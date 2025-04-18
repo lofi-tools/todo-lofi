@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "core"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = []
+
+[workspace.dependencies]
+# Add shared dependencies here
+iroh = { version = "0.15.0" }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }

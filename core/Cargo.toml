@@ -1,0 +1,9 @@
+[package]
+name = "todo-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }
+iroh = { workspace = true }
