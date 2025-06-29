@@ -3,8 +3,8 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    crane = { url = "github:ipetkov/crane"; inputs.nixpkgs.follows = "nixpkgs"; };
-    rust-overlay = { url = "github:oxalica/rust-overlay"; inputs.nixpkgs.follows = "nixpkgs"; inputs.flake-utils.follows = "flake-utils"; };
+    crane = { url = "github:ipetkov/crane"; };
+    rust-overlay = { url = "github:oxalica/rust-overlay"; inputs.nixpkgs.follows = "nixpkgs"; };
   };
 
   outputs = inputs@{ self, nixpkgs, flake-utils, flake-parts, crane, rust-overlay, ... }:
@@ -33,11 +33,36 @@
             pname = "todo-core";
           });
 
-          buildDeps = [ ownPkgs.rust pkgs.pkg-config ];
-          devDeps = [ pkgs.cargo-watch ];
+          buildDeps = [ 
+            ownPkgs.rust 
+            pkgs.pkg-config 
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            pkgs.darwin.apple_sdk.frameworks.Security
+            pkgs.darwin.apple_sdk.frameworks.CoreServices
+            pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+            pkgs.darwin.apple_sdk.frameworks.WebKit
+            pkgs.darwin.apple_sdk.frameworks.AppKit
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.webkitgtk
+            pkgs.gtk3
+            pkgs.cairo
+            pkgs.gdk-pixbuf
+            pkgs.glib
+            pkgs.dbus
+            pkgs.openssl_3
+            pkgs.librsvg
+            pkgs.libsoup_3
+          ];
+          devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
 
           scripts = mapAttrs (name: txt: pkgs.writeShellScriptBin name txt) {
             prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
+            desktop = ''
+              set -e
+              echo "🚀 Starting TodoLofi Desktop App..."
+              cd desktop
+              cargo tauri dev
+            '';
           };
 
         in

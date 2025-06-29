@@ -331,8 +331,10 @@ checksum = "c469d952047f47f91b68d1cba3f10d63c11d73e4636f24f08daf0278abf01c4d"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -360,14 +362,6 @@ checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
 dependencies = [
  "time",
  "version_check",
-]
-
-[[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tokio",
 ]
 
 [[package]]
@@ -552,10 +546,10 @@ dependencies = [
 name = "desktop"
 version = "0.1.0"
 dependencies = [
- "core",
  "serde",
  "tauri",
  "tauri-build",
+ "todo-core",
  "tokio",
 ]
 
@@ -3463,6 +3457,16 @@ checksum = "5d4f6d1145dcb577acf783d4e601bc1d76a13337bb54e6233add580b07344c8b"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "todo-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

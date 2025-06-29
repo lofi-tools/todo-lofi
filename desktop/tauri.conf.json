@@ -1,51 +1,37 @@
 {
+  "productName": "TodoLofi",
+  "version": "0.1.0",
+  "identifier": "com.todolofi.app",
   "build": {
     "beforeBuildCommand": "cargo build",
     "beforeDevCommand": "cargo build",
-    "devPath": "http://localhost:1420",
-    "distDir": "../dist"
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "TodoLofi",
-    "version": "0.1.0"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": true
-    },
-    "bundle": {
-      "active": true,
-      "category": "DeveloperTool",
-      "copyright": "",
-      "deb": {
-        "depends": []
-      },
-      "externalBin": [],
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ],
-      "identifier": "com.todolofi.app",
-      "shortDescription": "",
-      "targets": "all"
-    },
-    "security": {
-      "csp": null
-    },
-    "updater": {
-      "active": false
-    },
+  "app": {
     "windows": [
       {
-        "fullscreen": false,
+        "title": "",
+        "width": 1024,
         "height": 768,
         "resizable": true,
-        "title": "TodoLofi",
-        "width": 1024
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "decorations": true
       }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "DeveloperTool",
+    "copyright": "",
+    "shortDescription": "",
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
     ]
   }
 }

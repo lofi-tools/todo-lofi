@@ -3,17 +3,22 @@
 pub mod operation;
 
 pub struct AppState {
-    replica: taskchampion::Replica,
+    // replica: taskchampion::Replica,
 }
+
+pub struct Task {}
 
 impl AppState {
     pub fn new() -> Self {
-        let replica = Replica::new(StorageConfig::InMemory.into_storage().unwrap());
-        Self { replica }
+        // For now, create a simple empty state
+        // TODO: Integrate with taskchampion when ready
+        //     let replica = Replica::new(StorageConfig::InMemory.into_storage().unwrap());
+        //     Self { replica }
+        Self {}
     }
 
     // Method to get all todos (read-only)
-    pub fn get_all(&self) -> Vec<Todo> {
+    pub fn get_all(&self) -> Vec<Task> {
         // self.replica.all_tasks()
         //     .into_iter()
         //     .map(|task| Todo {
@@ -27,7 +32,7 @@ impl AppState {
         todo!()
     }
 
-    pub fn add(&mut self, todo: Todo) {
+    pub fn add(&mut self, task: Task) {
         // let mut task = self.replica.new_task(todo.title);
         // if todo.completed {
         //     task.set_completed();
@@ -36,7 +41,7 @@ impl AppState {
         todo!()
     }
 
-    pub fn remove(&mut self, id: &str) -> Option<Todo> {
+    pub fn remove(&mut self, id: &str) -> Option<Task> {
         // if let Ok(uuid) = uuid::Uuid::parse_str(id) {
         //     if let Some(task) = self.replica.get_task(uuid) {
         //         let todo = Todo {

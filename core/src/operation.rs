@@ -1,3 +1,10 @@
+use serde::{Serialize, Deserialize};
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
+type TaskMap = HashMap<String, String>;
+
 /// An Operation defines a single change to the task database, as stored locally in the replica.
 ///
 /// Operations are the means by which changes are made to the database, typically batched together
