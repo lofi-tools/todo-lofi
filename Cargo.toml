@@ -1,13 +1,13 @@
 [workspace]
+resolver = "2"
+package = { version = "0.1.0", edition = "2024" }
+metadata.crane.name="my-workspace"
 members = [
     "core",
     "desktop"
 ]
 
-[workspace.package]
-version = "0.1.0"
-edition = "2021"
-authors = []
+
 
 [workspace.dependencies]
 # Add shared dependencies here

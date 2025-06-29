@@ -9,6 +9,6 @@ tauri-build = { version = "2.0.0" }
 
 [dependencies]
 core = { path = "../core" }
-tauri = { version = "2.0.0", features = ["shell-open"] }
+tauri = { version = "2.0.0" }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
