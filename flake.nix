@@ -1,19 +1,10 @@
 {
-  description = "A Rust project with todo-core";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    crane = {
-      url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
-    };
+    crane = {      url = "github:ipetkov/crane";      inputs.nixpkgs.follows = "nixpkgs";    };
+    rust-overlay = {      url = "github:oxalica/rust-overlay";      inputs.nixpkgs.follows = "nixpkgs";      inputs.flake-utils.follows = "flake-utils";    };
   };
 
   outputs = inputs@{ self, nixpkgs, flake-utils, flake-parts, crane, rust-overlay, ... }:
@@ -24,13 +15,13 @@
       perSystem = { config, pkgs, system, ... }:
         let
           overlays = [ (import rust-overlay) ];
-          pkgs' = import nixpkgs {
-            inherit system overlays;
-          };
-          rustToolchain = pkgs'.rust-bin.stable.latest.default.override {
+          # pkgs' = import nixpkgs {
+          #   inherit system overlays;
+          # };
+          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
             extensions = [ "rust-src" ];
           };
-          craneLib = crane.lib.${system}.overrideToolchain rustToolchain;
+          craneLib = crane.lib.${pkgs.system}.overrideToolchain rustToolchain;
 
           # Build the workspace members
           src = pkgs.lib.cleanSource ./.;
@@ -51,9 +42,9 @@
         in
         {
           # Development shell
-          devShells.default = pkgs'.mkShell {
+          devShells.default = pkgs.mkShell {
             inputsFrom = [ cargoArtifacts ];
-            nativeBuildInputs = with pkgs'; [
+            nativeBuildInputs = with pkgs; [
               rustToolchain
               cargo-watch # Optional: for development workflow
               pkg-config
