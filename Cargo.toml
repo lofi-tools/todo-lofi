@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "core"
+    "core",
+    "desktop"
 ]
 
 [workspace.package]
@@ -10,6 +11,7 @@ authors = []
 
 [workspace.dependencies]
 # Add shared dependencies here
-iroh = { version = "0.15.0" }
+taskchampion = { git = "https://github.com/GothenburgBitFactory/taskchampion" }
+# iroh = { version = "0.15.0" } # Removed unused iroh
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
