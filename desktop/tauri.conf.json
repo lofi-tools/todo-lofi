@@ -9,16 +9,7 @@
   },
   "app": {
     "windows": [
-      {
-        "title": "",
-        "width": 1024,
-        "height": 768,
-        "resizable": true,
-        "fullscreen": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "decorations": true
-      }
+
     ],
     "security": {
       "csp": null

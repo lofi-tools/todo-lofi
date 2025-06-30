@@ -33,9 +33,9 @@
             pname = "todo-core";
           });
 
-          buildDeps = [ 
-            ownPkgs.rust 
-            pkgs.pkg-config 
+          buildDeps = [
+            ownPkgs.rust
+            pkgs.pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.darwin.apple_sdk.frameworks.Security
             pkgs.darwin.apple_sdk.frameworks.CoreServices
@@ -57,11 +57,8 @@
 
           scripts = mapAttrs (name: txt: pkgs.writeShellScriptBin name txt) {
             prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
-            desktop = ''
-              set -e
-              echo "🚀 Starting TodoLofi Desktop App..."
-              cd desktop
-              cargo tauri dev
+            dt = ''set -e
+              cd desktop; cargo tauri dev
             '';
           };
 
