@@ -1,0 +1,8 @@
+[package]
+name = "desktop-gpui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+todo-core.workspace = true
+
