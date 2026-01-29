@@ -5,12 +5,10 @@
   "build": {
     "beforeBuildCommand": "cargo build",
     "beforeDevCommand": "cargo build",
-    "frontendDist": "../dist"
+    "frontendDist": "./dist"
   },
   "app": {
-    "windows": [
-
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -21,8 +19,6 @@
     "copyright": "",
     "shortDescription": "",
     "targets": "all",
-    "icon": [
-      "icons/icon.png"
-    ]
+    "icon": ["icons/icon.png"]
   }
 }

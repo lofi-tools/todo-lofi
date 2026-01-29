@@ -3,14 +3,16 @@ resolver = "2"
 package = { version = "0.1.0", edition = "2024" }
 metadata.crane.name="my-workspace"
 members = [
-    "core",
-    "desktop"
+    "apps/*",
+    "libs/*",
 ]
 
 
 
 [workspace.dependencies]
-# Add shared dependencies here
+# OWN LIBS
+todo-core = { path = "libs/core" }
+
 # taskchampion = { git = "https://github.com/GothenburgBitFactory/taskchampion" }
 # iroh = { version = "0.15.0" } # Removed unused iroh
 serde = { version = "1.0", features = ["derive"] }
