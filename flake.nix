@@ -1,11 +1,8 @@
 {
-  # inputs = {
-  #   nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  #   flake-utils.url = "github:numtide/flake-utils";
-  #   flake-parts.url = "github:hercules-ci/flake-parts";
-  #   crane = { url = "github:ipetkov/crane"; };
-  #   rust-overlay = { url = "github:oxalica/rust-overlay"; inputs.nixpkgs.follows = "nixpkgs"; };
-  # };
+  # inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # inputs.flake-utils.url = "github:numtide/flake-utils";
+  # inputs.crane = { url = "github:ipetkov/crane"; };
+  # inputs.rust-overlay = { url = "github:oxalica/rust-overlay"; inputs.nixpkgs.follows = "nixpkgs"; };
   inputs.nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
   inputs.parts.url = "github:hercules-ci/flake-parts";
   inputs.my-nix = { url = "github:nmrshll/nix-utils"; inputs.nixpkgs.follows = "nixpkgs"; inputs.fp.follows = "parts"; };
@@ -15,19 +12,8 @@
     with builtins; {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       imports = (attrValues inputs.my-nix.flakeModules) ++ [ ];
-      perSystem = { pkgs, system, lib, lib', self', ... }:
+      perSystem = { pkgs, system, lib, l, self', ... }:
         let
-          dbg = x: trace
-            (
-              if builtins.isAttrs x then "${builtins.toJSON (builtins.attrNames x)}"
-              else if builtins.isList x then "${map dbg x}"
-              else if builtins.isPath x then "${toString x}"
-              else "${toString x}"
-            )
-            x;
-
-
-          l = builtins // top.lib // lib // lib';
           bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
 
           buildDeps = [
@@ -57,27 +43,26 @@
 
 
 
-          # TODO move to my-nix
-          workspaceMembers = (fromTOML (readFile ./Cargo.toml)).workspace.members or [ ];
-          expandWsMember = member:
-            if lib.strings.hasSuffix "/*" member then
-              let
-                baseDir = lib.strings.removeSuffix "/*" member;
-                subDirs = lib.filterAttrs (name: type: type == "directory") (readDir (./. + "/${baseDir}"));
-              in
-              map (name: "${baseDir}/${name}") (attrNames subDirs)
-            else
-              [ member ];
+          # # TODO move to my-nix
+          # workspaceMembers = (fromTOML (readFile ./Cargo.toml)).workspace.members or [ ];
+          # expandWsMember = member:
+          #   if lib.strings.hasSuffix "/*" member then
+          #     let
+          #       baseDir = lib.strings.removeSuffix "/*" member;
+          #       subDirs = lib.filterAttrs (name: type: type == "directory") (readDir (./. + "/${baseDir}"));
+          #     in
+          #     map (name: "${baseDir}/${name}") (attrNames subDirs)
+          #   else
+          #     [ member ];
 
-          validCratePaths = filter (crate: pathExists (./. + "/${crate}/Cargo.toml")) (concatLists (map expandWsMember workspaceMembers));
-          crates = l.listToAttrs (map (path: { name = baseNameOf path; value = l.customRust.buildCrate path; }) validCratePaths);
+          # validCratePaths = filter (crate: pathExists (./. + "/${crate}/Cargo.toml")) (concatLists (map expandWsMember workspaceMembers));
+          # crates = l.listToAttrs (map (path: { name = baseNameOf path; value = l.customRust.buildCrate path; }) validCratePaths);
 
 
 
         in
         {
-          packages = crates // { /* default = crates.new; */ } // scripts;
-          # dbg = {  cDirs = cargoSubdirNames ./apps; inherit candidates; };
+          # packages = scripts;
           # checks = tests;
           devShellParts.env = { };
           devShellParts.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
