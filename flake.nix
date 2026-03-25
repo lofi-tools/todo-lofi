@@ -17,10 +17,12 @@
   outputs = inputs@{ self, parts, my-nix, ... }: parts.lib.mkFlake { inherit inputs; } (top@{ lib, ... }:
     with builtins; {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
-      imports = (attrValues inputs.my-nix.flakeModules) ++ [ ];
-      perSystem = { pkgs, system, lib, l, self', ownPkgs, ... }:
+      imports = (attrValues inputs.my-nix.flakeModules.essentials) ++ [
+        inputs.my-nix.flakeModules.rust
+      ];
+      perSystem = { pkgs, ... }:
         let
-          bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
+          # bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
 
           buildDeps = [
             pkgs.pkg-config
@@ -30,7 +32,7 @@
             # pkgs.darwin.xcode_26_1_Apple_silicon # comment out for first build
             # pkgs.apple-sdk_26
             # TODO try symlinkJoin of xcode and exo.metal-toolchain
-            ownPkgs.install-xcode-global
+            pkgs.own.my-nix.install-xcode-global
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             /*  pkgs.webkitgtk */
             /*  pkgs.gtk3 */
@@ -50,7 +52,7 @@
             xcrun = ''${env.DEVELOPER_DIR}/Contents/Developer/usr/bin/xcrun'';
             # metal = ''${env.DEVELOPER_DIR}/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal $@'';
             dbg-env = '' ${concatStringsSep "\n" (attrValues (mapAttrs (n: v: "printf \"${n}=${v}\\n\"") env))} '';
-            dbg-store-xcode = '' DEVELOPER_DIR="${ownPkgs.install-xcode-global.DEV_DIR}" xcodebuild -version '';
+            dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.my-nix.install-xcode-global.DEV_DIR}" xcodebuild -version '';
           };
 
           env = {
@@ -60,8 +62,8 @@
             # METAL = "${inputs.exo.packages.${system}.metal-toolchain}/bin/metal";
             # BINDGEN_EXTRA_CLANG_ARGS = "-I${inputs.exo.packages.${system}.metal-toolchain}";
 
-            DEVELOPER_DIR = ownPkgs.install-xcode-global.DEV_DIR;
-            SDKROOT = ownPkgs.install-xcode-global.SDKROOT;
+            DEVELOPER_DIR = pkgs.own.my-nix.install-xcode-global.DEV_DIR;
+            SDKROOT = pkgs.own.my-nix.install-xcode-global.SDKROOT;
           };
 
         in
@@ -72,12 +74,12 @@
 
           devShellParts.env = env;
           devShellParts.shellHookParts = {
-            install-xcode = '' ${ownPkgs.install-xcode-global}/bin/install-xcode-global '';
+            install-xcode = '' ${pkgs.own.my-nix.install-xcode-global}/bin/install-xcode-global '';
             # install-metal = ''xcodebuild -importComponent metalToolchain -importPath .cache/Metal.dmg'';
             # use-os-xcrun = ''export PATH="/usr/bin:/usr/local/bin:$PATH"'';
             #     DEVELOPER_DIR = unsafeDiscardStringContext DEV_DIR;
             # SDKROOT = unsafeDiscardStringContext "${DEV_DIR}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
-            appleSdkDirs = '' 
+            appleSdkDirs = ''
               export DEVELOPER_DIR="${env.DEVELOPER_DIR}"
               export SDKROOT="${env.SDKROOT}"
             '';
