@@ -1,133 +1,271 @@
-//! Core library for the todo application
+//! Core library for the todo application using DSON CRDT
+
+use dson::{
+    CausalContext, CausalDotStore, Identifier, OrMap,
+    crdts::{mvreg::MvRegValue, snapshot::ToValue},
+    transaction::CrdtValue,
+    dot_fun::DotFun,
+    traits::{DotStore, DotStoreJoin},
+    sentinel::{DummySentinel, Sentinel, ValueSentinel},
+    types::{DotChange, DryJoinOutput},
+};
 
 pub mod operation;
 
-pub struct AppState {
-    // replica: taskchampion::Replica,
+/// A unique task identifier
+pub type TaskId = String;
+
+/// Task properties stored in the CRDT
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub id: TaskId,
+    pub title: String,
+    pub completed: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
-pub struct Task {}
+/// AppState uses DSON CRDT for distributed state management
+pub struct AppState {
+    store: CausalDotStore<OrMap<String>>,
+    local_id: u8,
+    version: u16,
+}
 
 impl AppState {
     pub fn new() -> Self {
-        // For now, create a simple empty state
-        // TODO: Integrate with taskchampion when ready
-        //     let replica = Replica::new(StorageConfig::InMemory.into_storage().unwrap());
-        //     Self { replica }
-        Self {}
+        Self {
+            store: CausalDotStore::default(),
+            local_id: 0,
+            version: 0,
+        }
     }
 
-    // Method to get all todos (read-only)
+    /// Get all tasks from the CRDT store
     pub fn get_all(&self) -> Vec<Task> {
-        // self.replica.all_tasks()
-        //     .into_iter()
-        //     .map(|task| Todo {
-        //         id: task.get_uuid().to_string(),
-        //         title: task.get_description().to_string(),
-        //         completed: task.is_completed(),
-        //         created_at: task.get_created().timestamp(),
-        //         updated_at: task.get_modified().map(|t| t.timestamp())
-        //     })
-        //     .collect()
-        todo!()
+        let id = Identifier::new(self.local_id, self.version);
+        let tx = self.store.transact(id);
+        let mut tasks = Vec::new();
+
+        // Iterate through all task entries in the store
+        if let Some(root) = tx.get(&"tasks".to_string()) {
+            if let CrdtValue::Map(task_map) = root {
+                for (task_id, task_entry) in task_map.iter() {
+                    if let Some(task_data) = Self::parse_task(task_id, task_entry) {
+                        tasks.push(task_data);
+                    }
+                }
+            }
+        }
+
+        tasks
     }
 
+    /// Parse a task entry from the CRDT map
+    fn parse_task(task_id: &str, task_entry: &dson::crdts::map::MapEntry<String>) -> Option<Task> {
+        let map = &task_entry.map;
+
+        let title = map
+            .get(&"title".to_string())?
+            .reg
+            .value()
+            .and_then(|v| match v {
+                MvRegValue::String(s) => Some(s.clone()),
+                _ => None,
+            })?;
+
+        let completed = map
+            .get(&"completed".to_string())?
+            .reg
+            .value()
+            .and_then(|v| match v {
+                MvRegValue::Bool(b) => Some(b),
+                _ => None,
+            })?;
+
+        let created_at = map
+            .get(&"created_at".to_string())?
+            .reg
+            .value()
+            .and_then(|v| match v {
+                MvRegValue::U64(n) => Some(*n),
+                _ => None,
+            })?;
+
+        let updated_at = map
+            .get(&"updated_at".to_string())?
+            .reg
+            .value()
+            .and_then(|v| match v {
+                MvRegValue::U64(n) => Some(*n),
+                _ => None,
+            })?;
+
+        Some(Task {
+            id: task_id.to_string(),
+            title,
+            completed: completed?,
+            created_at: created_at?,
+            updated_at: updated_at?,
+        })
+    }
+
+    /// Add a new task to the CRDT store
     pub fn add(&mut self, task: Task) {
-        // let mut task = self.replica.new_task(todo.title);
-        // if todo.completed {
-        //     task.set_completed();
-        // }
-        // self.replica.add_task(task);
-        todo!()
+        let id = Identifier::new(self.local_id, self.version);
+        self.version = self.version.wrapping_add(1);
+        let mut tx = self.store.transact(id);
+
+        tx.in_map("tasks", |tasks_tx| {
+            tasks_tx.in_map(&task.id, |task_tx| {
+                task_tx.write_register("title", MvRegValue::String(task.title));
+                task_tx.write_register("completed", MvRegValue::Bool(task.completed));
+                task_tx.write_register("created_at", MvRegValue::U64(task.created_at));
+                task_tx.write_register("updated_at", MvRegValue::U64(task.updated_at));
+            });
+        });
+
+        let _delta = tx.commit();
     }
 
+    /// Remove a task from the CRDT store
     pub fn remove(&mut self, id: &str) -> Option<Task> {
-        // if let Ok(uuid) = uuid::Uuid::parse_str(id) {
-        //     if let Some(task) = self.replica.get_task(uuid) {
-        //         let todo = Todo {
-        //             id: task.get_uuid().to_string(),
-        //             title: task.get_description().to_string(),
-        //             completed: task.is_completed(),
-        //             created_at: task.get_created().timestamp(),
-        //             updated_at: task.get_modified().map(|t| t.timestamp())
-        //         };
-        //         self.replica.delete_task(uuid);
-        //         return Some(todo);
-        //     }
-        // }
-        // None
-        todo!()
+        let task = self.get_all()
+            .into_iter()
+            .find(|t| t.id == id)?;
+
+        let id = Identifier::new(self.local_id, self.version);
+        self.version = self.version.wrapping_add(1);
+        let mut tx = self.store.transact(id);
+
+        tx.in_map("tasks", |tasks_tx| {
+            tasks_tx.remove(id);
+        });
+
+        let _delta = tx.commit();
+
+        Some(task)
     }
 
+    /// Toggle a task's completed status
     pub fn toggle(&mut self, id: &str) -> bool {
-        // if let Ok(uuid) = uuid::Uuid::parse_str(id) {
-        //     if let Some(mut task) = self.replica.get_task(uuid) {
-        //         if task.is_completed() {
-        //             task.set_pending();
-        //         } else {
-        //             task.set_completed();
-        //         }
-        //         self.replica.update_task(task);
-        //         return true;
-        //     }
-        // }
-        // false
-        todo!()
+        let task = match self.get_all().into_iter().find(|t| t.id == id) {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let id = Identifier::new(self.local_id, self.version);
+        self.version = self.version.wrapping_add(1);
+        let mut tx = self.store.transact(id);
+
+        tx.in_map("tasks", |tasks_tx| {
+            tasks_tx.in_map(&task.id, |task_tx| {
+                task_tx.write_register(
+                    "completed",
+                    MvRegValue::Bool(!task.completed),
+                );
+                task_tx.write_register(
+                    "updated_at",
+                    MvRegValue::U64(std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()),
+                );
+            });
+        });
+
+        let _delta = tx.commit();
+        true
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
+    use super::*;
 
-    // #[test]
-    // fn test_todo_list_operations_yrs() {
-    //     let mut list = AppState::new();
-    //     let todo1 = Todo {
-    //         id: "1".to_string(),
-    //         title: "Test todo 1".to_string(),
-    //         completed: false,
-    //         created_at: 100,
-    //         updated_at: None,
-    //     };
-    //     let todo2 = Todo {
-    //         id: "2".to_string(),
-    //         title: "Test todo 2".to_string(),
-    //         completed: true,
-    //         created_at: 200,
-    //         updated_at: Some(250),
-    //     };
+    #[test]
+    fn test_app_state_add_task() {
+        let mut store = AppState::new();
+        
+        let task = Task {
+            id: "task-1".to_string(),
+            title: "Test task".to_string(),
+            completed: false,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        
+        store.add(task.clone());
+        let tasks = store.get_all();
+        
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "task-1");
+        assert_eq!(tasks[0].title, "Test task");
+        assert!(!tasks[0].completed);
+    }
 
-    //     // Add todos
-    //     list.add(todo1.clone());
-    //     list.add(todo2.clone());
+    #[test]
+    fn test_app_state_toggle_task() {
+        let mut store = AppState::new();
+        
+        let task = Task {
+            id: "task-1".to_string(),
+            title: "Test task".to_string(),
+            completed: false,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        
+        store.add(task);
+        
+        // Toggle to completed
+        store.toggle("task-1");
+        let tasks = store.get_all();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].completed);
+        
+        // Toggle back to not completed
+        store.toggle("task-1");
+        let tasks = store.get_all();
+        assert!(!tasks[0].completed);
+    }
 
-    //     // Verify initial state
-    //     let current_todos = list.get_all();
-    //     assert_eq!(current_todos.len(), 2);
-    //     assert!(current_todos.contains(&todo1));
-    //     assert!(current_todos.contains(&todo2));
-
-    //     // Toggle todo 1
-    //     assert!(list.toggle("1"));
-    //     let todos_after_toggle = list.get_all();
-    //     let toggled_todo = todos_after_toggle.iter().find(|t| t.id == "1").unwrap();
-    //     assert!(toggled_todo.completed);
-    //     assert_eq!(toggled_todo.title, "Test todo 1"); // Ensure other fields are intact
-
-    //     // Remove todo 2
-    //     let removed = list.remove("2").unwrap();
-    //     assert_eq!(removed, todo2);
-    //     let todos_after_remove = list.get_all();
-    //     assert_eq!(todos_after_remove.len(), 1);
-    //     assert_eq!(todos_after_remove[0].id, "1");
-    //     assert!(todos_after_remove[0].completed); // State from toggle should persist
-
-    //     // Try removing non-existent todo
-    //     assert!(list.remove("3").is_none());
-    //     assert_eq!(list.get_all().len(), 1); // Count should remain 1
-
-    //     // Try toggling non-existent todo
-    //     assert!(!list.toggle("3"));
-    // }
+    #[test]
+    fn test_app_state_remove_task() {
+        let mut store = AppState::new();
+        
+        let task1 = Task {
+            id: "task-1".to_string(),
+            title: "Task 1".to_string(),
+            completed: false,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        
+        let task2 = Task {
+            id: "task-2".to_string(),
+            title: "Task 2".to_string(),
+            completed: false,
+            created_at: 2000,
+            updated_at: 2000,
+        };
+        
+        store.add(task1);
+        store.add(task2);
+        
+        assert_eq!(store.get_all().len(), 2);
+        
+        let removed = store.remove("task-1");
+        assert!(removed.is_some());
+        assert_eq!(store.get_all().len(), 1);
+        
+        let remaining = store.get_all()[0].clone();
+        assert_eq!(remaining.id, "task-2");
+    }
 }

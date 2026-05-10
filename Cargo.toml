@@ -1,12 +1,9 @@
+
 [workspace]
 resolver = "2"
 package = { version = "0.1.0", edition = "2024" }
-metadata.crane.name="my-workspace"
-members = [
-    "apps/*",
-    "libs/*",
-]
-
+metadata.crane.name = "my-workspace"
+members = ["apps/*", "libs/*"]
 
 
 [workspace.dependencies]
@@ -16,4 +13,6 @@ todo-core = { path = "libs/core" }
 # taskchampion = { git = "https://github.com/GothenburgBitFactory/taskchampion" }
 # iroh = { version = "0.15.0" } # Removed unused iroh
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "^1", features = ["full"] }
+thiserror = "^1.0"
+anyhow = "^1.0"

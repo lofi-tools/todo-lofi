@@ -21,13 +21,17 @@ todo-lofi/
 ```
 
 Workspace-level dependency versions are declared in the root `Cargo.toml` and inherited by member crates via `.workspace = true`.
+Shared dependencies (duplicates across projects) should preferably go into the workspace.
 
 ---
 
 ## Build & Development Commands
 
+Enter the nix environment first using `direnv reload` (if necessary, `nix develop`). Then:
+
 | Command | Description |
 |---|---|
+| `utest` | Test current crate |
 | `cargo build` | Build all workspace members |
 | `cargo build -p desktop-gpui` | Build only the GPUI app |
 | `cargo run -p desktop-gpui` | Run the GPUI desktop app |
@@ -35,8 +39,6 @@ Workspace-level dependency versions are declared in the root `Cargo.toml` and in
 | `cargo test --workspace` | Run all tests across the workspace |
 | `cargo clippy --workspace` | Lint all crates |
 | `cargo fmt --all` | Format all source files |
-
-**Nix users:** enter the dev shell with `nix develop` or `direnv allow` (requires `.envrc`). The shell sets `DEVELOPER_DIR` and `SDKROOT` for macOS SDK resolution automatically.
 
 ---
 
@@ -78,7 +80,7 @@ desktop-gpui: re-init
 
 ---
 
-## Architecture Notes
+## Architecture 
 
 - `libs/core` is the single source of truth for domain types (`Task`, `AppState`, `Operation`). All app crates depend on it; it must not depend on any app crate.
 - `Operation` is modelled as a CRDT-friendly append-only log entry (Create / Delete / Update / UndoPoint) — keep this invariant when extending it.

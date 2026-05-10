@@ -1,0 +1,104 @@
+use dson::{
+    CausalContext, CausalDotStore, DotChange, DotFun, DotStore, DotStoreJoin, DryJoinOutput,
+    Identifier,
+    crdts::mvreg::MvRegValue,
+    sentinel::{DummySentinel, Sentinel, ValueSentinel},
+};
+use std::collections::HashSet;
+
+/// A multi-value register that can only store String values.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StringReg {
+    inner: DotFun<String>,
+}
+impl StringReg {
+    // /// Create a delta that overwrites all values with a single string.
+    // pub fn write(&self, value: String, cc: &CausalContext, id: Identifier) -> CausalDotStore<Self> {
+    //     // 1. Create a fresh dot for this write.
+    //     // let dot = cc.fresh_dot(id);
+
+    //     // // 2. Build a DotFun with just that dot -> value.
+    //     // let mut delta_inner = DotFun::default();
+    //     // delta_inner.set(dot, value);
+
+    //     // // 3. Wrap it in a CausalDotStore with an appropriate context.
+    //     // let delta_context = cc.with_dot(dot);
+    //     // CausalDotStore {
+    //     //     store: StringReg { inner: delta_inner },
+    //     //     context: delta_context,
+    //     // }
+    // }
+
+    /// Create a delta that clears all values.
+    pub fn clear(&self) -> CausalDotStore<Self> {
+        // Clear = empty store, same context.
+        CausalDotStore {
+            store: StringReg::default(),
+            context: CausalContext::default(),
+        }
+    }
+
+    /// Read all concurrent values (no conflict resolution).
+    pub fn values(&self) -> Vec<&String> {
+        self.inner.values().collect()
+    }
+
+    /// Read a single value, returning an error if there are multiple or none.
+    pub fn value(&self) -> Result<&String, StringRegError> {
+        let mut iter = self.inner.values();
+        match (iter.next(), iter.next()) {
+            (Some(v), None) => Ok(v),
+            (None, _) => Err(StringRegError::Cleared),
+            (Some(_), Some(_)) => Err(StringRegError::Conflict),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StringRegError {
+    #[error("register is cleared")]
+    Cleared,
+    #[error("register has multiple conflicting values")]
+    Conflict,
+}
+
+impl DotStore for StringReg {
+    fn add_dots_to(&self, other: &mut CausalContext) {
+        self.inner.add_dots_to(other);
+    }
+
+    fn is_bottom(&self) -> bool {
+        self.inner.is_bottom()
+    }
+
+    fn subset_for_inflation_from(&self, frontier: &CausalContext) -> Self {
+        StringReg {
+            inner: self.inner.subset_for_inflation_from(frontier),
+        }
+    }
+}
+impl<S> DotStoreJoin<S> for StringReg
+where
+    S: ValueSentinel<String>,
+{
+    fn join(
+        (m1, cc1): (Self, &CausalContext),
+        (m2, cc2): (Self, &CausalContext),
+        on_dot_change: &mut dyn FnMut(DotChange),
+        sentinel: &mut S,
+    ) -> Result<Self, S::Error> {
+        // Use the same pattern as MvReg: join the two DotFuns under their causal contexts.
+        let inner = DotFun::join((m1.inner, cc1), (m2.inner, cc2), on_dot_change, sentinel)?;
+
+        Ok(StringReg { inner })
+    }
+
+    fn dry_join(
+        (m1, cc1): (&Self, &CausalContext),
+        (m2, cc2): (&Self, &CausalContext),
+        sentinel: &mut S,
+    ) -> Result<DryJoinOutput, S::Error> {
+        // Again, mirror MvReg: delegate to DotFun's dry_join.
+        DotFun::dry_join((&m1.inner, cc1), (&m2.inner, cc2), sentinel)
+    }
+}
