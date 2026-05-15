@@ -1,269 +1,257 @@
 pub mod utils;
 pub use crate::utils::*;
 
-pub mod task {
-    use dson::{
-        CausalContext, CausalDotStore, Dot, DotChange, DotFun, DotStore, DotStoreJoin,
-        DryJoinOutput, Identifier, sentinel::Sentinel,
-    };
-    use entity_id::EntityId;
-    use ulid::Ulid;
+use dson::{
+    CausalContext, CausalDotStore, Dot, DotChange, DotFun, DotStore, DotStoreJoin, DryJoinOutput,
+    Identifier, sentinel::Sentinel,
+};
+use entity_id::EntityId;
+use ulid::Ulid;
 
-    #[derive(EntityId, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
-    #[entity_id(prefix = "task")]
-    pub struct TaskId(Ulid);
+#[derive(EntityId, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[entity_id(prefix = "task")]
+pub struct TaskId(Ulid);
 
-    pub type ActorId = dson::Identifier;
+pub type ActorId = dson::Identifier;
 
-    #[derive(Debug, Clone)]
-    pub struct Delta<T>(pub CausalDotStore<T>);
-    impl<T> std::ops::Deref for Delta<T> {
-        type Target = CausalDotStore<T>;
-        fn deref(&self) -> &Self::Target {
-            &self.0
+#[derive(Debug, Clone)]
+pub struct Delta<T>(pub CausalDotStore<T>);
+impl<T> std::ops::Deref for Delta<T> {
+    type Target = CausalDotStore<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A custom CRDT struct.
+/// DotFun maps a Dot (unique event ID) to a Value.
+/// DotFun fields can contain multiple values during a conflict, which we resolve in `join`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Task {
+    pub id: TaskId,
+    pub title: DotFun<String>,
+    pub done: DotFun<bool>,
+}
+impl DotStore for Task {
+    fn add_dots_to(&self, other: &mut CausalContext) {
+        self.title.add_dots_to(other);
+        self.done.add_dots_to(other);
+    }
+    fn is_bottom(&self) -> bool {
+        self.title.is_bottom() && self.done.is_bottom()
+    }
+    fn subset_for_inflation_from(&self, frontier: &CausalContext) -> Self {
+        Self {
+            id: self.id,
+            title: self.title.subset_for_inflation_from(frontier),
+            done: self.done.subset_for_inflation_from(frontier),
         }
     }
-
-    /// A custom CRDT struct.
-    /// DotFun maps a Dot (unique event ID) to a Value.
-    /// DotFun fields can contain multiple values during a conflict, which we resolve in `join`.
-    #[derive(Debug, Clone, PartialEq, Default)]
-    pub struct Task {
-        pub id: TaskId,
-        pub title: DotFun<String>,
-        pub done: DotFun<bool>,
-    }
-    impl DotStore for Task {
-        fn add_dots_to(&self, other: &mut CausalContext) {
-            self.title.add_dots_to(other);
-            self.done.add_dots_to(other);
-        }
-        fn is_bottom(&self) -> bool {
-            self.title.is_bottom() && self.done.is_bottom()
-        }
-        fn subset_for_inflation_from(&self, frontier: &CausalContext) -> Self {
-            Self {
-                id: self.id,
-                title: self.title.subset_for_inflation_from(frontier),
-                done: self.done.subset_for_inflation_from(frontier),
-            }
-        }
-    }
-    impl Task {
-        // pub fn new_for(cc: &CausalContext, actor: ActorId, title: &str) -> Self {
-        //     let dot = cc.next_dot_for(actor);
-        //     Self {
-        //         id: TaskId::new(),
-        //         title: {
-        //             let mut val = DotFun::default();
-        //             val.set(dot, title.to_string());
-        //             val
-        //         },
-        //         done: DotFun::default(),
-        //     }
-        // }
-        pub fn new_at_dot(dot: Dot, title: &str) -> Self {
-            Self {
-                id: TaskId::new(),
-                title: {
-                    let mut val = DotFun::default();
-                    val.set(dot, title.to_string());
-                    val
-                },
-                done: DotFun::default(),
-            }
+}
+impl Task {
+    // pub fn new_for(cc: &CausalContext, actor: ActorId, title: &str) -> Self {
+    //     let dot = cc.next_dot_for(actor);
+    //     Self {
+    //         id: TaskId::new(),
+    //         title: {
+    //             let mut val = DotFun::default();
+    //             val.set(dot, title.to_string());
+    //             val
+    //         },
+    //         done: DotFun::default(),
+    //     }
+    // }
+    pub fn new_at_dot(dot: Dot, title: &str) -> Self {
+        Self {
+            id: TaskId::new(),
+            title: {
+                let mut val = DotFun::default();
+                val.set(dot, title.to_string());
+                val
+            },
+            done: DotFun::default(),
         }
     }
+}
 
-    // impl<S> DotStoreJoin<S> for Task
-    // where
-    //     S: dson::sentinel::Sentinel
-    //         + dson::sentinel::ValueSentinel<String>
-    //         + dson::sentinel::ValueSentinel<bool>,
-    // {
-    //     fn join(
-    //         (s1, c1): (Self, &CausalContext),
-    //         (s2, c2): (Self, &CausalContext),
-    //         on_dot_change: &mut dyn FnMut(DotChange),
-    //         sentinel: &mut S,
-    //     ) -> Result<Self, S::Error> {
-    //         if s1.id != s2.id {
-    //             return Ok(s1); // Should be error: cannot join tasks with different ids
-    //         }
+// impl<S> DotStoreJoin<S> for Task
+// where
+//     S: dson::sentinel::Sentinel
+//         + dson::sentinel::ValueSentinel<String>
+//         + dson::sentinel::ValueSentinel<bool>,
+// {
+//     fn join(
+//         (s1, c1): (Self, &CausalContext),
+//         (s2, c2): (Self, &CausalContext),
+//         on_dot_change: &mut dyn FnMut(DotChange),
+//         sentinel: &mut S,
+//     ) -> Result<Self, S::Error> {
+//         if s1.id != s2.id {
+//             return Ok(s1); // Should be error: cannot join tasks with different ids
+//         }
 
-    //         // Join field field
-    //         let mut new_title =
-    //             DotStoreJoin::join((s1.title, c1), (s2.title, c2), on_dot_change, sentinel)?;
-    //         let mut new_done =
-    //             DotStoreJoin::join((s1.done, c1), (s2.done, c2), on_dot_change, sentinel)?;
+//         // Join field field
+//         let mut new_title =
+//             DotStoreJoin::join((s1.title, c1), (s2.title, c2), on_dot_change, sentinel)?;
+//         let mut new_done =
+//             DotStoreJoin::join((s1.done, c1), (s2.done, c2), on_dot_change, sentinel)?;
 
-    //         // Conflict Resolution (LWW - Last Writer Wins)
-    //         // If concurrent writes caused multiple values (dots) to exist in a field,
-    //         // we pick the one with the "maximum" dot (highest seq, then highest ID).
-    //         // This ensures the field acts as a "Single-Value Register".
-    //         if new_title.len() > 1
-    //             && let Some((dot, val)) = new_title.iter().max_by_key(|(d, _)| *d)
-    //         {
-    //             let winner = val.clone();
-    //             let winner_dot = dot;
-    //             new_title = DotFun::default();
-    //             new_title.set(winner_dot, winner);
-    //         }
+//         // Conflict Resolution (LWW - Last Writer Wins)
+//         // If concurrent writes caused multiple values (dots) to exist in a field,
+//         // we pick the one with the "maximum" dot (highest seq, then highest ID).
+//         // This ensures the field acts as a "Single-Value Register".
+//         if new_title.len() > 1
+//             && let Some((dot, val)) = new_title.iter().max_by_key(|(d, _)| *d)
+//         {
+//             let winner = val.clone();
+//             let winner_dot = dot;
+//             new_title = DotFun::default();
+//             new_title.set(winner_dot, winner);
+//         }
 
-    //         if new_done.len() > 1
-    //             && let Some((dot, val)) = new_done.iter().max_by_key(|(d, _)| *d)
-    //         {
-    //             let winner = *val;
-    //             let winner_dot = dot;
-    //             new_done = DotFun::default();
-    //             new_done.set(winner_dot, winner);
-    //         }
+//         if new_done.len() > 1
+//             && let Some((dot, val)) = new_done.iter().max_by_key(|(d, _)| *d)
+//         {
+//             let winner = *val;
+//             let winner_dot = dot;
+//             new_done = DotFun::default();
+//             new_done.set(winner_dot, winner);
+//         }
 
-    //         Ok(Task {
-    //             id: s1.id,
-    //             title: new_title,
-    //             done: new_done,
-    //         })
+//         Ok(Task {
+//             id: s1.id,
+//             title: new_title,
+//             done: new_done,
+//         })
+//     }
+// }
+
+impl DotStoreJoin<TaskValidator> for Task {
+    fn join(
+        (ds1, c1): (Self, &CausalContext),
+        (ds2, c2): (Self, &CausalContext),
+        on_dot_change: &mut dyn FnMut(DotChange),
+        sentinel: &mut TaskValidator,
+    ) -> Result<Self, StrErr> {
+        if ds1 == Self::default() {
+            return Ok(ds2);
+        }
+        if ds2 == Self::default() {
+            return Ok(ds1);
+        }
+        if ds1.id != TaskId::default() && ds2.id != TaskId::default() && ds1.id != ds2.id {
+            return Err(format!("ID mismatch: \"{}\" != \"{}\"", ds1.id, ds2.id).into());
+        }
+        Ok(Self {
+            id: ds1.id,
+            title: DotStoreJoin::join((ds1.title, c1), (ds2.title, c2), on_dot_change, sentinel)?,
+            done: DotStoreJoin::join((ds1.done, c1), (ds2.done, c2), on_dot_change, sentinel)?,
+        })
+    }
+    fn dry_join(
+        (s1, c1): (&Self, &CausalContext),
+        (s2, c2): (&Self, &CausalContext),
+        sentinel: &mut TaskValidator,
+    ) -> Result<DryJoinOutput, StrErr> {
+        // check if any field would change
+        let title_out = DotStoreJoin::dry_join((&s1.title, c1), (&s2.title, c2), sentinel)?;
+        let done_out = DotStoreJoin::dry_join((&s1.done, c1), (&s2.done, c2), sentinel)?;
+        // If either field changes, the struct changes
+        Ok(DryJoinOutput::new(
+            title_out.is_bottom() && done_out.is_bottom(),
+        ))
+    }
+}
+
+impl Task {
+    /// Creates a delta to set the title.
+    pub fn delta_set_title(&self, value: &str, cc: &CausalContext, id: Identifier) -> Delta<Self> {
+        let next_dot = cc.next_dot_for(id);
+
+        let mut title_delta = DotFun::default();
+        title_delta.set(next_dot, value.to_string());
+
+        let task_delta = Task {
+            id: self.id,
+            title: title_delta,
+            done: DotFun::default(), // No change to 'done'
+        };
+
+        // Create the delta context.
+        // We MUST include the dots we are aware of for this field.
+        // This acts as the "previous operation" dependency.
+        let mut delta_cc = CausalContext::default();
+        // Include old dots from this field so they can be tombstoned/replaced
+        // self.title.add_dots_to(&mut delta_cc);
+        // Include the new dot
+        delta_cc.insert_dot(next_dot);
+
+        Delta(CausalDotStore {
+            store: task_delta,
+            context: delta_cc,
+        })
+    }
+
+    // /// Creates a delta to set the done status.
+    // pub fn set_done(
+    //     &self,
+    //     value: bool,
+    //     current_ctx: &CausalContext,
+    //     id: Identifier,
+    // ) -> CausalDotStore<Self> {
+    //     let next_seq = current_ctx
+    //         .iter()
+    //         .filter_map(|(i, s)| if i == id { Some(s) } else { None })
+    //         .max()
+    //         .map_or(1, |s| s + 1);
+
+    //     let dot = Dot::new(id, next_seq);
+
+    //     let mut done_delta = DotFun::default();
+    //     done_delta.set(dot, value);
+
+    //     let task_delta = Task {
+    //         title: DotFun::default(),
+    //         done: done_delta,
+    //     };
+
+    //     let mut delta_ctx = CausalContext::default();
+    // self.done.add_dots_to(&mut delta_ctx); // Include history of 'done'
+    //     delta_ctx.insert(dot);
+
+    //     CausalDotStore {
+    //         store: task_delta,
+    //         context: delta_ctx,
     //     }
     // }
 
-    impl DotStoreJoin<Validator> for Task {
-        fn join(
-            (ds1, c1): (Self, &CausalContext),
-            (ds2, c2): (Self, &CausalContext),
-            on_dot_change: &mut dyn FnMut(DotChange),
-            sentinel: &mut Validator,
-        ) -> Result<Self, String> {
-            if ds1 == Self::default() {
-                return Ok(ds2);
-            }
-            if ds2 == Self::default() {
-                return Ok(ds1);
-            }
-            if ds1.id != TaskId::default() && ds2.id != TaskId::default() && ds1.id != ds2.id {
-                return Err(format!("ID mismatch: \"{}\" != \"{}\"", ds1.id, ds2.id));
-            }
-            Ok(Self {
-                id: ds1.id,
-                title: DotStoreJoin::join(
-                    (ds1.title, c1),
-                    (ds2.title, c2),
-                    on_dot_change,
-                    sentinel,
-                )?,
-                done: DotStoreJoin::join((ds1.done, c1), (ds2.done, c2), on_dot_change, sentinel)?,
-            })
-        }
-        fn dry_join(
-            (s1, c1): (&Self, &CausalContext),
-            (s2, c2): (&Self, &CausalContext),
-            sentinel: &mut Validator,
-        ) -> Result<DryJoinOutput, String> {
-            // check if any field would change
-            let title_out = DotStoreJoin::dry_join((&s1.title, c1), (&s2.title, c2), sentinel)?;
-            let done_out = DotStoreJoin::dry_join((&s1.done, c1), (&s2.done, c2), sentinel)?;
-            // If either field changes, the struct changes
-            Ok(DryJoinOutput::new(
-                title_out.is_bottom() && done_out.is_bottom(),
-            ))
-        }
+    /// Helper to get the current resolved title
+    pub fn get_title(&self) -> Option<&String> {
+        // Since we resolve conflicts in join, there should be at most one value.
+        self.title.values().next()
     }
 
-    impl Task {
-        /// Creates a delta to set the title.
-        pub fn delta_set_title(
-            &self,
-            value: &str,
-            cc: &CausalContext,
-            id: Identifier,
-        ) -> Delta<Self> {
-            let next_dot = cc.next_dot_for(id);
-
-            let mut title_delta = DotFun::default();
-            title_delta.set(next_dot, value.to_string());
-
-            let task_delta = Task {
-                id: self.id,
-                title: title_delta,
-                done: DotFun::default(), // No change to 'done'
-            };
-
-            // Create the delta context.
-            // We MUST include the dots we are aware of for this field.
-            // This acts as the "previous operation" dependency.
-            let mut delta_cc = CausalContext::default();
-            // Include old dots from this field so they can be tombstoned/replaced
-            // self.title.add_dots_to(&mut delta_cc);
-            // Include the new dot
-            delta_cc.insert_dot(next_dot);
-
-            Delta(CausalDotStore {
-                store: task_delta,
-                context: delta_cc,
-            })
-        }
-
-        // /// Creates a delta to set the done status.
-        // pub fn set_done(
-        //     &self,
-        //     value: bool,
-        //     current_ctx: &CausalContext,
-        //     id: Identifier,
-        // ) -> CausalDotStore<Self> {
-        //     let next_seq = current_ctx
-        //         .iter()
-        //         .filter_map(|(i, s)| if i == id { Some(s) } else { None })
-        //         .max()
-        //         .map_or(1, |s| s + 1);
-
-        //     let dot = Dot::new(id, next_seq);
-
-        //     let mut done_delta = DotFun::default();
-        //     done_delta.set(dot, value);
-
-        //     let task_delta = Task {
-        //         title: DotFun::default(),
-        //         done: done_delta,
-        //     };
-
-        //     let mut delta_ctx = CausalContext::default();
-        // self.done.add_dots_to(&mut delta_ctx); // Include history of 'done'
-        //     delta_ctx.insert(dot);
-
-        //     CausalDotStore {
-        //         store: task_delta,
-        //         context: delta_ctx,
-        //     }
-        // }
-
-        /// Helper to get the current resolved title
-        pub fn get_title(&self) -> Option<&String> {
-            // Since we resolve conflicts in join, there should be at most one value.
-            self.title.values().next()
-        }
-
-        /// Helper to get the current resolved done status
-        pub fn get_done(&self) -> Option<bool> {
-            self.done.values().next().copied()
-        }
+    /// Helper to get the current resolved done status
+    pub fn get_done(&self) -> Option<bool> {
+        self.done.values().next().copied()
     }
-
-    pub struct Validator;
-    impl dson::sentinel::Sentinel for Validator {
-        type Error = String;
-    }
-    impl<K> dson::sentinel::ValueSentinel<K> for Validator {}
-    impl dson::sentinel::KeySentinel for Validator {}
-    impl<K> dson::sentinel::Visit<K> for Validator {
-        fn enter(&mut self, _key: &K) -> Result<(), Self::Error> {
-            Ok(())
-        }
-        fn exit(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-    pub type ValidatorErr = <Validator as Sentinel>::Error;
 }
+
+pub struct TaskValidator;
+impl dson::sentinel::Sentinel for TaskValidator {
+    type Error = StrErr;
+}
+impl<K> dson::sentinel::ValueSentinel<K> for TaskValidator {}
+impl dson::sentinel::KeySentinel for TaskValidator {}
+impl<K> dson::sentinel::Visit<K> for TaskValidator {
+    fn enter(&mut self, _key: &K) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn exit(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+pub type TaskJoinErr = <TaskValidator as Sentinel>::Error;
 
 // pub mod single_task {
 //     use crate::task::{ActorId, Delta, Task, Validator};
@@ -585,33 +573,93 @@ pub mod task {
 //     }
 // }
 
-pub mod task_map_2 {}
+pub mod task_map_2 {
+    use crate::{ActorId, Delta, StrErr, Task, TaskId, TaskValidator};
+    use dson::{CausalDotStore, DotFun, DotMap};
+
+    #[derive(Debug)]
+    pub struct TaskMap {
+        pub tasks: CausalDotStore<DotMap<TaskId, Task>>,
+        pub owner: ActorId,
+    }
+    impl TaskMap {
+        pub fn new(owner: ActorId) -> Self {
+            Self {
+                tasks: CausalDotStore::default(),
+                owner,
+            }
+        }
+        pub fn join(self, other: TaskMapDelta) -> Result<Self, StrErr> {
+            let joined = self.tasks.join(other.0, &mut TaskValidator)?;
+            Ok(TaskMap {
+                tasks: joined,
+                owner: self.owner,
+            })
+        }
+        pub fn add_task(&mut self, title: &str) -> (Task, TaskMapDelta) {
+            let prev_cc = self.tasks.context.clone();
+            let dot1_a = self.tasks.context.next_dot_for(self.owner);
+            let mut t1 = Task {
+                id: TaskId::new(),
+                title: DotFun::default(),
+                done: DotFun::default(),
+            };
+            t1.title.set(dot1_a, title.to_string());
+            self.tasks.store.set(t1.id, t1.clone());
+            self.tasks.context.insert_next_dot(dot1_a);
+
+            let delta_inner = self.tasks.subset_for_inflation_from(&prev_cc);
+            (t1, Delta(delta_inner))
+        }
+    }
+
+    pub type TaskMapDelta = Delta<DotMap<TaskId, Task>>;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use dson::DotStore;
+
+        #[test]
+        fn test_taskmap_concurrent_add_task() -> anyhow::Result<()> {
+            let alice = ActorId::new(0, 0);
+            let bob = ActorId::new(1, 0);
+            let mut tm_a = TaskMap::new(alice);
+            let mut tm_b = TaskMap::new(bob);
+
+            let (t1a, delta_a) = tm_a.add_task("task_a1");
+            let (t1b, delta_b) = tm_b.add_task("task_b1");
+
+            let mut expected_context = tm_a.tasks.context.clone();
+            expected_context.union(&tm_b.tasks.context);
+
+            tm_a = tm_a.join(delta_b)?;
+            tm_b = tm_b.join(delta_a)?;
+
+            // let joined = tm_a.join(tm_b).unwrap();
+
+            assert_eq!(tm_a.tasks.context, expected_context);
+            assert!(!tm_a.tasks.store.is_bottom());
+            assert_eq!(tm_a.tasks.store.get(&t1a.id), Some(&t1a));
+            assert_eq!(tm_a.tasks.store.get(&t1b.id), Some(&t1b));
+            assert_eq!(tm_b.tasks.context, expected_context);
+            assert!(!tm_b.tasks.store.is_bottom());
+            assert_eq!(tm_b.tasks.store.get(&t1a.id), Some(&t1a));
+            assert_eq!(tm_b.tasks.store.get(&t1b.id), Some(&t1b));
+            assert_eq!(tm_b.tasks, tm_a.tasks);
+
+            Ok(())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use crate::task::{ActorId, Task, TaskId, Validator};
-    use dson::{CausalContext, CausalDotStore, DotFun, DotMap, DotStore};
-
-    // impl Task {
-    //     pub fn new(title: &str, cc: &mut CausalContext, actor: ActorId) -> Self {
-    //         let next_dot = cc.next_dot_for(actor);
-    //         let mut task = Task {
-    //             id: TaskId::new(),
-    //             title: DotFun::default(),
-    //             done: DotFun::default(),
-    //         };
-    //         t1.title.set(next_dot, "dot1_a".to_string());
-    //         ds1.context.insert_next_dot(next_dot);
-    //         // Task {
-    //         //     id: TaskId::new(),
-    //         //     title: DotFun::default(),
-    //         //     done: DotFun::default(),
-    //         // }
-    //     }
-    // }
+    use crate::{ActorId, Task, TaskId, TaskValidator};
+    use dson::{CausalDotStore, DotFun, DotMap, DotStore};
 
     #[test]
-    fn test_concurrent_add_task() -> anyhow::Result<()> {
+    fn test_dotmap_concurrent_add_task() -> anyhow::Result<()> {
         let alice = ActorId::new(0, 0);
         let bob = ActorId::new(1, 0);
         let mut ds1 = CausalDotStore::<DotMap<TaskId, Task>>::default();
@@ -628,7 +676,6 @@ mod tests {
         ds1.context.insert_next_dot(dot1_a);
 
         let dot2_b = ds2.context.next_dot_for(bob);
-
         let mut t2 = Task {
             id: TaskId::new(),
             title: DotFun::default(),
@@ -641,7 +688,7 @@ mod tests {
         let mut expected_context = ds1.context.clone();
         expected_context.union(&ds2.context);
 
-        let join = ds1.join(ds2, &mut Validator).unwrap();
+        let join = ds1.join(ds2, &mut TaskValidator).unwrap();
 
         assert_eq!(join.context, expected_context);
         assert!(!join.store.is_bottom());
