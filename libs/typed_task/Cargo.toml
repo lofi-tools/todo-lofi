@@ -7,5 +7,6 @@ edition = "2024"
 [dependencies]
 dson = "0.3.0"
 thiserror.workspace = true
+anyhow.workspace = true
 entity_id = "*"
 ulid = "1.2.1"
