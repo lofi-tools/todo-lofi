@@ -611,6 +611,24 @@ pub mod task_map_2 {
             let delta_inner = self.tasks.subset_for_inflation_from(&prev_cc);
             (t1, Delta(delta_inner))
         }
+        pub fn set_task_title(&mut self, id: TaskId, title: &str) -> Result<TaskMapDelta, StrErr> {
+            let prev_cc = self.tasks.context.clone();
+            let dot1_a = self.tasks.context.next_dot_for(self.owner);
+            let mut t1 = self
+                .tasks
+                .store
+                .get_mut_and_invalidate(&id)
+                .ok_or_else(|| StrErr {
+                    message: "task not found".to_string(),
+                })?
+                .clone();
+            t1.title.set(dot1_a, title.to_string());
+            self.tasks.store.set(id, t1.clone());
+            self.tasks.context.insert_next_dot(dot1_a);
+
+            let delta_inner = self.tasks.subset_for_inflation_from(&prev_cc);
+            Ok(Delta(delta_inner))
+        }
     }
 
     pub type TaskMapDelta = Delta<DotMap<TaskId, Task>>;
@@ -647,6 +665,28 @@ pub mod task_map_2 {
             assert_eq!(tm_b.tasks.store.get(&t1a.id), Some(&t1a));
             assert_eq!(tm_b.tasks.store.get(&t1b.id), Some(&t1b));
             assert_eq!(tm_b.tasks, tm_a.tasks);
+
+            Ok(())
+        }
+
+        #[test]
+        fn test_concurrent_set_task_title() -> anyhow::Result<()> {
+            let alice = ActorId::new(0, 0);
+            let bob = ActorId::new(1, 0);
+            let mut tm_a = TaskMap::new(alice);
+            let mut tm_b = TaskMap::new(bob);
+
+            // create task and sync with bob
+            let (t1a, delta_a) = tm_a.add_task("task_a1");
+            tm_b = tm_b.join(delta_a)?;
+
+            // set task title concurrently and sync
+            let delta_a = tm_a.set_task_title(t1a.id, "A did this")?;
+            let delta_b = tm_b.set_task_title(t1a.id, "B did this")?;
+            tm_a = tm_a.join(delta_b)?;
+            tm_b = tm_b.join(delta_a)?;
+
+            dbg!(&tm_a, &tm_b);
 
             Ok(())
         }
