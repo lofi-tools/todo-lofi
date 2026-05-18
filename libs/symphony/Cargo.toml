@@ -1,0 +1,18 @@
+[package]
+name = "symphony"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+snafu.workspace = true
+dunce = "^1"
+regex.workspace = true
+time = { version = "0.3", features = ["serde"] } # "format-description"
+reqwest.workspace = true
+url.workspace = true
+async-trait.workspace = true

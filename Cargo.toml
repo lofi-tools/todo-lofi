@@ -13,6 +13,15 @@ todo-core = { path = "libs/core" }
 # taskchampion = { git = "https://github.com/GothenburgBitFactory/taskchampion" }
 # iroh = { version = "0.15.0" } # Removed unused iroh
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "^1", features = ["full"] }
 thiserror = "^1.0"
 anyhow = "^1.0"
+snafu = { version = "0.9.0", features = ["backtrace"] }
+regex = "1.12.3"
+async-trait = "0.1"
+reqwest = { version = "0.13.3", features = ["json"] }   # "tcp-tls"
+url = "2.5.8"
+log = "0.4"
+env_logger = "0.11.10"
+chrono = { version = "0.4" }
