@@ -1552,7 +1552,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "todo-core",
 ]
 
 [[package]]

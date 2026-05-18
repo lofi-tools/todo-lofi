@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-todo-core.workspace = true
+# todo-core.workspace = true
 # # gpui = { git = "https://github.com/zed-industries/gpui", features = ["test-support"] }
 # gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui = { version = "^0.2" }
