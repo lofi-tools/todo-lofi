@@ -17,10 +17,11 @@ syn = { version = "2.0", default-features = false, features = [
   "printing",
   "proc-macro",
 ] }
-zyn = { version = "0.5.4", features = ["pretty"] }
+zyn = { version = "0.5.4", features = ["pretty", "diagnostics"] }
 
 [dev-dependencies]
 zyn = { version = "0.5", features = [
   "pretty",
+  "diagnostics",
 ] } # pretty for formatted assertions
 snafu = "0.8" # for __InternalExtractErrorType trait in generated code

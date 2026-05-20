@@ -1,10 +1,7 @@
 #![recursion_limit = "128"] // https://github.com/rust-lang/rust/issues/62059
 extern crate proc_macro;
 use proc_macro::TokenStream;
-// use quote::quote;
-use std::collections::BTreeSet;
 use syn::spanned::Spanned;
-// TODO use https://github.com/aacebo/zyn
 
 #[proc_macro_attribute]
 pub fn report(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -17,10 +14,10 @@ fn body(
     _attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let item = syn::parse::<Item>(item)?;
+    let item = syn::parse::<syn::Item>(item)?;
 
     let f = match item {
-        Item::Fn(f) => f,
+        syn::Item::Fn(f) => f,
         _ => {
             return Err(syn::Error::new(
                 item.span(),
@@ -29,14 +26,14 @@ fn body(
         }
     };
 
-    let ItemFn {
+    let syn::ItemFn {
         attrs,
         vis,
         sig,
         block,
     } = f;
 
-    let Signature {
+    let syn::Signature {
         constness,
         asyncness,
         unsafety,
@@ -51,32 +48,32 @@ fn body(
     } = sig;
 
     let output_ty = match output {
-        ReturnType::Default => quote! { () },
-        ReturnType::Type(_, ty) => quote! { #ty },
+        syn::ReturnType::Default => quote::quote! { () },
+        syn::ReturnType::Type(_, ty) => quote::quote! { #ty },
     };
 
-    let error_ty = quote! { <#output_ty as ::snafu::__InternalExtractErrorType>::Err };
+    let error_ty = quote::quote! { <#output_ty as ::snafu::__InternalExtractErrorType>::Err };
 
-    let output = quote! { -> ::snafu::Report<#error_ty> };
+    let output = quote::quote! { -> ::snafu::Report<#error_ty> };
 
     let captured_original_body = if asyncness.is_some() {
-        quote! { async #block.await }
+        quote::quote! { async #block.await }
     } else {
-        quote! { (|| #block)() }
+        quote::quote! { (|| #block)() }
     };
 
-    let ascribed_original_result = quote! {
+    let ascribed_original_result = quote::quote! {
         let __snafu_body: #output_ty = #captured_original_body;
     };
 
-    let block = quote! {
+    let block = quote::quote! {
         {
             #ascribed_original_result;
             <::snafu::Report<_> as ::core::convert::From<_>>::from(__snafu_body)
         }
     };
 
-    Ok(quote! {
+    Ok(quote::quote! {
         #(#attrs)*
         #vis
         #constness
@@ -92,15 +89,78 @@ fn body(
     })
 }
 
-// use proc_macro::TokenStream;
-// use std::collections::BTreeSet;
+// zyn-based implementation
 use zyn::quote::quote;
-// use syn::{Item, ItemFn, ReturnType, Signature, spanned::Spanned};
-use zyn::prelude::*;
 use zyn::syn::{Item, ItemFn, ReturnType, Signature};
 
+/// zyn-based body function for testing
+fn zyn_body(args: zyn::Args, item: zyn::Input) -> zyn::Output {
+    // Convert Input to Item using as_item()
+    let item = match item.as_item() {
+        Some(i) => i.clone(),
+        None => {
+            let diag = zyn::mark::error("`#[snafu::report]` may only be used on functions").build();
+            return zyn::Output::from(diag);
+        }
+    };
+
+    let ItemFn {
+        attrs,
+        vis,
+        sig,
+        block,
+        ..
+    } = match item {
+        Item::Fn(f) => f,
+        _ => {
+            let diag = zyn::mark::error("`#[snafu::report]` may only be used on functions").build();
+            return zyn::Output::from(diag);
+        }
+    };
+
+    let Signature {
+        constness,
+        asyncness,
+        unsafety,
+        abi,
+        fn_token,
+        ident,
+        generics,
+        inputs,
+        variadic,
+        output,
+        ..
+    } = sig;
+
+    let output_ty = match output {
+        ReturnType::Default => quote! { () },
+        ReturnType::Type(_, ty) => quote! { #ty },
+    };
+
+    let error_ty = quote! { <#output_ty as ::snafu::__InternalExtractErrorType>::Err };
+    let captured_body = if asyncness.is_some() {
+        quote! { async #block.await }
+    } else {
+        quote! { (|| #block)() }
+    };
+
+    let _ = args; // args unused for now
+    zyn::zyn! {
+        @for (attr in attrs.iter()) { #attr }
+        #vis
+        #constness #asyncness #unsafety #abi
+        #fn_token #ident #generics
+        (#inputs #variadic)
+        -> ::snafu::Report<#error_ty>
+        {
+            let __snafu_body: #output_ty = #captured_body;
+            <::snafu::Report<_> as ::core::convert::From<_>>::from(__snafu_body)
+        }
+    }
+}
+
 #[zyn::attribute]
-pub fn zyn_report(#[zyn(input)] item: Item, _args: zyn::Args) -> zyn::TokenStream {
+pub fn zyn_report(#[zyn(input)] item: Item, args: zyn::Args) -> zyn::TokenStream {
     let ItemFn {
         attrs,
         vis,
@@ -138,8 +198,9 @@ pub fn zyn_report(#[zyn(input)] item: Item, _args: zyn::Args) -> zyn::TokenStrea
         quote! { (|| #block)() }
     };
 
+    let _ = args;
     zyn::zyn! {
-        #(#attrs)*
+        @for (attr in attrs.iter()) { #attr }
         #vis
         #constness #asyncness #unsafety #abi
         #fn_token #ident #generics
@@ -154,144 +215,109 @@ pub fn zyn_report(#[zyn(input)] item: Item, _args: zyn::Args) -> zyn::TokenStrea
 
 #[cfg(test)]
 mod tests {
-    use crate::report::body;
-    use zyn::prelude::*;
-    use zyn::{
-        Args,
-        syn::{Item, ReturnType},
-    }; // adjust path to your macro module
+    use crate::zyn_body;
+    use zyn::syn::Item;
 
     #[test]
     fn transforms_sync_result_function() {
-        let input: Item = zyn::parse! {
-            fn parse_config(path: &str) -> Result<Config, ConfigError> {
-                Ok(Config::default())
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("fn parse_config(path: &str) -> Result<Config, ConfigError> { Ok(Config::default()) }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<ConfigError>");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < ConfigError >");
         zyn::assert_tokens_contain!(output, "let __snafu_body : Result < Config , ConfigError >");
-        zyn::assert_tokens_contain!(output, "::core::convert::From<_>>::from(__snafu_body)");
+        zyn::assert_tokens_contain!(
+            output,
+            ":: core :: convert :: From < _ >> :: from (__snafu_body)"
+        );
     }
 
     #[test]
     fn transforms_async_result_function() {
-        let input: Item = zyn::parse! {
-            async fn fetch_user(id: u64) -> Result<User, ApiError> {
-                api::get(id).await
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("async fn fetch_user(id: u64) -> Result<User, ApiError> { api::get(id).await }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
         zyn::assert_tokens_contain!(output, "async fn fetch_user");
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<ApiError>");
-        zyn::assert_tokens_contain!(output, "async { Ok ( Config :: default ( ) ) }.await");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < ApiError >");
     }
 
     #[test]
     fn transforms_function_with_unit_return() {
-        let input: Item = zyn::parse! {
-            fn log_startup() {
-                println!("starting...");
-            }
-        }
-        .unwrap();
+        let input: Item =
+            zyn::parse!("fn log_startup() { println!(\"starting...\"); }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
         // Unit return -> extracts () as error type placeholder
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<()>");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < () >");
         zyn::assert_tokens_contain!(output, "let __snafu_body : ()");
     }
 
     #[test]
     fn transforms_function_with_generic_error() {
-        let input: Item = zyn::parse! {
-            fn process<T: std::fmt::Debug>(val: T) -> Result<T, std::io::Error> {
-                Ok(val)
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("fn process<T: std::fmt::Debug>(val: T) -> Result<T, std::io::Error> { Ok(val) }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<std::io::Error>");
-        zyn::assert_tokens_contain!(output, "let __snafu_body : Result < T , std::io::Error >");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < std :: io :: Error >");
+        zyn::assert_tokens_contain!(
+            output,
+            "let __snafu_body : Result < T , std :: io :: Error >"
+        );
     }
 
     #[test]
     fn rejects_non_function_items() {
-        let input: Item = zyn::parse! {
-            struct NotAFunction;
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("struct NotAFunction;" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let result = body(Args::empty(), input.into());
+        let output = zyn_body(zyn::Args::new(), input);
 
-        zyn::assert_diagnostic_error!(result, "may only be used on functions");
-        zyn::assert_tokens_empty!(result.unwrap_err());
+        zyn::assert_diagnostic_error!(output, "may only be used on functions");
+        zyn::assert_tokens_empty!(output);
     }
 
     #[test]
     fn preserves_function_attributes_and_visibility() {
-        let input: Item = zyn::parse! {
-            #[deprecated(note = "use new_api")]
-            #[doc(hidden)]
-            pub(crate) fn legacy() -> Result<(), OldError> {
-                Err(OldError)
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("#[deprecated(note = \"use new_api\")] #[doc(hidden)] pub(crate) fn legacy() -> Result<(), OldError> { Err(OldError) }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
         zyn::assert_tokens_contain!(output, "# [deprecated (note = \"use new_api\")]");
         zyn::assert_tokens_contain!(output, "# [doc (hidden)]");
         zyn::assert_tokens_contain!(output, "pub (crate) fn legacy");
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<OldError>");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < OldError >");
     }
 
     #[test]
     fn preserves_const_unsafe_abi_modifiers() {
-        let input: Item = zyn::parse! {
-            pub const unsafe extern "C" fn raw_api() -> Result<i32, FfiError> {
-                Ok(42)
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("pub const unsafe extern \"C\" fn raw_api() -> Result<i32, FfiError> { Ok(42) }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
         zyn::assert_tokens_contain!(output, "pub const unsafe extern \"C\" fn raw_api");
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<FfiError>");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < FfiError >");
     }
 
     #[test]
     fn handles_generics_and_where_clauses() {
-        let input: Item = zyn::parse! {
-            fn parse_json<'a, T: serde::Deserialize<'a>>(
-                s: &'a str
-            ) -> Result<T, serde_json::Error>
-            where
-                T: std::fmt::Debug,
-            {
-                serde_json::from_str(s)
-            }
-        }
-        .unwrap();
+        let input: Item = zyn::parse!("fn parse_json<'a, T: serde::Deserialize<'a>>(s: &'a str) -> Result<T, serde_json::Error> where T: std::fmt::Debug, { serde_json::from_str(s) }" => Item).unwrap();
+        let input: zyn::Input = input.into();
 
-        let output = body(Args::empty(), input.into()).unwrap();
+        let output = zyn_body(zyn::Args::new(), input);
 
         zyn::assert_tokens_contain!(
             output,
-            "fn parse_json < 'a , T : serde::Deserialize < 'a > >"
+            "fn parse_json < 'a , T : serde :: Deserialize < 'a > >"
         );
-        zyn::assert_tokens_contain!(output, "where T : std::fmt::Debug ,");
-        zyn::assert_tokens_contain!(output, "-> ::snafu::Report<serde_json::Error>");
+        zyn::assert_tokens_contain!(output, "where T : std :: fmt :: Debug ,");
+        zyn::assert_tokens_contain!(output, "-> :: snafu :: Report < serde_json :: Error >");
     }
 }
