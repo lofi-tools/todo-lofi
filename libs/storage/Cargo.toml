@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-snafu.workspace = true
-turso = { version = "0.7.0-pre.1", features = ["sync"] }
+snafu = { workspace = true, features = [
+  "backtrace",
+  # "backtraces-impl-backtrace-crate",
+] }
+anyhow.workspace = true
+turso = { version = "=0.5.3" }
 tokio.workspace = true
-turso-migrate = { git = "https://github.com/maun/turso-migrate.git" }
+# turso-migrate = { git = "https://github.com/maun/turso-migrate.git" } # incompatible with turso-mappers turso version
 serde.workspace = true
 serde_json.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+# libsql-orm = { version = "0.2.5" }
+turso-mappers = { version = "0.4.0" } # forces turso =0.5.3

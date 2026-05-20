@@ -11,17 +11,17 @@ pub struct BlockerRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Issue {
     pub id: String,
-    pub identifier: String,
+    // pub identifier: String,
     pub title: String,
     pub description: Option<String>,
-    pub priority: Option<i32>,
-    pub state: String,
+    // pub priority: Option<i32>,
+    // pub state: String,
     pub branch_name: Option<String>,
-    pub url: Option<String>,
+    // pub url: Option<String>,
     pub labels: Vec<String>,
     pub blocked_by: Vec<BlockerRef>,
-    pub created_at: Option<SystemTime>,
-    pub updated_at: Option<SystemTime>,
+    // pub created_at: Option<SystemTime>,
+    // pub updated_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

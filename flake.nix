@@ -34,7 +34,11 @@
             dt = ''set -e;  cd desktop; cargo tauri dev '';
           };
 
-          env = { };
+          env = {
+            # SNAFU_RAW_ERROR_MESSAGES = 1;
+            # RUST_LIB_BACKTRACE = 1;
+            # RUST_BACKTRACE = "1";
+          };
 
           # checks = {
           #   # Check that todo-core builds
