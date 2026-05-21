@@ -65,8 +65,8 @@
             targets = [ ];
           });
           myDevShell.env = env;
-          myDevShell.shellHooks = { };
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
+          myDevShell.shellHooks = { };
         };
     });
 

@@ -19,11 +19,8 @@
       /*  pkgs.librsvg */
       /*  pkgs.libsoup_3 */
     ];
-    runtimeDeps = [
-      # pkgs.openssl
-    ];
-    devDeps = [
-    ];
+    runtimeDeps = [ ];
+    devDeps = [ ];
 
     # wd = "$(git rev-parse --show-toplevel)";
     scripts = mapAttrs pkgs.writeShellScriptBin {
@@ -47,6 +44,7 @@
       # METAL = "${inputs.exo.packages.${system}.metal-toolchain}/bin/metal";
       # BINDGEN_EXTRA_CLANG_ARGS = "-I${inputs.exo.packages.${system}.metal-toolchain}";
     };
+
   in
   {
     packages = scripts;
