@@ -98,7 +98,7 @@ impl TursoStorage {
                       title TEXT NOT NULL,
                       description TEXT,
                       -- priority INTEGER,
-                      state TEXT NOT NULL,
+                      -- state TEXT NOT NULL,
                       branch_name TEXT,
                       -- url TEXT,
                       labels TEXT NOT NULL,                         -- JSON Array
@@ -282,7 +282,7 @@ impl TursoStorage {
 
         self.conn.execute(
               "INSERT OR REPLACE INTO issues (id, title, description, branch_name, labels, blocked_by)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6j)",
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
               params![
                   issue.id.clone(), issue.title.clone(), issue.description.clone(),
                   issue.branch_name.clone(),
@@ -327,8 +327,8 @@ pub enum StorageError {
         // #[snafu(source(from(turso::Error, |e:turso::Error| e.to_string())))]
         #[snafu(source(from(exact)))]
         source: turso::Error,
-        // #[snafu(backtrace)]
-        // backtrace: Backtrace,
+        #[snafu(backtrace)]
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Failed to map Db row: {}", source))]
@@ -342,8 +342,8 @@ pub enum StorageError {
         #[snafu(source(from(serde_json::Error, Box::new)))]
         source: Box<dyn core::error::Error>,
         // msg: String,
-        // #[snafu(backtrace)]
-        // backtrace: Backtrace,
+        #[snafu(backtrace)]
+        backtrace: Backtrace,
     },
 
     // #[snafu(whatever, display("{message}"))]

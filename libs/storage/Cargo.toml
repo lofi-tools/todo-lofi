@@ -7,6 +7,7 @@ edition = "2024"
 snafu = { workspace = true, features = [
   "backtrace",
   # "backtraces-impl-backtrace-crate",
+  "unstable-provider-api",
 ] }
 anyhow.workspace = true
 turso = { version = "=0.5.3" }

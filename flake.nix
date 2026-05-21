@@ -56,6 +56,14 @@
           # packages = scripts;
           # rust.buildInputs = buildDeps;
           # rust.buildEnv = env;
+          # rust.toolchain = pkgs.rust-bin.stable.latest.default.override {
+          #   extensions = [ "rust-src" "rust-analyzer" ];
+          #   targets = [ ];
+          # };
+          rust.toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+            extensions = [ "rust-src" "rust-analyzer" ];
+            targets = [ ];
+          });
           myDevShell.env = env;
           myDevShell.shellHooks = { };
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
