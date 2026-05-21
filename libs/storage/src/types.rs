@@ -8,7 +8,7 @@ pub struct BlockerRef {
     // pub state: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Task {
     pub id: String,
     // pub identifier: String,
@@ -22,6 +22,8 @@ pub struct Task {
     pub blocked_by: Vec<BlockerRef>,
     // pub created_at: Option<SystemTime>,
     // pub updated_at: Option<SystemTime>,
+    pub importance_factor: f64,
+    pub urgency_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

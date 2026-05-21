@@ -1,7 +1,6 @@
-use std::backtrace::Backtrace;
-
 use serde::Deserialize;
 use snafu::{ResultExt, Snafu};
+use std::backtrace::Backtrace;
 use turso::{Connection, params};
 use turso_mappers::{QueryAsByName, TryFromRowByName};
 
@@ -17,23 +16,13 @@ pub struct TursoStorage {
 
 impl TursoStorage {
     pub async fn new(builder: turso::Builder) -> StorResult<Self> {
-        // let db = libsql_orm::Database::new_connect(":memory:", "")
-        //     .await
-        //     .context(LibsqlErr {
-        //         msg: "new_connect()".to_string(),
-        //     })?;
         let db = builder.build().await.context(DbErr)?;
         let conn = db.connect().context(DbErr)?;
-        // let db = libsql_orm::Database::new(conn);
         let self_ = Self { conn };
-
-        // Apply all pending migrations
-        self_.init_schema().await?;
         // Self::MIGRATIONS.to_latest(&mut conn).await.unwrap();
-
+        self_.init_schema().await?;
         Ok(self_)
     }
-
     // const MIGRATIONS: Migrations<'static> = {
     //     async fn my_migration(conn: &turso::Connection) -> turso::Result<()> {
     //         conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", ())
@@ -58,37 +47,8 @@ impl TursoStorage {
     //                 updated_at INTEGER          -- Unix milliseconds
     //             );",
     //         ),
-    //         Migration::up(
-    //             "002",
-    //             "CREATE TABLE IF NOT EXISTS run_attempts (
-    //                 task_id TEXT PRIMARY KEY,
-    //                 task_identifier TEXT NOT NULL,
-    //                 attempt INTEGER,
-    //                 workspace_path TEXT NOT NULL,
-    //                 started_at INTEGER NOT NULL,
-    //                 status TEXT NOT NULL,
-    //                 error TEXT
-    //             );",
-    //         ),
-    //         Migration::up(
-    //             "003",
-    //             "CREATE TABLE IF NOT EXISTS retry_entries (
-    //                 task_id TEXT PRIMARY KEY,
-    //                 identifier TEXT NOT NULL,
-    //                 attempt INTEGER NOT NULL,
-    //                 due_at_ms INTEGER NOT NULL,
-    //                 timer_handle INTEGER,
-    //                 error TEXT
-    //             );",
-    //         ),
-    //         // 2. From a file
-    //         // up_file!("../tests/migration-files/001_test.sql"),
-    //         // 3. Rust function
-    //         // up_fn!("003", my_migration),
     //     ])
     // };
-
-    /// Setup schema tables
     pub async fn init_schema(&self) -> StorResult<()> {
         self.conn
             .execute(
@@ -102,7 +62,8 @@ impl TursoStorage {
                       updated_at INTEGER,                           -- Unix milliseconds
                       created_at INTEGER,                           -- Unix milliseconds
                       deadline INTEGER,                             -- Unix milliseconds
-                      importance_factor REAL NOT NULL DEFAULT 1.0   -- Simple multiplier (e.g., 1.0 to 10.0)
+                      importance_factor REAL NOT NULL DEFAULT 1.0,
+                      urgency_factor REAL NOT NULL DEFAULT 1.0
                   ); ",
                 (),
             )
@@ -175,15 +136,16 @@ impl TursoStorage {
 
 #[derive(Debug, TryFromRowByName, Deserialize)]
 struct TaskDb {
-    pub id: String, // Primary Key string
+    pub id: String, // Primary Key
     pub title: String,
     pub description: Option<String>,
-    // pub state: String,
     pub branch_name: Option<String>,
-    pub labels: String, // Serialized JSON Array string
+    pub labels: String,     // Serialized JSON Array string
     pub blocked_by: String, // Serialized JSON Array string
-                        // pub created_at: Option<i64>, // Stored as Unix Milliseconds
-                        // pub updated_at: Option<i64>, // Stored as Unix Milliseconds
+    // pub created_at: Option<i64>, // Stored as Unix Milliseconds
+    // pub updated_at: Option<i64>, // Stored as Unix Milliseconds
+    pub importance_factor: f64,
+    pub urgency_factor: f64,
 }
 impl TryFrom<&Task> for TaskDb {
     type Error = StorageError;
@@ -197,6 +159,8 @@ impl TryFrom<&Task> for TaskDb {
             blocked_by: serde_json::to_string(&domain.blocked_by).context(SerializationErr)?,
             // created_at: domain.created_at.map(systime_to_ms),
             // updated_at: domain.updated_at.map(systime_to_ms),
+            importance_factor: domain.importance_factor,
+            urgency_factor: domain.urgency_factor,
         })
     }
 }
@@ -212,6 +176,8 @@ impl TryFrom<TaskDb> for Task {
             blocked_by: serde_json::from_str(&db_record.blocked_by).context(ParseRowErr)?,
             // created_at: db_record.created_at.map(ms_to_systime),
             // updated_at: db_record.updated_at.map(ms_to_systime),
+            importance_factor: db_record.importance_factor,
+            urgency_factor: db_record.urgency_factor,
         })
         .context(MapRowErr)
     }
@@ -220,16 +186,21 @@ impl TursoStorage {
     pub async fn save_task(&self, task: &Task) -> StorResult<()> {
         let labels_json = serde_json::to_string(&task.labels).context(SerializationErr)?;
         let blocked_json = serde_json::to_string(&task.blocked_by).context(SerializationErr)?;
+        let norm = |f| if f == 0.0 { 1.0 } else { f };
+        let importance = norm(task.importance_factor);
+        let urgency = norm(task.urgency_factor);
         // let created_at = task.created_at.map(systime_to_ms);
         // let updated_at = task.updated_at.map(systime_to_ms);
 
+        dbg!(&task.importance_factor, &task.urgency_factor);
         self.conn.execute(
-              "INSERT OR REPLACE INTO tasks (id, title, description, branch_name, labels, blocked_by)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+              "INSERT OR REPLACE INTO tasks (id, title, description, branch_name, labels, blocked_by, importance_factor, urgency_factor)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
               params![
                   task.id.clone(), task.title.clone(), task.description.clone(),
                   task.branch_name.clone(),
-                  labels_json, blocked_json
+                  labels_json, blocked_json,
+                  importance, urgency,
               ]
           ).await.context(DbErr)?;
 
@@ -258,36 +229,41 @@ impl TursoStorage {
     }
 
     pub async fn list_tasks_by_priority(&self) -> Result<Vec<Task>, StorageError> {
-        #[derive(Debug, TryFromRowByName, Deserialize)]
-        pub struct TempTask {
-            pub id: String,
-            pub title: String,
-            pub importance_factor: f64,
-            pub urgency_factor: f64,
-            pub priority_score: f64,
-        }
-
         let sql = r#"
-            SELECT id, title, importance_factor,
-                   CASE WHEN deadline IS NULL THEN 1.0
-                        ELSE 86400.0 / MAX(1.0, deadline - unixepoch('now'))
-                   END AS urgency_factor,
-                   importance_factor * CASE WHEN deadline IS NULL THEN 1.0
-                                            ELSE 86400.0 / MAX(1.0, deadline - unixepoch('now'))
-                                       END AS priority_score
+            SELECT *,
+              CASE WHEN deadline IS NULL THEN 1.0
+                  ELSE 86400.0 / MAX(1.0, deadline - unixepoch('now'))
+              END AS urgency_factor,
+              importance_factor * CASE WHEN deadline IS NULL THEN 1.0
+                                      ELSE 86400.0 / MAX(1.0, deadline - unixepoch('now'))
+                                  END AS priority_score
             FROM tasks
             ORDER BY priority_score DESC
         "#;
 
-        let tasks = self
+        let rows = self
             .conn
-            .query_as_by_name::<TempTask>(sql, ())
+            .query_as_by_name::<TaskDb>(sql, ())
             .await
             .context(MapRowErr)?;
-        dbg!(&tasks);
+        // dbg!(&rows);
 
-        // Ok(tasks)
-        todo!()
+        let mut tasks = Vec::new();
+        for row in rows {
+            dbg!(&row.id, row.importance_factor);
+            tasks.push(Task {
+                id: row.id,
+                title: row.title,
+                description: None,
+                branch_name: None,
+                labels: Vec::new(),
+                blocked_by: Vec::new(),
+                importance_factor: row.importance_factor,
+                urgency_factor: row.urgency_factor,
+            });
+        }
+
+        Ok(tasks)
     }
 }
 
@@ -309,6 +285,8 @@ pub enum StorageError {
     MapRowError {
         #[snafu(source(from(exact)))]
         source: turso_mappers::TursoMapperError,
+        #[snafu(backtrace)]
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Failed to parse Db row: {source}"))]
@@ -328,18 +306,6 @@ pub enum StorageError {
     //     #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
     //     source: Option<Box<dyn std::error::Error>>,
     // },
-    // #[snafu(display("Failed DB query: {source}"))]
-    // LibsqlError {
-    //     // msg: Option<String>,
-    //     #[snafu(source(from(exact)))]
-    //     source: libsql_orm::compat::LibsqlError,
-    // },
-    // #[snafu(display("ORM error: {source}"))]
-    // OrmError {
-    //     // msg: Option<String>,
-    //     #[snafu(source(from(exact)))]
-    //     source: libsql_orm::Error,
-    // },
     #[snafu(display("Serialization/Deserialization failed: {}", source))]
     SerializationError { source: serde_json::Error },
 
@@ -349,14 +315,6 @@ pub enum StorageError {
     #[snafu(display("{kind} not found: {id}"))]
     NotFound { kind: String, id: String },
 }
-
-// #[derive(Debug, Snafu)]
-// #[snafu(display("Could not read file {path}"))]
-// #[snafu(whatever)]
-// struct AnyErr {
-//     source: std::io::Error,
-//     path: String,
-// }
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +327,6 @@ mod tests {
     }
     impl TestState {
         pub async fn new() -> anyhow::Result<Self> {
-            let db = Builder::new_local(":memory:").build().await?;
             Ok(Self {
                 db: TursoStorage::new(Builder::new_local(":memory:"))
                     .await
@@ -395,6 +352,7 @@ mod tests {
                     }],
                     // created_at: Some(now),
                     // updated_at: Some(now),
+                    ..Default::default()
                 };
                 if i > 1 {
                     issue.blocked_by = vec![BlockerRef {
@@ -410,29 +368,37 @@ mod tests {
 
     #[tokio::test]
     #[snafu::report]
-    async fn test_task_lifecycle() -> Result<(), StorageError> {
+    async fn test_save_load_task() -> Result<(), StorageError> {
         let storage = TursoStorage::new(Builder::new_local(":memory:")).await?;
         // let now = SystemTime::now();
 
-        let task = Task {
+        let mut task = Task {
             id: "task_01".to_string(),
-            title: "Fix bug in pipeline".to_string(),
-            description: Some("CI/CD pipeline failing on step 3".to_string()),
-            branch_name: Some("fix/pipeline".to_string()),
+            title: "Task 1".to_string(),
+            description: Some("Do Task 1".to_string()),
+            branch_name: Some("fix/task-1".to_string()),
             labels: vec!["bug".to_string(), "backend".to_string()],
             blocked_by: vec![BlockerRef {
                 id: Some("task_00".to_string()),
             }],
-            // created_at: Some(now),
             // updated_at: Some(now),
+            // created_at: Some(now),
+            ..Default::default()
         };
 
         storage.save_task(&task).await?;
-
         let retrieved = storage.get_task("task_01").await?;
         assert_eq!(retrieved.id, task.id);
         assert_eq!(retrieved.labels, vec!["bug", "backend"]);
         assert_eq!(retrieved.blocked_by[0].id.as_deref(), Some("task_00"));
+
+        task.title = "Updated Task 1".to_string();
+        task.labels.push("frontend".to_string());
+        storage.save_task(&task).await?;
+
+        let reloaded = storage.get_task("task_01").await?;
+        assert_eq!(reloaded.title, "Updated Task 1");
+        assert_eq!(reloaded.labels, vec!["bug", "backend", "frontend"]);
 
         Ok(())
     }
@@ -458,6 +424,15 @@ mod tests {
         //     task_with_deadline_priority.priority_score
         //         > task_without_deadline_priority.priority_score
         // );
+        let mut task = test.db.get_task("task_02").await?;
+        task.importance_factor = 10.0;
+        test.db.save_task(&task).await?;
+
+        let reloaded = test.db.get_task("task_02").await?;
+        assert_eq!(reloaded.importance_factor, 10.0);
+
+        let prioritized_tasks = test.db.list_tasks_by_priority().await?;
+        assert_eq!(prioritized_tasks[0].id, "task_02");
 
         Ok(())
     }
