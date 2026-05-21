@@ -4,12 +4,12 @@ use std::{collections::HashMap, time::SystemTime};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlockerRef {
     pub id: Option<String>,
-    pub identifier: Option<String>,
-    pub state: Option<String>,
+    // pub identifier: Option<String>,
+    // pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Issue {
+pub struct Task {
     pub id: String,
     // pub identifier: String,
     pub title: String,
