@@ -5,5 +5,25 @@ edition = "2024"
 
 [dependencies]
 cersei = { git = "https://github.com/pacifio/cersei" }
+# async, IO, web
 tokio = { version = "1", features = ["full"] }
+tokio-util = { workspace = true }
+# Terminal / TUI
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+termimad = "0.30"
+# Serde, formats, codecs
+serde = { workspace = true }
+serde_json = { workspace = true }
+pulldown-cmark = "0.12"
+syntect = { version = "5", features = ["default-syntaxes", "default-themes"] }
+# Errors, logs
 anyhow = "1"
+fastrace = "0.7.17"
+
+# System
+dirs = { version = "6.0.0" }
+# which = "8.0.2"
+ctrlc = "3"
+parking_lot = "0.12"
