@@ -6,7 +6,7 @@ use turso_mappers::{QueryAsByName, TryFromRowByName};
 
 use crate::{
     types::Task,
-    utils::{ms_to_systime, systime_to_ms},
+    // utils::{ms_to_systime, systime_to_ms},
 };
 
 pub struct TursoStorage {
@@ -192,7 +192,6 @@ impl TursoStorage {
         // let created_at = task.created_at.map(systime_to_ms);
         // let updated_at = task.updated_at.map(systime_to_ms);
 
-        dbg!(&task.importance_factor, &task.urgency_factor);
         self.conn.execute(
               "INSERT OR REPLACE INTO tasks (id, title, description, branch_name, labels, blocked_by, importance_factor, urgency_factor)
                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -246,11 +245,9 @@ impl TursoStorage {
             .query_as_by_name::<TaskDb>(sql, ())
             .await
             .context(MapRowErr)?;
-        // dbg!(&rows);
 
         let mut tasks = Vec::new();
         for row in rows {
-            dbg!(&row.id, row.importance_factor);
             tasks.push(Task {
                 id: row.id,
                 title: row.title,

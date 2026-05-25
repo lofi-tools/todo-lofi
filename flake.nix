@@ -32,6 +32,12 @@
           scripts = mapAttrs (n: s: pkgs.writeShellScriptBin n s) {
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
             dt = ''set -e;  cd desktop; cargo tauri dev '';
+            ccheck = ''set -ex;
+              cargo check -p desktop-gpui
+              cargo check -p storage
+              cargo check -p report_proc
+              cargo check -p agent-cli
+            '';
           };
 
           env = {
@@ -56,14 +62,10 @@
           # packages = scripts;
           # rust.buildInputs = buildDeps;
           # rust.buildEnv = env;
-          # rust.toolchain = pkgs.rust-bin.stable.latest.default.override {
+          # rust.toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
           #   extensions = [ "rust-src" "rust-analyzer" ];
           #   targets = [ ];
-          # };
-          rust.toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
-            extensions = [ "rust-src" "rust-analyzer" ];
-            targets = [ ];
-          });
+          # });
           myDevShell.env = env;
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
