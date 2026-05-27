@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cersei = { git = "https://github.com/pacifio/cersei" }
+cersei = { workspace = true }
 # async, IO, web
 tokio = { version = "1", features = ["full"] }
 tokio-util = { workspace = true }
@@ -23,7 +23,7 @@ anyhow = "1"
 fastrace = "0.7.17"
 
 # System
-dirs = { version = "6.0.0" }
+dirs = { workspace = true }
 # which = "8.0.2"
 ctrlc = "3"
 parking_lot = "0.12"

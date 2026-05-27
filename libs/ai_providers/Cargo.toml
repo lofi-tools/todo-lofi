@@ -1,0 +1,22 @@
+[package]
+name = "ai_providers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+# reqwest = { workspace = true, features = ["stream"] }
+reqwest = { version = "0.12", features = [
+  "json",
+  "stream",
+  "rustls-tls",
+  "rustls-tls-webpki-roots",
+], default-features = false }
+anyhow.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+dirs.workspace = true
+cersei.workspace = true
+futures = "0.3.32"

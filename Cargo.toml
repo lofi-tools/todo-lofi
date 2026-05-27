@@ -33,7 +33,9 @@ serde_json = "1.0"
 uuid = { version = "1", features = ["v4"] }
 regex = "1.12.3"
 url = "2.5.8"
-chrono = { version = "0.4" }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = { version = "6.0.0" }
+cersei = { git = "https://github.com/pacifio/cersei" }
 
 
 # # HTTP
