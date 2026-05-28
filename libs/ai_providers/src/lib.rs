@@ -4,9 +4,12 @@ use cersei::{
     types::{CerseiError, ContentBlock, MessageContent, Role, StopReason, StreamEvent, Usage},
 };
 use futures::StreamExt;
+use std::process::{Command, Output};
 use tokio::sync::mpsc;
 
 pub mod nous_portal;
+pub mod oauth;
+pub mod poolside;
 
 pub struct OpenAiCompatible {
     name: String,
@@ -530,4 +533,67 @@ impl Provider for OpenAiCompatible {
 //     }
 // }
 
-pub mod oauth;
+pub struct RealRunner {}
+impl RealRunner {
+    // fn create_dir(&mut self, path: &Path) -> anyhow::Result<()> {
+    //     fs::create_dir_all(path)?;
+    //     Ok(())
+    // }
+    // fn set_current_dir(&mut self, target_dir: &Path) -> anyhow::Result<()> {
+    //     if std::env::current_dir()? != target_dir {
+    //         std::env::set_current_dir(target_dir)?;
+    //     }
+    //     Ok(())
+    // }
+    fn exec_cmd<I, S>(&mut self, args: I) -> Result<Output, CmdErr>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr> + ToString,
+    {
+        let mut args_iter = args.into_iter();
+        let binary = match args_iter.next() {
+            Some(bin) => bin,
+            None => return Err(CmdErr::NoArgs),
+        };
+
+        // Collect arguments for logging
+        let args_vec: Vec<String> = args_iter.map(|s| s.to_string()).collect();
+        let full_command = std::iter::once(binary.to_string())
+            .chain(args_vec.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("RUNNING: {}", full_command);
+
+        let output = Command::new(&binary)
+            .args(&args_vec)
+            .output()
+            .map_err(CmdErr::IoErr)?;
+        if !output.status.success() {
+            return Err(CmdErr::ExitWithErrStatus(output))?;
+        }
+        Ok(output)
+    }
+
+    // fn exec_real_cmd_no_side_effects<I, S>(&mut self, args: I) -> Result<Output, CmdErr>
+    // where
+    //     I: IntoIterator<Item = S>,
+    //     S: AsRef<std::ffi::OsStr> + ToString,
+    // {
+    //     self.exec_cmd(args)
+    // }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CmdErr {
+    #[error("Io Error: {0}")]
+    IoErr(std::io::Error),
+    #[error("Command exited with err status: {0:?}")]
+    ExitWithErrStatus(Output),
+    #[error("Found no arguments")]
+    NoArgs,
+}
+impl From<CmdErr> for String {
+    fn from(cmd_err: CmdErr) -> Self {
+        cmd_err.to_string()
+    }
+}

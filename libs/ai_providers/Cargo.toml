@@ -20,3 +20,4 @@ async-trait.workspace = true
 dirs.workspace = true
 cersei.workspace = true
 futures = "0.3.32"
+thiserror.workspace = true

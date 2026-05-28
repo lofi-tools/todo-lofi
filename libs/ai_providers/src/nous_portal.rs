@@ -138,11 +138,11 @@ pub mod nous_auth_file {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use cersei::{prelude::Provider, types::Message};
 
-    use super::*;
-
     #[tokio::test]
+    #[ignore = "needs network + depends on live server"]
     async fn test_provider() -> anyhow::Result<()> {
         let provider = provider()?;
         assert_eq!(provider.name, "nous-portal");
