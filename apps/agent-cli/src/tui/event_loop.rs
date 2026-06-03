@@ -102,12 +102,10 @@ pub async fn run(
                         Event::Mouse(_) => {
                             // Mouse capture disabled to allow native text selection
                         }
-                        Event::Paste(text) => {
-                            if !state.is_streaming {
-                                state.input.insert_str(state.cursor_pos, &text);
-                                state.cursor_pos += text.len();
-                                state.dirty = true;
-                            }
+                        Event::Paste(text) if !state.is_streaming => {
+                            state.input.insert_str(state.cursor_pos, &text);
+                            state.cursor_pos += text.len();
+                            state.dirty = true;
                         }
                         Event::Resize(_, _) => {
                             // Re-push keyboard enhancement after resize

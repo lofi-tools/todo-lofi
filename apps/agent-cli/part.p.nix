@@ -15,7 +15,7 @@
 
     # wd = "$(git rev-parse --show-toplevel)";
     scripts = mapAttrs pkgs.writeShellScriptBin {
-      ag = "cargo run -p agent-cli";
+      ag = ''cargo run -p agent-cli -- "$@" '';
     };
 
     env = {

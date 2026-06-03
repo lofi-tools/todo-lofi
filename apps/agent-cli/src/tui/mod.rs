@@ -30,7 +30,7 @@ pub type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
 
 /// Main entry point for the TUI. Sets up terminal, runs the event loop, cleans up.
 pub async fn run_repl(
-    agent: Agent,
+    agent: Arc<Agent>,
     config: &AppConfig,
     // memory_manager: &MemoryManager,
     // session_id: &str,
@@ -41,7 +41,7 @@ pub async fn run_repl(
     install_panic_hook();
 
     let mut terminal = setup_terminal()?;
-    let agent = Arc::new(agent);
+    // let agent = Arc::new(agent);
     let result = event_loop::run(
         &mut terminal,
         agent,

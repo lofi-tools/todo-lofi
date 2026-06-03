@@ -2,19 +2,27 @@ use crate::{OpenAiCompatible, RealRunner};
 use cersei::prelude::Auth;
 
 pub fn provider() -> anyhow::Result<OpenAiCompatible> {
-    let mut runner = RealRunner {};
-    let key_file_path =
-        String::from_utf8_lossy(runner.exec_cmd(["pool-key-file"])?.stdout.as_slice()).to_string();
+    // let mut runner = RealRunner {};
+    // let key_file_path =
+    //     String::from_utf8_lossy(runner.exec_cmd(["pool-key-file"])?.stdout.as_slice()).to_string();
 
-    let key = std::fs::read_to_string(&key_file_path)?.trim().to_string();
+    // let key = std::fs::read_to_string(&key_file_path)?.trim().to_string();
 
     Ok(OpenAiCompatible {
         name: "poolside".to_string(),
-        auth: Auth::ApiKey(key),
+        auth: Auth::ApiKey(load_key()?),
         base_url: "https://inference.poolside.ai/v1".to_string(),
         default_model: "poolside/laguna-xs.2".to_string(),
         client: reqwest::Client::new(),
     })
+}
+
+pub fn load_key() -> anyhow::Result<String> {
+    let mut runner = RealRunner {};
+    let key_file_path =
+        String::from_utf8_lossy(runner.exec_cmd(["pool-key-file"])?.stdout.as_slice()).to_string();
+    let key = std::fs::read_to_string(&key_file_path)?.trim().to_string();
+    Ok(key)
 }
 
 #[cfg(test)]

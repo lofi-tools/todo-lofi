@@ -1,103 +1,22 @@
-use anyhow::bail;
-use cersei::events::AgentEvent;
+use ai_providers::poolside;
+// use cersei::events::AgentEvent;
+use crate::cli_commands::Cli;
+use crate::config::AppConfig;
 use cersei::tools::permissions::AllowAll;
 use cersei::{Agent, OpenAi};
 use clap::Parser;
-use fastrace::collector::Config;
-use fastrace::collector::ConsoleReporter;
-use fastrace::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
-
-use crate::cli_commands::Cli;
-use crate::config::AppConfig;
-use crate::tui::run_repl;
 
 pub mod cli_commands;
 pub mod config;
+pub mod signals;
 pub mod tui;
-pub mod signals {
-    //! Signal handling: Ctrl+C (single = cancel, double = exit), SIGTERM.
-
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Instant;
-    use tokio_util::sync::CancellationToken;
-
-    static LAST_CTRLC: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
-
-    /// Install signal handlers. Returns a CancellationToken that gets cancelled on Ctrl+C.
-    pub fn install(
-        cancel_token: CancellationToken,
-        running: Arc<AtomicBool>,
-    ) -> anyhow::Result<()> {
-        let ct = cancel_token.clone();
-        let r = running.clone();
-
-        ctrlc_handler(move || {
-            let mut last = LAST_CTRLC.lock();
-            let now = Instant::now();
-
-            // Double Ctrl+C within 500ms = hard exit
-            if let Some(prev) = *last {
-                if now.duration_since(prev).as_millis() < 500 {
-                    eprintln!("\nForce exit.");
-                    std::process::exit(130);
-                }
-            }
-            *last = Some(now);
-
-            if r.load(Ordering::Relaxed) {
-                // Agent is running — cancel it
-                ct.cancel();
-                eprintln!("\n  Cancelling... (press Ctrl+C again to force exit)");
-            } else {
-                // Not running — exit
-                eprintln!("\nGoodbye.");
-                std::process::exit(0);
-            }
-        });
-
-        Ok(())
-    }
-
-    fn ctrlc_handler(f: impl Fn() + Send + 'static) {
-        let _ = ctrlc::set_handler(f);
-    }
-
-    /// Reset the cancel token for a new agent run.
-    #[allow(dead_code)]
-    pub fn fresh_cancel_token() -> CancellationToken {
-        CancellationToken::new()
-    }
-}
-
-// struct State {
-//     start_time: Instant,
-//     text_bytes: usize,
-//     tool_count: u32,
-// }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // fastrace::set_reporter(ConsoleReporter, Config::default());
-
-    let provider = OpenAi::builder()
-        .base_url("http://127.0.0.1:1234/v1")
-        .api_key("")
-        .model("qwen3.6-27b-mtplx-optimized-speed")
-        .build()?;
-    let agent = Agent::builder()
-        .provider(provider)
-        .tools(cersei::tools::coding())
-        .system_prompt("Coding assistant, be concise.")
-        .max_turns(5)
-        .permission_policy(AllowAll)
-        .working_dir(".")
-        .build()?;
-
     let cli = Cli::parse();
 
     // // Initialize tracing
@@ -118,31 +37,174 @@ async fn main() -> anyhow::Result<()> {
     // Load config with CLI overrides
     let mut config = config::load();
     config::apply_cli_overrides(&cli, &mut config);
+    let agent = Arc::new(build_agent_wip().await?);
 
-    // let agent = std::sync::Arc::new(agent);
-    // let mut stream = agent.run_stream("What files are in the current directory? List them.");
-    // let mut state = State {
-    //     start_time: Instant::now(),
-    //     text_bytes: 0usize,
-    //     tool_count: 0u32,
-    // };
-    // while let Some(event) = stream.next().await {
-    //     let root = Span::root("worker-loop", SpanContext::random());
-    //     let _guard = root.set_local_parent();
+    let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
+    if let Some(prompt_text) = prompt {
+        let prompt_text = prompt_text.to_string();
+        let stream = agent.run_stream(&prompt_text);
+        dbg!(&stream.collect_text().await.unwrap());
+    } else {
+        run_tui_app(cli, config, agent).await?;
+    }
 
-    //     handle_agent_event(&event, &mut state)?;
-    //     if matches!(&event, AgentEvent::Error(_) | AgentEvent::Complete(_)) {
-    //         break;
-    //     }
-    // }
     // fastrace::flush();
-
-    // run_repl(agent, &config, cancel_token).await?;
-    run_tui_app(cli, config).await?;
-
     Ok(())
 }
 
+async fn build_agent_wip() -> anyhow::Result<Agent> {
+    let api_key = poolside::load_key()?;
+    // let client = reqwest::Client::new();
+    // let models: serde_json::Value = client
+    //     .get("https://inference.poolside.ai/v1/models")
+    //     .bearer_auth(&api_key)
+    //     .send()
+    //     .await?
+    //     .json()
+    //     .await?;
+    // println!("Available models: {:#?}", models);
+
+    // let provider = OpenAi::builder()
+    //     .base_url("http://127.0.0.1:1234/v1")
+    //     .api_key("")
+    //     .model("qwen3.6-27b-mtplx-optimized-speed")
+    //     .build()?;
+    // let provider = ai_providers::poolside::provider()?;
+    let model = "poolside/laguna-xs.2";
+    let provider = OpenAi::builder()
+        .base_url("https://inference.poolside.ai/v1")
+        .api_key(api_key)
+        .model(model)
+        .build()?;
+    let agent = Agent::builder()
+        .provider(provider)
+        .model(model)
+        // .tools(cersei::tools::coding())
+        // .system_prompt("Coding assistant, be concise.")
+        .max_turns(5)
+        .permission_policy(AllowAll)
+        .working_dir(".")
+        .build()?;
+    Ok(agent)
+}
+
+pub async fn run_tui_app(cli: Cli, mut config: AppConfig, agent: Arc<Agent>) -> anyhow::Result<()> {
+    // let theme = Theme::from_name(&config.theme);
+
+    // Resolve or create session ID
+    // let session_id = if let Some(ref resume) = cli.resume {
+    //     if resume == "last" {
+    //         sessions::last_session_id(&config)
+    //             .ok_or_else(|| anyhow::anyhow!("No previous session found"))?
+    //     } else {
+    //         resume.clone()
+    //     }
+    // } else {
+    //     uuid::Uuid::new_v4().to_string()
+    // };
+
+    // Build memory manager with graph memory
+    // let memory_manager = build_memory_manager(&config)?;
+
+    let cancel_token = CancellationToken::new();
+    let running = Arc::new(AtomicBool::new(false));
+
+    // Install signal handlers
+    crate::signals::install(cancel_token.clone(), running.clone())?;
+
+    // Build the initial agent with shared permission mode and TUI permission channel
+    // let shared_mode = crate::permissions::new_shared_mode();
+    // let (perm_tx, perm_rx) = crate::permissions::permission_channel();
+    // let (agent, resolved_model) = build_agent(
+    //     &config.model,
+    //     &config,
+    //     &memory_manager,
+    //     &session_id,
+    //     cancel_token.clone(),
+    //     None,
+    //     Some(shared_mode.clone()),
+    //     Some(perm_tx),
+    // )?;
+    // config.model = resolved_model;
+
+    // Show startup banner
+    // let effort = EffortLevel::from_str(&config.effort);
+    // JSON mode: --json flag OR --output-format stream-json
+    // let json_mode = cli.json || config.output_format == "stream-json";
+    // if !json_mode {
+    //     print_banner(&config, &session_id, &effort);
+    // }
+
+    // Dispatch to REPL or single-shot
+    // "." means "start interactive in current directory"
+    // let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
+    // if let Some(prompt_text) = prompt {
+    //     let prompt_text = prompt_text.to_string();
+    //     repl::run_single_shot(
+    //         agent,
+    //         &prompt_text,
+    //         &theme,
+    //         &session_id,
+    //         &config,
+    //         &memory_manager,
+    //         json_mode,
+    //         running,
+    //         cancel_token,
+    //     )
+    //     .await
+    // } else if json_mode {
+    //     // JSON mode uses the old REPL (no TUI)
+    //     repl::run_repl(
+    //         agent,
+    //         &theme,
+    //         &session_id,
+    //         &config,
+    //         &memory_manager,
+    //         json_mode,
+    //         running,
+    //         cancel_token.clone(),
+    //     )
+    //     .await
+    // } else {
+    // TUI mode (default interactive)
+    tui::run_repl(
+        agent,
+        &config,
+        // &memory_manager,
+        // &session_id,
+        cancel_token,
+        // shared_mode,
+        // perm_rx,
+    )
+    .await
+    // }
+}
+
+// async fn alt_main_oneshot() -> anyhow::Result<()> {
+//     struct State {
+//         start_time: Instant,
+//         text_bytes: usize,
+//         tool_count: u32,
+//     }
+
+//     let agent = std::sync::Arc::new(build_agent_wip()?);
+//     let mut stream = agent.run_stream("What files are in the current directory? List them.");
+//     let mut state = State {
+//         start_time: Instant::now(),
+//         text_bytes: 0usize,
+//         tool_count: 0u32,
+//     };
+//     while let Some(event) = stream.next().await {
+//         let root = Span::root("worker-loop", SpanContext::random());
+//         let _guard = root.set_local_parent();
+
+//         handle_agent_event(&event, &mut state)?;
+//         if matches!(&event, AgentEvent::Error(_) | AgentEvent::Complete(_)) {
+//             break;
+//         }
+//     }
+//     Ok(())
+// }
 // #[fastrace::trace]
 // fn handle_agent_event(event: &AgentEvent, state: &mut State) -> anyhow::Result<()> {
 //     match event {
@@ -215,113 +277,3 @@ async fn main() -> anyhow::Result<()> {
 //     }
 //     Ok(())
 // }
-
-pub async fn run_tui_app(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
-    // let theme = Theme::from_name(&config.theme);
-
-    // Resolve or create session ID
-    // let session_id = if let Some(ref resume) = cli.resume {
-    //     if resume == "last" {
-    //         sessions::last_session_id(&config)
-    //             .ok_or_else(|| anyhow::anyhow!("No previous session found"))?
-    //     } else {
-    //         resume.clone()
-    //     }
-    // } else {
-    //     uuid::Uuid::new_v4().to_string()
-    // };
-
-    // Build memory manager with graph memory
-    // let memory_manager = build_memory_manager(&config)?;
-
-    let cancel_token = CancellationToken::new();
-    let running = Arc::new(AtomicBool::new(false));
-
-    // Install signal handlers
-    crate::signals::install(cancel_token.clone(), running.clone())?;
-
-    // Build the initial agent with shared permission mode and TUI permission channel
-    // let shared_mode = crate::permissions::new_shared_mode();
-    // let (perm_tx, perm_rx) = crate::permissions::permission_channel();
-    // let (agent, resolved_model) = build_agent(
-    //     &config.model,
-    //     &config,
-    //     &memory_manager,
-    //     &session_id,
-    //     cancel_token.clone(),
-    //     None,
-    //     Some(shared_mode.clone()),
-    //     Some(perm_tx),
-    // )?;
-    // config.model = resolved_model;
-    let agent = build_agent_wip()?;
-
-    // Show startup banner
-    // let effort = EffortLevel::from_str(&config.effort);
-    // JSON mode: --json flag OR --output-format stream-json
-    // let json_mode = cli.json || config.output_format == "stream-json";
-    // if !json_mode {
-    //     print_banner(&config, &session_id, &effort);
-    // }
-
-    // Dispatch to REPL or single-shot
-    // "." means "start interactive in current directory"
-    // let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
-    // if let Some(prompt_text) = prompt {
-    //     let prompt_text = prompt_text.to_string();
-    //     repl::run_single_shot(
-    //         agent,
-    //         &prompt_text,
-    //         &theme,
-    //         &session_id,
-    //         &config,
-    //         &memory_manager,
-    //         json_mode,
-    //         running,
-    //         cancel_token,
-    //     )
-    //     .await
-    // } else if json_mode {
-    //     // JSON mode uses the old REPL (no TUI)
-    //     repl::run_repl(
-    //         agent,
-    //         &theme,
-    //         &session_id,
-    //         &config,
-    //         &memory_manager,
-    //         json_mode,
-    //         running,
-    //         cancel_token.clone(),
-    //     )
-    //     .await
-    // } else {
-    // TUI mode (default interactive)
-    tui::run_repl(
-        agent,
-        &config,
-        // &memory_manager,
-        // &session_id,
-        cancel_token,
-        // shared_mode,
-        // perm_rx,
-    )
-    .await
-    // }
-}
-
-fn build_agent_wip() -> anyhow::Result<Agent> {
-    let provider = OpenAi::builder()
-        .base_url("http://127.0.0.1:1234/v1")
-        .api_key("")
-        .model("qwen3.6-27b-mtplx-optimized-speed")
-        .build()?;
-    let agent = Agent::builder()
-        .provider(provider)
-        .tools(cersei::tools::coding())
-        .system_prompt("Coding assistant, be concise.")
-        .max_turns(5)
-        .permission_policy(AllowAll)
-        .working_dir(".")
-        .build()?;
-    Ok(agent)
-}

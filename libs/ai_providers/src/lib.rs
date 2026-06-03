@@ -11,6 +11,7 @@ pub mod nous_portal;
 pub mod oauth;
 pub mod poolside;
 
+#[derive(Debug)]
 pub struct OpenAiCompatible {
     name: String,
     auth: Auth,
