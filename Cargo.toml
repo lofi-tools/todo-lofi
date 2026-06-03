@@ -123,3 +123,6 @@ pathfinder_simd = { git = "https://github.com/servo/pathfinder", rev = "ae70f36"
 # tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "ff4dbc058918336ad4dda3aa930b5d832ff9758d" }
 # dispatch2 = { git = "https://github.com/madsmtm/objc2", tag = "dispatch2-0.3.1" }
 ctrlc = { path = "./patched/ctrlc" }
+# (https://github.com/pacifio/cersei?rev=59883b1d429fa1ac024a7b089b5917185cdd2039#59883b1d)
+[patch."https://github.com/pacifio/cersei"]
+cersei-tools = { path = "./patched/cersei-tools" }
