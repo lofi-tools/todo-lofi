@@ -28,7 +28,7 @@
 
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
 
-          # wd = "$(git rev-parse --show-toplevel)";
+          bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs (n: s: pkgs.writeShellScriptBin n s) {
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
             dt = ''set -e;  cd desktop; cargo tauri dev '';
@@ -37,6 +37,20 @@
               cargo check -p storage
               cargo check -p report_proc
               cargo check -p agent-cli
+            '';
+            dep-url = ''cargo metadata --format-version 1 2>/dev/null | \
+                jq -r --arg dep "$1" \
+                '.packages[] | select(.name == $dep) | .repository // empty' '';
+            dep-url2 = ''curl -H "User-Agent: cargo-patch/0.1.0"  "https://crates.io/api/v1/crates/$1" | jq -r '.crate.repository' '';
+            clone-patch = with bash; '' set -ex;
+              DEP_NAME="$1"
+              [ -d "${wd}/patched/$DEP_NAME" ] && echo "Error: ./patched/$DEP_NAME exists" && exit 1
+              GIT_URL=$(cargo metadata --format-version 1 2>/dev/null | jq -r --arg d "$DEP_NAME" '.packages[] | select(.name == $d) | .repository // empty')
+              echo "GIT_URL: $GIT_URL";
+              [ -z "$GIT_URL" ] && GIT_URL=$(curl -s -H "User-Agent: cargo-patch/0.1.0"  "https://crates.io/api/v1/crates/$DEP_NAME" | jq -r '.crate.repository')
+              [ -z "$GIT_URL" ] && printf "Error: no repository found for $DEP_NAME\n" && exit 1
+              printf "%s\n" "Cloning $GIT_URL into ${wd}/patched/$DEP_NAME"
+              git clone "$GIT_URL" "${wd}/patched/$DEP_NAME"
             '';
           };
 

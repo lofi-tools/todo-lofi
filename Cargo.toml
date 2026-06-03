@@ -35,7 +35,7 @@ regex = "1.12.3"
 url = "2.5.8"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = { version = "6.0.0" }
-cersei = { git = "https://github.com/pacifio/cersei" }
+cersei = { git = "https://github.com/pacifio/cersei", rev = "59883b1d429fa1ac024a7b089b5917185cdd2039" }
 
 
 # # HTTP
@@ -114,3 +114,12 @@ cersei = { git = "https://github.com/pacifio/cersei" }
 # strip = true
 # lto = "thin"
 # opt-level = "z"
+
+
+# [patch.crates-io]
+# tree-sitter = { version = "0.26.9" }
+[patch.crates-io]
+pathfinder_simd = { git = "https://github.com/servo/pathfinder", rev = "ae70f36" }
+# tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "ff4dbc058918336ad4dda3aa930b5d832ff9758d" }
+# dispatch2 = { git = "https://github.com/madsmtm/objc2", tag = "dispatch2-0.3.1" }
+ctrlc = { path = "./patched/ctrlc" }

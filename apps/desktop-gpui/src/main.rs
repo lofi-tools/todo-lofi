@@ -1,6 +1,6 @@
 use gpui::{
-    App, Application, Bounds, Context, CursorStyle, Decorations, HitboxBehavior, Hsla, MouseButton,
-    Pixels, Point, ResizeEdge, Size, Window, WindowBackgroundAppearance, WindowBounds,
+    App, Application, Bounds, BoxShadow, Context, CursorStyle, Decorations, HitboxBehavior, Hsla,
+    MouseButton, Pixels, Point, ResizeEdge, Size, Window, WindowBackgroundAppearance, WindowBounds,
     WindowDecorations, WindowOptions, black, canvas, div, green, point, prelude::*, px, rgb, size,
     transparent_black, white,
 };
@@ -104,7 +104,7 @@ impl Render for WindowShadow {
                             .when(!tiling.left, |div| div.border_l(border_size))
                             .when(!tiling.right, |div| div.border_r(border_size))
                             .when(!tiling.is_tiled(), |div| {
-                                div.shadow(vec![gpui::BoxShadow {
+                                div.shadow(vec![BoxShadow {
                                     color: Hsla {
                                         h: 0.,
                                         s: 0.,
@@ -114,6 +114,7 @@ impl Render for WindowShadow {
                                     blur_radius: shadow_size / 2.,
                                     spread_radius: px(0.),
                                     offset: point(px(0.0), px(0.0)),
+                                    inset: false,
                                 }])
                             }),
                     })
@@ -154,6 +155,7 @@ impl Render for WindowShadow {
                                             blur_radius: px(20.0),
                                             spread_radius: px(0.0),
                                             offset: point(px(0.0), px(0.0)),
+                                            inset: false,
                                         }])
                                         .map(|div| match decorations {
                                             Decorations::Server => div,
@@ -203,7 +205,11 @@ fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> O
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    let app = gpui_platform::application();
+    app.run(move |cx: &mut App| {
+        // This must be called before using any GPUI Component features.
+        gpui_component::init(cx);
+
         let bounds = Bounds::centered(None, size(px(600.0), px(600.0)), cx);
         cx.open_window(
             WindowOptions {
