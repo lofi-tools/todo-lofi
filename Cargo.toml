@@ -125,4 +125,5 @@ pathfinder_simd = { git = "https://github.com/servo/pathfinder", rev = "ae70f36"
 ctrlc = { path = "./patched/ctrlc" }
 # (https://github.com/pacifio/cersei?rev=59883b1d429fa1ac024a7b089b5917185cdd2039#59883b1d)
 [patch."https://github.com/pacifio/cersei"]
-cersei-tools = { path = "./patched/cersei-tools" }
+# cersei-tools = { path = "./patched/cersei-tools" }
+cersei = { git = "https://github.com/nmrshll-contrib/cersei.git", branch = "nmrshll/cersei-tools-update-treesitter" }
