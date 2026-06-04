@@ -20,15 +20,17 @@
       /*  pkgs.libsoup_3 */
     ];
     runtimeDeps = [ ];
-    devDeps = [ ];
+    devDeps = [
+      pkgs.cargo-watch
+    ];
 
     # wd = "$(git rev-parse --show-toplevel)";
     scripts = mapAttrs pkgs.writeShellScriptBin {
-      pdg = "cargo run -p desktop-gpui";
       dbg-env = '' ${concatStringsSep "\n" (attrValues (mapAttrs (n: v: "printf \"${n}=${v}\\n\"") env))} '';
       dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.my-nix.install-xcode-global.DEV_DIR}" xcodebuild -version '';
       # xcrun = ''${env.DEVELOPER_DIR}/Contents/Developer/usr/bin/xcrun'';
       # metal = ''${env.DEVELOPER_DIR}/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal $@'';
+      pdg = "cargo watch -x 'run -p desktop-gpui'";
     };
 
     env = {
