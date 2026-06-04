@@ -1,6 +1,12 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{button::*, checkbox::*, input::*, scroll::*, *};
+use gpui_component::{button::*, input::*, scroll::ScrollableElement, *};
+
+pub mod ui_traits;
+pub mod components {
+    pub mod checkbox;
+    pub mod tooltip;
+}
 
 struct Task {
     id: String,
@@ -25,11 +31,16 @@ impl TodoApp {
         });
 
         // Subscribe to input events
-        cx.subscribe(&input_state, move |this, _, event, cx| match event {
-            gpui_component::input::InputEvent::PressEnter { .. } => {
+        cx.subscribe(&input_state, move |this, _, event, cx| {
+            if let gpui_component::input::InputEvent::PressEnter { .. } = event {
                 this.save_task(cx);
             }
-            _ => {}
+            //   match event {
+            //     gpui_component::input::InputEvent::PressEnter { .. } => {
+            //         this.save_task(cx);
+            //     }
+            //     _ => {}
+            // }
         })
         .detach();
 
@@ -115,7 +126,7 @@ impl Render for TodoApp {
             .flex()
             .flex_row()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(rgba(0x1e1e_1eff))
             .on_action(cx.listener(
                 |this, _action: &gpui_component::input::Escape, _window, cx| {
                     this.editing_index = None;
@@ -212,13 +223,13 @@ impl Render for TodoApp {
                                     .mt_4()
                                     .children((0..=self.tasks.len()).filter_map(|i| {
                                         let task = self.tasks.get(i);
-                                        
-                                        // If we are filtering, and there is a task at this index, 
+
+                                        // If we are filtering, and there is a task at this index,
                                         // check if it matches the filter.
                                         // The insertion row before the task should also be filtered accordingly?
                                         // Actually, if we filter, we might only want to show insertion row at the bottom.
                                         // But let's try to keep the "insert before" logic if it matches.
-                                        
+
                                         let should_show = if let Some(tag) = &self.selected_tag {
                                             task.map(|t| t.tags.contains(tag)).unwrap_or(i == self.tasks.len())
                                         } else {
@@ -259,7 +270,7 @@ impl Render for TodoApp {
                                                                     .size_4()
                                                                     .label("+")
                                                                     .on_click(move |_, window, cx| {
-                                                                        _ = view_insert.update(
+                                                                        view_insert.update(
                                                                             cx,
                                                                             |this, cx| {
                                                                                 this.editing_index =
@@ -316,19 +327,19 @@ impl Render for TodoApp {
                                                         .rounded_md()
                                                         .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
                                                         .child(div().w_8())
-                                                        .child(
-                                                            Checkbox::new(format!("check-{}", task_id))
-                                                                .checked(is_completed)
-                                                                .on_click(move |_, _, cx| {
-                                                                    _ = view_toggle.update(
-                                                                        cx,
-                                                                        |this, cx| {
-                                                                            this.toggle_task(i);
-                                                                            cx.notify();
-                                                                        },
-                                                                    );
-                                                                }),
-                                                        )
+                                                        .child( crate::components::checkbox::Checkbox::new(format!("check-{}", task_id))
+                                                            .checked(is_completed)
+                                                            .with_size(Pixels::from(22.))
+                                                            .on_click(move |_, _, cx| {
+                                                              view_toggle.update(
+                                                                    cx,
+                                                                    |this, cx| {
+                                                                        this.toggle_task(i);
+                                                                        cx.notify();
+                                                                    },
+                                                                );
+                                                            })
+                                                         )
                                                         .child(
                                                             div()
                                                                 .flex_1()
@@ -376,6 +387,7 @@ fn main() {
     app.run(move |cx| {
         // This must be called before using any GPUI Component features.
         gpui_component::init(cx);
+        Theme::change(ThemeMode::Dark, None, cx);
 
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
