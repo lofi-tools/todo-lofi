@@ -1,233 +1,196 @@
-use gpui::{
-    App, Application, Bounds, BoxShadow, Context, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    MouseButton, Pixels, Point, ResizeEdge, Size, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowOptions, black, canvas, div, green, point, prelude::*, px, rgb, size,
-    transparent_black, white,
-};
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use gpui_component::{button::*, checkbox::*, *};
 
-struct WindowShadow {}
+struct Task {
+    id: String,
+    title: String,
+    completed: bool,
+}
 
-// Things to do:
-// 1. We need a way of calculating which edge or corner the mouse is on,
-//    and then dispatch on that
-// 2. We need to improve the shadow rendering significantly
-// 3. We need to implement the techniques in here in Zed
+pub struct TodoApp {
+    tasks: Vec<Task>,
+}
 
-impl Render for WindowShadow {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let decorations = window.window_decorations();
-        let rounding = px(10.0);
-        let shadow_size = px(10.0);
-        let border_size = px(1.0);
-        let grey = rgb(0x808080);
-        window.set_client_inset(shadow_size);
+impl TodoApp {
+    pub fn new() -> Self {
+        Self {
+            tasks: vec![
+                Task {
+                    id: "1".into(),
+                    title: "Learn GPUI".into(),
+                    completed: false,
+                },
+                Task {
+                    id: "2".into(),
+                    title: "Build a todo app".into(),
+                    completed: true,
+                },
+                Task {
+                    id: "3".into(),
+                    title: "Explore gpui-component".into(),
+                    completed: false,
+                },
+            ],
+        }
+    }
 
-        div()
-            .id("window-backdrop")
-            .bg(transparent_black())
-            .map(|div| match decorations {
-                Decorations::Server => div,
-                Decorations::Client { tiling, .. } => div
-                    .bg(gpui::transparent_black())
-                    .child(
-                        canvas(
-                            |_bounds, window, _cx| {
-                                window.insert_hitbox(
-                                    Bounds::new(
-                                        point(px(0.0), px(0.0)),
-                                        window.window_bounds().get_bounds().size,
-                                    ),
-                                    HitboxBehavior::Normal,
-                                )
-                            },
-                            move |_bounds, hitbox, window, _cx| {
-                                let mouse = window.mouse_position();
-                                let size = window.window_bounds().get_bounds().size;
-                                let Some(edge) = resize_edge(mouse, shadow_size, size) else {
-                                    return;
-                                };
-                                window.set_cursor_style(
-                                    match edge {
-                                        ResizeEdge::Top | ResizeEdge::Bottom => {
-                                            CursorStyle::ResizeUpDown
-                                        }
-                                        ResizeEdge::Left | ResizeEdge::Right => {
-                                            CursorStyle::ResizeLeftRight
-                                        }
-                                        ResizeEdge::TopLeft | ResizeEdge::BottomRight => {
-                                            CursorStyle::ResizeUpLeftDownRight
-                                        }
-                                        ResizeEdge::TopRight | ResizeEdge::BottomLeft => {
-                                            CursorStyle::ResizeUpRightDownLeft
-                                        }
-                                    },
-                                    &hitbox,
-                                );
-                            },
-                        )
-                        .size_full()
-                        .absolute(),
-                    )
-                    .when(!(tiling.top || tiling.right), |div| {
-                        div.rounded_tr(rounding)
-                    })
-                    .when(!(tiling.top || tiling.left), |div| div.rounded_tl(rounding))
-                    .when(!tiling.top, |div| div.pt(shadow_size))
-                    .when(!tiling.bottom, |div| div.pb(shadow_size))
-                    .when(!tiling.left, |div| div.pl(shadow_size))
-                    .when(!tiling.right, |div| div.pr(shadow_size))
-                    .on_mouse_move(|_e, window, _cx| window.refresh())
-                    .on_mouse_down(MouseButton::Left, move |e, window, _cx| {
-                        let size = window.window_bounds().get_bounds().size;
-                        let pos = e.position;
+    fn toggle_task(&mut self, index: usize) {
+        if let Some(task) = self.tasks.get_mut(index) {
+            task.completed = !task.completed;
+        }
+    }
 
-                        match resize_edge(pos, shadow_size, size) {
-                            Some(edge) => window.start_window_resize(edge),
-                            None => window.start_window_move(),
-                        };
-                    }),
-            })
-            .size_full()
-            .child(
-                div()
-                    .cursor(CursorStyle::Arrow)
-                    .map(|div| match decorations {
-                        Decorations::Server => div,
-                        Decorations::Client { tiling } => div
-                            .border_color(grey)
-                            .when(!(tiling.top || tiling.right), |div| {
-                                div.rounded_tr(rounding)
-                            })
-                            .when(!(tiling.top || tiling.left), |div| div.rounded_tl(rounding))
-                            .when(!tiling.top, |div| div.border_t(border_size))
-                            .when(!tiling.bottom, |div| div.border_b(border_size))
-                            .when(!tiling.left, |div| div.border_l(border_size))
-                            .when(!tiling.right, |div| div.border_r(border_size))
-                            .when(!tiling.is_tiled(), |div| {
-                                div.shadow(vec![BoxShadow {
-                                    color: Hsla {
-                                        h: 0.,
-                                        s: 0.,
-                                        l: 0.,
-                                        a: 0.4,
-                                    },
-                                    blur_radius: shadow_size / 2.,
-                                    spread_radius: px(0.),
-                                    offset: point(px(0.0), px(0.0)),
-                                    inset: false,
-                                }])
-                            }),
-                    })
-                    .on_mouse_move(|_e, _, cx| {
-                        cx.stop_propagation();
-                    })
-                    .bg(gpui::rgb(0xCCCCFF))
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .justify_around()
-                    .child(
-                        div().w_full().flex().flex_row().justify_around().child(
-                            div()
-                                .flex()
-                                .bg(white())
-                                .size(px(300.0))
-                                .justify_center()
-                                .items_center()
-                                .shadow_lg()
-                                .border_1()
-                                .border_color(rgb(0x0000ff))
-                                .text_xl()
-                                .text_color(rgb(0xffffff))
-                                .child(
-                                    div()
-                                        .id("hello")
-                                        .w(px(200.0))
-                                        .h(px(100.0))
-                                        .bg(green())
-                                        .shadow(vec![gpui::BoxShadow {
-                                            color: Hsla {
-                                                h: 0.,
-                                                s: 0.,
-                                                l: 0.,
-                                                a: 1.0,
-                                            },
-                                            blur_radius: px(20.0),
-                                            spread_radius: px(0.0),
-                                            offset: point(px(0.0), px(0.0)),
-                                            inset: false,
-                                        }])
-                                        .map(|div| match decorations {
-                                            Decorations::Server => div,
-                                            Decorations::Client { .. } => div
-                                                .on_mouse_down(
-                                                    MouseButton::Left,
-                                                    |_e, window, _| {
-                                                        window.start_window_move();
-                                                    },
-                                                )
-                                                .on_click(|e, window, _| {
-                                                    if e.is_right_click() {
-                                                        window.show_window_menu(e.position());
-                                                    }
-                                                })
-                                                .text_color(black())
-                                                .child("this is the custom titlebar"),
-                                        }),
-                                ),
-                        ),
-                    ),
-            )
+    fn insert_task(&mut self, index: usize) {
+        let new_task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: format!("New Task at {}", index),
+            completed: false,
+        };
+        self.tasks.insert(index, new_task);
     }
 }
 
-fn resize_edge(pos: Point<Pixels>, shadow_size: Pixels, size: Size<Pixels>) -> Option<ResizeEdge> {
-    let edge = if pos.y < shadow_size && pos.x < shadow_size {
-        ResizeEdge::TopLeft
-    } else if pos.y < shadow_size && pos.x > size.width - shadow_size {
-        ResizeEdge::TopRight
-    } else if pos.y < shadow_size {
-        ResizeEdge::Top
-    } else if pos.y > size.height - shadow_size && pos.x < shadow_size {
-        ResizeEdge::BottomLeft
-    } else if pos.y > size.height - shadow_size && pos.x > size.width - shadow_size {
-        ResizeEdge::BottomRight
-    } else if pos.y > size.height - shadow_size {
-        ResizeEdge::Bottom
-    } else if pos.x < shadow_size {
-        ResizeEdge::Left
-    } else if pos.x > size.width - shadow_size {
-        ResizeEdge::Right
-    } else {
-        return None;
-    };
-    Some(edge)
+impl Render for TodoApp {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity().clone();
+
+        div().v_flex().size_full().bg(cx.theme().background).child(
+            div()
+                .v_flex()
+                .p_8()
+                .gap_6()
+                .max_w_128()
+                .mx_auto()
+                // Header
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .child(div().text_3xl().font_bold().child("Tasks"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Plan your day, one task at a time."),
+                        ),
+                )
+                // Tasks List Container
+                .child(
+                    div()
+                        .v_flex()
+                        .relative()
+                        .children(self.tasks.iter().enumerate().map(|(i, task)| {
+                            let task_id = task.id.clone();
+                            let is_completed = task.completed;
+                            let view_toggle = view.clone();
+                            let view_insert = view.clone();
+
+                            div()
+                                .v_flex()
+                                .child(
+                                    // Insertion point above
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .h_6()
+                                        .child(
+                                            div().w_8().h_flex().justify_center().child(
+                                                Button::new(format!("insert-{}", i))
+                                                    .ghost()
+                                                    .p_0()
+                                                    .size_5()
+                                                    .label("+")
+                                                    .on_click(move |_, _, cx| {
+                                                        _ = view_insert.update(cx, |this, cx| {
+                                                            this.insert_task(i);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .h_px()
+                                                .bg(cx.theme().border.opacity(0.3)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_4()
+                                        .p_2()
+                                        .rounded_md()
+                                        .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+                                        .child(
+                                            div().w_8().h_flex().justify_center(), // Empty space for alignment with the + button above
+                                        )
+                                        .child(
+                                            Checkbox::new(format!("check-{}", task_id))
+                                                .checked(is_completed)
+                                                .on_click(move |_, _, cx| {
+                                                    _ = view_toggle.update(cx, |this, cx| {
+                                                        this.toggle_task(i);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_base()
+                                                .when(is_completed, |this| {
+                                                    this.text_color(cx.theme().muted_foreground)
+                                                })
+                                                .child(task.title.clone()),
+                                        ),
+                                )
+                        }))
+                        // Final insertion point
+                        .child(
+                            div()
+                                .h_flex()
+                                .items_center()
+                                .h_6()
+                                .child(div().w_8().h_flex().justify_center().child({
+                                    let view_insert = view.clone();
+                                    let final_index = self.tasks.len();
+                                    Button::new("insert-final")
+                                        .ghost()
+                                        .p_0()
+                                        .size_5()
+                                        .label("+")
+                                        .on_click(move |_, _, cx| {
+                                            _ = view_insert.update(cx, |this, cx| {
+                                                this.insert_task(final_index);
+                                                cx.notify();
+                                            });
+                                        })
+                                }))
+                                .child(div().flex_1().h_px().bg(cx.theme().border.opacity(0.3))),
+                        ),
+                ),
+        )
+    }
 }
 
 fn main() {
-    let app = gpui_platform::application();
-    app.run(move |cx: &mut App| {
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+
+    app.run(move |cx| {
         // This must be called before using any GPUI Component features.
         gpui_component::init(cx);
 
-        let bounds = Bounds::centered(None, size(px(600.0), px(600.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_background: WindowBackgroundAppearance::Opaque,
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    cx.observe_window_appearance(window, |_, window, _| {
-                        window.refresh();
-                    })
-                    .detach();
-                    WindowShadow {}
-                })
-            },
-        )
-        .unwrap();
+        cx.spawn(async move |cx| {
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let view = cx.new(|_| TodoApp::new());
+                // This first level on the window, should be a Root.
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+            .expect("Failed to open window");
+        })
+        .detach();
     });
 }

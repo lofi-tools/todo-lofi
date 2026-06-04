@@ -2521,10 +2521,12 @@ dependencies = [
  "anyhow",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.12",
+ "uuid",
 ]
 
 [[package]]
