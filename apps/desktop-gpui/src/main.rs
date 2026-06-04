@@ -132,35 +132,50 @@ impl Render for TodoApp {
                                     .child(
                                         // Insertion point / Input field
                                         div()
+                                            .group("plus-row")
                                             .h_flex()
                                             .items_center()
-                                            .min_h_6()
+                                            .when(is_editing, |this| this.p_2().gap_4())
+                                            .when(!is_editing, |this| this.min_h_2())
                                             .child(
-                                                div().w_8().h_flex().justify_center().child(
-                                                    Button::new(format!("insert-{}", i))
-                                                        .ghost()
-                                                        .p_0()
-                                                        .size_5()
-                                                        .label("+")
-                                                        .on_click(move |_, window, cx| {
-                                                            _ = view_insert.update(
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.editing_index = Some(i);
-                                                                    this.input_state.update(
-                                                                        cx,
-                                                                        |state, cx| {
-                                                                            state.set_value(
-                                                                                "", window, cx,
-                                                                            );
-                                                                            state.focus(window, cx);
-                                                                        },
-                                                                    );
-                                                                    cx.notify();
-                                                                },
-                                                            );
-                                                        }),
-                                                ),
+                                                div()
+                                                    .w_8()
+                                                    .h_flex()
+                                                    .justify_center()
+                                                    .when(!is_editing, |this| {
+                                                        this.opacity(0.0)
+                                                            .group_hover("plus-row", |s| {
+                                                                s.opacity(1.0)
+                                                            })
+                                                    })
+                                                    .child(
+                                                        Button::new(format!("insert-{}", i))
+                                                            .ghost()
+                                                            .p_0()
+                                                            .size_4()
+                                                            .label("+")
+                                                            .on_click(move |_, window, cx| {
+                                                                _ = view_insert.update(
+                                                                    cx,
+                                                                    |this, cx| {
+                                                                        this.editing_index =
+                                                                            Some(i);
+                                                                        this.input_state.update(
+                                                                            cx,
+                                                                            |state, cx| {
+                                                                                state.set_value(
+                                                                                    "", window, cx,
+                                                                                );
+                                                                                state.focus(
+                                                                                    window, cx,
+                                                                                );
+                                                                            },
+                                                                        );
+                                                                        cx.notify();
+                                                                    },
+                                                                );
+                                                            }),
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -172,7 +187,11 @@ impl Render for TodoApp {
                                                         )
                                                     })
                                                     .when(!is_editing, |this| {
-                                                        this.h_px()
+                                                        this.opacity(0.0)
+                                                            .group_hover("plus-row", |s| {
+                                                                s.opacity(1.0)
+                                                            })
+                                                            .h_px()
                                                             .bg(cx.theme().border.opacity(0.3))
                                                     }),
                                             ),
