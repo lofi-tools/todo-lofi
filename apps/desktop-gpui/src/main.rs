@@ -1,17 +1,19 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{button::*, checkbox::*, input::*, *};
+use gpui_component::{button::*, checkbox::*, input::*, scroll::*, *};
 
 struct Task {
     id: String,
     title: String,
     completed: bool,
+    tags: Vec<String>,
 }
 
 pub struct TodoApp {
     tasks: Vec<Task>,
     editing_index: Option<usize>,
     input_state: Entity<InputState>,
+    selected_tag: Option<String>,
 }
 
 impl TodoApp {
@@ -37,20 +39,24 @@ impl TodoApp {
                     id: "1".into(),
                     title: "Learn GPUI".into(),
                     completed: false,
+                    tags: vec!["coding".into(), "gpui".into()],
                 },
                 Task {
                     id: "2".into(),
                     title: "Build a todo app".into(),
                     completed: true,
+                    tags: vec!["coding".into(), "rust".into()],
                 },
                 Task {
                     id: "3".into(),
                     title: "Explore gpui-component".into(),
                     completed: false,
+                    tags: vec!["gpui".into()],
                 },
             ],
             editing_index: None,
             input_state,
+            selected_tag: None,
         }
     }
 
@@ -63,6 +69,13 @@ impl TodoApp {
             .trim()
             .to_string();
         if !title.is_empty() {
+            let mut tags = Vec::new();
+            for word in title.split_whitespace() {
+                if word.starts_with('#') && word.len() > 1 {
+                    tags.push(word[1..].to_string());
+                }
+            }
+
             if let Some(index) = self.editing_index {
                 self.tasks.insert(
                     index,
@@ -70,6 +83,7 @@ impl TodoApp {
                         id: uuid::Uuid::new_v4().to_string(),
                         title,
                         completed: false,
+                        tags,
                     },
                 );
                 self.editing_index = None;
@@ -88,9 +102,18 @@ impl TodoApp {
 impl Render for TodoApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().clone();
+        let selected_tag = self.selected_tag.clone();
+
+        let mut all_tags = std::collections::BTreeSet::new();
+        for task in &self.tasks {
+            for tag in &task.tags {
+                all_tags.insert(tag.clone());
+            }
+        }
 
         div()
-            .v_flex()
+            .flex()
+            .flex_row()
             .size_full()
             .bg(cx.theme().background)
             .on_action(cx.listener(
@@ -99,148 +122,249 @@ impl Render for TodoApp {
                     cx.notify();
                 },
             ))
+            // Sidebar
             .child(
                 div()
+                    .w_64()
+                    .h_full()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .p_4()
+                    .v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground)
+                            .mb_2()
+                            .child("Tags"),
+                    )
+                    .child(
+                        div()
+                            .child("All Tasks")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
+                            .when(self.selected_tag.is_none(), |this| {
+                                this.bg(cx.theme().accent)
+                            })
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                this.selected_tag = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children(all_tags.into_iter().map(|tag| {
+                        let tag_clone = tag.clone();
+                        let is_selected = Some(tag.clone()) == selected_tag;
+                        div()
+                            .child(tag)
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
+                            .when(is_selected, |this| this.bg(cx.theme().accent))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                                this.selected_tag = Some(tag_clone.clone());
+                                cx.notify();
+                            }))
+                    })),
+            )
+            // Main Content
+            .child(
+                div()
+                    .flex_1()
                     .v_flex()
                     .p_8()
                     .gap_6()
-                    .max_w_128()
-                    .mx_auto()
-                    // Header
+                    .overflow_y_scrollbar()
                     .child(
                         div()
                             .v_flex()
                             .gap_1()
-                            .child(div().text_3xl().font_bold().child("Tasks"))
+                            .max_w_128()
+                            .mx_auto()
+                            .w_full()
+                            // Header
                             .child(
                                 div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Plan your day, one task at a time."),
-                            ),
-                    )
-                    // Tasks List Container
-                    .child(
-                        div()
-                            .v_flex()
-                            .relative()
-                            .children((0..=self.tasks.len()).map(|i| {
-                                let view_insert = view.clone();
-                                let is_editing = self.editing_index == Some(i);
-
-                                v_flex()
+                                    .v_flex()
+                                    .gap_1()
                                     .child(
-                                        // Insertion point / Input field
-                                        div()
-                                            .group("plus-row")
-                                            .h_flex()
-                                            .items_center()
-                                            .when(is_editing, |this| this.p_2().gap_4())
-                                            .when(!is_editing, |this| this.min_h_2())
+                                        div().text_3xl().font_bold().child(match &self.selected_tag {
+                                            Some(tag) => format!("Tasks: {}", tag),
+                                            None => "All Tasks".to_string(),
+                                        }),
+                                    )
+                                    // .child(
+                                    //     div()
+                                    //         .text_sm()
+                                    //         .text_color(cx.theme().muted_foreground)
+                                    //         .child("Plan your day, one task at a time."),
+                                    // ),
+                            )
+                            // Tasks List Container
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .relative()
+                                    .mt_4()
+                                    .children((0..=self.tasks.len()).filter_map(|i| {
+                                        let task = self.tasks.get(i);
+                                        
+                                        // If we are filtering, and there is a task at this index, 
+                                        // check if it matches the filter.
+                                        // The insertion row before the task should also be filtered accordingly?
+                                        // Actually, if we filter, we might only want to show insertion row at the bottom.
+                                        // But let's try to keep the "insert before" logic if it matches.
+                                        
+                                        let should_show = if let Some(tag) = &self.selected_tag {
+                                            task.map(|t| t.tags.contains(tag)).unwrap_or(i == self.tasks.len())
+                                        } else {
+                                            true
+                                        };
+
+                                        if !should_show {
+                                            return None;
+                                        }
+
+                                        let view_insert = view.clone();
+                                        let is_editing = self.editing_index == Some(i);
+
+                                        Some(v_flex()
                                             .child(
+                                                // Insertion point / Input field
                                                 div()
-                                                    .w_8()
+                                                    .group("plus-row")
                                                     .h_flex()
-                                                    .justify_center()
-                                                    .when(!is_editing, |this| {
-                                                        this.opacity(0.0)
-                                                            .group_hover("plus-row", |s| {
-                                                                s.opacity(1.0)
-                                                            })
-                                                    })
+                                                    .items_center()
+                                                    .when(is_editing, |this| this.p_2().gap_4())
+                                                    .when(!is_editing, |this| this.min_h_2())
                                                     .child(
-                                                        Button::new(format!("insert-{}", i))
-                                                            .ghost()
-                                                            .p_0()
-                                                            .size_4()
-                                                            .label("+")
-                                                            .on_click(move |_, window, cx| {
-                                                                _ = view_insert.update(
-                                                                    cx,
-                                                                    |this, cx| {
-                                                                        this.editing_index =
-                                                                            Some(i);
-                                                                        this.input_state.update(
+                                                        div()
+                                                            .w_8()
+                                                            .h_flex()
+                                                            .justify_center()
+                                                            .when(!is_editing, |this| {
+                                                                this.opacity(0.0)
+                                                                    .group_hover("plus-row", |s| {
+                                                                        s.opacity(1.0)
+                                                                    })
+                                                            })
+                                                            .child(
+                                                                Button::new(format!("insert-{}", i))
+                                                                    .ghost()
+                                                                    .p_0()
+                                                                    .size_4()
+                                                                    .label("+")
+                                                                    .on_click(move |_, window, cx| {
+                                                                        _ = view_insert.update(
                                                                             cx,
-                                                                            |state, cx| {
-                                                                                state.set_value(
-                                                                                    "", window, cx,
+                                                                            |this, cx| {
+                                                                                this.editing_index =
+                                                                                    Some(i);
+                                                                                this.input_state.update(
+                                                                                    cx,
+                                                                                    |state, cx| {
+                                                                                        state.set_value(
+                                                                                            "", window, cx,
+                                                                                        );
+                                                                                        state.focus(
+                                                                                            window, cx,
+                                                                                        );
+                                                                                    },
                                                                                 );
-                                                                                state.focus(
-                                                                                    window, cx,
-                                                                                );
+                                                                                cx.notify();
                                                                             },
                                                                         );
-                                                                        cx.notify();
-                                                                    },
-                                                                );
+                                                                    }),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .when(is_editing, |this| {
+                                                                this.child(
+                                                                    Input::new(&self.input_state)
+                                                                        .cleanable(true),
+                                                                )
+                                                            })
+                                                            .when(!is_editing, |this| {
+                                                                this.opacity(0.0)
+                                                                    .group_hover("plus-row", |s| {
+                                                                        s.opacity(1.0)
+                                                                    })
+                                                                    .h_px()
+                                                                    .bg(cx.theme().border.opacity(0.3))
                                                             }),
                                                     ),
                                             )
                                             .child(
-                                                div()
-                                                    .flex_1()
-                                                    .when(is_editing, |this| {
-                                                        this.child(
-                                                            Input::new(&self.input_state)
-                                                                .cleanable(true),
-                                                        )
-                                                    })
-                                                    .when(!is_editing, |this| {
-                                                        this.opacity(0.0)
-                                                            .group_hover("plus-row", |s| {
-                                                                s.opacity(1.0)
-                                                            })
-                                                            .h_px()
-                                                            .bg(cx.theme().border.opacity(0.3))
-                                                    }),
-                                            ),
-                                    )
-                                    .child(
-                                        // The task at this index (if exists)
-                                        if let Some(task) = self.tasks.get(i) {
-                                            let task_id = task.id.clone();
-                                            let is_completed = task.completed;
-                                            let view_toggle = view.clone();
+                                                // The task at this index (if exists)
+                                                if let Some(task) = task {
+                                                    let task_id = task.id.clone();
+                                                    let is_completed = task.completed;
+                                                    let view_toggle = view.clone();
+                                                    let task_tags = task.tags.clone();
 
-                                            div()
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_4()
-                                                .p_2()
-                                                .rounded_md()
-                                                .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
-                                                .child(div().w_8())
-                                                .child(
-                                                    Checkbox::new(format!("check-{}", task_id))
-                                                        .checked(is_completed)
-                                                        .on_click(move |_, _, cx| {
-                                                            _ = view_toggle.update(
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.toggle_task(i);
-                                                                    cx.notify();
-                                                                },
-                                                            );
-                                                        }),
-                                                )
-                                                .child(
                                                     div()
-                                                        .flex_1()
-                                                        .text_base()
-                                                        .when(is_completed, |this| {
-                                                            this.text_color(
-                                                                cx.theme().muted_foreground,
-                                                            )
-                                                        })
-                                                        .child(task.title.clone()),
-                                                )
-                                                .into_any_element()
-                                        } else {
-                                            div().into_any_element()
-                                        },
-                                    )
-                            })),
+                                                        .h_flex()
+                                                        .items_center()
+                                                        .gap_4()
+                                                        .p_2()
+                                                        .rounded_md()
+                                                        .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+                                                        .child(div().w_8())
+                                                        .child(
+                                                            Checkbox::new(format!("check-{}", task_id))
+                                                                .checked(is_completed)
+                                                                .on_click(move |_, _, cx| {
+                                                                    _ = view_toggle.update(
+                                                                        cx,
+                                                                        |this, cx| {
+                                                                            this.toggle_task(i);
+                                                                            cx.notify();
+                                                                        },
+                                                                    );
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .v_flex()
+                                                                .child(
+                                                                    div()
+                                                                        .text_base()
+                                                                        .when(is_completed, |this| {
+                                                                            this.text_color(
+                                                                                cx.theme().muted_foreground,
+                                                                            )
+                                                                        })
+                                                                        .child(task.title.clone()),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .h_flex()
+                                                                        .gap_2()
+                                                                        .children(task_tags.into_iter().map(|t| {
+                                                                            div()
+                                                                                .text_xs()
+                                                                                .px_1()
+                                                                                .rounded_sm()
+                                                                                .bg(cx.theme().muted)
+                                                                                .text_color(cx.theme().muted_foreground)
+                                                                                .child(format!("#{}", t))
+                                                                        }))
+                                                                )
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    div().into_any_element()
+                                                },
+                                            ))
+                                    })),
+                            ),
                     ),
             )
     }
