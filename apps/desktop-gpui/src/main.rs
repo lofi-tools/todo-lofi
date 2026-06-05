@@ -2,7 +2,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{button::*, input::*, scroll::ScrollableElement, *};
 
-use crate::task_store::{Task, TaskStore};
+use crate::{task_store::TaskStore, ui_parts::navbar::NavBar};
 
 pub mod ui_traits;
 pub mod components {
@@ -87,11 +87,11 @@ pub mod ui_parts {
 }
 
 pub struct TodoApp {
-    // tasks: Vec<Task>,
     task_store: Entity<TaskStore>,
     editing_index: Option<usize>,
     input_state: Entity<InputState>,
-    selected_tag: Option<String>,
+    selected_tag: Entity<Option<String>>,
+    sidebar_ui: Entity<NavBar>,
 }
 
 impl TodoApp {
@@ -101,8 +101,13 @@ impl TodoApp {
             state.set_placeholder("New task title...", window, cx);
             state
         });
+        let task_store = cx.new(|_| TaskStore::new());
+        let selected_tag = cx.new(|_| None);
+        let sidebar_ui = cx.new(|_| NavBar {
+            task_store: task_store.clone(),
+            selected_tag: selected_tag.clone(),
+        });
 
-        // Subscribe to input events
         cx.subscribe(&input_state, move |this, _, event, cx| {
             if let gpui_component::input::InputEvent::PressEnter { .. } = event {
                 this.save_task(cx);
@@ -117,30 +122,11 @@ impl TodoApp {
         .detach();
 
         Self {
-            // tasks: vec![
-            //     Task {
-            //         id: "1".into(),
-            //         title: "Learn GPUI".into(),
-            //         completed: false,
-            //         tags: vec!["coding".into(), "gpui".into()],
-            //     },
-            //     Task {
-            //         id: "2".into(),
-            //         title: "Build a todo app".into(),
-            //         completed: true,
-            //         tags: vec!["coding".into(), "rust".into()],
-            //     },
-            //     Task {
-            //         id: "3".into(),
-            //         title: "Explore gpui-component".into(),
-            //         completed: false,
-            //         tags: vec!["gpui".into()],
-            //     },
-            // ],
-            task_store: cx.new(|_| TaskStore::new()),
+            task_store,
             editing_index: None,
             input_state,
-            selected_tag: None,
+            selected_tag,
+            sidebar_ui,
         }
     }
 
@@ -162,15 +148,6 @@ impl TodoApp {
             }
 
             if let Some(index) = self.editing_index {
-                // self.tasks.insert(
-                //     index,
-                //     Task {
-                //         id: uuid::Uuid::new_v4().to_string(),
-                //         title,
-                //         completed: false,
-                //         tags,
-                //     },
-                // );
                 task_store.insert_task(index, &title);
                 self.editing_index = None;
                 cx.notify();
@@ -188,8 +165,8 @@ impl TodoApp {
 impl Render for TodoApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().clone();
-        let selected_tag = self.selected_tag.clone();
-        // let selected_tag = self.selected_tag.read(cx);
+        // let selected_tag = self.selected_tag.clone();
+        let selected_tag = self.selected_tag.read(cx);
         let task_store = self.task_store.read(cx);
         let all_tasks = task_store.tasks().unwrap();
 
@@ -201,7 +178,7 @@ impl Render for TodoApp {
         }
 
         let filtered_tasks = match selected_tag {
-            Some(ref tag) => all_tasks
+            Some(tag) => all_tasks
                 .iter()
                 .filter(|t| t.tags.contains(tag))
                 .cloned()
@@ -221,54 +198,7 @@ impl Render for TodoApp {
                 },
             ))
             // Sidebar
-            .child(
-                div()
-                    .w_64()
-                    .h_full()
-                    .border_r_1()
-                    .border_color(cx.theme().border)
-                    .p_4()
-                    .v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .mb_2()
-                            .child("Tags"),
-                    )
-                    .child(
-                        div()
-                            .child("All Tasks")
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
-                            .when(self.selected_tag.is_none(), |this| {
-                                this.bg(cx.theme().accent)
-                            })
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                this.selected_tag = None;
-                                cx.notify();
-                            })),
-                    )
-                    .children(all_tags.into_iter().map(|tag| {
-                        let tag_clone = tag.clone();
-                        let is_selected = Some(tag.clone()) == selected_tag;
-                        div()
-                            .child(tag)
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .hover(|s| s.bg(cx.theme().accent.opacity(0.5)))
-                            .when(is_selected, |this| this.bg(cx.theme().accent))
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                                this.selected_tag = Some(tag_clone.clone());
-                                cx.notify();
-                            }))
-                    })),
-            )
+            .child(self.sidebar_ui.clone())
             // Main Content
             .child(
                 div()
@@ -290,7 +220,7 @@ impl Render for TodoApp {
                                     .v_flex()
                                     .gap_1()
                                     .child(
-                                        div().text_3xl().font_bold().child(match &self.selected_tag {
+                                        div().text_3xl().font_bold().child(match selected_tag {
                                             Some(tag) => format!("Tasks: {}", tag),
                                             None => "All Tasks".to_string(),
                                         }),
@@ -317,7 +247,7 @@ impl Render for TodoApp {
                                         // Actually, if we filter, we might only want to show insertion row at the bottom.
                                         // But let's try to keep the "insert before" logic if it matches.
 
-                                        let should_show = if let Some(tag) = &self.selected_tag {
+                                        let should_show = if let Some(tag) = selected_tag {
                                             task.map(|t| t.tags.contains(tag)).unwrap_or(i == filtered_tasks.len())
                                         } else {
                                             true
