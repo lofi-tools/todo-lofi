@@ -42,6 +42,7 @@
                 jq -r --arg dep "$1" \
                 '.packages[] | select(.name == $dep) | .repository // empty' '';
             dep-url2 = ''curl -H "User-Agent: cargo-patch/0.1.0"  "https://crates.io/api/v1/crates/$1" | jq -r '.crate.repository' '';
+
             clone-patch = with bash; '' set -ex;
               DEP_NAME="$1"
               [ -d "${wd}/patched/$DEP_NAME" ] && echo "Error: ./patched/$DEP_NAME exists" && exit 1
@@ -52,6 +53,8 @@
               printf "%s\n" "Cloning $GIT_URL into ${wd}/patched/$DEP_NAME"
               git clone "$GIT_URL" "${wd}/patched/$DEP_NAME"
             '';
+
+            mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
           };
 
           env = {
@@ -74,8 +77,8 @@
         in
         {
           # packages = scripts;
-          # rust.buildInputs = buildDeps;
-          # rust.buildEnv = env;
+          rust.buildInputs = buildDeps;
+          rust.buildEnv = env;
           # rust.toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
           #   extensions = [ "rust-src" "rust-analyzer" ];
           #   targets = [ ];

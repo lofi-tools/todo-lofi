@@ -3,19 +3,20 @@ name = "storage"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
 [dependencies]
-snafu = { workspace = true, features = [
-  "backtrace",
-  # "backtraces-impl-backtrace-crate",
-  # "unstable-provider-api",
-] }
-anyhow.workspace = true
-turso = { version = "=0.5.3" }
+toasty = { version = "0.7", features = ["turso", "serde", "jiff"] }
+toasty-driver-turso = "0.7"
+toasty-cli = "0.7"
+jiff = "0.2"
 tokio.workspace = true
-# turso-migrate = { git = "https://github.com/maun/turso-migrate.git" } # incompatible with turso-mappers turso version
 serde.workspace = true
 serde_json.workspace = true
-chrono = { workspace = true, features = ["serde"] }
-# libsql-orm = { version = "0.2.5" }
-turso-mappers = { version = "0.4.0" } # forces turso =0.5.3
-# decimax = { version = "0.3.0" }
+anyhow.workspace = true
+dirs = "6.0"
+
+[dev-dependencies]
+tokio.workspace = true
