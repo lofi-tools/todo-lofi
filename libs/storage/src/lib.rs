@@ -1,4 +1,5 @@
 pub mod task;
+pub mod tracing_setup;
 
 pub mod prelude {
     pub use crate::task::{BlockerRef, Task};
@@ -20,7 +21,10 @@ pub struct TodoStore {
     pub db: toasty::db::Db,
 }
 impl TodoStore {
+    #[tracing::instrument(skip(config), fields(db_url = %config.db_url))]
     pub async fn new(config: &StorageConfig) -> toasty::Result<Self> {
+        crate::tracing_setup::init_tracing();
+        tracing::info!("Initializing TodoStore");
         let db = toasty::Db::builder()
             .models(toasty::models!(task::Task))
             .connect(&config.db_url)
@@ -28,6 +32,7 @@ impl TodoStore {
 
         Self::apply_pending_migrations(&db, &config.toasty_toml).await?;
 
+        tracing::info!("TodoStore initialized");
         Ok(Self { db })
     }
 

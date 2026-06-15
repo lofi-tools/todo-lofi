@@ -3312,6 +3312,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrace-tracing"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e26ee74fc06c6a7b49cce575ccd4e4ce2c8992c35d83e5c2f41babcbef862712"
+dependencies = [
+ "fastrace",
+ "take_mut",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fastrand"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9711,6 +9724,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "fastrace",
+ "fastrace-tracing",
  "jiff",
  "serde",
  "serde_json",
@@ -9718,6 +9733,8 @@ dependencies = [
  "toasty-cli",
  "toasty-driver-turso",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -10161,6 +10178,12 @@ name = "take-until"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bdb6fa0dfa67b38c1e66b7041ba9dcf23b99d8121907cd31c807a332f7a0bbb"
+
+[[package]]
+name = "take_mut"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 
 [[package]]
 name = "tantivy"

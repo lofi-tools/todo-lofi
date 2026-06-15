@@ -29,8 +29,11 @@ pub struct BlockerRef {
 }
 
 impl TodoStore {
+    #[tracing::instrument(skip(self, create))]
     pub async fn create_task(&mut self, create: <Task as Model>::Create) -> toasty::Result<Task> {
+        tracing::info!("Creating task");
         let created = create.exec(&mut self.db).await?;
+        tracing::info!(task_id = %created.id, "Task created");
         Ok(created)
     }
 
@@ -52,20 +55,30 @@ impl TodoStore {
     //         .await?;
     //     Ok(())
     // }
+    #[tracing::instrument(skip(self, _update))]
     pub async fn update_task_by_id(
         &mut self,
         id: i64,
-        update: impl IntoExpr<i64>,
+        _update: impl IntoExpr<i64>,
     ) -> toasty::Result<()> {
+        tracing::info!(task_id = %id, "Updating task");
         todo!()
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn get_task(&mut self, id: i64) -> toasty::Result<Task> {
-        Task::get_by_id(&mut self.db, id).await
+        tracing::info!(task_id = %id, "Getting task");
+        let task = Task::get_by_id(&mut self.db, id).await?;
+        tracing::info!(title = %task.title, "Task retrieved");
+        Ok(task)
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn list_tasks(&mut self) -> toasty::Result<Vec<Task>> {
-        Task::all().exec(&mut self.db).await
+        tracing::info!("Listing all tasks");
+        let tasks = Task::all().exec(&mut self.db).await?;
+        tracing::info!(count = %tasks.len(), "Tasks listed");
+        Ok(tasks)
     }
 }
 
