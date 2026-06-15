@@ -55,12 +55,15 @@
             '';
 
             mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
+
+            testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
           };
 
           env = {
             # SNAFU_RAW_ERROR_MESSAGES = 1;
             # RUST_LIB_BACKTRACE = 1;
             # RUST_BACKTRACE = "1";
+            RUST_LOG = "toasty=debug";
           };
 
           # checks = {

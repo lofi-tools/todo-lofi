@@ -29,11 +29,12 @@ pub struct BlockerRef {
 }
 
 impl TodoStore {
-    #[tracing::instrument(skip(self, create))]
+    // #[tracing::instrument(skip(self, create))]
+    #[fastrace::trace]
     pub async fn create_task(&mut self, create: <Task as Model>::Create) -> toasty::Result<Task> {
-        tracing::info!("Creating task");
+        // tracing::info!("Creating task");
         let created = create.exec(&mut self.db).await?;
-        tracing::info!(task_id = %created.id, "Task created");
+        // tracing::info!(task_id = %created.id, "Task created");
         Ok(created)
     }
 
@@ -55,29 +56,30 @@ impl TodoStore {
     //         .await?;
     //     Ok(())
     // }
-    #[tracing::instrument(skip(self, _update))]
+
+    #[fastrace::trace]
     pub async fn update_task_by_id(
         &mut self,
         id: i64,
         _update: impl IntoExpr<i64>,
     ) -> toasty::Result<()> {
-        tracing::info!(task_id = %id, "Updating task");
+        // tracing::info!(task_id = %id, "Updating task");
         todo!()
     }
 
-    #[tracing::instrument(skip(self))]
+    #[fastrace::trace]
     pub async fn get_task(&mut self, id: i64) -> toasty::Result<Task> {
-        tracing::info!(task_id = %id, "Getting task");
+        // tracing::info!(task_id = %id, "Getting task");
         let task = Task::get_by_id(&mut self.db, id).await?;
-        tracing::info!(title = %task.title, "Task retrieved");
+        // tracing::info!(title = %task.title, "Task retrieved");
         Ok(task)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[fastrace::trace]
     pub async fn list_tasks(&mut self) -> toasty::Result<Vec<Task>> {
-        tracing::info!("Listing all tasks");
+        // tracing::info!("Listing all tasks");
         let tasks = Task::all().exec(&mut self.db).await?;
-        tracing::info!(count = %tasks.len(), "Tasks listed");
+        // tracing::info!(count = %tasks.len(), "Tasks listed");
         Ok(tasks)
     }
 }
@@ -85,11 +87,9 @@ impl TodoStore {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use std::time::Duration;
-
-    use jiff::Timestamp;
-
     use crate::prelude::*;
+    use jiff::Timestamp;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_create_get_task() -> anyhow::Result<()> {
@@ -114,6 +114,7 @@ mod tests {
         let retrieved = storage.get_task(task.id).await?;
         assert_eq!(retrieved.id, task.id);
         assert_eq!(retrieved.title, "Task 1");
+
         Ok(())
     }
 
@@ -125,26 +126,13 @@ mod tests {
             .create_task(Task::create().id(0).title("Task 1"))
             .await?;
 
-        // let updated = Task {
-        //     id: task.id,
-        //     title: "Updated Task 1".to_string(),
-        //     description: Some("Updated description".to_string()),
-        //     branch_name: None,
-        //     labels: Some(toasty::Json(vec!["feature".to_string()])),
-        //     blocked_by: Some(toasty::Json(vec![])),
-        //     importance_factor: 2.0,
-        //     urgency_factor: 1.5,
-        //     created_at: task.created_at,
-        //     updated_at: Timestamp::now(),
-        // };
-
-        // storage.update_task(task.id, &updated).await?;
-        Task::update_by_id(task.id)
+        let query = Task::update_by_id(task.id)
             .title("Updated Task 1")
             .description(Some("Updated description".to_string()))
-            .importance_factor(2.0)
-            .exec(&mut storage.db)
-            .await?;
+            .importance_factor(2.0);
+        // let stmt = query.build_stmt().;
+        // println!("{stmt}");
+        query.exec(&mut storage.db).await?;
 
         let reloaded = storage.get_task(task.id).await?;
         assert_eq!(reloaded.title, "Updated Task 1");
@@ -176,40 +164,34 @@ mod tests {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn test_db_schema__update_created_at_should_fail() -> anyhow::Result<()> {
-    //     let mut storage = TodoStore::for_test().await?;
+    #[tokio::test]
+    #[ignore = "triggers still experimental on turso, unsupported by toasty driver"]
+    async fn test_db_schema__update_created_at_should_fail() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
 
-    //     let task = storage.create_task(Task::create().title("Task 1")).await?;
+        let task = storage.create_task(Task::create().title("Task 1")).await?;
 
-    //     let original_created_at = task.created_at;
+        let original_created_at = task.created_at;
 
-    //     let mut updated = task.clone();
-    //     updated.created_at = Timestamp::now().checked_add(Duration::from_secs(1))?;
-    //     updated.title = "Updated".to_string();
+        let mut updated = task.clone();
+        updated.created_at = Timestamp::now().checked_add(Duration::from_secs(1))?;
+        updated.title = "Updated".to_string();
 
-    //     // let result = storage.update_task(task.id, &updated).await;
-    //     let result = Task::update_by_id(task.id)
-    //         .created_at(updated.created_at)
-    //         .exec(&mut storage.db)
-    //         .await;
+        let result = Task::update_by_id(task.id)
+            .created_at(updated.created_at)
+            .exec(&mut storage.db)
+            .await;
 
-    //     dbg!(&result);
-    //     assert!(result.is_err());
+        dbg!(&result);
+        assert!(result.is_err());
+        // TODO assert error msg
 
-    //     // if result.is_ok() {
-    //     //     let reloaded = storage.get_task(task.id).await?;
-    //     //     dbg!(
-    //     //         &original_created_at,
-    //     //         &updated.created_at,
-    //     //         &reloaded.created_at
-    //     //     );
-    //     //     assert_eq!(
-    //     //         reloaded.created_at, original_created_at,
-    //     //         "created_at should not be mutable"
-    //     //     );
-    //     // }
+        let reloaded = storage.get_task(task.id).await?;
+        assert_eq!(
+            reloaded.created_at, original_created_at,
+            "created_at should not be mutable"
+        );
 
-    //     Ok(())
-    // }
+        Ok(())
+    }
 }

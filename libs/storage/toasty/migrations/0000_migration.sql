@@ -1,4 +1,4 @@
-CREATE TABLE "tasks" (
+CREATE TABLE tasks (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "title" TEXT NOT NULL,
     "description" TEXT,
@@ -12,7 +12,7 @@ CREATE TABLE "tasks" (
 );
 
 CREATE TRIGGER protect_created_at
-BEFORE UPDATE OF created_at ON your_table
+BEFORE UPDATE OF created_at ON tasks
 BEGIN
     SELECT RAISE(ABORT, 'The created_at column cannot be updated');
 END;

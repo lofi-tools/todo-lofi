@@ -6,6 +6,7 @@ pub mod prelude {
     pub use crate::{StorageConfig, TodoStore};
 }
 pub use prelude::*;
+use toasty_driver_turso::Turso;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -13,21 +14,39 @@ use toasty::migration::History;
 use toasty::schema::db::Migration;
 
 pub struct StorageConfig {
-    pub db_url: String,
+    pub db_uri: String,
     pub toasty_toml: std::path::PathBuf,
+}
+impl std::fmt::Display for StorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "db_uri: {}, toasty_toml: {}",
+            self.db_uri,
+            self.toasty_toml.display()
+        )
+    }
 }
 
 pub struct TodoStore {
     pub db: toasty::db::Db,
 }
 impl TodoStore {
-    #[tracing::instrument(skip(config), fields(db_url = %config.db_url))]
-    pub async fn new(config: &StorageConfig) -> toasty::Result<Self> {
+    #[fastrace::trace(properties = { "config": "{config}" })]
+    pub async fn new(config: &StorageConfig) -> anyhow::Result<Self> {
         crate::tracing_setup::init_tracing();
-        tracing::info!("Initializing TodoStore");
+
+        let driver = Turso::new(&config.db_uri)?;
+        // .experimental_triggers(true) // Enable triggers
+        // .concurrent_writes()
+        // .experimental_custom_types(true)
+        // .experimental_generated_columns(true)
+        // .experimental_materialized_views(true)
+        // .experimental_vacuum(true)
+
         let db = toasty::Db::builder()
             .models(toasty::models!(task::Task))
-            .connect(&config.db_url)
+            .build(driver)
             .await?;
 
         Self::apply_pending_migrations(&db, &config.toasty_toml).await?;
@@ -36,6 +55,7 @@ impl TodoStore {
         Ok(Self { db })
     }
 
+    #[fastrace::trace]
     async fn apply_pending_migrations(
         db: &toasty::db::Db,
         toasty_toml: &Path,
@@ -85,9 +105,9 @@ mod tests {
     use crate::{StorageConfig, TodoStore};
     impl TodoStore {
         #[cfg(test)]
-        pub async fn for_test() -> toasty::Result<Self> {
+        pub async fn for_test() -> anyhow::Result<Self> {
             let config = StorageConfig {
-                db_url: "turso::memory:".to_string(),
+                db_uri: "turso::memory:".to_string(),
                 toasty_toml: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("Toasty.toml"),
             };

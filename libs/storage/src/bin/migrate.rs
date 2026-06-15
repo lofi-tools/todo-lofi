@@ -16,6 +16,7 @@ pub static REPO: LazyLock<PathBuf> = LazyLock::new(|| {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     storage::tracing_setup::init_tracing();
+
     let toasty_config = Config::load_from(&REPO.join("libs/storage/Toasty.toml"))?;
     let db_url = std::env::var("TURSO_DB_URL")
         .unwrap_or_else(|_| format!("turso:{}/.cache/todo.db", REPO.display()));
