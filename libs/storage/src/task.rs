@@ -1,6 +1,7 @@
 use crate::TodoStore;
 use toasty::Model;
 use toasty::schema::Model;
+use toasty::stmt::IntoExpr;
 
 #[derive(Debug, Clone, Model)]
 pub struct Task {
@@ -28,28 +29,35 @@ pub struct BlockerRef {
 }
 
 impl TodoStore {
-    pub async fn create_task(
-        &mut self,
-        task_create: <Task as Model>::Create,
-    ) -> toasty::Result<Task> {
-        let created = task_create.exec(&mut self.db).await?;
+    pub async fn create_task(&mut self, create: <Task as Model>::Create) -> toasty::Result<Task> {
+        let created = create.exec(&mut self.db).await?;
         Ok(created)
     }
 
-    pub async fn update_task(&mut self, id: i64, task: &Task) -> toasty::Result<()> {
-        let mut existing = Task::get_by_id(&mut self.db, id).await?;
-        existing
-            .update()
-            .title(&task.title)
-            .description(&task.description)
-            .branch_name(&task.branch_name)
-            .labels(&task.labels)
-            .blocked_by(&task.blocked_by)
-            .importance_factor(task.importance_factor)
-            .urgency_factor(task.urgency_factor)
-            .exec(&mut self.db)
-            .await?;
-        Ok(())
+    // pub async fn update_task(
+    //     &mut self,
+    //     id: i64,
+    //     update: <Task as Model>::UpdateQuery,
+    // ) -> toasty::Result<()> {
+    //     // let mut existing = Task::get_by_id(&mut self.db, id).await?;
+    //     Task::update_by_id(id)
+    //         .title(&task.title)
+    //         .description(&task.description)
+    //         .branch_name(&task.branch_name)
+    //         .labels(&task.labels)
+    //         .blocked_by(&task.blocked_by)
+    //         .importance_factor(task.importance_factor)
+    //         .urgency_factor(task.urgency_factor)
+    //         .exec(&mut self.db)
+    //         .await?;
+    //     Ok(())
+    // }
+    pub async fn update_task_by_id(
+        &mut self,
+        id: i64,
+        update: impl IntoExpr<i64>,
+    ) -> toasty::Result<()> {
+        todo!()
     }
 
     pub async fn get_task(&mut self, id: i64) -> toasty::Result<Task> {
@@ -62,7 +70,12 @@ impl TodoStore {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+
     use crate::prelude::*;
 
     #[tokio::test]
@@ -99,20 +112,26 @@ mod tests {
             .create_task(Task::create().id(0).title("Task 1"))
             .await?;
 
-        let updated = Task {
-            id: task.id,
-            title: "Updated Task 1".to_string(),
-            description: Some("Updated description".to_string()),
-            branch_name: None,
-            labels: Some(toasty::Json(vec!["feature".to_string()])),
-            blocked_by: Some(toasty::Json(vec![])),
-            importance_factor: 2.0,
-            urgency_factor: 1.5,
-            created_at: task.created_at,
-            updated_at: jiff::Timestamp::now(),
-        };
+        // let updated = Task {
+        //     id: task.id,
+        //     title: "Updated Task 1".to_string(),
+        //     description: Some("Updated description".to_string()),
+        //     branch_name: None,
+        //     labels: Some(toasty::Json(vec!["feature".to_string()])),
+        //     blocked_by: Some(toasty::Json(vec![])),
+        //     importance_factor: 2.0,
+        //     urgency_factor: 1.5,
+        //     created_at: task.created_at,
+        //     updated_at: Timestamp::now(),
+        // };
 
-        storage.update_task(task.id, &updated).await?;
+        // storage.update_task(task.id, &updated).await?;
+        Task::update_by_id(task.id)
+            .title("Updated Task 1")
+            .description(Some("Updated description".to_string()))
+            .importance_factor(2.0)
+            .exec(&mut storage.db)
+            .await?;
 
         let reloaded = storage.get_task(task.id).await?;
         assert_eq!(reloaded.title, "Updated Task 1");
@@ -126,18 +145,6 @@ mod tests {
 
         for i in 1..=5 {
             storage
-                // .create_task(Task {
-                //     id: 0,
-                //     title: format!("Task {}", i),
-                //     description: None,
-                //     branch_name: None,
-                //     labels: toasty::Json(vec![]),
-                //     blocked_by: toasty::Json(vec![]),
-                //     importance_factor: 1.0,
-                //     urgency_factor: 1.0,
-                //     created_at: jiff::Timestamp::now(),
-                //     updated_at: jiff::Timestamp::now(),
-                // })
                 .create_task(
                     Task::create()
                         .title(format!("Task {}", i))
@@ -155,4 +162,41 @@ mod tests {
         assert_eq!(tasks.len(), 5);
         Ok(())
     }
+
+    // #[tokio::test]
+    // async fn test_db_schema__update_created_at_should_fail() -> anyhow::Result<()> {
+    //     let mut storage = TodoStore::for_test().await?;
+
+    //     let task = storage.create_task(Task::create().title("Task 1")).await?;
+
+    //     let original_created_at = task.created_at;
+
+    //     let mut updated = task.clone();
+    //     updated.created_at = Timestamp::now().checked_add(Duration::from_secs(1))?;
+    //     updated.title = "Updated".to_string();
+
+    //     // let result = storage.update_task(task.id, &updated).await;
+    //     let result = Task::update_by_id(task.id)
+    //         .created_at(updated.created_at)
+    //         .exec(&mut storage.db)
+    //         .await;
+
+    //     dbg!(&result);
+    //     assert!(result.is_err());
+
+    //     // if result.is_ok() {
+    //     //     let reloaded = storage.get_task(task.id).await?;
+    //     //     dbg!(
+    //     //         &original_created_at,
+    //     //         &updated.created_at,
+    //     //         &reloaded.created_at
+    //     //     );
+    //     //     assert_eq!(
+    //     //         reloaded.created_at, original_created_at,
+    //     //         "created_at should not be mutable"
+    //     //     );
+    //     // }
+
+    //     Ok(())
+    // }
 }

@@ -39,12 +39,14 @@ id = { table = 0, index = 4 }
 name = "labels"
 ty = "String"
 storage_ty = "Text"
+nullable = true
 
 [[schema.tables.columns]]
 id = { table = 0, index = 5 }
 name = "blocked_by"
 ty = "String"
 storage_ty = "Text"
+nullable = true
 
 [[schema.tables.columns]]
 id = { table = 0, index = 6 }
