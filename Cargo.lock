@@ -2664,6 +2664,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_entity_id"
+version = "0.1.0"
+dependencies = [
+ "zyn",
+]
+
+[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9723,6 +9730,7 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "derive_entity_id",
  "dirs 6.0.0",
  "fastrace",
  "fastrace-tracing",

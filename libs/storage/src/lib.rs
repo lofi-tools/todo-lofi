@@ -1,6 +1,41 @@
 pub mod error;
 pub mod task;
 pub mod tracing_setup;
+// pub mod entity_id {
+
+//     static ID_GENERATOR: std::sync::LazyLock<ax_id::Generator> =
+//         std::sync::LazyLock::new(ax_id::Generator::new_auto);
+//     pub fn generate_id() -> u64 {
+//         ID_GENERATOR.generate_simple().0
+//     }
+
+//     // #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+//     // pub struct AxId(pub ax_id::Id);
+//     // impl Default for AxId {
+//     //     fn default() -> Self {
+//     //         Self(generate_id())
+//     //     }
+//     // }
+
+//     // if generated without ax_id:
+//     // pub fn new() -> Self {
+//     //     // Get milliseconds since epoch
+//     //     let millis = SystemTime::now()
+//     //         .duration_since(UNIX_EPOCH)
+//     //         .expect("System time before UNIX epoch")
+//     //         .as_millis() as u64;
+
+//     //     // Atomic counter for uniqueness within the same millisecond
+//     //     static COUNTER: AtomicU64 = AtomicU64::new(0);
+//     //     let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+//     //     // Combine: top 32 bits = timestamp (low 32 bits of millis),
+//     //     // bottom 32 bits = counter (wrapping around).
+//     //     // This gives a good chance of uniqueness and still fits in u64.
+//     //     let id = ((millis & 0xFFFF_FFFF) << 32) | (counter & 0xFFFF_FFFF);
+//     //     TaskId(id)
+//     // }
+// }
 
 pub mod prelude {
     pub use crate::error::{Error, Result};

@@ -1,14 +1,53 @@
 use crate::TodoStore;
+use derive_entity_id::EntityId;
 use snafu::OptionExt;
+// use std::str::FromStr;
+use toasty::Embed;
 use toasty::Model;
 use toasty::schema::Model;
 use toasty::stmt::IntoExpr;
 
+#[derive(EntityId, Embed, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[entity_id(prefix = "task")]
+pub struct TaskId(u64);
+// impl TaskId {
+//     pub const PREFIX: &'static str = "task";
+//     pub fn auto() -> Self {
+//         Self(crate::entity_id::generate_id())
+//     }
+//     fn unprefix_id(s: &str) -> &str {
+//         if let Some(stripped) = s.strip_prefix(&format!("{}_", TaskId::PREFIX)) {
+//             stripped
+//         } else {
+//             s
+//         }
+//     }
+// }
+// impl FromStr for TaskId {
+//     type Err = <u64 as FromStr>::Err;
+//     fn from_str(s: &str) -> Result<Self, Self::Err> {
+//         let value = Self::unprefix_id(s);
+//         let num = u64::from_str(value)?;
+//         Ok(TaskId(num))
+//     }
+// }
+// impl TryFrom<String> for TaskId {
+//     type Error = <u64 as FromStr>::Err;
+//     fn try_from(value: String) -> Result<Self, Self::Error> {
+//         value.parse()
+//     }
+// }
+// impl TryFrom<&str> for TaskId {
+//     type Error = <u64 as FromStr>::Err;
+//     fn try_from(value: &str) -> Result<Self, Self::Error> {
+//         value.parse()
+//     }
+// }
+
 #[derive(Debug, Clone, Model)]
 pub struct Task {
     #[key]
-    #[auto]
-    pub id: i64,
+    pub id: TaskId,
     pub title: String,
     pub description: Option<String>,
     pub branch_name: Option<String>,
@@ -31,38 +70,31 @@ pub struct BlockerRef {
 }
 
 impl TodoStore {
-    // #[tracing::instrument(skip(self, create))]
     #[fastrace::trace]
     pub async fn create_task(&mut self, create: <Task as Model>::Create) -> crate::Result<Task> {
-        // tracing::info!("Creating task");
-        let created = create.exec(&mut self.db).await?;
-        // tracing::info!(task_id = %created.id, "Task created");
+        // let id = TaskId::auto();
+        let created = create.id(TaskId::auto()).exec(&mut self.db).await?;
         Ok(created)
     }
 
     #[fastrace::trace]
     pub async fn update_task_by_id(
         &mut self,
-        _id: i64,
-        _update: impl IntoExpr<i64>,
+        _id: TaskId,
+        _update: impl IntoExpr<TaskId>,
     ) -> crate::Result<()> {
-        // tracing::info!(task_id = %id, "Updating task");
         todo!()
     }
 
     #[fastrace::trace]
-    pub async fn get_task(&mut self, id: i64) -> crate::Result<Task> {
-        // tracing::info!(task_id = %id, "Getting task");
+    pub async fn get_task(&mut self, id: TaskId) -> crate::Result<Task> {
         let task = Task::get_by_id(&mut self.db, id).await?;
-        // tracing::info!(title = %task.title, "Task retrieved");
         Ok(task)
     }
 
     #[fastrace::trace]
     pub async fn list_tasks(&mut self) -> crate::Result<Vec<Task>> {
-        // tracing::info!("Listing all tasks");
         let tasks = Task::all().exec(&mut self.db).await?;
-        // tracing::info!(count = %tasks.len(), "Tasks listed");
         Ok(tasks)
     }
 
@@ -146,7 +178,7 @@ impl TodoStore {
                 .parse::<jiff::Timestamp>()?;
 
             tasks.push(Task {
-                id,
+                id: TaskId(id as u64),
                 title,
                 description,
                 branch_name,
@@ -202,16 +234,12 @@ mod tests {
     async fn test_update_task() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
-        let task = storage
-            .create_task(Task::create().id(0).title("Task 1"))
-            .await?;
+        let task = storage.create_task(Task::create().title("Task 1")).await?;
 
         let query = Task::update_by_id(task.id)
             .title("Updated Task 1")
             .description(Some("Updated description".to_string()))
             .importance_factor(2.0);
-        // let stmt = query.build_stmt().;
-        // println!("{stmt}");
         query.exec(&mut storage.db).await?;
 
         let reloaded = storage.get_task(task.id).await?;
@@ -308,7 +336,6 @@ mod tests {
 
         dbg!(&result);
         assert!(result.is_err());
-        // TODO assert error msg
 
         let reloaded = storage.get_task(task.id).await?;
         assert_eq!(

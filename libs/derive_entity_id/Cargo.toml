@@ -1,0 +1,10 @@
+[package]
+name = "derive_entity_id"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+zyn = { version = "0.5", features = ["derive"] }
