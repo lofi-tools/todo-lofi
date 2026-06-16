@@ -9729,6 +9729,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "snafu 0.9.1",
  "toasty",
  "toasty-cli",
  "toasty-driver-turso",

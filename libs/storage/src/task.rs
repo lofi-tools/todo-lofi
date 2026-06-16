@@ -1,4 +1,5 @@
 use crate::TodoStore;
+use snafu::OptionExt;
 use toasty::Model;
 use toasty::schema::Model;
 use toasty::stmt::IntoExpr;
@@ -32,44 +33,25 @@ pub struct BlockerRef {
 impl TodoStore {
     // #[tracing::instrument(skip(self, create))]
     #[fastrace::trace]
-    pub async fn create_task(&mut self, create: <Task as Model>::Create) -> toasty::Result<Task> {
+    pub async fn create_task(&mut self, create: <Task as Model>::Create) -> crate::Result<Task> {
         // tracing::info!("Creating task");
         let created = create.exec(&mut self.db).await?;
         // tracing::info!(task_id = %created.id, "Task created");
         Ok(created)
     }
 
-    // pub async fn update_task(
-    //     &mut self,
-    //     id: i64,
-    //     update: <Task as Model>::UpdateQuery,
-    // ) -> toasty::Result<()> {
-    //     // let mut existing = Task::get_by_id(&mut self.db, id).await?;
-    //     Task::update_by_id(id)
-    //         .title(&task.title)
-    //         .description(&task.description)
-    //         .branch_name(&task.branch_name)
-    //         .labels(&task.labels)
-    //         .blocked_by(&task.blocked_by)
-    //         .importance_factor(task.importance_factor)
-    //         .urgency_factor(task.urgency_factor)
-    //         .exec(&mut self.db)
-    //         .await?;
-    //     Ok(())
-    // }
-
     #[fastrace::trace]
     pub async fn update_task_by_id(
         &mut self,
         _id: i64,
         _update: impl IntoExpr<i64>,
-    ) -> toasty::Result<()> {
+    ) -> crate::Result<()> {
         // tracing::info!(task_id = %id, "Updating task");
         todo!()
     }
 
     #[fastrace::trace]
-    pub async fn get_task(&mut self, id: i64) -> toasty::Result<Task> {
+    pub async fn get_task(&mut self, id: i64) -> crate::Result<Task> {
         // tracing::info!(task_id = %id, "Getting task");
         let task = Task::get_by_id(&mut self.db, id).await?;
         // tracing::info!(title = %task.title, "Task retrieved");
@@ -77,7 +59,7 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
-    pub async fn list_tasks(&mut self) -> toasty::Result<Vec<Task>> {
+    pub async fn list_tasks(&mut self) -> crate::Result<Vec<Task>> {
         // tracing::info!("Listing all tasks");
         let tasks = Task::all().exec(&mut self.db).await?;
         // tracing::info!(count = %tasks.len(), "Tasks listed");
@@ -85,7 +67,7 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
-    pub async fn list_tasks_by_priority(&mut self) -> anyhow::Result<Vec<Task>> {
+    pub async fn list_tasks_by_priority(&mut self) -> crate::Result<Vec<Task>> {
         let rows = toasty::sql::query(
             r#"
             SELECT
@@ -123,14 +105,17 @@ impl TodoStore {
                 unreachable!("raw SQL queries return record rows");
             };
 
-            let id = record
-                .get(0)
-                .and_then(|v| v.to_i64())
-                .ok_or_else(|| anyhow::anyhow!("expected i64 for id"))?;
+            let id = record.first().and_then(|v| v.to_i64()).context(
+                crate::error::UnexpectedValueSnafu {
+                    message: "expected i64 for id",
+                },
+            )?;
             let title = record
                 .get(1)
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("expected string for title"))?
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for title",
+                })?
                 .to_owned();
             let description = record.get(2).and_then(|v| v.as_str()).map(str::to_owned);
             let branch_name = record.get(3).and_then(|v| v.as_str()).map(str::to_owned);
@@ -148,12 +133,16 @@ impl TodoStore {
             let created_at = record
                 .get(9)
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("expected string for created_at"))?
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for created_at",
+                })?
                 .parse::<jiff::Timestamp>()?;
             let updated_at = record
                 .get(10)
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("expected string for updated_at"))?
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for updated_at",
+                })?
                 .parse::<jiff::Timestamp>()?;
 
             tasks.push(Task {
@@ -183,7 +172,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn test_create_get_task() -> anyhow::Result<()> {
+    async fn test_create_get_task() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let task = storage
@@ -210,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_task() -> anyhow::Result<()> {
+    async fn test_update_task() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let task = storage
@@ -232,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_tasks() -> anyhow::Result<()> {
+    async fn test_list_tasks() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         for i in 1..=5 {
@@ -256,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_tasks_by_priority() -> anyhow::Result<()> {
+    async fn test_list_tasks_by_priority() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let now_unix = std::time::SystemTime::now()
@@ -301,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "triggers still experimental on turso, unsupported by toasty driver"]
-    async fn test_db_schema__update_created_at_should_fail() -> anyhow::Result<()> {
+    async fn test_db_schema__update_created_at_should_fail() -> crate::error::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let task = storage.create_task(Task::create().title("Task 1")).await?;
