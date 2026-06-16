@@ -5,6 +5,7 @@ CREATE TABLE tasks (
     "branch_name" TEXT,
     "labels" TEXT,
     "blocked_by" TEXT,
+    "deadline" INTEGER,
     "importance_factor" REAL NOT NULL,
     "urgency_factor" REAL NOT NULL,
     "created_at" TEXT NOT NULL,

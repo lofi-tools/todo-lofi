@@ -5,6 +5,7 @@ pub mod prelude {
     pub use crate::task::{BlockerRef, Task};
     pub use crate::{StorageConfig, TodoStore};
 }
+use anyhow::Context;
 pub use prelude::*;
 use toasty_driver_turso::Turso;
 
@@ -36,7 +37,7 @@ impl TodoStore {
     pub async fn new(config: &StorageConfig) -> anyhow::Result<Self> {
         crate::tracing_setup::init_tracing();
 
-        let driver = Turso::new(&config.db_uri)?;
+        let driver = Turso::new(&config.db_uri).context("failed to create Turso driver")?;
         // .experimental_triggers(true) // Enable triggers
         // .concurrent_writes()
         // .experimental_custom_types(true)
@@ -47,9 +48,12 @@ impl TodoStore {
         let db = toasty::Db::builder()
             .models(toasty::models!(task::Task))
             .build(driver)
-            .await?;
+            .await
+            .context("failed to build toasty Db")?;
 
-        Self::apply_pending_migrations(&db, &config.toasty_toml).await?;
+        Self::apply_pending_migrations(&db, &config.toasty_toml)
+            .await
+            .context("failed to apply pending migrations")?;
 
         tracing::info!("TodoStore initialized");
         Ok(Self { db })
@@ -59,21 +63,29 @@ impl TodoStore {
     async fn apply_pending_migrations(
         db: &toasty::db::Db,
         toasty_toml: &Path,
-    ) -> toasty::Result<()> {
-        let toasty_config = toasty_cli::Config::load_from(toasty_toml)
-            .map_err(|e| toasty::Error::from_args(format_args!("{e}")))?;
+    ) -> anyhow::Result<()> {
+        let toasty_config =
+            toasty_cli::Config::load_from(toasty_toml).context("failed to load Toasty config")?;
 
         let history_path = toasty_config.migration.get_history_file_path();
         let migrations_dir = toasty_config.migration.get_migrations_dir();
 
-        let history = History::load_or_default(&history_path)?;
+        let history =
+            History::load_or_default(&history_path).context("failed to load migration history")?;
 
         if history.entries().is_empty() {
             return Ok(());
         }
 
-        let mut conn = db.driver().connect().await?;
-        let applied = conn.applied_migrations().await?;
+        let mut conn = db
+            .driver()
+            .connect()
+            .await
+            .context("failed to connect to database")?;
+        let applied = conn
+            .applied_migrations()
+            .await
+            .context("failed to get applied migrations")?;
         let applied_ids: HashSet<u64> = applied.iter().map(|m| m.id()).collect();
 
         let pending: Vec<_> = history
@@ -89,7 +101,10 @@ impl TodoStore {
 
         for entry in &pending {
             let sql_path = migrations_dir.join(&entry.name);
-            let sql = std::fs::read_to_string(&sql_path)?;
+            let sql = std::fs::read_to_string(&sql_path).context(format!(
+                "failed to read migration SQL: {}",
+                sql_path.display()
+            ))?;
             // dbg!(&sql);
             let migration = Migration::new_sql(sql);
             conn.apply_migration(entry.id, &entry.name, &migration)
@@ -106,12 +121,16 @@ mod tests {
     impl TodoStore {
         #[cfg(test)]
         pub async fn for_test() -> anyhow::Result<Self> {
+            use anyhow::Context;
+
             let config = StorageConfig {
                 db_uri: "turso::memory:".to_string(),
                 toasty_toml: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("Toasty.toml"),
             };
-            Self::new(&config).await
+            Self::new(&config)
+                .await
+                .context("failed to create test TodoStore")
         }
     }
 }
