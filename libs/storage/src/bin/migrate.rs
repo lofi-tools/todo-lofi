@@ -13,6 +13,19 @@ pub static REPO: LazyLock<PathBuf> = LazyLock::new(|| {
     PathBuf::from(path_str)
 });
 
+// pub static REPO: LazyLock<Result<PathBuf, String>> = LazyLock::new(|| {
+//     let path_bytes = Command::new("git")
+//         .arg("rev-parse")
+//         .arg("--show-toplevel")
+//         .output()
+//         .map_err(|e| e.to_string())?
+//         .stdout;
+//     let path_str = str::from_utf8(&path_bytes)
+//         .map_err(|e| e.to_string())?
+//         .trim();
+//     Ok(PathBuf::from(path_str))
+// });
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     storage::tracing_setup::init_tracing();

@@ -18,18 +18,6 @@ pub enum Error {
     #[snafu(display("failed to connect to database: {source}"))]
     DbConnect { source: toasty::Error },
 
-    #[snafu(display("failed to read migrations directory {path}: {source}"))]
-    MigrationsDir {
-        source: std::io::Error,
-        path: String,
-    },
-
-    #[snafu(display("failed to read migration SQL {path}: {source}"))]
-    MigrationSql {
-        source: std::io::Error,
-        path: String,
-    },
-
     #[snafu(display(
         "checksum mismatch for migration '{name}': expected {expected}, got {actual}"
     ))]
