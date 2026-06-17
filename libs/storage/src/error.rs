@@ -15,22 +15,28 @@ pub enum Error {
     #[snafu(display("failed to apply pending migrations: {source}"))]
     Migrations { source: toasty::Error },
 
-    #[snafu(display("failed to load Toasty config: {source}"))]
-    ToastyConfig { source: anyhow::Error },
-
-    #[snafu(display("failed to load migration history: {source}"))]
-    MigrationHistory { source: toasty::Error },
-
     #[snafu(display("failed to connect to database: {source}"))]
     DbConnect { source: toasty::Error },
 
-    #[snafu(display("failed to get applied migrations: {source}"))]
-    AppliedMigrations { source: toasty::Error },
+    #[snafu(display("failed to read migrations directory {path}: {source}"))]
+    MigrationsDir {
+        source: std::io::Error,
+        path: String,
+    },
 
     #[snafu(display("failed to read migration SQL {path}: {source}"))]
     MigrationSql {
         source: std::io::Error,
         path: String,
+    },
+
+    #[snafu(display(
+        "checksum mismatch for migration '{name}': expected {expected}, got {actual}"
+    ))]
+    MigrationChecksumMismatch {
+        name: String,
+        expected: String,
+        actual: String,
     },
 
     #[snafu(display("failed to parse timestamp: {source}"))]
