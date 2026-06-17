@@ -76,7 +76,12 @@ impl TodoStore {
     fn compute_checksum(content: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
-        format!("{:x}", hasher.finalize())
+        let bytes = hasher.finalize();
+        bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+            .to_string()
     }
 
     #[fastrace::trace]

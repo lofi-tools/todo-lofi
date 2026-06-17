@@ -74,7 +74,7 @@ cersei = { git = "https://github.com/pacifio/cersei", rev = "59883b1d429fa1ac024
 # dashmap = "6"
 # bytes = "1"
 # base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 # url = "2"
 
 # # Text processing
