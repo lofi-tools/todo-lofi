@@ -1,53 +1,22 @@
 use crate::TodoStore;
 use derive_entity_id::EntityId;
 use snafu::OptionExt;
-// use std::str::FromStr;
+use toasty::Deferred;
 use toasty::Embed;
 use toasty::Model;
 use toasty::schema::Model;
 use toasty::stmt::IntoExpr;
 
+// TODO after https://github.com/tokio-rs/toasty/issues/1040: use as key once embed keys work with parent/subtasks relationship
 #[derive(EntityId, Embed, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 #[entity_id(prefix = "task")]
 pub struct TaskId(u64);
-// impl TaskId {
-//     pub const PREFIX: &'static str = "task";
-//     pub fn auto() -> Self {
-//         Self(crate::entity_id::generate_id())
-//     }
-//     fn unprefix_id(s: &str) -> &str {
-//         if let Some(stripped) = s.strip_prefix(&format!("{}_", TaskId::PREFIX)) {
-//             stripped
-//         } else {
-//             s
-//         }
-//     }
-// }
-// impl FromStr for TaskId {
-//     type Err = <u64 as FromStr>::Err;
-//     fn from_str(s: &str) -> Result<Self, Self::Err> {
-//         let value = Self::unprefix_id(s);
-//         let num = u64::from_str(value)?;
-//         Ok(TaskId(num))
-//     }
-// }
-// impl TryFrom<String> for TaskId {
-//     type Error = <u64 as FromStr>::Err;
-//     fn try_from(value: String) -> Result<Self, Self::Error> {
-//         value.parse()
-//     }
-// }
-// impl TryFrom<&str> for TaskId {
-//     type Error = <u64 as FromStr>::Err;
-//     fn try_from(value: &str) -> Result<Self, Self::Error> {
-//         value.parse()
-//     }
-// }
 
 #[derive(Debug, Clone, Model)]
 pub struct Task {
     #[key]
-    pub id: TaskId,
+    #[auto]
+    pub id: u64,
     pub title: String,
     pub description: Option<String>,
     pub branch_name: Option<String>,
@@ -62,6 +31,12 @@ pub struct Task {
     pub created_at: jiff::Timestamp,
     #[update(jiff::Timestamp::now())]
     pub updated_at: jiff::Timestamp,
+    #[index]
+    pub parent_id: Option<u64>,
+    #[has_many(pair = parent)]
+    pub subtasks: Deferred<Vec<Task>>,
+    #[belongs_to(key = parent_id, references = id)]
+    pub parent: Deferred<Option<Task>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -72,22 +47,21 @@ pub struct BlockerRef {
 impl TodoStore {
     #[fastrace::trace]
     pub async fn create_task(&mut self, create: <Task as Model>::Create) -> crate::Result<Task> {
-        // let id = TaskId::auto();
-        let created = create.id(TaskId::auto()).exec(&mut self.db).await?;
+        let created = create.exec(&mut self.db).await?;
         Ok(created)
     }
 
     #[fastrace::trace]
     pub async fn update_task_by_id(
         &mut self,
-        _id: TaskId,
-        _update: impl IntoExpr<TaskId>,
+        _id: u64,
+        _update: impl IntoExpr<u64>,
     ) -> crate::Result<()> {
         todo!()
     }
 
     #[fastrace::trace]
-    pub async fn get_task(&mut self, id: TaskId) -> crate::Result<Task> {
+    pub async fn get_task(&mut self, id: u64) -> crate::Result<Task> {
         let task = Task::get_by_id(&mut self.db, id).await?;
         Ok(task)
     }
@@ -104,7 +78,8 @@ impl TodoStore {
             r#"
             SELECT
                 id, title, description, branch_name, labels, blocked_by,
-                deadline, importance_factor, urgency_factor, created_at, updated_at
+                deadline, importance_factor, urgency_factor, created_at, updated_at,
+                parent_id
             FROM tasks
             ORDER BY
                 importance_factor * CASE
@@ -127,6 +102,7 @@ impl TodoStore {
             toasty::stmt::Type::F64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
         ])
         .exec(&mut self.db)
         .await?;
@@ -141,7 +117,7 @@ impl TodoStore {
                 crate::error::UnexpectedValueSnafu {
                     message: "expected i64 for id",
                 },
-            )?;
+            )? as u64;
             let title = record
                 .get(1)
                 .and_then(|v| v.as_str())
@@ -176,9 +152,10 @@ impl TodoStore {
                     message: "expected string for updated_at",
                 })?
                 .parse::<jiff::Timestamp>()?;
+            let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
 
             tasks.push(Task {
-                id: TaskId(id as u64),
+                id,
                 title,
                 description,
                 branch_name,
@@ -189,6 +166,9 @@ impl TodoStore {
                 urgency_factor,
                 created_at,
                 updated_at,
+                parent_id,
+                subtasks: Deferred::default(),
+                parent: Deferred::default(),
             });
         }
 
@@ -342,6 +322,30 @@ mod tests {
             reloaded.created_at, original_created_at,
             "created_at should not be mutable"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_create_task_with_parent() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let parent = storage
+            .create_task(Task::create().title("Parent task".to_string()))
+            .await?;
+
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Child task".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        assert_eq!(child.parent_id, Some(parent.id));
+
+        let fetched = storage.get_task(child.id).await?;
+        assert_eq!(fetched.parent_id, Some(parent.id));
 
         Ok(())
     }

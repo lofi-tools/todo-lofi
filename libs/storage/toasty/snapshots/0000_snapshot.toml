@@ -50,27 +50,41 @@ nullable = true
 
 [[schema.tables.columns]]
 id = { table = 0, index = 6 }
+name = "deadline"
+ty = "I64"
+storage_ty = { Integer = 4 }
+nullable = true
+
+[[schema.tables.columns]]
+id = { table = 0, index = 7 }
 name = "importance_factor"
 ty = "F64"
 storage_ty = { Float = 8 }
 
 [[schema.tables.columns]]
-id = { table = 0, index = 7 }
+id = { table = 0, index = 8 }
 name = "urgency_factor"
 ty = "F64"
 storage_ty = { Float = 8 }
 
 [[schema.tables.columns]]
-id = { table = 0, index = 8 }
+id = { table = 0, index = 9 }
 name = "created_at"
 ty = "String"
 storage_ty = "Text"
 
 [[schema.tables.columns]]
-id = { table = 0, index = 9 }
+id = { table = 0, index = 10 }
 name = "updated_at"
 ty = "String"
 storage_ty = "Text"
+
+[[schema.tables.columns]]
+id = { table = 0, index = 11 }
+name = "parent_id"
+ty = "I64"
+storage_ty = { Integer = 4 }
+nullable = true
 
 [[schema.tables.indices]]
 id = { table = 0, index = 0 }
@@ -79,3 +93,9 @@ on = 0
 columns = [{ column = { table = 0, index = 0 }, op = "Eq", scope = "Partition" }]
 unique = true
 primary_key = true
+
+[[schema.tables.indices]]
+id = { table = 0, index = 1 }
+name = "index_tasks_by_parent_id"
+on = 0
+columns = [{ column = { table = 0, index = 11 }, op = "Eq", scope = "Partition" }]
