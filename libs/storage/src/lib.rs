@@ -1,7 +1,4 @@
-use sha2::{Digest, Sha256};
 use snafu::ResultExt;
-use std::collections::HashMap;
-use toasty::schema::db::Migration;
 use toasty_driver_turso::Turso;
 
 pub mod error;
@@ -10,7 +7,8 @@ pub mod task;
 pub mod tracing_setup;
 
 pub mod prelude {
-    pub use crate::error::{Error, Result};
+    pub use crate::error::{self, QueryErr, Result, StorageSetupErr};
+    pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::task::{BlockerRef, Task};
     pub use crate::{StorageConfig, TodoStore};
 }
@@ -30,31 +28,30 @@ pub struct TodoStore {
 }
 impl TodoStore {
     #[fastrace::trace(properties = { "config": "{config}" })]
-    pub async fn new(config: &StorageConfig) -> crate::error::Result<Self> {
-        crate::tracing_setup::init_tracing();
+    pub async fn new(config: &StorageConfig) -> Result<Self, StorageSetupErr> {
+        let driver = Turso::new(&config.db_uri).context(error::TursoDriverSnafu)?;
 
-        use snafu::ResultExt;
-        let driver = Turso::new(&config.db_uri).context(crate::error::TursoDriverSnafu)?;
-
-        let mut db = toasty::Db::builder()
+        let db = toasty::Db::builder()
             .models(toasty::models!(task::Task))
             .build(driver)
             .await
-            .context(crate::error::DbBuildSnafu)?;
+            .context(error::DbBuildSnafu)?;
 
-        Self::apply_pending_migrations(&mut db).await?;
+        let mut store = Self { db };
+        store.apply_pending_migrations().await?;
 
         tracing::info!("TodoStore initialized");
-        Ok(Self { db })
+        Ok(store)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::prelude::*;
     use crate::{StorageConfig, TodoStore};
     impl TodoStore {
         #[cfg(test)]
-        pub async fn for_test() -> crate::error::Result<Self> {
+        pub async fn for_test() -> Result<Self, StorageSetupErr> {
             let config = StorageConfig {
                 db_uri: "turso::memory:".to_string(),
             };
