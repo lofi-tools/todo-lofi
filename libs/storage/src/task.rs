@@ -44,6 +44,24 @@ pub struct BlockerRef {
     pub id: Option<String>,
 }
 
+impl Task {
+    /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
+    ///
+    /// `now_secs` is unix timestamp in seconds. When the deadline has passed,
+    /// the denominator is capped at 1.0, bounding the score at
+    /// `importance_factor * 86400.0`.
+    pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
+        let deadline_factor = match self.deadline {
+            None => 1.0,
+            Some(dl) => {
+                let diff = dl as f64 - now_secs as f64;
+                86400.0_f64 / diff.max(1.0)
+            }
+        };
+        self.importance_factor * deadline_factor
+    }
+}
+
 impl TodoStore {
     #[fastrace::trace]
     pub async fn create_task(&mut self, create: <Task as Model>::Create) -> crate::Result<Task> {
@@ -346,6 +364,48 @@ mod tests {
 
         let fetched = storage.get_task(child.id).await?;
         assert_eq!(fetched.parent_id, Some(parent.id));
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_priority_score_over_time() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let start = tokio::time::Instant::now();
+        let start_timestamp = start.elapsed().as_secs();
+
+        let task = storage
+            .create_task(
+                Task::create()
+                    .title("Deadline task".to_string())
+                    .importance_factor(2.0)
+                    .deadline(Some(start_timestamp + 3600)),
+            )
+            .await?;
+
+        let score_early = task.compute_priority_score(start_timestamp);
+
+        tokio::time::advance(Duration::from_secs(59 * 60)).await;
+        let score_closer = task.compute_priority_score(start.elapsed().as_secs());
+        assert!(score_closer > score_early);
+
+        tokio::time::advance(Duration::from_secs(2 * 60)).await;
+        let prio_score_after = task.compute_priority_score(start.elapsed().as_secs());
+        let max_score = task.importance_factor * 86400.0;
+        assert!(
+            prio_score_after <= max_score,
+            "past-deadline score {prio_score_after} should be <= {max_score}"
+        );
+
+        let no_deadline = storage
+            .create_task(
+                Task::create()
+                    .title("No deadline".to_string())
+                    .importance_factor(3.0),
+            )
+            .await?;
+        assert_eq!(no_deadline.compute_priority_score(start_timestamp), 3.0);
 
         Ok(())
     }
