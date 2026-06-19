@@ -130,9 +130,9 @@ pub mod ui_parts {
                     }
                 }
             }
-            fn toggle_task(&mut self, index: usize, cx: &mut Context<Self>) -> anyhow::Result<()> {
+            fn toggle_task(&mut self, id: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
                 let task_store = self.task_store.read(cx);
-                task_store.toggle_task(index)?;
+                task_store.toggle_task(id)?;
                 Ok(())
             }
         }
@@ -282,8 +282,9 @@ pub mod ui_parts {
                                                 .checked(is_completed)
                                                 .with_size(Pixels::from(22.))
                                                 .on_click(move |_, _, cx| {
+                                                    let task_id = task_id.clone();
                                                     view_toggle.update(cx, |this, cx| {
-                                                        let _ = this.toggle_task(i, cx);
+                                                        let _ = this.toggle_task(&task_id, cx);
                                                         cx.notify();
                                                     });
                                                 }),

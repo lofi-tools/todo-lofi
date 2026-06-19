@@ -68,13 +68,13 @@ impl TaskStore {
         tasks.insert(idx, task);
         Ok(())
     }
-    pub fn toggle_task(&self, index: usize) -> anyhow::Result<()> {
+    pub fn toggle_task(&self, id: &str) -> anyhow::Result<()> {
         let mut tasks = self
             .tasks
             .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock tasks: {}", e))?;
 
-        if let Some(task) = tasks.get_mut(index) {
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
             task.completed = !task.completed;
         }
 
