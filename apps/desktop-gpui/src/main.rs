@@ -243,21 +243,79 @@ pub mod ui_parts {
                     ))
                     .v_flex()
                     .relative()
+                    .child({
+                        let is_editing = self.editing_index == Some(0);
+                        let view_insert = view.clone();
+                        div()
+                            .group("plus-row")
+                            .h_flex()
+                            .items_center()
+                            .relative()
+                            .when(is_editing, |this| this.gap_4())
+                            .when(!is_editing, |this| {
+                                this.h(px(12.))
+                                    .mt(-px(6.))
+                                    .mb(-px(6.))
+                            })
+                            .child(
+                                div()
+                                    .w_8()
+                                    .h_flex()
+                                    .justify_center()
+                                    .when(!is_editing, |this| {
+                                        this.opacity(0.0)
+                                            .group_hover("plus-row", |s| s.opacity(1.0))
+                                    })
+                                    .child(
+                                        Button::new("insert-0")
+                                            .ghost()
+                                            .p_0()
+                                            .size_6()
+                                            .label("+")
+                                            .on_click(move |_, window, cx| {
+                                                view_insert.update(cx, |this, cx| {
+                                                    this.editing_index = Some(0);
+                                                    this.input_state.update(
+                                                        cx,
+                                                        |state, cx| {
+                                                            state.set_value("", window, cx);
+                                                            state.focus(window, cx);
+                                                        },
+                                                    );
+                                                    cx.notify();
+                                                });
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .when(is_editing, |this| {
+                                        this.child(
+                                            Input::new(&self.input_state)
+                                                .cleanable(true),
+                                        )
+                                    })
+                                    .when(!is_editing, |this| {
+                                        this.opacity(0.0)
+                                            .group_hover("plus-row", |s| s.opacity(1.0))
+                                            .h_px()
+                                            .bg(cx.theme().border.opacity(0.3))
+                                    }),
+                            )
+                    })
                     .children((0..=filtered_tasks.len()).flat_map(|i| {
                         let task = filtered_tasks.get(i);
 
-                        let should_show = if selected_tag.is_some() {
-                            task.is_some() || i == filtered_tasks.len()
-                        } else {
-                            true
-                        };
+                        let should_show = task.is_some();
 
                         if !should_show {
                             return vec![].into_iter();
                         }
 
                         let view_insert = view.clone();
-                        let is_editing = self.editing_index == Some(i);
+                        let insert_at = i + 1;
+                        let is_editing = self.editing_index == Some(insert_at);
 
                         let plus_row = div()
                             .group("plus-row")
@@ -286,9 +344,9 @@ pub mod ui_parts {
                                             .size_6()
                                             .label("+")
                                             .on_click(move |_, window, cx| {
-                                                println!("insert-{}", i);
+                                                println!("insert-{}", insert_at);
                                                 view_insert.update(cx, |this, cx| {
-                                                    this.editing_index = Some(i);
+                                                    this.editing_index = Some(insert_at);
                                                     this.input_state.update(
                                                         cx,
                                                         |state, cx| {
@@ -320,7 +378,7 @@ pub mod ui_parts {
                                     }),
                             );
 
-                        let mut elements: Vec<_> = vec![plus_row.into_any_element()];
+                        let mut elements: Vec<_> = Vec::new();
 
                         if let Some(task) = task {
                             let task_id = task.id;
@@ -383,6 +441,8 @@ pub mod ui_parts {
 
                             elements.push(task_item.into_any_element());
                         }
+
+                        elements.push(plus_row.into_any_element());
 
                         elements.into_iter()
                     }))
@@ -454,7 +514,7 @@ impl Render for TodoApp {
                             .gap_1()
                             .w_full()
                             .child(div().v_flex().gap_1().child(
-                                div().text_3xl().font_bold().ml(px(16.)).child(
+                                div().text_3xl().font_bold().ml(px(16.)).mb(px(16.)).child(
                                     match selected_tag {
                                         Some(tag) => format!("Tasks: {}", tag),
                                         None => "All Tasks".to_string(),
