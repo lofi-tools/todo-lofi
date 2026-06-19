@@ -45,6 +45,7 @@ impl TodoApp {
             selected_tag: selected_tag.clone(),
             task_store: task_store.clone(),
             editing_index: None,
+            excluded_tags: HashSet::new(),
         });
 
         Self {

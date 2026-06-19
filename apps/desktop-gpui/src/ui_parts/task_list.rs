@@ -175,6 +175,7 @@ pub struct TaskList {
     pub task_store: Entity<TaskStore>,
     pub editing_index: Option<usize>,
     pub input_state: Entity<InputState>,
+    pub excluded_tags: HashSet<String>,
 }
 
 impl TaskList {
@@ -223,6 +224,18 @@ impl Render for TaskList {
         let selected_tag = self.selected_tag.read(cx);
         let task_store = self.task_store.read(cx);
 
+        self.excluded_tags = match selected_tag.as_deref() {
+            Some(tag) => {
+                let mut excluded = HashSet::new();
+                excluded.insert(tag.to_string());
+                if let Ok(ancestors) = task_store.ancestors_of(tag) {
+                    excluded.extend(ancestors);
+                }
+                excluded
+            }
+            None => HashSet::new(),
+        };
+
         let filtered_tasks = match selected_tag.as_deref() {
             Some(tag) => task_store.tasks_for_tag(tag).unwrap_or_default(),
             None => task_store.tasks().unwrap_or_default(),
@@ -255,13 +268,19 @@ impl Render for TaskList {
                 let mut elements: Vec<_> = Vec::new();
 
                 if let Some(task) = task {
+                    let display_tags: Vec<String> = task
+                        .tags
+                        .iter()
+                        .filter(|t| !self.excluded_tags.contains(t.as_str()))
+                        .cloned()
+                        .collect();
                     elements.push(
                         TaskItemRow::new(
                             view.clone(),
                             task.id,
                             task.title.clone(),
                             task.completed,
-                            task.tags.clone(),
+                            display_tags,
                         )
                         .into_any_element(),
                     );
