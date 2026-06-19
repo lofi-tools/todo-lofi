@@ -13,10 +13,13 @@ CREATE TABLE tasks (
     "parent_id" INTEGER REFERENCES tasks("id")
 );
 
-CREATE TRIGGER protect_created_at
-BEFORE UPDATE OF created_at ON tasks
-BEGIN
-    SELECT RAISE(ABORT, 'The created_at column cannot be updated');
-END;
+-- #[toasty::breakpoint]
+-- TODO: triggers not yet supported on Turso
+-- CREATE TRIGGER protect_created_at
+-- BEFORE UPDATE OF created_at ON tasks
+-- BEGIN
+--     SELECT RAISE(ABORT, 'The created_at column cannot be updated');
+-- END;
 
+-- #[toasty::breakpoint]
 CREATE INDEX index_tasks_by_parent_id ON tasks("parent_id");

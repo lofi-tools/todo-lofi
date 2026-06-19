@@ -203,8 +203,9 @@ impl TodoStore {
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use crate::prelude::*;
     use jiff::Timestamp;
+
+    use crate::prelude::*;
     use std::time::Duration;
 
     #[tokio::test]

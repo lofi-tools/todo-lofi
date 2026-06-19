@@ -51,37 +51,13 @@ impl TodoStore {
 mod tests {
     use crate::{StorageConfig, TodoStore};
 
-    const TAG_DAG_DDL: &[&str] = &[
-        r#"CREATE TABLE IF NOT EXISTS tag_implications (
-            "implier_id" INTEGER NOT NULL REFERENCES tags("id") ON DELETE CASCADE,
-            "implied_id" INTEGER NOT NULL REFERENCES tags("id") ON DELETE CASCADE,
-            PRIMARY KEY ("implier_id", "implied_id")
-        )"#,
-        r#"CREATE INDEX IF NOT EXISTS idx_tag_implications_implier ON tag_implications("implier_id")"#,
-        r#"CREATE INDEX IF NOT EXISTS idx_tag_implications_implied ON tag_implications("implied_id")"#,
-        r#"CREATE TABLE IF NOT EXISTS direct_task_tags (
-            "task_id" INTEGER NOT NULL REFERENCES tasks("id") ON DELETE CASCADE,
-            "tag_id" INTEGER NOT NULL REFERENCES tags("id") ON DELETE CASCADE,
-            PRIMARY KEY ("task_id", "tag_id")
-        )"#,
-    ];
-
     impl TodoStore {
         #[cfg(test)]
         pub async fn for_test() -> Result<Self, crate::StorageSetupErr> {
             let config = StorageConfig {
                 db_uri: "turso::memory:".to_string(),
             };
-            let mut store = Self::new(&config).await?;
-
-            for sql in TAG_DAG_DDL {
-                toasty::sql::statement(sql.to_string())
-                    .exec(&mut store.db)
-                    .await
-                    .map_err(|e| crate::StorageSetupErr::DbBuild { source: e })?;
-            }
-
-            Ok(store)
+            TodoStore::new(&config).await
         }
     }
 }

@@ -66,11 +66,7 @@ impl From<std::time::SystemTimeError> for QueryErr {
 impl From<crate::migrations::MigrationError> for QueryErr {
     fn from(source: crate::migrations::MigrationError) -> Self {
         match source {
-            crate::migrations::MigrationError::ApplyMigration { source, .. }
-            | crate::migrations::MigrationError::DbConnect { source }
-            | crate::migrations::MigrationError::Database { source } => {
-                QueryErr::Database { source }
-            }
+            crate::migrations::MigrationError::Database { source } => QueryErr::Database { source },
             crate::migrations::MigrationError::ChecksumMismatch {
                 name,
                 expected,
