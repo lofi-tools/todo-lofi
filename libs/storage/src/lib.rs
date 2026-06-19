@@ -12,7 +12,7 @@ pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::tag::{Tag, TagId, TagNode};
-    pub use crate::task::{BlockerRef, Task};
+    pub use crate::task::{BlockerRef, Task, TaskWithMeta};
     pub use crate::{StorageConfig, TodoStore};
 }
 pub use prelude::*;

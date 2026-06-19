@@ -39,6 +39,24 @@ pub struct Task {
     pub parent: Deferred<Option<Task>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TaskWithMeta {
+    pub id: u64,
+    pub title: String,
+    pub description: Option<String>,
+    pub branch_name: Option<String>,
+    pub labels: Option<toasty::Json<Vec<String>>>,
+    pub blocked_by: Option<toasty::Json<Vec<BlockerRef>>>,
+    pub deadline: Option<u64>,
+    pub importance_factor: f64,
+    pub urgency_factor: f64,
+    pub created_at: jiff::Timestamp,
+    pub updated_at: jiff::Timestamp,
+    pub parent_id: Option<u64>,
+    pub priority_score: f64,
+    pub inferred_tags: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct BlockerRef {
     pub id: Option<String>,
@@ -46,10 +64,6 @@ pub struct BlockerRef {
 
 impl Task {
     /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
-    ///
-    /// `now_secs` is unix timestamp in seconds. When the deadline has passed,
-    /// the denominator is capped at 1.0, bounding the score at
-    /// `importance_factor * 86400.0`.
     pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
         let deadline_factor = match self.deadline {
             None => 1.0,
@@ -60,6 +74,85 @@ impl Task {
         };
         self.importance_factor * deadline_factor
     }
+}
+
+fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskWithMeta> {
+    let toasty::stmt::Value::Record(record) = record else {
+        unreachable!("raw SQL queries return record rows");
+    };
+
+    let id = record
+        .first()
+        .and_then(|v| v.to_i64())
+        .context(crate::error::UnexpectedValueSnafu {
+            message: "expected i64 for id",
+        })? as u64;
+    let title = record
+        .get(1)
+        .and_then(|v| v.as_str())
+        .context(crate::error::UnexpectedValueSnafu {
+            message: "expected string for title",
+        })?
+        .to_owned();
+    let description = record.get(2).and_then(|v| v.as_str()).map(str::to_owned);
+    let branch_name = record.get(3).and_then(|v| v.as_str()).map(str::to_owned);
+    let labels = record
+        .get(4)
+        .and_then(|v| v.as_str())
+        .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
+    let blocked_by = record
+        .get(5)
+        .and_then(|v| v.as_str())
+        .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
+    let deadline = record.get(6).and_then(|v| v.to_u64());
+    let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
+    let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
+    let created_at = record
+        .get(9)
+        .and_then(|v| v.as_str())
+        .context(crate::error::UnexpectedValueSnafu {
+            message: "expected string for created_at",
+        })?
+        .parse::<jiff::Timestamp>()?;
+    let updated_at = record
+        .get(10)
+        .and_then(|v| v.as_str())
+        .context(crate::error::UnexpectedValueSnafu {
+            message: "expected string for updated_at",
+        })?
+        .parse::<jiff::Timestamp>()?;
+    let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let deadline_factor = match deadline {
+        None => 1.0,
+        Some(dl) => {
+            let diff = dl as f64 - now_secs as f64;
+            86400.0_f64 / diff.max(1.0)
+        }
+    };
+    let priority_score = importance_factor * deadline_factor;
+
+    Ok(TaskWithMeta {
+        id,
+        title,
+        description,
+        branch_name,
+        labels,
+        blocked_by,
+        deadline,
+        importance_factor,
+        urgency_factor,
+        created_at,
+        updated_at,
+        parent_id,
+        priority_score,
+        inferred_tags: Vec::new(),
+    })
 }
 
 impl TodoStore {
@@ -100,7 +193,7 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
-    pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<Task>> {
+    pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let rows = toasty::sql::query(
             r#"
             SELECT
@@ -136,74 +229,14 @@ impl TodoStore {
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            let toasty::stmt::Value::Record(record) = row else {
-                unreachable!("raw SQL queries return record rows");
-            };
-
-            let id = record.first().and_then(|v| v.to_i64()).context(
-                crate::error::UnexpectedValueSnafu {
-                    message: "expected i64 for id",
-                },
-            )? as u64;
-            let title = record
-                .get(1)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for title",
-                })?
-                .to_owned();
-            let description = record.get(2).and_then(|v| v.as_str()).map(str::to_owned);
-            let branch_name = record.get(3).and_then(|v| v.as_str()).map(str::to_owned);
-            let labels = record
-                .get(4)
-                .and_then(|v| v.as_str())
-                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
-            let blocked_by = record
-                .get(5)
-                .and_then(|v| v.as_str())
-                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
-            let deadline = record.get(6).and_then(|v| v.to_u64());
-            let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
-            let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
-            let created_at = record
-                .get(9)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for created_at",
-                })?
-                .parse::<jiff::Timestamp>()?;
-            let updated_at = record
-                .get(10)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for updated_at",
-                })?
-                .parse::<jiff::Timestamp>()?;
-            let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
-
-            tasks.push(Task {
-                id,
-                title,
-                description,
-                branch_name,
-                labels,
-                blocked_by,
-                deadline,
-                importance_factor,
-                urgency_factor,
-                created_at,
-                updated_at,
-                parent_id,
-                subtasks: Deferred::default(),
-                parent: Deferred::default(),
-            });
+            tasks.push(parse_task_from_row(&row)?);
         }
 
         Ok(tasks)
     }
 
     #[fastrace::trace]
-    pub async fn list_tasks_by_tag(&mut self, tag_id: u64) -> crate::QueryResult<Vec<Task>> {
+    pub async fn list_tasks_by_tag(&mut self, tag_id: u64) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let mut tag_ids = vec![tag_id];
         let descendants = self.get_all_descendants(tag_id).await?;
         tag_ids.extend(descendants.into_iter().map(|t| t.id));
@@ -250,67 +283,7 @@ impl TodoStore {
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            let toasty::stmt::Value::Record(record) = row else {
-                unreachable!();
-            };
-
-            let id = record.first().and_then(|v| v.to_i64()).context(
-                crate::error::UnexpectedValueSnafu {
-                    message: "expected i64 for id",
-                },
-            )? as u64;
-            let title = record
-                .get(1)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for title",
-                })?
-                .to_owned();
-            let description = record.get(2).and_then(|v| v.as_str()).map(str::to_owned);
-            let branch_name = record.get(3).and_then(|v| v.as_str()).map(str::to_owned);
-            let labels = record
-                .get(4)
-                .and_then(|v| v.as_str())
-                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
-            let blocked_by = record
-                .get(5)
-                .and_then(|v| v.as_str())
-                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
-            let deadline = record.get(6).and_then(|v| v.to_u64());
-            let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
-            let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
-            let created_at = record
-                .get(9)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for created_at",
-                })?
-                .parse::<jiff::Timestamp>()?;
-            let updated_at = record
-                .get(10)
-                .and_then(|v| v.as_str())
-                .context(crate::error::UnexpectedValueSnafu {
-                    message: "expected string for updated_at",
-                })?
-                .parse::<jiff::Timestamp>()?;
-            let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
-
-            tasks.push(Task {
-                id,
-                title,
-                description,
-                branch_name,
-                labels,
-                blocked_by,
-                deadline,
-                importance_factor,
-                urgency_factor,
-                created_at,
-                updated_at,
-                parent_id,
-                subtasks: Deferred::default(),
-                parent: Deferred::default(),
-            });
+            tasks.push(parse_task_from_row(&row)?);
         }
 
         Ok(tasks)
