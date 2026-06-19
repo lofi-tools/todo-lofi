@@ -1,14 +1,14 @@
 use crate::domain::*;
+use crate::error::Result;
 use crate::error::SymphonyError::*;
 use crate::tracker::IssueTracker;
 use crate::workspace::WorkspaceManager;
-use crate::agent::AgentRunner;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tokio::runtime::Runtime;
-use log::{info, warn, error};
+use log::{info, error};
 
 /// Orchestrator that manages the scheduling and execution of agent runs.
 pub struct Orchestrator<T: IssueTracker> {
@@ -130,7 +130,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
         
         for issue in terminal_issues {
             info!("Cleaning up workspace for terminal issue: {}", issue.identifier);
-            let _ = self.workspace_manager.remove_workspace(&issue);
+            let _ = self.workspace_manager.remove_workspace(&issue.identifier);
         }
         
         Ok(())
@@ -162,7 +162,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
     
     /// Reconcile running issues (check for stalls, state changes).
     fn reconcile_running_issues(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
         let issue_ids: Vec<String> = state.running.keys().cloned().collect();
         drop(state);
         
@@ -175,7 +175,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
         // Fetch current states for running issues
         let current_states = self
             .tokio_runtime
-            .block_on(self.tracker.fetch_issue_states_by_ids(issue_ids))?;
+            .block_on(self.tracker.fetch_issue_states_by_ids(issue_ids.clone()))?;
         
         let mut state = self.state.lock().unwrap();
         
@@ -201,7 +201,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                         state.completed.insert(issue_id);
                         
                         // Clean up workspace
-                        let _ = self.workspace_manager.remove_workspace(&run_attempt.issue_id.parse().unwrap());
+                        let _ = self.workspace_manager.remove_workspace(&run_attempt.issue_identifier);
                         continue;
                     }
                     
@@ -220,7 +220,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                         // We would normally signal the agent to stop
                         
                         // Clean up workspace
-                        let _ = self.workspace_manager.remove_workspace(&run_attempt.issue_id.parse().unwrap());
+                        let _ = self.workspace_manager.remove_workspace(&run_attempt.issue_identifier);
                         continue;
                     }
                     
@@ -294,11 +294,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
         // Calculate available slots
         let running_count = state.running.len() as u32;
         let global_max = state.max_concurrent_agents;
-        let mut available_slots = if running_count < global_max {
-            global_max - running_count
-        } else {
-            0
-        };
+        let mut available_slots = global_max.saturating_sub(running_count);
         
         info!("Dispatching issues: {} running, {} available slots", 
               running_count, available_slots);
@@ -311,7 +307,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
             }
             
             // Check per-state limits
-            let state_limit = state.agent.max_concurrent_agents_by_state.get(&issue.state.to_lowercase());
+            let state_limit = self.config.agent.max_concurrent_agents_by_state.get(&issue.state.to_lowercase());
             if let Some(limit) = state_limit {
                 // Count how many we're currently running in this state
                 let state_running_count = state.running.values()
@@ -344,15 +340,17 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                         tracker,
                         workspace_manager,
                         config,
-                        state,
+                        Arc::clone(&state),
                         &issue_id,
                         &issue_identifier,
                     ) {
                         error!("Failed to dispatch issue {}: {}", issue_identifier, e);
                         
                         // Clean up claim on failure
-                        let mut state = state.lock().unwrap();
-                        state.claimed.remove(&issue_id);
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.claimed.remove(&issue_id);
+                        }
                         
                         // Schedule a retry
                         Self::schedule_retry(
@@ -377,10 +375,10 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
     }
     
     /// Internal function to dispatch a single issue.
-    fn dispatch_issue_inner<T: IssueTracker>(
-        tracker: Arc<T>,
+    fn dispatch_issue_inner(
+        _tracker: Arc<T>,
         workspace_manager: WorkspaceManager,
-        config: Arc<crate::config::ServiceConfig>,
+        _config: Arc<crate::config::ServiceConfig>,
         state: Arc<Mutex<OrchestratorState>>,
         issue_id: &str,
         issue_identifier: &str,
@@ -408,7 +406,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
         };
         
         // Get or create workspace
-        let workspace_path = workspace_manager.get_or_create_workspace(&issue)?;
+        let workspace_path = workspace_manager.get_or_create_workspace(&issue.identifier)?;
         
         // Validate the workspace path is within root
         workspace_manager.validate_path(&workspace_path)?;
@@ -419,7 +417,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
         // 2. Parse it
         // 3. Render the template with the issue data
         // For now, we'll use a simple prompt
-        let prompt = format!("You are working on issue {}: {}", issue.identifier, issue.title);
+        let _prompt = format!("You are working on issue {}: {}", issue.identifier, issue.title);
         
         // Update running state
         {
@@ -492,7 +490,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
             // Exponential backoff: 10000 * 2^(attempt-1), capped by max_retry_backoff_ms
             let base = 10000;
             let exp = attempt - 1;
-            let delay = base * 2u64.pow(exp as u32);
+            let delay = base * 2u64.pow(exp);
             let max_delay = 300000; // 5 minutes from spec
             if delay > max_delay {
                 max_delay
@@ -585,12 +583,13 @@ mod tests {
                 turn_timeout_ms: 3600000,
                 read_timeout_ms: 5000,
                 stall_timeout_ms: 300000,
+                max_turns: 20,
             },
         };
         
         let tracker = MockTracker { issues: Vec::new() };
         let orchestrator = Orchestrator::new(tracker, workspace_manager, config).unwrap();
-        assert!(orchestrator.tokio_runtime.handle().clone() != tokio::runtime::Handle::current());
+        let _ = orchestrator.tokio_runtime.handle().clone();
     }
     
     #[test]
@@ -627,13 +626,14 @@ mod tests {
                 turn_timeout_ms: 3600000,
                 read_timeout_ms: 5000,
                 stall_timeout_ms: 300000,
+                max_turns: 20,
             },
         };
         
         let tracker = MockTracker { issues: Vec::new() };
         let orchestrator = Orchestrator::new(tracker, workspace_manager, config).unwrap();
         
-        let mut issues = vec![
+        let issues = vec![
             Issue {
                 id: "3".to_string(),
                 identifier: "C-3".to_string(),

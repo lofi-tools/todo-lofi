@@ -1,5 +1,4 @@
 use snafu::Snafu;
-use std::error::Error;
 
 #[derive(Debug, Snafu)]
 pub enum SymphonyError {

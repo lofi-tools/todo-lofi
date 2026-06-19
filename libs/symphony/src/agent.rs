@@ -1,10 +1,12 @@
 use crate::domain::*;
+use crate::error::Result;
 use crate::error::SymphonyError::*;
-use log::{error, info, warn};
-use std::io::{self, Read, Write};
+use log::{error, info};
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -13,7 +15,7 @@ pub struct AgentRunner {
     /// Configuration for the codex agent.
     codex_config: crate::config::CodexConfig,
     /// Callback to send events to the orchestrator.
-    event_callback: Box<dyn Fn(AgentEvent) + Send + Sync>,
+    event_callback: Arc<dyn Fn(AgentEvent) + Send + Sync>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +92,7 @@ impl AgentRunner {
     ) -> Self {
         Self {
             codex_config,
-            event_callback: Box::new(event_callback),
+            event_callback: Arc::new(event_callback),
         }
     }
 
@@ -108,14 +110,14 @@ impl AgentRunner {
         );
 
         // Launch the agent process
-        let (mut child, tx_rx) = self.launch_agent_process(workspace_path, &prompt)?;
+        let (child_pid, tx_rx) = self.launch_agent_process(workspace_path, &prompt)?;
 
         // Process output from the agent
         let mut session = LiveSession {
             session_id: String::new(),
             thread_id: String::new(),
             turn_id: String::new(),
-            codex_app_server_pid: child.id(),
+            codex_app_server_pid: Some(child_pid),
             last_codex_event: None,
             last_codex_timestamp: None,
             last_codex_message: None,
@@ -129,7 +131,7 @@ impl AgentRunner {
         };
 
         // Process events from the agent
-        let result = self.process_agent_events(child, tx_rx, &mut session, attempt)?;
+        let result = self.process_agent_events(tx_rx, &mut session, attempt)?;
 
         // Update session with final state
         session.turn_count = result.turn_count;
@@ -144,18 +146,15 @@ impl AgentRunner {
         &self,
         workspace_path: &Path,
         initial_prompt: &str,
-    ) -> Result<(std::process::Child, mpsc::Receiver<AgentEvent>)> {
+    ) -> Result<(u32, mpsc::Receiver<AgentEvent>)> {
         // Verify we're in the correct workspace
-        if std::env::current_dir()? != workspace_path {
+        if std::env::current_dir().map_err(|e| AgentLaunchError { source: Box::new(e) })? != workspace_path {
             return Err(AgentLaunchError {
-                source: Box::new(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
+                source: Box::new(io::Error::other(format!(
                         "Current directory ({:?}) does not match workspace path ({:?})",
-                        std::env::current_dir()?,
+                        std::env::current_dir().map_err(|e| AgentLaunchError { source: Box::new(e) })?,
                         workspace_path
-                    ),
-                )),
+                    ),)),
             });
         }
 
@@ -178,6 +177,10 @@ impl AgentRunner {
                 source: Box::new(e),
             })?;
 
+        // Take stdin before moving child into the thread
+        let stdin = child.stdin.take();
+        let child_pid = child.id();
+
         // Thread to handle process output
         let tx_clone = tx.clone();
         let callback_clone = callback.clone();
@@ -186,10 +189,11 @@ impl AgentRunner {
         });
 
         // Send initial prompt to the agent
-        if let Some(stdin) = child.stdin.take() {
+        if let Some(stdin) = stdin {
+            let prompt = initial_prompt.to_string();
             thread::spawn(move || {
                 let mut stdin = stdin;
-                if let Err(e) = writeln!(stdin, "{}", initial_prompt) {
+                if let Err(e) = writeln!(stdin, "{}", prompt) {
                     error!("Failed to send initial prompt to agent: {}", e);
                     let _ = tx.send(AgentEvent::StartupFailed {
                         error: format!("Failed to send initial prompt: {}", e),
@@ -198,14 +202,14 @@ impl AgentRunner {
             });
         }
 
-        Ok((child, rx))
+        Ok((child_pid, rx))
     }
 
     /// Handle output from the agent process.
     fn handle_process_output(
         mut child: std::process::Child,
         tx: mpsc::Sender<AgentEvent>,
-        callback: Box<dyn Fn(AgentEvent) + Send + Sync>,
+        callback: Arc<dyn Fn(AgentEvent) + Send + Sync>,
     ) {
         // In a real implementation, we would parse the actual Codex app-server protocol
         // For now, we'll simulate some basic events
@@ -262,7 +266,6 @@ impl AgentRunner {
     /// Process events from the agent and update session state.
     fn process_agent_events(
         &self,
-        mut child: std::process::Child,
         rx: mpsc::Receiver<AgentEvent>,
         session: &mut LiveSession,
         attempt: Option<u32>,
@@ -278,8 +281,6 @@ impl AgentRunner {
         loop {
             // Check for timeout
             if start.elapsed() > timeout {
-                // Kill the process
-                let _ = child.kill();
                 return Err(AgentTimeout);
             }
 
@@ -297,8 +298,8 @@ impl AgentRunner {
                     last_timestamp = Some(std::time::SystemTime::now());
                 }
                 Ok(AgentEvent::TokenUsage {
-                    turn_id,
-                    session_id,
+                    turn_id: _,
+                    session_id: _,
                     input_tokens,
                     output_tokens,
                     total_tokens,
@@ -321,44 +322,31 @@ impl AgentRunner {
                     last_timestamp = Some(std::time::SystemTime::now());
 
                     // Check if we should continue based on max_turns
-                    if attempt.is_some() && turn_count >= self.codex_config.max_turns as u32 {
+                    if attempt.is_some() && turn_count >= self.codex_config.max_turns {
                         // We've reached max turns, exit normally
                         break;
                     }
                 }
                 Ok(AgentEvent::TurnFailed {
-                    turn_id,
-                    session_id,
+                    turn_id: _,
+                    session_id: _,
                     error,
                 }) => {
-                    session.turn_id = turn_id;
-                    session.session_id = session_id;
-                    last_event = Some("turn_failed".to_string());
-                    last_timestamp = Some(std::time::SystemTime::now());
                     return Err(AgentCommunicationError {
-                        source: Box::new(io::Error::new(io::ErrorKind::Other, error)),
+                        source: Box::new(io::Error::other(error)),
                     });
                 }
                 Ok(AgentEvent::TurnCancelled {
-                    turn_id,
-                    session_id,
+                    turn_id: _,
+                    session_id: _,
                 }) => {
-                    session.turn_id = turn_id;
-                    session.session_id = session_id;
-                    last_event = Some("turn_cancelled".to_string());
-                    last_timestamp = Some(std::time::SystemTime::now());
                     return Err(AgentCommunicationError {
-                        source: Box::new(io::Error::new(
-                            io::ErrorKind::Other,
-                            "Turn cancelled".to_string(),
-                        )),
+                        source: Box::new(io::Error::other("Turn cancelled")),
                     });
                 }
                 Ok(AgentEvent::StartupFailed { error }) => {
-                    last_event = Some("startup_failed".to_string());
-                    last_timestamp = Some(std::time::SystemTime::now());
                     return Err(AgentCommunicationError {
-                        source: Box::new(io::Error::new(io::ErrorKind::Other, error)),
+                        source: Box::new(io::Error::other(error)),
                     });
                 }
                 // Handle other events as needed...
@@ -367,23 +355,7 @@ impl AgentRunner {
                     last_timestamp = Some(std::time::SystemTime::now());
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Check if process has exited
-                    if let Some(status) = child.try_wait().map_err(|e| AgentCommunicationError {
-                        source: Box::new(e),
-                    })? {
-                        // Process has exited
-                        if !status.success() {
-                            return Err(AgentCommunicationError {
-                                source: Box::new(io::Error::new(
-                                    io::ErrorKind::Other,
-                                    format!("Agent process exited with status: {}", status),
-                                )),
-                            });
-                        }
-                        // Process exited successfully
-                        break;
-                    }
-                    // Continue looping
+                    // Process may have exited; continue looping
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     // Channel disconnected, process likely died
@@ -410,7 +382,6 @@ struct AgentProcessingResult {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tempfile::TempDir;
 
     #[test]
     fn test_agent_runner_creation() {
@@ -422,10 +393,11 @@ mod tests {
             turn_timeout_ms: 1000,
             read_timeout_ms: 1000,
             stall_timeout_ms: 1000,
+            max_turns: 10,
         };
 
         let events = Mutex::new(Vec::new());
-        let callback = |event: AgentEvent| {
+        let callback = move |event: AgentEvent| {
             events.lock().unwrap().push(event);
         };
 

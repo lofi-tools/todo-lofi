@@ -10056,6 +10056,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "snafu 0.9.1",
+ "tempfile",
  "time",
  "tokio",
  "url",

@@ -1,12 +1,11 @@
 use crate::domain::*;
+use crate::error::Result;
 use crate::error::SymphonyError::*;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::SystemTime;
 use time::OffsetDateTime;
 use url::Url;
-use async_trait::async_trait;
 
 /// Linear API client for fetching issues.
 pub struct LinearTracker {
@@ -110,7 +109,7 @@ impl IssueTracker for LinearTracker {
         
         let project_lookup: serde_json::Value = self
             .client
-            .post(&self.endpoint)
+            .post(self.endpoint.as_str())
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({
@@ -158,7 +157,7 @@ impl IssueTracker for LinearTracker {
             
             let response: serde_json::Value = self
                 .client
-                .post(&self.endpoint)
+                .post(self.endpoint.as_str())
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
                 .json(&serde_json::json!({
@@ -356,12 +355,12 @@ fn parse_issue_node(node: &serde_json::Value) -> Result<Issue> {
     let created_at = node.get("createdAt")
         .and_then(|v| v.as_str())
         .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
-        .map(|dt| SystemTime::from(dt));
+        .map(SystemTime::from);
     
     let updated_at = node.get("updatedAt")
         .and_then(|v| v.as_str())
         .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
-        .map(|dt| SystemTime::from(dt));
+        .map(SystemTime::from);
     
     Ok(Issue {
         id,
@@ -386,8 +385,7 @@ fn parse_issue_node(node: &serde_json::Value) -> Result<Issue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    
+
     #[test]
     fn test_parse_issue_node() {
         let json = serde_json::json!({

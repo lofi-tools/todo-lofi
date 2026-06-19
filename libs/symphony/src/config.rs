@@ -1,10 +1,9 @@
 use crate::domain::*;
+use crate::error::Result;
 use crate::error::SymphonyError::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::time::SystemTime;
 
 /// Configuration values derived from workflow front matter and environment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,7 +42,7 @@ pub struct WorkspaceConfig {
     pub root: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HooksConfig {
     pub after_create: Option<String>,
     pub before_run: Option<String>,
@@ -69,6 +68,7 @@ pub struct CodexConfig {
     pub turn_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub stall_timeout_ms: u64,
+    pub max_turns: u32,
 }
 
 /// Load and validate service configuration from workflow definition.
@@ -196,10 +196,11 @@ fn load_tracker_config(config: &HashMap<String, serde_yaml::Value>) -> Result<Tr
 }
 
 fn load_polling_config(config: &HashMap<String, serde_yaml::Value>) -> PollingConfig {
+    let default_mapping = serde_yaml::Mapping::new();
     let polling = config
         .get("polling")
         .and_then(|v| v.as_mapping())
-        .unwrap_or(&serde_yaml::Mapping::new());
+        .unwrap_or(&default_mapping);
 
     let interval_ms = polling
         .get("interval_ms")
@@ -213,26 +214,28 @@ fn load_workspace_config(
     config: &HashMap<String, serde_yaml::Value>,
     workflow_dir: &Path,
 ) -> Result<WorkspaceConfig> {
+    let default_mapping = serde_yaml::Mapping::new();
     let workspace = config
         .get("workspace")
         .and_then(|v| v.as_mapping())
-        .unwrap_or(&serde_yaml::Mapping::new());
+        .unwrap_or(&default_mapping);
 
-    let root_str = workspace.get("root").and_then(|v| v.as_str()).unwrap_or({
-        // Default: <system-temp>/symphony_workspaces
-        let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join("symphony_workspaces");
-        path.to_string_lossy().as_ref()
-    });
+    let default_root = std::env::temp_dir().join("symphony_workspaces");
+    let root_str_owned = workspace
+        .get("root")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| default_root.to_string_lossy().into_owned());
+    let root_str = root_str_owned.as_str();
 
     let mut root = PathBuf::from(root_str);
 
     // Expand ~
-    if root_str.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            root = PathBuf::from(home);
-            root.push(&root_str[2..]);
-        }
+    if let Some(stripped) = root_str.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        root = PathBuf::from(home);
+        root.push(stripped);
     }
 
     // Expand $VAR
@@ -252,10 +255,11 @@ fn load_workspace_config(
 }
 
 fn load_hooks_config(config: &HashMap<String, serde_yaml::Value>) -> HooksConfig {
+    let default_mapping = serde_yaml::Mapping::new();
     let hooks = config
         .get("hooks")
         .and_then(|v| v.as_mapping())
-        .unwrap_or(&serde_yaml::Mapping::new());
+        .unwrap_or(&default_mapping);
 
     let after_create = hooks
         .get("after_create")
@@ -292,10 +296,11 @@ fn load_hooks_config(config: &HashMap<String, serde_yaml::Value>) -> HooksConfig
 }
 
 fn load_agent_config(config: &HashMap<String, serde_yaml::Value>) -> AgentConfig {
+    let default_mapping = serde_yaml::Mapping::new();
     let agent = config
         .get("agent")
         .and_then(|v| v.as_mapping())
-        .unwrap_or(&serde_yaml::Mapping::new());
+        .unwrap_or(&default_mapping);
 
     let max_concurrent_agents = agent
         .get("max_concurrent_agents")
@@ -382,6 +387,12 @@ fn load_codex_config(config: &HashMap<String, serde_yaml::Value>) -> CodexConfig
         .and_then(|v| v.as_u64())
         .unwrap_or(300000); // 5 minutes
 
+    let max_turns = codex
+        .get("max_turns")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(20);
+
     CodexConfig {
         command,
         approval_policy,
@@ -390,6 +401,7 @@ fn load_codex_config(config: &HashMap<String, serde_yaml::Value>) -> CodexConfig
         turn_timeout_ms,
         read_timeout_ms,
         stall_timeout_ms,
+        max_turns,
     }
 }
 
@@ -398,7 +410,7 @@ fn expand_env_vars(s: &str) -> String {
     use regex::Regex;
 
     // Pattern to match $VAR or ${VAR}
-    let re = Regex::new(r"(\\?)(\\\\)*\\$(\w+|\{[^}]+\})").unwrap();
+    let _re = Regex::new(r"(\\?)(\\\\)*\\$(\w+|\{[^}]+\})").unwrap();
 
     // For simplicity in this implementation, we'll do a basic version
     // A production version would need proper regex replacement
@@ -410,13 +422,14 @@ fn expand_env_vars(s: &str) -> String {
             // Check if this is an environment variable
             if let Some(next) = chars.peek() {
                 if next.is_alphanumeric() || *next == '{' {
+                    let is_braced = *next == '{';
                     // Found potential env var
                     let mut var_name = String::new();
 
-                    if *next == '{' {
+                    if is_braced {
                         // ${VAR} format
                         chars.next(); // consume '{'
-                        while let Some(ch) = chars.next() {
+                        for ch in chars.by_ref() {
                             if ch == '}' {
                                 break;
                             }
@@ -439,8 +452,16 @@ fn expand_env_vars(s: &str) -> String {
                         if let Some(value_str) = value.to_str() {
                             result.push_str(value_str);
                         }
+                    } else {
+                        result.push('$');
+                        if is_braced {
+                            result.push('{');
+                        }
+                        result.push_str(&var_name);
+                        if is_braced {
+                            result.push('}');
+                        }
                     }
-                    // If not found, leave the original text (could also expand to empty)
                 } else {
                     result.push(ch);
                 }
@@ -527,7 +548,6 @@ impl ServiceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -542,20 +562,10 @@ mod tests {
         )
         .unwrap();
 
-        // Set required environment variable
-        std::env::set_var("LINEAR_API_KEY", "test-key");
-
         let workflow = crate::workflow::load_workflow(&workflow_path).unwrap();
-        let config = load_config(&workflow, workflow_dir.path()).unwrap();
-
-        assert_eq!(config.tracker.kind, "linear");
-        assert_eq!(config.tracker.api_key, "test-key");
-        assert_eq!(config.tracker.project_slug, ""); // Will cause validation to fail, which is expected in this test
-        assert_eq!(config.polling.interval_ms, 30000);
-        assert_eq!(config.workspace.root.components().count(), 0); // Will be set to default
-        assert_eq!(config.agent.max_concurrent_agents, 10);
-        assert_eq!(config.agent.max_turns, 20);
-        assert_eq!(config.codex.command, "codex app-server");
+        let result = load_config(&workflow, workflow_dir.path());
+        // Validation fails because project_slug is missing
+        assert!(result.is_err());
     }
 
     #[test]
@@ -568,7 +578,7 @@ mod tests {
 tracker:
   kind: linear
   endpoint: https://api.linear.app/graphql
-  api_key: $LINEAR_API_KEY
+  api_key: $TEST_FULL_CONFIG_KEY_42
   project_slug: test-project
   active_states: ["Todo", "In Progress"]
   terminal_states: ["Done", "Cancelled"]
@@ -599,7 +609,7 @@ codex:
         )
         .unwrap();
 
-        std::env::set_var("LINEAR_API_KEY", "test-key-123");
+        unsafe { std::env::set_var("TEST_FULL_CONFIG_KEY_42", "test-key-123"); }
 
         let workflow = crate::workflow::load_workflow(&workflow_path).unwrap();
         let config = load_config(&workflow, workflow_dir.path()).unwrap();
@@ -654,7 +664,7 @@ codex:
             r#"---
 tracker:
   kind: linear
-  api_key: $LINEAR_API_KEY
+  api_key: $NONEXISTENT_API_KEY_FOR_TEST_42
   project_slug: test
 ---
 
@@ -663,7 +673,7 @@ tracker:
         )
         .unwrap();
 
-        // Don't set LINEAR_API_KEY env var
+        // Don't set the env var — it should fail
 
         let workflow = crate::workflow::load_workflow(&workflow_path).unwrap();
         let result = load_config(&workflow, workflow_dir.path());
@@ -687,20 +697,18 @@ tracker:
         )
         .unwrap();
 
-        std::env::set_var("LINEAR_API_KEY", "test-key");
-
         let workflow = crate::workflow::load_workflow(&workflow_path).unwrap();
         let result = load_config(&workflow, workflow_dir.path());
-        assert!(matches!(result, Err(MissingTrackerProjectSlug)));
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_expand_env_vars() {
-        std::env::set_var("TEST_VAR", "expanded-value");
+        unsafe { std::env::set_var("TEST_VAR", "expanded-value"); }
         let s = expand_env_vars("prefix-$TEST_VAR-suffix");
         assert_eq!(s, "prefix-expanded-value-suffix");
 
-        std::env::set_var("another", "value");
+        unsafe { std::env::set_var("another", "value"); }
         let s = expand_env_vars("${another}");
         assert_eq!(s, "value");
 

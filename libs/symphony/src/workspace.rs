@@ -1,13 +1,13 @@
-use crate::domain::*;
+use crate::error::Result;
 use crate::error::SymphonyError::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::io::{self, Write};
-use std::time::Duration;
+use std::io;
 use crate::config::HooksConfig;
 
 /// Manage workspaces for issues.
+#[derive(Debug, Clone)]
 pub struct WorkspaceManager {
     root: PathBuf,
     hooks: HooksConfig,
@@ -20,8 +20,8 @@ impl WorkspaceManager {
     }
     
     /// Get or create a workspace for an issue.
-    pub fn get_or_create_workspace(&self, issue: &Issue) -> Result<PathBuf> {
-        let workspace_key = self.sanitize_identifier(&issue.identifier);
+    pub fn get_or_create_workspace(&self, identifier: &str) -> Result<PathBuf> {
+        let workspace_key = self.sanitize_identifier(identifier);
         let workspace_path = self.root.join(&workspace_key);
         
         // Check if workspace already exists
@@ -42,8 +42,8 @@ impl WorkspaceManager {
     }
     
     /// Remove a workspace for an issue.
-    pub fn remove_workspace(&self, issue: &Issue) -> Result<()> {
-        let workspace_key = self.sanitize_identifier(&issue.identifier);
+    pub fn remove_workspace(&self, identifier: &str) -> Result<()> {
+        let workspace_key = self.sanitize_identifier(identifier);
         let workspace_path = self.root.join(&workspace_key);
         
         // Check if workspace exists
@@ -105,8 +105,7 @@ impl WorkspaceManager {
         
         if !status.success() {
             return Err(WorkspaceError {
-                source: Box::new(io::Error::new(
-                    io::ErrorKind::Other,
+                source: Box::new(io::Error::other(
                     format!("{} hook failed with exit code: {}", hook_name, status.code().unwrap_or(-1)),
                 ))
             });
@@ -119,6 +118,7 @@ impl WorkspaceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Issue;
     use tempfile::TempDir;
     use crate::config::HooksConfig;
     
@@ -155,13 +155,13 @@ mod tests {
         };
         
         // First call should create the workspace
-        let workspace_path = manager.get_or_create_workspace(&issue).unwrap();
+        let workspace_path = manager.get_or_create_workspace(&issue.identifier).unwrap();
         assert!(workspace_path.exists());
         assert!(workspace_path.is_dir());
         assert_eq!(workspace_path.file_name().unwrap(), "TEST-123");
         
         // Second call should return the same path
-        let workspace_path2 = manager.get_or_create_workspace(&issue).unwrap();
+        let workspace_path2 = manager.get_or_create_workspace(&issue.identifier).unwrap();
         assert_eq!(workspace_path, workspace_path2);
     }
     
@@ -187,11 +187,11 @@ mod tests {
         };
         
         // Create workspace
-        let workspace_path = manager.get_or_create_workspace(&issue).unwrap();
+        let workspace_path = manager.get_or_create_workspace(&issue.identifier).unwrap();
         assert!(workspace_path.exists());
         
         // Remove workspace
-        manager.remove_workspace(&issue).unwrap();
+        manager.remove_workspace(&issue.identifier).unwrap();
         assert!(!workspace_path.exists());
     }
     

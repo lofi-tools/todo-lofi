@@ -1,13 +1,14 @@
 use crate::domain::WorkflowDefinition;
 use crate::error::SymphonyError::*;
 use serde_yaml;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 /// Load and parse a WORKFLOW.md file.
 pub fn load_workflow<P: AsRef<Path>>(path: P) -> crate::error::Result<WorkflowDefinition> {
     let content = fs::read_to_string(&path)
-        .map_err(|e| MissingWorkflowFile {
+        .map_err(|_e| MissingWorkflowFile {
             path: path.as_ref().to_string_lossy().into_owned(),
         })?;
     
@@ -17,26 +18,25 @@ pub fn load_workflow<P: AsRef<Path>>(path: P) -> crate::error::Result<WorkflowDe
 /// Parse workflow content from a string.
 pub fn parse_workflow(content: &str) -> crate::error::Result<WorkflowDefinition> {
     // Check if content starts with YAML front matter
-    if content.starts_with("---") {
-        // Find the end of front matter
-        let mut lines = content.lines();
-        // Skip the first "---"
-        lines.next();
-        
+    if let Some(after_first) = content.strip_prefix("---") {
+        let after_first_nl = after_first.strip_prefix('\n').unwrap_or(after_first);
+        let offset = content.len() - after_first_nl.len();
+
         let mut yaml_lines = Vec::new();
-        let mut in_front_matter = true;
-        
-        for line in lines {
+        let mut found_end = false;
+        let mut body_start = offset;
+
+        for line in after_first_nl.lines() {
             if line.trim() == "---" {
-                in_front_matter = false;
+                found_end = true;
+                body_start += line.len() + 1; // skip past this line + newline
                 break;
             }
-            if in_front_matter {
-                yaml_lines.push(line);
-            }
+            yaml_lines.push(line);
+            body_start += line.len() + 1;
         }
         
-        if in_front_matter {
+        if !found_end {
             // No closing --- found, treat as no front matter
             return Err(WorkflowParseError {
                 source: Box::new(std::io::Error::new(
@@ -58,17 +58,22 @@ pub fn parse_workflow(content: &str) -> crate::error::Result<WorkflowDefinition>
         }
         
         // The rest is the prompt template
-        let remainder: String = lines.collect();
-        let prompt_template = remainder.trim_start().to_string();
+        let prompt_template = if body_start < content.len() {
+            content[body_start..].trim().to_string()
+        } else {
+            String::new()
+        };
         
         Ok(WorkflowDefinition {
-            config: config.as_mapping().unwrap().clone(),
+            config: config.as_mapping().unwrap().iter()
+                .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v.clone())))
+                .collect(),
             prompt_template,
         })
     } else {
         // No front matter, entire content is prompt
         Ok(WorkflowDefinition {
-            config: serde_yaml::Mapping::new(),
+            config: HashMap::new(),
             prompt_template: content.trim().to_string(),
         })
     }
@@ -77,8 +82,7 @@ pub fn parse_workflow(content: &str) -> crate::error::Result<WorkflowDefinition>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    
+
     #[test]
     fn test_parse_workflow_with_front_matter() {
         let content = r#"---
