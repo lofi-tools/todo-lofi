@@ -145,6 +145,19 @@ impl Render for NavBar {
                                             this.selected_tag.update(cx, |tag, _| {
                                                 *tag = Some(tag_for_select.clone())
                                             });
+                                            let task_store = this.task_store.read(cx);
+                                            if let Ok(parents) =
+                                                task_store.ancestors_of(&tag_for_select)
+                                            {
+                                                this.expanded_tags.update(
+                                                    cx,
+                                                    move |expanded, _| {
+                                                        for parent in &parents {
+                                                            expanded.insert(parent.clone());
+                                                        }
+                                                    },
+                                                );
+                                            }
                                             cx.notify();
                                         }),
                                     ),

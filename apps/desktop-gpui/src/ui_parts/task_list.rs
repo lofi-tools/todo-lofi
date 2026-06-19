@@ -8,6 +8,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState},
 };
+use std::collections::HashSet;
 
 #[derive(IntoElement)]
 struct PlusRow {
@@ -189,7 +190,15 @@ impl TaskList {
         if !title.is_empty()
             && let Some(index) = self.editing_index
         {
-            let _ = task_store.insert_task(index, &title);
+            let selected_tag = self.selected_tag.read(cx).clone();
+            let mut tags = Vec::new();
+            if let Some(ref tag) = selected_tag {
+                tags.push(tag.clone());
+                if let Ok(ancestors) = task_store.ancestors_of(tag) {
+                    tags.extend(ancestors);
+                }
+            }
+            let _ = task_store.insert_task(index, &title, tags);
             self.editing_index = None;
             cx.notify();
         }

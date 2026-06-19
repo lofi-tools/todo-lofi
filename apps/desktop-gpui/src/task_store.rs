@@ -20,8 +20,9 @@ pub struct UiTask {
 pub struct TaskStore {
     pub tasks: Arc<RwLock<Vec<UiTask>>>,
     pub top_level_tags: Arc<RwLock<Vec<String>>>,
-    pub tag_to_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    pub tag_to_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub tag_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub tag_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub tag_parents: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl TaskStore {
@@ -30,8 +31,9 @@ impl TaskStore {
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
             top_level_tags: Arc::new(RwLock::new(Vec::new())),
-            tag_to_descendants: Arc::new(RwLock::new(HashMap::new())),
-            tag_to_children: Arc::new(RwLock::new(HashMap::new())),
+            tag_descendants: Arc::new(RwLock::new(HashMap::new())),
+            tag_children: Arc::new(RwLock::new(HashMap::new())),
+            tag_parents: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -43,20 +45,27 @@ impl TaskStore {
         let top_level = store.get_top_level_tags().await?;
 
         let mut ui_tasks = Vec::new();
-        let mut tag_to_descendants = HashMap::new();
-        let mut tag_to_children = HashMap::new();
+        let mut tag_descendants = HashMap::new();
+        let mut tag_children = HashMap::new();
+        let mut tag_parents = HashMap::new();
         let mut top_level_names = Vec::new();
 
         for tag in &all_tags {
             let children = store.get_children(tag.id).await?;
             let child_names: Vec<String> = children.into_iter().map(|t| t.name).collect();
-            tag_to_children.insert(tag.name.clone(), child_names);
+            tag_children.insert(tag.name.clone(), child_names);
         }
 
         for tag in &all_tags {
             let descendants = store.get_all_descendants(tag.id).await?;
             let descendant_names: Vec<String> = descendants.into_iter().map(|t| t.name).collect();
-            tag_to_descendants.insert(tag.name.clone(), descendant_names);
+            tag_descendants.insert(tag.name.clone(), descendant_names);
+        }
+
+        for tag in &all_tags {
+            let parents = store.get_parents(tag.id).await?;
+            let parent_names: Vec<String> = parents.into_iter().map(|t| t.name).collect();
+            tag_parents.insert(tag.name.clone(), parent_names);
         }
 
         for tag in &top_level {
@@ -88,8 +97,9 @@ impl TaskStore {
         Ok(Self {
             tasks: Arc::new(RwLock::new(ui_tasks)),
             top_level_tags: Arc::new(RwLock::new(top_level_names)),
-            tag_to_descendants: Arc::new(RwLock::new(tag_to_descendants)),
-            tag_to_children: Arc::new(RwLock::new(tag_to_children)),
+            tag_descendants: Arc::new(RwLock::new(tag_descendants)),
+            tag_children: Arc::new(RwLock::new(tag_children)),
+            tag_parents: Arc::new(RwLock::new(tag_parents)),
         })
     }
 
@@ -113,7 +123,7 @@ impl TaskStore {
 
     pub fn children_of(&self, tag: &str) -> anyhow::Result<Vec<String>> {
         let map = self
-            .tag_to_children
+            .tag_children
             .read()
             .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
         Ok(map.get(tag).cloned().unwrap_or_default())
@@ -122,7 +132,7 @@ impl TaskStore {
     pub fn tasks_for_tag(&self, tag: &str) -> anyhow::Result<Vec<UiTask>> {
         let descendants = {
             let map = self
-                .tag_to_descendants
+                .tag_descendants
                 .read()
                 .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
             map.get(tag).cloned().unwrap_or_default()
@@ -140,12 +150,44 @@ impl TaskStore {
         Ok(filtered)
     }
 
-    pub fn insert_task(&self, idx: usize, title: &str) -> anyhow::Result<()> {
+    pub fn ancestors_of(&self, tag: &str) -> anyhow::Result<Vec<String>> {
+        let map = self
+            .tag_parents
+            .read()
+            .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
+        let mut result = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        if let Some(parents) = map.get(tag) {
+            for parent in parents {
+                if visited.insert(parent.clone()) {
+                    queue.push_back(parent.clone());
+                    result.push(parent.clone());
+                }
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(parents) = map.get(&current) {
+                for parent in parents {
+                    if visited.insert(parent.clone()) {
+                        queue.push_back(parent.clone());
+                        result.push(parent.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub fn insert_task(&self, idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
         let task = UiTask {
             id: 0,
             title: title.into(),
             completed: false,
-            tags: vec![],
+            tags,
             description: None,
             deadline: None,
             importance_factor: 1.0,
