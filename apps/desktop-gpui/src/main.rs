@@ -30,7 +30,7 @@ pub mod ui_parts {
         impl Render for NavBar {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let task_store = self.task_store.read(cx);
-                let all_tags = task_store.all_tags().unwrap();
+                let top_level = task_store.top_level_tags().unwrap();
                 let selected_tag = self.selected_tag.read(cx).clone();
 
                 div()
@@ -65,7 +65,7 @@ pub mod ui_parts {
                                 }),
                             ),
                     )
-                    .children(all_tags.iter().map(|tag| {
+                    .children(top_level.iter().map(|tag| {
                         let tag_clone = tag.to_string();
                         let is_selected = Some(tag.clone()) == selected_tag;
                         div()
@@ -143,15 +143,10 @@ pub mod ui_parts {
                 let view = cx.entity().clone();
                 let selected_tag = self.selected_tag.read(cx);
                 let task_store = self.task_store.read(cx);
-                let all_tasks = task_store.tasks().unwrap();
 
-                let filtered_tasks = match selected_tag {
-                    Some(tag) => all_tasks
-                        .iter()
-                        .filter(|t| t.tags.contains(tag))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                    None => all_tasks,
+                let filtered_tasks = match selected_tag.as_deref() {
+                    Some(tag) => task_store.tasks_for_tag(tag).unwrap_or_default(),
+                    None => task_store.tasks().unwrap_or_default(),
                 };
 
                 div()
@@ -167,9 +162,8 @@ pub mod ui_parts {
                     .children((0..=filtered_tasks.len()).filter_map(|i| {
                         let task = filtered_tasks.get(i);
 
-                        let should_show = if let Some(tag) = &selected_tag {
-                            task.map(|t| t.tags.contains(tag))
-                                .unwrap_or(i == filtered_tasks.len())
+                        let should_show = if selected_tag.is_some() {
+                            task.is_some() || i == filtered_tasks.len()
                         } else {
                             true
                         };
@@ -351,16 +345,7 @@ impl Render for TodoApp {
         let _view = cx.entity().clone();
         let selected_tag = self.selected_tag.read(cx);
         let task_store = self.task_store.read(cx);
-        let all_tasks = task_store.tasks().unwrap();
-
-        let _filtered_tasks = match selected_tag {
-            Some(tag) => all_tasks
-                .iter()
-                .filter(|t| t.tags.contains(tag))
-                .cloned()
-                .collect::<Vec<_>>(),
-            None => all_tasks,
-        };
+        let _all_tasks = task_store.tasks().unwrap();
 
         div()
             .flex()

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::HashMap,
     sync::{Arc, RwLock},
 };
 
@@ -19,7 +19,8 @@ pub struct UiTask {
 
 pub struct TaskStore {
     pub tasks: Arc<RwLock<Vec<UiTask>>>,
-    pub all_tags_cache: Arc<RwLock<BTreeSet<String>>>,
+    pub top_level_tags: Arc<RwLock<Vec<String>>>,
+    pub tag_to_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl TaskStore {
@@ -27,7 +28,8 @@ impl TaskStore {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
-            all_tags_cache: Arc::new(RwLock::new(BTreeSet::new())),
+            top_level_tags: Arc::new(RwLock::new(Vec::new())),
+            tag_to_descendants: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -35,13 +37,17 @@ impl TaskStore {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        let all_tags = store.list_tags().await?;
+        let top_level = store.get_top_level_tags().await?;
 
         let mut ui_tasks = Vec::new();
-        let mut tag_set = BTreeSet::new();
+        let mut tag_to_descendants = HashMap::new();
+        let mut top_level_names = Vec::new();
 
-        for tag in &all_tags {
-            tag_set.insert(tag.name.clone());
+        for tag in &top_level {
+            top_level_names.push(tag.name.clone());
+            let descendants = store.get_all_descendants(tag.id).await?;
+            let descendant_names: Vec<String> = descendants.into_iter().map(|t| t.name).collect();
+            tag_to_descendants.insert(tag.name.clone(), descendant_names);
         }
 
         for task in &tasks {
@@ -60,11 +66,16 @@ impl TaskStore {
             });
         }
 
-        tracing::info!(tasks = ui_tasks.len(), "Loaded tasks from storage");
+        tracing::info!(
+            tasks = ui_tasks.len(),
+            top_level_tags = top_level_names.len(),
+            "Loaded tasks from storage"
+        );
 
         Ok(Self {
             tasks: Arc::new(RwLock::new(ui_tasks)),
-            all_tags_cache: Arc::new(RwLock::new(tag_set)),
+            top_level_tags: Arc::new(RwLock::new(top_level_names)),
+            tag_to_descendants: Arc::new(RwLock::new(tag_to_descendants)),
         })
     }
 
@@ -75,6 +86,36 @@ impl TaskStore {
             .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
 
         Ok(tasks.clone())
+    }
+
+    pub fn top_level_tags(&self) -> anyhow::Result<Vec<String>> {
+        let tags = self
+            .top_level_tags
+            .read()
+            .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
+
+        Ok(tags.clone())
+    }
+
+    pub fn tasks_for_tag(&self, tag: &str) -> anyhow::Result<Vec<UiTask>> {
+        let descendants = {
+            let map = self
+                .tag_to_descendants
+                .read()
+                .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
+            map.get(tag).cloned().unwrap_or_default()
+        };
+
+        let mut tags_to_match = descendants;
+        tags_to_match.push(tag.to_string());
+
+        let tasks = self.tasks()?;
+        let filtered: Vec<UiTask> = tasks
+            .into_iter()
+            .filter(|t| t.tags.iter().any(|tag| tags_to_match.contains(tag)))
+            .collect();
+
+        Ok(filtered)
     }
 
     pub fn insert_task(&self, idx: usize, title: &str) -> anyhow::Result<()> {
@@ -113,14 +154,5 @@ impl TaskStore {
         }
 
         Ok(())
-    }
-
-    pub fn all_tags(&self) -> anyhow::Result<BTreeSet<String>> {
-        let tags = self
-            .all_tags_cache
-            .read()
-            .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
-
-        Ok(tags.clone())
     }
 }
