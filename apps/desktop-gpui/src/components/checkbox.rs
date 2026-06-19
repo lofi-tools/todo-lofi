@@ -215,7 +215,7 @@ impl RenderOnce for Checkbox {
         let border_color = if checked {
             cx.theme().primary
         } else {
-            cx.theme().input
+            cx.theme().foreground.opacity(0.4)
         };
         let color = if self.disabled {
             border_color.opacity(0.5)
