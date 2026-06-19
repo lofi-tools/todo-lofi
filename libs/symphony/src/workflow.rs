@@ -7,11 +7,10 @@ use std::path::Path;
 
 /// Load and parse a WORKFLOW.md file.
 pub fn load_workflow<P: AsRef<Path>>(path: P) -> crate::error::Result<WorkflowDefinition> {
-    let content = fs::read_to_string(&path)
-        .map_err(|_e| MissingWorkflowFile {
-            path: path.as_ref().to_string_lossy().into_owned(),
-        })?;
-    
+    let content = fs::read_to_string(&path).map_err(|_e| MissingWorkflowFile {
+        path: path.as_ref().to_string_lossy().into_owned(),
+    })?;
+
     parse_workflow(&content)
 }
 
@@ -35,37 +34,40 @@ pub fn parse_workflow(content: &str) -> crate::error::Result<WorkflowDefinition>
             yaml_lines.push(line);
             body_start += line.len() + 1;
         }
-        
+
         if !found_end {
             // No closing --- found, treat as no front matter
             return Err(WorkflowParseError {
                 source: Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "No closing YAML front matter delimiter",
-                ))
+                )),
             });
         }
-        
+
         let yaml_content = yaml_lines.join("\n");
-        let config: serde_yaml::Value = serde_yaml::from_str(&yaml_content)
-            .map_err(|e| WorkflowParseError {
-                source: Box::new(e)
+        let config: serde_yaml::Value =
+            serde_yaml::from_str(&yaml_content).map_err(|e| WorkflowParseError {
+                source: Box::new(e),
             })?;
-            
+
         // Config must be a map/object
         if !config.is_mapping() {
             return Err(WorkflowFrontMatterNotAMap);
         }
-        
+
         // The rest is the prompt template
         let prompt_template = if body_start < content.len() {
             content[body_start..].trim().to_string()
         } else {
             String::new()
         };
-        
+
         Ok(WorkflowDefinition {
-            config: config.as_mapping().unwrap().iter()
+            config: config
+                .as_mapping()
+                .unwrap()
+                .iter()
                 .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v.clone())))
                 .collect(),
             prompt_template,
@@ -97,21 +99,21 @@ polling:
 
 Working on issue: {{ issue.identifier }}
 "#;
-        
+
         let workflow = parse_workflow(content).unwrap();
-        
+
         // Check config was parsed
         assert_eq!(workflow.config.len(), 2);
         assert!(workflow.config.contains_key("tracker"));
         assert!(workflow.config.contains_key("polling"));
-        
+
         // Check prompt template
         let expected = r#"# Test Prompt
 
 Working on issue: {{ issue.identifier }}"#;
         assert_eq!(workflow.prompt_template, expected);
     }
-    
+
     #[test]
     fn test_parse_workflow_without_front_matter() {
         let content = r#"
@@ -121,19 +123,19 @@ Working on issue: {{ issue.identifier }}"#;
 Working on issue: {{ issue.identifier }}
 
 "#;
-        
+
         let workflow = parse_workflow(content).unwrap();
-        
+
         // Check config is empty
         assert!(workflow.config.is_empty());
-        
+
         // Check prompt template
         let expected = r#"# Test Prompt
 
 Working on issue: {{ issue.identifier }}"#;
         assert_eq!(workflow.prompt_template, expected);
     }
-    
+
     #[test]
     fn test_parse_workflow_invalid_yaml() {
         let content = r#"---
@@ -142,11 +144,11 @@ tracker: [invalid, yaml: here
 
 content
 "#;
-        
+
         let result = parse_workflow(content);
         assert!(matches!(result, Err(WorkflowParseError { .. })));
     }
-    
+
     #[test]
     fn test_parse_workflow_front_matter_not_map() {
         let content = r#"---
@@ -156,7 +158,7 @@ content
 
 content
 "#;
-        
+
         let result = parse_workflow(content);
         assert!(matches!(result, Err(WorkflowFrontMatterNotAMap)));
     }

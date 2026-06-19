@@ -8,7 +8,9 @@ pub enum SymphonyError {
 
     /// Error parsing workflow file (YAML or Markdown)
     #[snafu(display("Failed to parse workflow file: {}", source))]
-    WorkflowParseError { source: Box<dyn std::error::Error + Send + Sync> },
+    WorkflowParseError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Workflow front matter is not a map/object
     #[snafu(display("Workflow front matter is not a map/object"))]
@@ -16,11 +18,15 @@ pub enum SymphonyError {
 
     /// Error during prompt template parsing
     #[snafu(display("Template parse error: {}", source))]
-    TemplateParseError { source: Box<dyn std::error::Error + Send + Sync> },
+    TemplateParseError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Error during prompt template rendering (unknown variable/filter)
     #[snafu(display("Template render error: {}", source))]
-    TemplateRenderError { source: Box<dyn std::error::Error + Send + Sync> },
+    TemplateRenderError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Tracker kind is not supported
     #[snafu(display("Unsupported tracker kind: {}", kind))]
@@ -36,7 +42,9 @@ pub enum SymphonyError {
 
     /// Linear API request failed (transport/error)
     #[snafu(display("Linear API request failed: {}", source))]
-    LinearApiRequest { source: Box<dyn std::error::Error + Send + Sync> },
+    LinearApiRequest {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Linear API returned non-200 status
     #[snafu(display("Linear API status error: {} {}", status, body))]
@@ -64,15 +72,21 @@ pub enum SymphonyError {
 
     /// Error creating or accessing workspace
     #[snafu(display("Workspace error: {}", source))]
-    WorkspaceError { source: Box<dyn std::error::Error + Send + Sync> },
+    WorkspaceError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Error launching agent process
     #[snafu(display("Agent launch failed: {}", source))]
-    AgentLaunchError { source: Box<dyn std::error::Error + Send + Sync> },
+    AgentLaunchError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Error communicating with agent process
     #[snafu(display("Agent communication error: {}", source))]
-    AgentCommunicationError { source: Box<dyn std::error::Error + Send + Sync> },
+    AgentCommunicationError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Agent process timed out
     #[snafu(display("Agent process timed out"))]

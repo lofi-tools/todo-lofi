@@ -228,9 +228,7 @@ fn handle_key(
                     (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
                         state.should_quit = true;
                     }
-                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
-                        if state.is_streaming =>
-                    {
+                    (KeyModifiers::CONTROL, KeyCode::Char('c')) if state.is_streaming => {
                         cancel_token.cancel();
                         state.is_streaming = false;
                         state.commit_turn();
@@ -667,23 +665,20 @@ fn handle_slash_command(state: &mut AppState, input: &str, config: &AppConfig) {
                 if auth_dir.exists()
                     && let Ok(entries) = std::fs::read_dir(&auth_dir)
                 {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".json")
-                                && let Ok(content) = std::fs::read_to_string(entry.path())
-                                && let Ok(json) =
-                                    serde_json::from_str::<serde_json::Value>(&content)
-                            {
-                                let provider = json["type"].as_str().unwrap_or("?");
-                                let email = json["email"].as_str().unwrap_or("?");
-                                let expired = json["expired"].as_str().unwrap_or("?");
-                                accounts.push(format!(
-                                    "  {} ({}) — expires {}",
-                                    provider, email, expired
-                                ));
-                            }
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".json")
+                            && let Ok(content) = std::fs::read_to_string(entry.path())
+                            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                        {
+                            let provider = json["type"].as_str().unwrap_or("?");
+                            let email = json["email"].as_str().unwrap_or("?");
+                            let expired = json["expired"].as_str().unwrap_or("?");
+                            accounts
+                                .push(format!("  {} ({}) — expires {}", provider, email, expired));
                         }
                     }
+                }
             }
 
             let status = if is_via_proxy { "active" } else { "inactive" };

@@ -26,9 +26,10 @@ impl LinearTracker {
         active_states: Vec<String>,
         terminal_states: Vec<String>,
     ) -> Result<Self> {
-        let endpoint_url = Url::parse(&endpoint)
-            .map_err(|e| ConfigValidation { message: format!("Invalid tracker endpoint URL: {}", e) })?;
-        
+        let endpoint_url = Url::parse(&endpoint).map_err(|e| ConfigValidation {
+            message: format!("Invalid tracker endpoint URL: {}", e),
+        })?;
+
         Ok(Self {
             client: Client::new(),
             endpoint: endpoint_url,
@@ -45,12 +46,15 @@ impl LinearTracker {
 pub trait IssueTracker: Send + Sync {
     /// Fetch candidate issues in active states for the configured project.
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>>;
-    
+
     /// Fetch issues by their states (used for startup terminal cleanup).
     async fn fetch_issues_by_states(&self, state_names: Vec<String>) -> Result<Vec<Issue>>;
-    
+
     /// Fetch current states for specific issue IDs (used for reconciliation).
-    async fn fetch_issue_states_by_ids(&self, issue_ids: Vec<String>) -> Result<HashMap<String, String>>;
+    async fn fetch_issue_states_by_ids(
+        &self,
+        issue_ids: Vec<String>,
+    ) -> Result<HashMap<String, String>>;
 }
 
 #[async_trait::async_trait]
@@ -97,7 +101,7 @@ impl IssueTracker for LinearTracker {
                 }
             }
         "#;
-        
+
         // First we need to get the project ID from the slug
         let project_query = r#"
             query($slug: String!) {
@@ -106,7 +110,7 @@ impl IssueTracker for LinearTracker {
                 }
             }
         "#;
-        
+
         let project_lookup: serde_json::Value = self
             .client
             .post(self.endpoint.as_str())
@@ -120,41 +124,52 @@ impl IssueTracker for LinearTracker {
             }))
             .send()
             .await
-            .map_err(|e| LinearApiRequest { source: Box::new(e) })?
+            .map_err(|e| LinearApiRequest {
+                source: Box::new(e),
+            })?
             .json()
             .await
-            .map_err(|e| LinearApiRequest { source: Box::new(e) })?;
-            
+            .map_err(|e| LinearApiRequest {
+                source: Box::new(e),
+            })?;
+
         // Check for GraphQL errors
         if let Some(errors) = project_lookup.get("errors") {
             return Err(LinearGraphqlErrors {
-                errors: errors.as_array().unwrap_or(&vec![])
+                errors: errors
+                    .as_array()
+                    .unwrap_or(&vec![])
                     .iter()
-                    .map(|e| e.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error").to_string())
-                    .collect()
+                    .map(|e| {
+                        e.get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error")
+                            .to_string()
+                    })
+                    .collect(),
             });
         }
-        
+
         let project_id = project_lookup
             .get("data")
             .and_then(|d| d.get("projectSlugLookup"))
             .and_then(|p| p.get("id"))
             .and_then(|id| id.as_str())
             .ok_or_else(|| LinearUnknownPayload {
-                payload: serde_json::to_string(&project_lookup).unwrap_or_default()
+                payload: serde_json::to_string(&project_lookup).unwrap_or_default(),
             })?;
-        
+
         // Now fetch issues with pagination
         let mut all_issues = Vec::new();
         let mut cursor: Option<String> = None;
         let mut has_next_page = true;
-        
+
         while has_next_page {
             let variables = serde_json::json!({
                 "projectId": project_id,
                 "cursor": cursor
             });
-            
+
             let response: serde_json::Value = self
                 .client
                 .post(self.endpoint.as_str())
@@ -166,183 +181,211 @@ impl IssueTracker for LinearTracker {
                 }))
                 .send()
                 .await
-                .map_err(|e| LinearApiRequest { source: Box::new(e) })?
+                .map_err(|e| LinearApiRequest {
+                    source: Box::new(e),
+                })?
                 .json()
                 .await
-                .map_err(|e| LinearApiRequest { source: Box::new(e) })?;
-                
+                .map_err(|e| LinearApiRequest {
+                    source: Box::new(e),
+                })?;
+
             // Check for GraphQL errors
             if let Some(errors) = response.get("errors") {
                 return Err(LinearGraphqlErrors {
-                    errors: errors.as_array().unwrap_or(&vec![])
+                    errors: errors
+                        .as_array()
+                        .unwrap_or(&vec![])
                         .iter()
-                        .map(|e| e.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error").to_string())
-                        .collect()
+                        .map(|e| {
+                            e.get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error")
+                                .to_string()
+                        })
+                        .collect(),
                 });
             }
-            
+
             let data = response
                 .get("data")
                 .and_then(|d| d.get("project"))
                 .ok_or_else(|| LinearUnknownPayload {
-                    payload: serde_json::to_string(&response).unwrap_or_default()
+                    payload: serde_json::to_string(&response).unwrap_or_default(),
                 })?;
-                
-            let issues_data = data
-                .get("issues")
-                .ok_or_else(|| LinearUnknownPayload {
-                    payload: serde_json::to_string(&response).unwrap_or_default()
-                })?;
-                
+
+            let issues_data = data.get("issues").ok_or_else(|| LinearUnknownPayload {
+                payload: serde_json::to_string(&response).unwrap_or_default(),
+            })?;
+
             let nodes = issues_data
                 .get("nodes")
                 .ok_or_else(|| LinearUnknownPayload {
-                    payload: serde_json::to_string(&response).unwrap_or_default()
+                    payload: serde_json::to_string(&response).unwrap_or_default(),
                 })?
                 .as_array()
                 .ok_or_else(|| LinearUnknownPayload {
-                    payload: serde_json::to_string(&response).unwrap_or_default()
+                    payload: serde_json::to_string(&response).unwrap_or_default(),
                 })?;
-                
+
             for node in nodes {
                 let issue = parse_issue_node(node)?;
                 // Filter by active states (case-insensitive)
                 let state_lower = issue.state.to_lowercase();
-                if self.active_states.contains(&state_lower) 
-                    && !self.terminal_states.contains(&state_lower) {
+                if self.active_states.contains(&state_lower)
+                    && !self.terminal_states.contains(&state_lower)
+                {
                     all_issues.push(issue);
                 }
             }
-            
+
             let page_info = issues_data
                 .get("pageInfo")
                 .ok_or_else(|| LinearUnknownPayload {
-                    payload: serde_json::to_string(&response).unwrap_or_default()
+                    payload: serde_json::to_string(&response).unwrap_or_default(),
                 })?;
-                
+
             has_next_page = page_info
                 .get("hasNextPage")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-                
+
             cursor = page_info
                 .get("endCursor")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
         }
-        
+
         Ok(all_issues)
     }
-    
+
     async fn fetch_issues_by_states(&self, state_names: Vec<String>) -> Result<Vec<Issue>> {
         // Similar to fetch_candidate_issues but filter by specific states
         let mut issues = self.fetch_candidate_issues().await?;
-        
+
         // Filter by the requested states
-        let state_set: std::collections::HashSet<String> = state_names
-            .into_iter()
-            .map(|s| s.to_lowercase())
-            .collect();
-            
-        issues.retain(|issue| {
-            state_set.contains(&issue.state.to_lowercase())
-        });
-        
+        let state_set: std::collections::HashSet<String> =
+            state_names.into_iter().map(|s| s.to_lowercase()).collect();
+
+        issues.retain(|issue| state_set.contains(&issue.state.to_lowercase()));
+
         Ok(issues)
     }
-    
-    async fn fetch_issue_states_by_ids(&self, issue_ids: Vec<String>) -> Result<HashMap<String, String>> {
+
+    async fn fetch_issue_states_by_ids(
+        &self,
+        issue_ids: Vec<String>,
+    ) -> Result<HashMap<String, String>> {
         if issue_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        
+
         // Linear doesn't have a direct batch lookup by IDs, so we'll fetch issues for the project
         // and filter
         // In a production implementation, you might want to optimize this
         let all_issues = self.fetch_candidate_issues().await?;
-        
+
         let mut state_map = HashMap::new();
         for issue in all_issues {
             if issue_ids.contains(&issue.id) {
                 state_map.insert(issue.id, issue.state);
             }
         }
-        
+
         Ok(state_map)
     }
 }
 
 fn parse_issue_node(node: &serde_json::Value) -> Result<Issue> {
-    let id = node.get("id")
+    let id = node
+        .get("id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LinearUnknownPayload {
-            payload: serde_json::to_string(node).unwrap_or_default()
+            payload: serde_json::to_string(node).unwrap_or_default(),
         })?
         .to_string();
-    
-    let identifier = node.get("identifier")
+
+    let identifier = node
+        .get("identifier")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LinearUnknownPayload {
-            payload: serde_json::to_string(node).unwrap_or_default()
+            payload: serde_json::to_string(node).unwrap_or_default(),
         })?
         .to_string();
-    
-    let title = node.get("title")
+
+    let title = node
+        .get("title")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LinearUnknownPayload {
-            payload: serde_json::to_string(node).unwrap_or_default()
+            payload: serde_json::to_string(node).unwrap_or_default(),
         })?
         .to_string();
-    
-    let description = node.get("description")
+
+    let description = node
+        .get("description")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    
-    let priority = node.get("priority")
+
+    let priority = node
+        .get("priority")
         .and_then(|v| v.as_i64())
         .map(|v| v as i32);
-    
-    let state = node.get("state")
+
+    let state = node
+        .get("state")
         .and_then(|s| s.get("name"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| LinearUnknownPayload {
-            payload: serde_json::to_string(node).unwrap_or_default()
+            payload: serde_json::to_string(node).unwrap_or_default(),
         })?
         .to_string();
-    
-    let branch_name = node.get("branchName")
+
+    let branch_name = node
+        .get("branchName")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    
-    let url = node.get("url")
+
+    let url = node
+        .get("url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    
+
     // Parse labels
     let mut labels = Vec::new();
-    if let Some(label_nodes) = node.get("labels")
+    if let Some(label_nodes) = node
+        .get("labels")
         .and_then(|l| l.get("nodes"))
-        .and_then(|n| n.as_array()) {
+        .and_then(|n| n.as_array())
+    {
         for label in label_nodes {
             if let Some(name) = label.get("name").and_then(|v| v.as_str()) {
                 labels.push(name.to_lowercase());
             }
         }
     }
-    
+
     // Parse blockedBy relationships
     let mut blocked_by = Vec::new();
-    if let Some(blocked_nodes) = node.get("blockedBy")
+    if let Some(blocked_nodes) = node
+        .get("blockedBy")
         .and_then(|b| b.get("nodes"))
-        .and_then(|n| n.as_array()) {
+        .and_then(|n| n.as_array())
+    {
         for blocker in blocked_nodes {
-            let blocker_id = blocker.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let blocker_identifier = blocker.get("identifier").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let blocker_state = blocker.get("state")
+            let blocker_id = blocker
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let blocker_identifier = blocker
+                .get("identifier")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let blocker_state = blocker
+                .get("state")
                 .and_then(|s| s.get("name"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            
+
             blocked_by.push(BlockerRef {
                 id: blocker_id,
                 identifier: blocker_identifier,
@@ -350,18 +393,20 @@ fn parse_issue_node(node: &serde_json::Value) -> Result<Issue> {
             });
         }
     }
-    
+
     // Parse timestamps
-    let created_at = node.get("createdAt")
+    let created_at = node
+        .get("createdAt")
         .and_then(|v| v.as_str())
         .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
         .map(SystemTime::from);
-    
-    let updated_at = node.get("updatedAt")
+
+    let updated_at = node
+        .get("updatedAt")
         .and_then(|v| v.as_str())
         .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
         .map(SystemTime::from);
-    
+
     Ok(Issue {
         id,
         identifier,
@@ -415,9 +460,9 @@ mod tests {
                 ]
             }
         });
-        
+
         let issue = parse_issue_node(&json).unwrap();
-        
+
         assert_eq!(issue.id, "issue-123");
         assert_eq!(issue.identifier, "TEST-123");
         assert_eq!(issue.title, "Test Issue");
@@ -425,7 +470,10 @@ mod tests {
         assert_eq!(issue.priority, Some(2));
         assert_eq!(issue.state, "In Progress");
         assert_eq!(issue.branch_name, Some("feature/test".to_string()));
-        assert_eq!(issue.url, Some("https://linear.app/test/issue/TEST-123".to_string()));
+        assert_eq!(
+            issue.url,
+            Some("https://linear.app/test/issue/TEST-123".to_string())
+        );
         assert_eq!(issue.labels, vec!["frontend", "bug"]);
         assert_eq!(issue.blocked_by.len(), 1);
         assert_eq!(issue.blocked_by[0].id.as_ref().unwrap(), "issue-456");

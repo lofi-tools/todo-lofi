@@ -5,8 +5,8 @@ use log::{error, info};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -148,13 +148,18 @@ impl AgentRunner {
         initial_prompt: &str,
     ) -> Result<(u32, mpsc::Receiver<AgentEvent>)> {
         // Verify we're in the correct workspace
-        if std::env::current_dir().map_err(|e| AgentLaunchError { source: Box::new(e) })? != workspace_path {
+        if std::env::current_dir().map_err(|e| AgentLaunchError {
+            source: Box::new(e),
+        })? != workspace_path
+        {
             return Err(AgentLaunchError {
                 source: Box::new(io::Error::other(format!(
-                        "Current directory ({:?}) does not match workspace path ({:?})",
-                        std::env::current_dir().map_err(|e| AgentLaunchError { source: Box::new(e) })?,
-                        workspace_path
-                    ),)),
+                    "Current directory ({:?}) does not match workspace path ({:?})",
+                    std::env::current_dir().map_err(|e| AgentLaunchError {
+                        source: Box::new(e)
+                    })?,
+                    workspace_path
+                ))),
             });
         }
 

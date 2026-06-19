@@ -609,7 +609,9 @@ codex:
         )
         .unwrap();
 
-        unsafe { std::env::set_var("TEST_FULL_CONFIG_KEY_42", "test-key-123"); }
+        unsafe {
+            std::env::set_var("TEST_FULL_CONFIG_KEY_42", "test-key-123");
+        }
 
         let workflow = crate::workflow::load_workflow(&workflow_path).unwrap();
         let config = load_config(&workflow, workflow_dir.path()).unwrap();
@@ -704,11 +706,15 @@ tracker:
 
     #[test]
     fn test_expand_env_vars() {
-        unsafe { std::env::set_var("TEST_VAR", "expanded-value"); }
+        unsafe {
+            std::env::set_var("TEST_VAR", "expanded-value");
+        }
         let s = expand_env_vars("prefix-$TEST_VAR-suffix");
         assert_eq!(s, "prefix-expanded-value-suffix");
 
-        unsafe { std::env::set_var("another", "value"); }
+        unsafe {
+            std::env::set_var("another", "value");
+        }
         let s = expand_env_vars("${another}");
         assert_eq!(s, "value");
 
