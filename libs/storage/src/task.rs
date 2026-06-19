@@ -91,6 +91,12 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
+    pub async fn delete_task(&mut self, id: u64) -> crate::Result<()> {
+        Task::delete_by_id(&mut self.db, id).await?;
+        Ok(())
+    }
+
+    #[fastrace::trace]
     pub async fn list_tasks_by_priority(&mut self) -> crate::Result<Vec<Task>> {
         let rows = toasty::sql::query(
             r#"

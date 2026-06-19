@@ -158,3 +158,15 @@ impl From<MigrationError> for crate::error::StorageSetupErr {
         crate::error::StorageSetupErr::Migration { source }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_migrations() {
+        let migrations = TodoStore::list_all_migrations();
+        assert!(migrations.len() >= 2);
+        assert!(migrations.iter().any(|m| m.name.contains("tag_dag")));
+    }
+}

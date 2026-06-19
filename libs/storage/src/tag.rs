@@ -1,0 +1,541 @@
+use crate::TodoStore;
+use derive_entity_id::EntityId;
+use std::collections::{HashMap, HashSet, VecDeque};
+use toasty::Model;
+
+#[derive(EntityId, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[entity_id(prefix = "tag")]
+pub struct TagId(u64);
+
+#[derive(Debug, Clone, Model)]
+pub struct Tag {
+    #[key]
+    #[auto]
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TagNode {
+    pub id: u64,
+    pub name: String,
+    pub children: Vec<TagNode>,
+}
+
+fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
+    if let toasty::stmt::Value::Record(record) = record {
+        let id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+        let name = record
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(Tag { id, name })
+    } else {
+        None
+    }
+}
+
+impl TodoStore {
+    pub async fn create_tag(&mut self, name: impl Into<String>) -> crate::Result<Tag> {
+        let tag = Tag::create().name(name.into()).exec(&mut self.db).await?;
+        Ok(tag)
+    }
+
+    pub async fn get_tag(&mut self, id: u64) -> crate::Result<Tag> {
+        let tag = Tag::get_by_id(&mut self.db, id).await?;
+        Ok(tag)
+    }
+
+    pub async fn list_tags(&mut self) -> crate::Result<Vec<Tag>> {
+        let tags = Tag::all().exec(&mut self.db).await?;
+        Ok(tags)
+    }
+
+    pub async fn delete_tag(&mut self, id: u64) -> crate::Result<()> {
+        Tag::delete_by_id(&mut self.db, id).await?;
+        Ok(())
+    }
+
+    pub async fn add_tag_implication(
+        &mut self,
+        implier_id: u64,
+        implied_id: u64,
+    ) -> crate::Result<()> {
+        if implier_id == implied_id {
+            return Err(crate::QueryErr::UnexpectedValue {
+                message: "A tag cannot imply itself".to_string(),
+            });
+        }
+
+        let existing = toasty::sql::query(
+            r#"SELECT 1 FROM tag_implications WHERE implier_id = ?1 AND implied_id = ?2"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(implier_id as i64)
+        .bind(implied_id as i64)
+        .exec(&mut self.db)
+        .await?;
+
+        if existing.is_empty() {
+            if self.would_create_cycle(implier_id, implied_id).await? {
+                return Err(crate::QueryErr::UnexpectedValue {
+                    message: format!(
+                        "Adding implication {}->{} would create a cycle",
+                        implier_id, implied_id
+                    ),
+                });
+            }
+
+            toasty::sql::statement(
+                r#"INSERT INTO tag_implications (implier_id, implied_id) VALUES (?1, ?2)"#,
+            )
+            .bind(implier_id as i64)
+            .bind(implied_id as i64)
+            .exec(&mut self.db)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn would_create_cycle(
+        &mut self,
+        implier_id: u64,
+        implied_id: u64,
+    ) -> crate::Result<bool> {
+        let rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let from = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let to = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                graph.entry(from).or_default().push(to);
+            }
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        if let Some(children) = graph.get(&implied_id) {
+            for &child in children {
+                if child == implier_id {
+                    return Ok(true);
+                }
+                queue.push_back(child);
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(children) = graph.get(&current) {
+                for &child in children {
+                    if child == implier_id {
+                        return Ok(true);
+                    }
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    pub async fn remove_tag_implication(
+        &mut self,
+        implier_id: u64,
+        implied_id: u64,
+    ) -> crate::Result<()> {
+        toasty::sql::statement(
+            r#"DELETE FROM tag_implications WHERE implier_id = ?1 AND implied_id = ?2"#,
+        )
+        .bind(implier_id as i64)
+        .bind(implied_id as i64)
+        .exec(&mut self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_top_level_tags(&mut self) -> crate::Result<Vec<Tag>> {
+        let rows = toasty::sql::query(
+            r#"
+            SELECT t.id, t.name
+            FROM tags t
+            WHERE t.id NOT IN (SELECT implier_id FROM tag_implications)
+            "#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .exec(&mut self.db)
+        .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
+
+    pub async fn get_children(&mut self, parent_id: u64) -> crate::Result<Vec<Tag>> {
+        let rows = toasty::sql::query(
+            r#"
+            SELECT t.id, t.name
+            FROM tags t
+            JOIN tag_implications ti ON ti.implier_id = t.id
+            WHERE ti.implied_id = ?1
+            "#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .bind(parent_id as i64)
+        .exec(&mut self.db)
+        .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
+
+    pub async fn get_parents(&mut self, child_id: u64) -> crate::Result<Vec<Tag>> {
+        let rows = toasty::sql::query(
+            r#"
+            SELECT t.id, t.name
+            FROM tags t
+            JOIN tag_implications ti ON ti.implied_id = t.id
+            WHERE ti.implier_id = ?1
+            "#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .bind(child_id as i64)
+        .exec(&mut self.db)
+        .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
+
+    pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_id: u64) -> crate::Result<()> {
+        let existing = toasty::sql::query(
+            r#"SELECT 1 FROM direct_task_tags WHERE task_id = ?1 AND tag_id = ?2"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(task_id as i64)
+        .bind(tag_id as i64)
+        .exec(&mut self.db)
+        .await?;
+
+        if existing.is_empty() {
+            toasty::sql::statement(
+                r#"INSERT INTO direct_task_tags (task_id, tag_id) VALUES (?1, ?2)"#,
+            )
+            .bind(task_id as i64)
+            .bind(tag_id as i64)
+            .exec(&mut self.db)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_tag_from_task(&mut self, task_id: u64, tag_id: u64) -> crate::Result<()> {
+        toasty::sql::statement(
+            r#"DELETE FROM direct_task_tags WHERE task_id = ?1 AND tag_id = ?2"#,
+        )
+        .bind(task_id as i64)
+        .bind(tag_id as i64)
+        .exec(&mut self.db)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_direct_task_tags(&mut self, task_id: u64) -> crate::Result<Vec<Tag>> {
+        let rows = toasty::sql::query(
+            r#"
+            SELECT t.id, t.name
+            FROM tags t
+            JOIN direct_task_tags dtt ON dtt.tag_id = t.id
+            WHERE dtt.task_id = ?1
+            "#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .bind(task_id as i64)
+        .exec(&mut self.db)
+        .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
+
+    pub async fn get_inferred_task_tags(&mut self, task_id: u64) -> crate::Result<Vec<Tag>> {
+        let direct_rows =
+            toasty::sql::query(r#"SELECT tag_id FROM direct_task_tags WHERE task_id = ?1"#)
+                .column_types([toasty::stmt::Type::I64])
+                .bind(task_id as i64)
+                .exec(&mut self.db)
+                .await?;
+
+        let direct_tag_ids: Vec<u64> = direct_rows
+            .iter()
+            .filter_map(|row| {
+                if let toasty::stmt::Value::Record(record) = row {
+                    record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in imp_rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let from = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let to = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                graph.entry(from).or_default().push(to);
+            }
+        }
+
+        let mut all_ids: HashSet<u64> = direct_tag_ids.iter().copied().collect();
+        let mut queue: VecDeque<u64> = direct_tag_ids.into();
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(parents) = graph.get(&current) {
+                for &parent in parents {
+                    if all_ids.insert(parent) {
+                        queue.push_back(parent);
+                    }
+                }
+            }
+        }
+
+        if all_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let id_list: Vec<String> = all_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let query = format!(
+            "SELECT t.id, t.name FROM tags t WHERE t.id IN ({})",
+            placeholders.join(",")
+        );
+
+        let rows = toasty::sql::query(&query)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use crate::TodoStore;
+    use crate::prelude::*;
+
+    #[tokio::test]
+    async fn test_create_tag() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let tag = storage.create_tag("Python").await?;
+        assert_eq!(tag.name, "Python");
+
+        let retrieved = storage.get_tag(tag.id).await?;
+        assert_eq!(retrieved.name, "Python");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_add_tag_implication() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let python = storage.create_tag("Python").await?;
+        let programming = storage.create_tag("Programming").await?;
+
+        storage
+            .add_tag_implication(python.id, programming.id)
+            .await?;
+
+        let parents = storage.get_parents(python.id).await?;
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].id, programming.id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_add_self_implication_fails() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let tag = storage.create_tag("Self").await?;
+        let result = storage.add_tag_implication(tag.id, tag.id).await;
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prevent_cycle() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let a = storage.create_tag("A").await?;
+        let b = storage.create_tag("B").await?;
+        let c = storage.create_tag("C").await?;
+
+        storage.add_tag_implication(a.id, b.id).await?;
+        storage.add_tag_implication(b.id, c.id).await?;
+
+        let result = storage.add_tag_implication(c.id, a.id).await;
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cascade_delete_task() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let task = storage
+            .create_task(Task::create().title("Test task".to_string()))
+            .await?;
+
+        let tag = storage.create_tag("Python").await?;
+        storage.assign_tag_to_task(task.id, tag.id).await?;
+
+        let tags = storage.get_direct_task_tags(task.id).await?;
+        assert_eq!(tags.len(), 1);
+
+        storage.delete_task(task.id).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_top_level_tags() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let cs = storage.create_tag("CS").await?;
+        let programming = storage.create_tag("Programming").await?;
+        let python = storage.create_tag("Python").await?;
+
+        storage
+            .add_tag_implication(python.id, programming.id)
+            .await?;
+        storage.add_tag_implication(programming.id, cs.id).await?;
+
+        let top = storage.get_top_level_tags().await?;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].id, cs.id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_children() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let programming = storage.create_tag("Programming").await?;
+        let python = storage.create_tag("Python").await?;
+        let java = storage.create_tag("Java").await?;
+
+        storage
+            .add_tag_implication(python.id, programming.id)
+            .await?;
+        storage.add_tag_implication(java.id, programming.id).await?;
+
+        let children = storage.get_children(programming.id).await?;
+        assert_eq!(children.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_task_tag_inference() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let cs = storage.create_tag("CS").await?;
+        let programming = storage.create_tag("Programming").await?;
+        let python = storage.create_tag("Python").await?;
+
+        storage
+            .add_tag_implication(python.id, programming.id)
+            .await?;
+        storage.add_tag_implication(programming.id, cs.id).await?;
+
+        let task = storage
+            .create_task(Task::create().title("Learn Python".to_string()))
+            .await?;
+
+        storage.assign_tag_to_task(task.id, python.id).await?;
+
+        let inferred = storage.get_inferred_task_tags(task.id).await?;
+        assert_eq!(inferred.len(), 3);
+
+        let names: Vec<String> = inferred.iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"Python".to_string()));
+        assert!(names.contains(&"Programming".to_string()));
+        assert!(names.contains(&"CS".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multiple_paths_dag() -> crate::error::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let react = storage.create_tag("React").await?;
+        let frontend = storage.create_tag("Frontend").await?;
+        let javascript = storage.create_tag("JavaScript").await?;
+
+        storage.add_tag_implication(react.id, frontend.id).await?;
+        storage.add_tag_implication(react.id, javascript.id).await?;
+
+        let task = storage
+            .create_task(Task::create().title("React project".to_string()))
+            .await?;
+
+        storage.assign_tag_to_task(task.id, react.id).await?;
+
+        let inferred = storage.get_inferred_task_tags(task.id).await?;
+        assert_eq!(inferred.len(), 3);
+
+        let names: Vec<String> = inferred.iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"React".to_string()));
+        assert!(names.contains(&"Frontend".to_string()));
+        assert!(names.contains(&"JavaScript".to_string()));
+
+        Ok(())
+    }
+}
