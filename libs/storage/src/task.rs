@@ -201,6 +201,114 @@ impl TodoStore {
 
         Ok(tasks)
     }
+
+    #[fastrace::trace]
+    pub async fn list_tasks_by_tag(&mut self, tag_id: u64) -> crate::QueryResult<Vec<Task>> {
+        let mut tag_ids = vec![tag_id];
+        let descendants = self.get_all_descendants(tag_id).await?;
+        tag_ids.extend(descendants.into_iter().map(|t| t.id));
+
+        let id_list: Vec<String> = tag_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let query = format!(
+            r#"
+            SELECT DISTINCT
+                t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
+                t.deadline, t.importance_factor, t.urgency_factor, t.created_at, t.updated_at,
+                t.parent_id
+            FROM tasks t
+            JOIN direct_task_tags dtt ON dtt.task_id = t.id
+            WHERE dtt.tag_id IN ({})
+            ORDER BY t.importance_factor DESC
+            "#,
+            placeholders.join(",")
+        );
+
+        let rows = toasty::sql::query(&query)
+            .column_types([
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::F64,
+                toasty::stmt::Type::F64,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::I64,
+            ])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let toasty::stmt::Value::Record(record) = row else {
+                unreachable!();
+            };
+
+            let id = record.first().and_then(|v| v.to_i64()).context(
+                crate::error::UnexpectedValueSnafu {
+                    message: "expected i64 for id",
+                },
+            )? as u64;
+            let title = record
+                .get(1)
+                .and_then(|v| v.as_str())
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for title",
+                })?
+                .to_owned();
+            let description = record.get(2).and_then(|v| v.as_str()).map(str::to_owned);
+            let branch_name = record.get(3).and_then(|v| v.as_str()).map(str::to_owned);
+            let labels = record
+                .get(4)
+                .and_then(|v| v.as_str())
+                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
+            let blocked_by = record
+                .get(5)
+                .and_then(|v| v.as_str())
+                .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
+            let deadline = record.get(6).and_then(|v| v.to_u64());
+            let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
+            let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
+            let created_at = record
+                .get(9)
+                .and_then(|v| v.as_str())
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for created_at",
+                })?
+                .parse::<jiff::Timestamp>()?;
+            let updated_at = record
+                .get(10)
+                .and_then(|v| v.as_str())
+                .context(crate::error::UnexpectedValueSnafu {
+                    message: "expected string for updated_at",
+                })?
+                .parse::<jiff::Timestamp>()?;
+            let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
+
+            tasks.push(Task {
+                id,
+                title,
+                description,
+                branch_name,
+                labels,
+                blocked_by,
+                deadline,
+                importance_factor,
+                urgency_factor,
+                created_at,
+                updated_at,
+                parent_id,
+                subtasks: Deferred::default(),
+                parent: Deferred::default(),
+            });
+        }
+
+        Ok(tasks)
+    }
 }
 
 #[cfg(test)]

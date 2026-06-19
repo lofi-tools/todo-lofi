@@ -352,6 +352,67 @@ impl TodoStore {
         }
         Ok(tags)
     }
+
+    pub async fn get_all_descendants(&mut self, tag_id: u64) -> QueryResult<Vec<Tag>> {
+        let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut children_map: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in imp_rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let child = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let parent = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                children_map.entry(parent).or_default().push(child);
+            }
+        }
+
+        let mut all_ids: HashSet<u64> = HashSet::new();
+        let mut queue: VecDeque<u64> = VecDeque::new();
+
+        if let Some(direct_children) = children_map.get(&tag_id) {
+            for &child in direct_children {
+                if all_ids.insert(child) {
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(children) = children_map.get(&current) {
+                for &child in children {
+                    if all_ids.insert(child) {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+
+        if all_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let id_list: Vec<String> = all_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let query = format!(
+            "SELECT t.id, t.name FROM tags t WHERE t.id IN ({})",
+            placeholders.join(",")
+        );
+
+        let rows = toasty::sql::query(&query)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .exec(&mut self.db)
+            .await?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            if let Some(tag) = parse_tag_row(&row) {
+                tags.push(tag);
+            }
+        }
+        Ok(tags)
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +592,54 @@ mod tests {
         assert!(names.contains(&"React".to_string()));
         assert!(names.contains(&"Frontend".to_string()));
         assert!(names.contains(&"JavaScript".to_string()));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_by_tag_multi_level() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let programming = storage.create_tag("Programming").await?;
+        let frontend = storage.create_tag("Frontend").await?;
+        let react = storage.create_tag("React").await?;
+        let backend = storage.create_tag("Backend").await?;
+        let rust = storage.create_tag("Rust").await?;
+
+        storage.add_tag_implication(react.id, frontend.id).await?;
+        storage.add_tag_implication(frontend.id, programming.id).await?;
+        storage.add_tag_implication(rust.id, backend.id).await?;
+        storage.add_tag_implication(backend.id, programming.id).await?;
+
+        let task_react = storage
+            .create_task(Task::create().title("React app".to_string()))
+            .await?;
+        storage.assign_tag_to_task(task_react.id, react.id).await?;
+
+        let task_rust = storage
+            .create_task(Task::create().title("Rust CLI".to_string()))
+            .await?;
+        storage.assign_tag_to_task(task_rust.id, rust.id).await?;
+
+        let task_python = storage
+            .create_task(Task::create().title("Python script".to_string()))
+            .await?;
+        let python = storage.create_tag("Python").await?;
+        storage.assign_tag_to_task(task_python.id, python.id).await?;
+
+        let programming_tasks = storage.list_tasks_by_tag(programming.id).await?;
+        assert_eq!(programming_tasks.len(), 2);
+        let titles: Vec<&str> = programming_tasks.iter().map(|t| t.title.as_str()).collect();
+        assert!(titles.contains(&"React app"));
+        assert!(titles.contains(&"Rust CLI"));
+
+        let frontend_tasks = storage.list_tasks_by_tag(frontend.id).await?;
+        assert_eq!(frontend_tasks.len(), 1);
+        assert_eq!(frontend_tasks[0].title, "React app");
+
+        let backend_tasks = storage.list_tasks_by_tag(backend.id).await?;
+        assert_eq!(backend_tasks.len(), 1);
+        assert_eq!(backend_tasks[0].title, "Rust CLI");
 
         Ok(())
     }
