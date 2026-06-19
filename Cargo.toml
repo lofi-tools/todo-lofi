@@ -8,7 +8,7 @@ members = ["apps/*", "libs/*"]
 
 [workspace.dependencies]
 # OWN LIBS
-todo-core = { path = "libs/core" }
+# todo-core = { path = "libs/core" }
 # taskchampion = { git = "https://github.com/GothenburgBitFactory/taskchampion" }
 
 # Async, web

@@ -2157,15 +2157,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core2"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dson",
- "uuid",
-]
-
-[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2726,7 +2717,6 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-build",
- "todo-core",
  "tokio",
 ]
 
@@ -2928,6 +2918,26 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "smallvec 1.15.1",
+ "ulid",
+]
+
+[[package]]
+name = "dson_freeform_task"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dson",
+ "uuid",
+]
+
+[[package]]
+name = "dson_typed_task"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dson",
+ "entity_id",
+ "thiserror 1.0.69",
  "ulid",
 ]
 
@@ -7178,6 +7188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "op_crdt"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10622,9 +10641,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-build"
-version = "2.6.2"
+version = "2.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa1f9055fc23919a54e4e125052bed16ed04aef0487086e758fe01a67b451c7"
+checksum = "bc9ce40b16101cb6ea63d3e221567affd1c3a9205f95d7bc574941a10636b632"
 dependencies = [
  "anyhow",
  "cargo_toml",
@@ -10735,9 +10754,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-utils"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092379df9a707631978e6c56b1bc2401d387f01e2d4a3c123360d167bbb9aa95"
+checksum = "3e176a18e67764923c4f1ce66f25ae4abe5f688384d5eb1a0fa6c77f3d90f887"
 dependencies = [
  "anyhow",
  "brotli",
@@ -11171,17 +11190,6 @@ dependencies = [
  "jiff",
  "serde_json",
  "toasty-core",
-]
-
-[[package]]
-name = "todo-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "dson",
- "serde",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -11904,17 +11912,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 dependencies = [
  "rand 0.9.4",
-]
-
-[[package]]
-name = "typed_task"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dson",
- "entity_id",
- "thiserror 1.0.69",
- "ulid",
 ]
 
 [[package]]

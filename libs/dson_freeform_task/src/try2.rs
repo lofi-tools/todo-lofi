@@ -3,10 +3,10 @@
 use dson::{
     CausalContext, CausalDotStore, Identifier, OrMap,
     crdts::{mvreg::MvRegValue, snapshot::ToValue},
-    transaction::CrdtValue,
     dot_fun::DotFun,
-    traits::{DotStore, DotStoreJoin},
     sentinel::{DummySentinel, Sentinel, ValueSentinel},
+    traits::{DotStore, DotStoreJoin},
+    transaction::CrdtValue,
     types::{DotChange, DryJoinOutput},
 };
 
@@ -130,9 +130,7 @@ impl AppState {
 
     /// Remove a task from the CRDT store
     pub fn remove(&mut self, id: &str) -> Option<Task> {
-        let task = self.get_all()
-            .into_iter()
-            .find(|t| t.id == id)?;
+        let task = self.get_all().into_iter().find(|t| t.id == id)?;
 
         let id = Identifier::new(self.local_id, self.version);
         self.version = self.version.wrapping_add(1);
@@ -160,16 +158,15 @@ impl AppState {
 
         tx.in_map("tasks", |tasks_tx| {
             tasks_tx.in_map(&task.id, |task_tx| {
-                task_tx.write_register(
-                    "completed",
-                    MvRegValue::Bool(!task.completed),
-                );
+                task_tx.write_register("completed", MvRegValue::Bool(!task.completed));
                 task_tx.write_register(
                     "updated_at",
-                    MvRegValue::U64(std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()),
+                    MvRegValue::U64(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                    ),
                 );
             });
         });
@@ -192,7 +189,7 @@ mod tests {
     #[test]
     fn test_app_state_add_task() {
         let mut store = AppState::new();
-        
+
         let task = Task {
             id: "task-1".to_string(),
             title: "Test task".to_string(),
@@ -200,10 +197,10 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         };
-        
+
         store.add(task.clone());
         let tasks = store.get_all();
-        
+
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-1");
         assert_eq!(tasks[0].title, "Test task");
@@ -213,7 +210,7 @@ mod tests {
     #[test]
     fn test_app_state_toggle_task() {
         let mut store = AppState::new();
-        
+
         let task = Task {
             id: "task-1".to_string(),
             title: "Test task".to_string(),
@@ -221,15 +218,15 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         };
-        
+
         store.add(task);
-        
+
         // Toggle to completed
         store.toggle("task-1");
         let tasks = store.get_all();
         assert_eq!(tasks.len(), 1);
         assert!(tasks[0].completed);
-        
+
         // Toggle back to not completed
         store.toggle("task-1");
         let tasks = store.get_all();
@@ -239,7 +236,7 @@ mod tests {
     #[test]
     fn test_app_state_remove_task() {
         let mut store = AppState::new();
-        
+
         let task1 = Task {
             id: "task-1".to_string(),
             title: "Task 1".to_string(),
@@ -247,7 +244,7 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         };
-        
+
         let task2 = Task {
             id: "task-2".to_string(),
             title: "Task 2".to_string(),
@@ -255,16 +252,16 @@ mod tests {
             created_at: 2000,
             updated_at: 2000,
         };
-        
+
         store.add(task1);
         store.add(task2);
-        
+
         assert_eq!(store.get_all().len(), 2);
-        
+
         let removed = store.remove("task-1");
         assert!(removed.is_some());
         assert_eq!(store.get_all().len(), 1);
-        
+
         let remaining = store.get_all()[0].clone();
         assert_eq!(remaining.id, "task-2");
     }

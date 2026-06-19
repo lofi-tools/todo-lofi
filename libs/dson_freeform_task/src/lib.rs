@@ -1,10 +1,6 @@
 use dson::{
-    CausalDotStore, Identifier, MvReg, OrMap,
-    crdts::{
-        NoExtensionTypes, NoExtensionTypesType, TypeVariantValue, mvreg::MvRegValue,
-        snapshot::ToValue,
-    },
-    sentinel::DummySentinel,
+    CausalDotStore, Identifier, OrMap,
+    crdts::{NoExtensionTypes, TypeVariantValue, mvreg::MvRegValue},
 };
 use uuid::Uuid;
 
@@ -14,6 +10,11 @@ pub struct TaskId(pub Uuid);
 impl TaskId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+}
+impl Default for TaskId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl From<TaskId> for String {
@@ -79,7 +80,7 @@ impl TodoList {
         // self.next_id += 1;
         let task = Task::new(&title);
 
-        let delta = {
+        let _delta = {
             let mut tx = self.store.transact(self.my_actor_id);
             tx.in_map("tasks", |task_tx| {
                 task_tx.in_map(task.id(), |task_tx| {
@@ -93,11 +94,11 @@ impl TodoList {
         task
     }
 
-    pub fn get_task(&self, task_id: TaskId) -> anyhow::Result<Task> {
+    pub fn get_task(&self, _task_id: TaskId) -> anyhow::Result<Task> {
         // let got = self.store.store.get(&task_id)
-        let tasks = match self.store.store.get("tasks") {
+        let _tasks = match self.store.store.get("tasks") {
             Some(v) => &v.map,
-            None => return Vec::new(),
+            None => return Err(anyhow::anyhow!("No tasks found")),
         };
 
         todo!()
@@ -246,6 +247,8 @@ impl TodoList {
 
 #[cfg(test)]
 mod tests {
+    use dson::sentinel::DummySentinel;
+
     use super::*;
 
     #[test]
@@ -267,6 +270,7 @@ mod tests {
 
         // The value can now be read from the map.
         let val = doc.store.get("key").unwrap();
+        use dson::crdts::snapshot::ToValue;
         assert_eq!(val.reg.value().unwrap(), &MvRegValue::U64(42));
     }
 

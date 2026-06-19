@@ -8,7 +8,7 @@
 //! 5. CLI flags
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::cli_commands::Cli;
 
@@ -255,10 +255,10 @@ fn apply_env(config: &mut AppConfig) {
             .filter(|s| !s.is_empty())
             .collect();
     }
-    if let Ok(v) = std::env::var("ABSTRACT_MAX_TURNS") {
-        if let Ok(n) = v.parse() {
-            config.max_turns = n;
-        }
+    if let Ok(v) = std::env::var("ABSTRACT_MAX_TURNS")
+        && let Ok(n) = v.parse()
+    {
+        config.max_turns = n;
     }
     if let Ok(v) = std::env::var("ABSTRACT_COMPRESSION") {
         config.compression_level = v;

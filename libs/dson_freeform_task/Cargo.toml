@@ -1,12 +1,9 @@
-
 [package]
-name = "typed_task"
+name = "dson_freeform_task"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 dson = "0.3.0"
-thiserror.workspace = true
+uuid = { version = "1", features = ["v7"] }
 anyhow.workspace = true
-entity_id = "*"
-ulid = "1.2.1"

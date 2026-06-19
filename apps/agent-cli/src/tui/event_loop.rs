@@ -228,12 +228,12 @@ fn handle_key(
                     (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
                         state.should_quit = true;
                     }
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                        if state.is_streaming {
-                            cancel_token.cancel();
-                            state.is_streaming = false;
-                            state.commit_turn();
-                        }
+                    (KeyModifiers::CONTROL, KeyCode::Char('c'))
+                        if state.is_streaming =>
+                    {
+                        cancel_token.cancel();
+                        state.is_streaming = false;
+                        state.commit_turn();
                     }
                     _ => {}
                 }
@@ -338,32 +338,24 @@ fn handle_key(
         }
 
         // Backspace
-        (_, KeyCode::Backspace) if !state.is_streaming => {
-            if state.cursor_pos > 0 {
-                state.cursor_pos -= 1;
-                state.input.remove(state.cursor_pos);
-            }
+        (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
+            state.cursor_pos -= 1;
+            state.input.remove(state.cursor_pos);
         }
 
         // Delete
-        (_, KeyCode::Delete) if !state.is_streaming => {
-            if state.cursor_pos < state.input.len() {
-                state.input.remove(state.cursor_pos);
-            }
+        (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
+            state.input.remove(state.cursor_pos);
         }
 
         // Left arrow
-        (_, KeyCode::Left) if !state.is_streaming => {
-            if state.cursor_pos > 0 {
-                state.cursor_pos -= 1;
-            }
+        (_, KeyCode::Left) if !state.is_streaming && state.cursor_pos > 0 => {
+            state.cursor_pos -= 1;
         }
 
         // Right arrow
-        (_, KeyCode::Right) if !state.is_streaming => {
-            if state.cursor_pos < state.input.len() {
-                state.cursor_pos += 1;
-            }
+        (_, KeyCode::Right) if !state.is_streaming && state.cursor_pos < state.input.len() => {
+            state.cursor_pos += 1;
         }
 
         // Up arrow — scroll if input empty, else history
@@ -406,10 +398,8 @@ fn handle_key(
         }
 
         // Esc
-        (_, KeyCode::Esc) => {
-            if state.overlay != Overlay::None {
-                state.overlay = Overlay::None;
-            }
+        (_, KeyCode::Esc) if state.overlay != Overlay::None => {
+            state.overlay = Overlay::None;
         }
 
         // Character input
@@ -674,28 +664,26 @@ fn handle_slash_command(state: &mut AppState, input: &str, config: &AppConfig) {
             let mut accounts = Vec::new();
             if let Some(home) = dirs::home_dir() {
                 let auth_dir = home.join(".cli-proxy-api");
-                if auth_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&auth_dir) {
+                if auth_dir.exists()
+                    && let Ok(entries) = std::fs::read_dir(&auth_dir)
+                {
                         for entry in entries.flatten() {
                             let name = entry.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".json") {
-                                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&content)
-                                    {
-                                        let provider = json["type"].as_str().unwrap_or("?");
-                                        let email = json["email"].as_str().unwrap_or("?");
-                                        let expired = json["expired"].as_str().unwrap_or("?");
-                                        accounts.push(format!(
-                                            "  {} ({}) — expires {}",
-                                            provider, email, expired
-                                        ));
-                                    }
-                                }
+                            if name.ends_with(".json")
+                                && let Ok(content) = std::fs::read_to_string(entry.path())
+                                && let Ok(json) =
+                                    serde_json::from_str::<serde_json::Value>(&content)
+                            {
+                                let provider = json["type"].as_str().unwrap_or("?");
+                                let email = json["email"].as_str().unwrap_or("?");
+                                let expired = json["expired"].as_str().unwrap_or("?");
+                                accounts.push(format!(
+                                    "  {} ({}) — expires {}",
+                                    provider, email, expired
+                                ));
                             }
                         }
                     }
-                }
             }
 
             let status = if is_via_proxy { "active" } else { "inactive" };

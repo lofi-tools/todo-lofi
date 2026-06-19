@@ -1,6 +1,5 @@
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::{button::*, input::*, scroll::ScrollableElement, *};
+use gpui_component::{input::*, scroll::ScrollableElement, *};
 
 use crate::{
     task_store::TaskStore,
@@ -125,7 +124,7 @@ pub mod ui_parts {
                     }
 
                     if let Some(index) = self.editing_index {
-                        task_store.insert_task(index, &title);
+                        let _ = task_store.insert_task(index, &title);
                         self.editing_index = None;
                         cx.notify();
                     }
@@ -161,7 +160,7 @@ pub mod ui_parts {
                 let filtered_tasks = match selected_tag {
                     Some(tag) => all_tasks
                         .iter()
-                        .filter(|t| t.tags.contains(&tag))
+                        .filter(|t| t.tags.contains(tag))
                         .cloned()
                         .collect::<Vec<_>>(),
                     None => all_tasks,
@@ -284,7 +283,7 @@ pub mod ui_parts {
                                                 .with_size(Pixels::from(22.))
                                                 .on_click(move |_, _, cx| {
                                                     view_toggle.update(cx, |this, cx| {
-                                                        this.toggle_task(i, cx);
+                                                        let _ = this.toggle_task(i, cx);
                                                         cx.notify();
                                                     });
                                                 }),
@@ -415,7 +414,7 @@ impl TodoApp {
 
 impl Render for TodoApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity().clone();
+        let _view = cx.entity().clone();
         // let selected_tag = self.selected_tag.clone();
         let selected_tag = self.selected_tag.read(cx);
         let task_store = self.task_store.read(cx);
@@ -428,7 +427,7 @@ impl Render for TodoApp {
             }
         }
 
-        let filtered_tasks = match selected_tag {
+        let _filtered_tasks = match selected_tag {
             Some(tag) => all_tasks
                 .iter()
                 .filter(|t| t.tags.contains(tag))

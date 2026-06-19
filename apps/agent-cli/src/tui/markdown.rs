@@ -34,14 +34,12 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
     let mut code_buffer = String::new();
     let mut bold = false;
     let mut italic = false;
-    let mut in_heading = false;
     let mut heading_level: u8 = 0;
 
     for event in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_line(&mut lines, &mut current_spans);
-                in_heading = true;
                 heading_level = level as u8;
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -58,7 +56,6 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                         .add_modifier(Modifier::BOLD),
                 ));
                 flush_line(&mut lines, &mut current_spans);
-                in_heading = false;
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {

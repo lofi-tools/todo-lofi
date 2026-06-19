@@ -3,7 +3,6 @@
 // use crate::permissions::SharedPermissionMode;
 use crate::tui::scroll::ScrollState;
 use cersei::tools::permissions::PermissionDecision;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::sync::oneshot;
 

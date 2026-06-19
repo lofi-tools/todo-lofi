@@ -17,11 +17,11 @@ pub fn install(cancel_token: CancellationToken, running: Arc<AtomicBool>) -> any
         let now = Instant::now();
 
         // Double Ctrl+C within 500ms = hard exit
-        if let Some(prev) = *last {
-            if now.duration_since(prev).as_millis() < 500 {
-                eprintln!("\nForce exit.");
-                std::process::exit(130);
-            }
+        if let Some(prev) = *last
+            && now.duration_since(prev).as_millis() < 500
+        {
+            eprintln!("\nForce exit.");
+            std::process::exit(130);
         }
         *last = Some(now);
 

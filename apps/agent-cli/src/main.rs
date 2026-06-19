@@ -88,7 +88,7 @@ async fn build_agent_wip() -> anyhow::Result<Agent> {
     Ok(agent)
 }
 
-pub async fn run_tui_app(cli: Cli, mut config: AppConfig, agent: Arc<Agent>) -> anyhow::Result<()> {
+pub async fn run_tui_app(_cli: Cli, config: AppConfig, agent: Arc<Agent>) -> anyhow::Result<()> {
     // let theme = Theme::from_name(&config.theme);
 
     // Resolve or create session ID

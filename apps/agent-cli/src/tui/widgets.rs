@@ -202,6 +202,12 @@ pub mod graph {
         pub pan_y: i16,
     }
 
+    impl Default for GraphOverlayState {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl GraphOverlayState {
         pub fn new() -> Self {
             Self {
@@ -401,7 +407,7 @@ pub mod graph {
 
             let fx = (from.x as i16 + state.pan_x + 7) as u16; // center of from node
             let fy = (from.y as i16 + state.pan_y + 2) as u16; // bottom of from node
-            let tx = (to.x as i16 + state.pan_x + 7) as u16;
+            let _tx = (to.x as i16 + state.pan_x + 7) as u16;
             let _ty = (to.y as i16 + state.pan_y) as u16;
 
             // Draw a simple vertical connector dot if nodes are vertically aligned
@@ -680,8 +686,8 @@ pub mod input {
             let len = seg.len();
             if len == 0 {
                 row += 1;
-            } else if usable_width > 0 {
-                row += (len / usable_width) + 1;
+            } else if let Some(rows) = len.checked_div(usable_width) {
+                row += rows + 1;
             } else {
                 row += 1;
             }
@@ -985,7 +991,7 @@ pub mod overlay {
         let area = centered_rect(f.area(), 75, 55);
         f.render_widget(Clear, area);
 
-        let options = vec!["Allow once", "Allow for session", "Always allow", "Deny"];
+        let options = ["Allow once", "Allow for session", "Always allow", "Deny"];
         let mut lines = vec![
             Line::default(),
             Line::from(Span::styled(
@@ -1260,12 +1266,14 @@ pub mod side_panel {
     }
 
     /// Simple tree node for building a file tree.
+    #[allow(dead_code)]
     struct TreeNode {
         name: String,
         children: std::collections::BTreeMap<String, TreeNode>,
         is_file: bool,
     }
 
+    #[allow(dead_code)]
     impl TreeNode {
         fn new(name: &str) -> Self {
             Self {
@@ -1542,39 +1550,38 @@ pub mod tool_call {
             Span::styled(dur, Style::default().fg(theme.dim)),
         ]));
 
-        if let Some(ref output) = tool.output_preview {
-            if tool.status != ToolStatus::Running && !output.is_empty() {
-                // Try rendering as inline diff for file tools
-                if let Some(diff_lines) = diff_inline::render_diff_output(output, &tool.name, theme)
-                {
-                    lines.extend(diff_lines);
+        if let Some(ref output) = tool.output_preview
+            && tool.status != ToolStatus::Running
+            && !output.is_empty()
+        {
+            // Try rendering as inline diff for file tools
+            if let Some(diff_lines) = diff_inline::render_diff_output(output, &tool.name, theme) {
+                lines.extend(diff_lines);
+            } else {
+                // Default: plain text preview
+                let is_file_tool = matches!(tool.name.as_str(), "Edit" | "Write" | "ApplyPatch");
+                let max_lines = if is_file_tool {
+                    MAX_FILE_TOOL_LINES
                 } else {
-                    // Default: plain text preview
-                    let is_file_tool =
-                        matches!(tool.name.as_str(), "Edit" | "Write" | "ApplyPatch");
-                    let max_lines = if is_file_tool {
-                        MAX_FILE_TOOL_LINES
-                    } else {
-                        MAX_OUTPUT_LINES
-                    };
+                    MAX_OUTPUT_LINES
+                };
 
-                    let preview_lines: Vec<&str> = output.lines().take(max_lines).collect();
-                    let total = output.lines().count();
-                    let style = if tool.status == ToolStatus::Error {
-                        Style::default().fg(theme.error)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
+                let preview_lines: Vec<&str> = output.lines().take(max_lines).collect();
+                let total = output.lines().count();
+                let style = if tool.status == ToolStatus::Error {
+                    Style::default().fg(theme.error)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-                    for pl in &preview_lines {
-                        lines.push(Line::from(Span::styled(format!("    {pl}"), style)));
-                    }
-                    if total > max_lines {
-                        lines.push(Line::from(Span::styled(
-                            format!("    ... ({} more lines)", total - max_lines),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
+                for pl in &preview_lines {
+                    lines.push(Line::from(Span::styled(format!("    {pl}"), style)));
+                }
+                if total > max_lines {
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... ({} more lines)", total - max_lines),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
             }
         }
