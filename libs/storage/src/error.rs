@@ -25,9 +25,6 @@ pub enum QueryErr {
     #[snafu(display("database error: {source}"))]
     Database { source: toasty::Error },
 
-    #[snafu(display("failed to connect to database: {source}"))]
-    DbConnect { source: toasty::Error },
-
     #[snafu(display("failed to parse timestamp: {source}"))]
     TimestampParse { source: jiff::Error },
 
@@ -41,7 +38,7 @@ pub enum QueryErr {
     SystemTime { source: std::time::SystemTimeError },
 }
 
-pub type Result<T, E = QueryErr> = std::result::Result<T, E>;
+pub type QueryResult<T, E = QueryErr> = std::result::Result<T, E>;
 
 impl From<toasty::Error> for QueryErr {
     fn from(source: toasty::Error) -> Self {
@@ -61,30 +58,5 @@ impl From<serde_json::Error> for QueryErr {
 impl From<std::time::SystemTimeError> for QueryErr {
     fn from(source: std::time::SystemTimeError) -> Self {
         QueryErr::SystemTime { source }
-    }
-}
-impl From<crate::migrations::MigrationError> for QueryErr {
-    fn from(source: crate::migrations::MigrationError) -> Self {
-        match source {
-            crate::migrations::MigrationError::Database { source } => QueryErr::Database { source },
-            crate::migrations::MigrationError::ChecksumMismatch {
-                name,
-                expected,
-                actual,
-            } => QueryErr::UnexpectedValue {
-                message: format!(
-                    "checksum mismatch for migration '{name}': expected {expected}, got {actual}"
-                ),
-            },
-        }
-    }
-}
-impl From<StorageSetupErr> for QueryErr {
-    fn from(source: StorageSetupErr) -> Self {
-        match source {
-            StorageSetupErr::TursoDriver { source } => QueryErr::Database { source },
-            StorageSetupErr::DbBuild { source } => QueryErr::Database { source },
-            StorageSetupErr::Migration { source } => source.into(),
-        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::TodoStore;
+use crate::{QueryResult, TodoStore};
 use derive_entity_id::EntityId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use toasty::Model;
@@ -37,22 +37,22 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
 }
 
 impl TodoStore {
-    pub async fn create_tag(&mut self, name: impl Into<String>) -> crate::Result<Tag> {
+    pub async fn create_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
         let tag = Tag::create().name(name.into()).exec(&mut self.db).await?;
         Ok(tag)
     }
 
-    pub async fn get_tag(&mut self, id: u64) -> crate::Result<Tag> {
+    pub async fn get_tag(&mut self, id: u64) -> QueryResult<Tag> {
         let tag = Tag::get_by_id(&mut self.db, id).await?;
         Ok(tag)
     }
 
-    pub async fn list_tags(&mut self) -> crate::Result<Vec<Tag>> {
+    pub async fn list_tags(&mut self) -> QueryResult<Vec<Tag>> {
         let tags = Tag::all().exec(&mut self.db).await?;
         Ok(tags)
     }
 
-    pub async fn delete_tag(&mut self, id: u64) -> crate::Result<()> {
+    pub async fn delete_tag(&mut self, id: u64) -> QueryResult<()> {
         Tag::delete_by_id(&mut self.db, id).await?;
         Ok(())
     }
@@ -61,7 +61,7 @@ impl TodoStore {
         &mut self,
         implier_id: u64,
         implied_id: u64,
-    ) -> crate::Result<()> {
+    ) -> QueryResult<()> {
         if implier_id == implied_id {
             return Err(crate::QueryErr::UnexpectedValue {
                 message: "A tag cannot imply itself".to_string(),
@@ -99,11 +99,7 @@ impl TodoStore {
         Ok(())
     }
 
-    async fn would_create_cycle(
-        &mut self,
-        implier_id: u64,
-        implied_id: u64,
-    ) -> crate::Result<bool> {
+    async fn would_create_cycle(&mut self, implier_id: u64, implied_id: u64) -> QueryResult<bool> {
         let rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
@@ -151,7 +147,7 @@ impl TodoStore {
         &mut self,
         implier_id: u64,
         implied_id: u64,
-    ) -> crate::Result<()> {
+    ) -> QueryResult<()> {
         toasty::sql::statement(
             r#"DELETE FROM tag_implications WHERE implier_id = ?1 AND implied_id = ?2"#,
         )
@@ -162,7 +158,7 @@ impl TodoStore {
         Ok(())
     }
 
-    pub async fn get_top_level_tags(&mut self) -> crate::Result<Vec<Tag>> {
+    pub async fn get_top_level_tags(&mut self) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
             SELECT t.id, t.name
@@ -183,7 +179,7 @@ impl TodoStore {
         Ok(tags)
     }
 
-    pub async fn get_children(&mut self, parent_id: u64) -> crate::Result<Vec<Tag>> {
+    pub async fn get_children(&mut self, parent_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
             SELECT t.id, t.name
@@ -206,7 +202,7 @@ impl TodoStore {
         Ok(tags)
     }
 
-    pub async fn get_parents(&mut self, child_id: u64) -> crate::Result<Vec<Tag>> {
+    pub async fn get_parents(&mut self, child_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
             SELECT t.id, t.name
@@ -229,7 +225,7 @@ impl TodoStore {
         Ok(tags)
     }
 
-    pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_id: u64) -> crate::Result<()> {
+    pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_id: u64) -> QueryResult<()> {
         let existing = toasty::sql::query(
             r#"SELECT 1 FROM direct_task_tags WHERE task_id = ?1 AND tag_id = ?2"#,
         )
@@ -252,7 +248,7 @@ impl TodoStore {
         Ok(())
     }
 
-    pub async fn remove_tag_from_task(&mut self, task_id: u64, tag_id: u64) -> crate::Result<()> {
+    pub async fn remove_tag_from_task(&mut self, task_id: u64, tag_id: u64) -> QueryResult<()> {
         toasty::sql::statement(
             r#"DELETE FROM direct_task_tags WHERE task_id = ?1 AND tag_id = ?2"#,
         )
@@ -263,7 +259,7 @@ impl TodoStore {
         Ok(())
     }
 
-    pub async fn get_direct_task_tags(&mut self, task_id: u64) -> crate::Result<Vec<Tag>> {
+    pub async fn get_direct_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
             SELECT t.id, t.name
@@ -286,7 +282,7 @@ impl TodoStore {
         Ok(tags)
     }
 
-    pub async fn get_inferred_task_tags(&mut self, task_id: u64) -> crate::Result<Vec<Tag>> {
+    pub async fn get_inferred_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
         let direct_rows =
             toasty::sql::query(r#"SELECT tag_id FROM direct_task_tags WHERE task_id = ?1"#)
                 .column_types([toasty::stmt::Type::I64])
@@ -365,7 +361,7 @@ mod tests {
     use crate::prelude::*;
 
     #[tokio::test]
-    async fn test_create_tag() -> crate::error::Result<()> {
+    async fn test_create_tag() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let tag = storage.create_tag("Python").await?;
@@ -378,7 +374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_tag_implication() -> crate::error::Result<()> {
+    async fn test_add_tag_implication() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let python = storage.create_tag("Python").await?;
@@ -396,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_self_implication_fails() -> crate::error::Result<()> {
+    async fn test_add_self_implication_fails() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let tag = storage.create_tag("Self").await?;
@@ -407,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prevent_cycle() -> crate::error::Result<()> {
+    async fn test_prevent_cycle() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let a = storage.create_tag("A").await?;
@@ -424,7 +420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cascade_delete_task() -> crate::error::Result<()> {
+    async fn test_cascade_delete_task() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let task = storage
@@ -443,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_top_level_tags() -> crate::error::Result<()> {
+    async fn test_get_top_level_tags() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let cs = storage.create_tag("CS").await?;
@@ -463,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_children() -> crate::error::Result<()> {
+    async fn test_get_children() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let programming = storage.create_tag("Programming").await?;
@@ -482,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_task_tag_inference() -> crate::error::Result<()> {
+    async fn test_task_tag_inference() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let cs = storage.create_tag("CS").await?;
@@ -512,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_paths_dag() -> crate::error::Result<()> {
+    async fn test_multiple_paths_dag() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
         let react = storage.create_tag("React").await?;

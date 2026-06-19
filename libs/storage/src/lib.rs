@@ -8,7 +8,7 @@ pub mod task;
 pub mod tracing_setup;
 
 pub mod prelude {
-    pub use crate::error::{self, QueryErr, Result, StorageSetupErr};
+    pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::tag::{Tag, TagId, TagNode};
     pub use crate::task::{BlockerRef, Task};
@@ -30,7 +30,7 @@ pub struct TodoStore {
 }
 impl TodoStore {
     #[fastrace::trace(properties = { "config": "{config}" })]
-    pub async fn new(config: &StorageConfig) -> Result<Self, StorageSetupErr> {
+    pub async fn new(config: &StorageConfig) -> QueryResult<Self, StorageSetupErr> {
         let driver = Turso::new(&config.db_uri).context(error::TursoDriverSnafu)?;
 
         let db = toasty::Db::builder()
