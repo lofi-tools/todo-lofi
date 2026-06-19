@@ -643,4 +643,37 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_list_tasks_by_tag_populates_inferred_tags() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let programming = storage.create_tag("Programming").await?;
+        let frontend = storage.create_tag("Frontend").await?;
+        let react = storage.create_tag("React").await?;
+
+        storage.add_tag_implication(react.id, frontend.id).await?;
+        storage.add_tag_implication(frontend.id, programming.id).await?;
+
+        let task = storage
+            .create_task(Task::create().title("React app".to_string()))
+            .await?;
+        storage.assign_tag_to_task(task.id, react.id).await?;
+
+        let programming_tasks = storage.list_tasks_by_tag(programming.id).await?;
+        assert_eq!(programming_tasks.len(), 1);
+
+        let task_with_meta = &programming_tasks[0];
+        assert_eq!(task_with_meta.title, "React app");
+        assert_eq!(task_with_meta.inferred_tags.len(), 3);
+        assert!(task_with_meta.inferred_tags.contains(&"React".to_string()));
+        assert!(task_with_meta.inferred_tags.contains(&"Frontend".to_string()));
+        assert!(task_with_meta.inferred_tags.contains(&"Programming".to_string()));
+
+        let react_tasks = storage.list_tasks_by_tag(react.id).await?;
+        assert_eq!(react_tasks.len(), 1);
+        assert_eq!(react_tasks[0].inferred_tags.len(), 3);
+
+        Ok(())
+    }
 }

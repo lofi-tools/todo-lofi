@@ -283,7 +283,10 @@ impl TodoStore {
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            tasks.push(parse_task_from_row(&row)?);
+            let mut task = parse_task_from_row(&row)?;
+            let inferred = self.get_inferred_task_tags(task.id).await?;
+            task.inferred_tags = inferred.into_iter().map(|t| t.name).collect();
+            tasks.push(task);
         }
 
         Ok(tasks)
