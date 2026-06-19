@@ -53,11 +53,14 @@ impl TaskStore {
             tag_to_children.insert(tag.name.clone(), child_names);
         }
 
-        for tag in &top_level {
-            top_level_names.push(tag.name.clone());
+        for tag in &all_tags {
             let descendants = store.get_all_descendants(tag.id).await?;
             let descendant_names: Vec<String> = descendants.into_iter().map(|t| t.name).collect();
             tag_to_descendants.insert(tag.name.clone(), descendant_names);
+        }
+
+        for tag in &top_level {
+            top_level_names.push(tag.name.clone());
         }
 
         for task in &tasks {
