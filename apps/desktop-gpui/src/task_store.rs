@@ -150,6 +150,29 @@ impl TaskStore {
         Ok(filtered)
     }
 
+    pub fn path_to(&self, tag: &str) -> anyhow::Result<Vec<String>> {
+        let map = self
+            .tag_parents
+            .read()
+            .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
+
+        let mut current = tag.to_string();
+        let mut chain = vec![current.clone()];
+
+        loop {
+            match map.get(&current) {
+                Some(parents) if !parents.is_empty() => {
+                    current = parents[0].clone();
+                    chain.push(current.clone());
+                }
+                _ => break,
+            }
+        }
+
+        chain.reverse();
+        Ok(chain)
+    }
+
     pub fn ancestors_of(&self, tag: &str) -> anyhow::Result<Vec<String>> {
         let map = self
             .tag_parents

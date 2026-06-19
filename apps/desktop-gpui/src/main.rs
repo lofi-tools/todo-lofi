@@ -34,11 +34,11 @@ impl TodoApp {
             state
         });
         let selected_tag = cx.new(|_| None);
-        let expanded_tags = cx.new(|_| HashSet::new());
+        let selected_path = cx.new(|_| Vec::new());
         let sidebar_ui = cx.new(|_| NavBar {
             task_store: task_store.clone(),
             selected_tag: selected_tag.clone(),
-            expanded_tags,
+            selected_path,
         });
         let task_list_ui = cx.new(|_| TaskList {
             input_state: input_state.clone(),

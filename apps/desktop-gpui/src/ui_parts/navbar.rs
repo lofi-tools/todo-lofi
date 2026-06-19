@@ -4,17 +4,16 @@ use gpui::{
     Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{ActiveTheme, StyledExt};
-use std::collections::HashSet;
 
 pub struct NavBar {
     pub task_store: Entity<TaskStore>,
     pub selected_tag: Entity<Option<String>>,
-    pub expanded_tags: Entity<HashSet<String>>,
+    pub selected_path: Entity<Vec<String>>,
 }
 
 fn collect_visible_tags(
     task_store: &TaskStore,
-    expanded: &HashSet<String>,
+    selected_path: &[String],
 ) -> Vec<(String, usize, bool)> {
     let top_level = task_store.top_level_tags().unwrap_or_default();
     let mut result = Vec::new();
@@ -22,7 +21,7 @@ fn collect_visible_tags(
     fn walk(
         tag: &str,
         depth: usize,
-        expanded: &HashSet<String>,
+        selected_path: &[String],
         task_store: &TaskStore,
         result: &mut Vec<(String, usize, bool)>,
     ) {
@@ -30,15 +29,16 @@ fn collect_visible_tags(
         let has_children = !children.is_empty();
         result.push((tag.to_string(), depth, has_children));
 
-        if expanded.contains(tag) {
+        let is_on_path = selected_path.iter().any(|p| p == tag);
+        if is_on_path {
             for child in &children {
-                walk(child, depth + 1, expanded, task_store, result);
+                walk(child, depth + 1, selected_path, task_store, result);
             }
         }
     }
 
     for tag in &top_level {
-        walk(tag, 0, expanded, task_store, &mut result);
+        walk(tag, 0, selected_path, task_store, &mut result);
     }
 
     result
@@ -46,12 +46,12 @@ fn collect_visible_tags(
 
 impl Render for NavBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let expanded = self.expanded_tags.read(cx).clone();
+        let selected_path = self.selected_path.read(cx).clone();
         let selected_tag = self.selected_tag.read(cx).clone();
 
         let visible_tags = {
             let task_store = self.task_store.read(cx);
-            collect_visible_tags(task_store, &expanded)
+            collect_visible_tags(task_store, &selected_path)
         };
 
         div()
@@ -82,6 +82,7 @@ impl Render for NavBar {
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             this.selected_tag.update(cx, |tag, _| *tag = None);
+                            this.selected_path.update(cx, |p, _| p.clear());
                             cx.notify();
                         }),
                     ),
@@ -90,14 +91,13 @@ impl Render for NavBar {
                 visible_tags
                     .into_iter()
                     .map(|(tag_name, depth, has_children)| {
-                        let is_expanded = expanded.contains(&tag_name);
+                        let is_on_path = selected_path.contains(&tag_name);
                         let is_selected = Some(tag_name.clone()) == selected_tag;
                         let indent = depth;
-                        let tag_for_toggle = tag_name.clone();
                         let tag_for_select = tag_name.clone();
 
                         let disclosure = if has_children {
-                            let indicator = if is_expanded { "▼" } else { "▶" };
+                            let indicator = if is_on_path { "▼" } else { "▶" };
                             div()
                                 .w_5()
                                 .flex_none()
@@ -107,20 +107,6 @@ impl Render for NavBar {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(indicator)
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| {
-                                        let tag = tag_for_toggle.clone();
-                                        this.expanded_tags.update(cx, move |tags, _| {
-                                            if tags.contains(&tag) {
-                                                tags.remove(&tag);
-                                            } else {
-                                                tags.insert(tag);
-                                            }
-                                        });
-                                        cx.notify();
-                                    }),
-                                )
                         } else {
                             div().w_5().flex_none()
                         };
@@ -145,19 +131,13 @@ impl Render for NavBar {
                                             this.selected_tag.update(cx, |tag, _| {
                                                 *tag = Some(tag_for_select.clone())
                                             });
-                                            let task_store = this.task_store.read(cx);
-                                            if let Ok(parents) =
-                                                task_store.ancestors_of(&tag_for_select)
-                                            {
-                                                this.expanded_tags.update(
-                                                    cx,
-                                                    move |expanded, _| {
-                                                        for parent in &parents {
-                                                            expanded.insert(parent.clone());
-                                                        }
-                                                    },
-                                                );
-                                            }
+                                            let path = {
+                                                let task_store = this.task_store.read(cx);
+                                                task_store
+                                                    .path_to(&tag_for_select)
+                                                    .unwrap_or_default()
+                                            };
+                                            this.selected_path.update(cx, move |p, _| *p = path);
                                             cx.notify();
                                         }),
                                     ),
