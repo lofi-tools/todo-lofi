@@ -81,12 +81,13 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         unreachable!("raw SQL queries return record rows");
     };
 
-    let id = record
-        .first()
-        .and_then(|v| v.to_i64())
-        .context(crate::error::UnexpectedValueSnafu {
-            message: "expected i64 for id",
-        })? as u64;
+    let id =
+        record
+            .first()
+            .and_then(|v| v.to_i64())
+            .context(crate::error::UnexpectedValueSnafu {
+                message: "expected i64 for id",
+            })? as u64;
     let title = record
         .get(1)
         .and_then(|v| v.as_str())
@@ -236,7 +237,10 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
-    pub async fn list_tasks_by_tag(&mut self, tag_id: u64) -> crate::QueryResult<Vec<TaskWithMeta>> {
+    pub async fn list_tasks_by_tag(
+        &mut self,
+        tag_id: u64,
+    ) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let mut tag_ids = vec![tag_id];
         let descendants = self.get_all_descendants(tag_id).await?;
         tag_ids.extend(descendants.into_iter().map(|t| t.id));

@@ -21,6 +21,7 @@ pub struct TaskStore {
     pub tasks: Arc<RwLock<Vec<UiTask>>>,
     pub top_level_tags: Arc<RwLock<Vec<String>>>,
     pub tag_to_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub tag_to_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl TaskStore {
@@ -30,6 +31,7 @@ impl TaskStore {
             tasks: Arc::new(RwLock::new(Vec::new())),
             top_level_tags: Arc::new(RwLock::new(Vec::new())),
             tag_to_descendants: Arc::new(RwLock::new(HashMap::new())),
+            tag_to_children: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -37,11 +39,19 @@ impl TaskStore {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
+        let all_tags = store.list_tags().await?;
         let top_level = store.get_top_level_tags().await?;
 
         let mut ui_tasks = Vec::new();
         let mut tag_to_descendants = HashMap::new();
+        let mut tag_to_children = HashMap::new();
         let mut top_level_names = Vec::new();
+
+        for tag in &all_tags {
+            let children = store.get_children(tag.id).await?;
+            let child_names: Vec<String> = children.into_iter().map(|t| t.name).collect();
+            tag_to_children.insert(tag.name.clone(), child_names);
+        }
 
         for tag in &top_level {
             top_level_names.push(tag.name.clone());
@@ -76,6 +86,7 @@ impl TaskStore {
             tasks: Arc::new(RwLock::new(ui_tasks)),
             top_level_tags: Arc::new(RwLock::new(top_level_names)),
             tag_to_descendants: Arc::new(RwLock::new(tag_to_descendants)),
+            tag_to_children: Arc::new(RwLock::new(tag_to_children)),
         })
     }
 
@@ -95,6 +106,14 @@ impl TaskStore {
             .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
 
         Ok(tags.clone())
+    }
+
+    pub fn children_of(&self, tag: &str) -> anyhow::Result<Vec<String>> {
+        let map = self
+            .tag_to_children
+            .read()
+            .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
+        Ok(map.get(tag).cloned().unwrap_or_default())
     }
 
     pub fn tasks_for_tag(&self, tag: &str) -> anyhow::Result<Vec<UiTask>> {

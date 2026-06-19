@@ -607,9 +607,13 @@ mod tests {
         let rust = storage.create_tag("Rust").await?;
 
         storage.add_tag_implication(react.id, frontend.id).await?;
-        storage.add_tag_implication(frontend.id, programming.id).await?;
+        storage
+            .add_tag_implication(frontend.id, programming.id)
+            .await?;
         storage.add_tag_implication(rust.id, backend.id).await?;
-        storage.add_tag_implication(backend.id, programming.id).await?;
+        storage
+            .add_tag_implication(backend.id, programming.id)
+            .await?;
 
         let task_react = storage
             .create_task(Task::create().title("React app".to_string()))
@@ -625,7 +629,9 @@ mod tests {
             .create_task(Task::create().title("Python script".to_string()))
             .await?;
         let python = storage.create_tag("Python").await?;
-        storage.assign_tag_to_task(task_python.id, python.id).await?;
+        storage
+            .assign_tag_to_task(task_python.id, python.id)
+            .await?;
 
         let programming_tasks = storage.list_tasks_by_tag(programming.id).await?;
         assert_eq!(programming_tasks.len(), 2);
@@ -653,7 +659,9 @@ mod tests {
         let react = storage.create_tag("React").await?;
 
         storage.add_tag_implication(react.id, frontend.id).await?;
-        storage.add_tag_implication(frontend.id, programming.id).await?;
+        storage
+            .add_tag_implication(frontend.id, programming.id)
+            .await?;
 
         let task = storage
             .create_task(Task::create().title("React app".to_string()))
@@ -667,8 +675,16 @@ mod tests {
         assert_eq!(task_with_meta.title, "React app");
         assert_eq!(task_with_meta.inferred_tags.len(), 3);
         assert!(task_with_meta.inferred_tags.contains(&"React".to_string()));
-        assert!(task_with_meta.inferred_tags.contains(&"Frontend".to_string()));
-        assert!(task_with_meta.inferred_tags.contains(&"Programming".to_string()));
+        assert!(
+            task_with_meta
+                .inferred_tags
+                .contains(&"Frontend".to_string())
+        );
+        assert!(
+            task_with_meta
+                .inferred_tags
+                .contains(&"Programming".to_string())
+        );
 
         let react_tasks = storage.list_tasks_by_tag(react.id).await?;
         assert_eq!(react_tasks.len(), 1);
