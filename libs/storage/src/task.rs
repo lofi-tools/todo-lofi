@@ -219,7 +219,13 @@ impl TodoStore {
             FROM tasks t
             JOIN direct_task_tags dtt ON dtt.task_id = t.id
             WHERE dtt.tag_id IN ({})
-            ORDER BY t.importance_factor DESC
+            ORDER BY
+                t.importance_factor * CASE
+                    WHEN t.deadline IS NULL THEN 1.0
+                    ELSE 86400.0 / MAX(1.0,
+                        CAST(t.deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
+                    )
+                END DESC
             "#,
             placeholders.join(",")
         );
