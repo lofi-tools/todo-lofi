@@ -40,16 +40,17 @@ impl Provider for OpenAiCompatible {
         &self.name
     }
 
-    fn context_window(&self, model: &str) -> u64 {
-        match model {
-            // m if m.contains("gpt-5") => 1_000_000,
-            // m if m.starts_with("o1") || m.starts_with("o3") => 200_000,
-            // m if m.contains("gpt-4o") => 128_000,
-            // m if m.contains("gpt-4-turbo") => 128_000,
-            // m if m.contains("gpt-4") => 8_192,
-            // m if m.contains("gpt-3.5") => 16_385,
-            _ => 128_000,
-        }
+    fn context_window(&self, _model: &str) -> u64 {
+        // match model {
+        //     // m if m.contains("gpt-5") => 1_000_000,
+        //     // m if m.starts_with("o1") || m.starts_with("o3") => 200_000,
+        //     // m if m.contains("gpt-4o") => 128_000,
+        //     // m if m.contains("gpt-4-turbo") => 128_000,
+        //     // m if m.contains("gpt-4") => 8_192,
+        //     // m if m.contains("gpt-3.5") => 16_385,
+        //     _ => 128_000,
+        // }
+        128_000
     }
 
     fn capabilities(&self, _model: &str) -> ProviderCapabilities {
@@ -89,7 +90,7 @@ impl Provider for OpenAiCompatible {
                             if let ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
-                                is_error,
+                                is_error: _,
                             } = block
                             {
                                 api_messages.push(serde_json::json!({
@@ -299,9 +300,9 @@ impl Provider for OpenAiCompatible {
                                         if data == "[DONE]" {
                                             // Emit accumulated tool calls
                                             for (idx, (id, name, args)) in &tool_calls {
-                                                let input: serde_json::Value =
-                                                    serde_json::from_str(args)
-                                                        .unwrap_or(serde_json::Value::Null);
+                                                // let input: serde_json::Value =
+                                                //     serde_json::from_str(args)
+                                                //         .unwrap_or(serde_json::Value::Null);
                                                 let _ = tx
                                                     .send(StreamEvent::ContentBlockStart {
                                                         index: *idx + 1,

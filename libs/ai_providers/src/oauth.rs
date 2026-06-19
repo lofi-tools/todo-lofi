@@ -159,7 +159,7 @@ struct AgentKeyResponse {
     #[serde(default)]
     reused: Option<bool>,
     #[serde(default)]
-    inference_base_url: Option<String>,
+    _inference_base_url: Option<String>,
 }
 
 // ─── Config helpers ──────────────────────────────────────────────────────────
@@ -190,9 +190,9 @@ fn get_config() -> (String, String, String, String) {
 // ─── Device code flow ────────────────────────────────────────────────────────
 
 async fn request_device_code(
-    client_id: &str,
+    _client_id: &str,
     portal_url: &str,
-    scope: &str,
+    _scope: &str,
 ) -> Result<DeviceCodeResponse> {
     let client = reqwest::Client::new();
     let url = format!("{portal_url}{DEVICE_CODE_ENDPOINT}");
@@ -216,8 +216,8 @@ async fn request_device_code(
 }
 
 async fn poll_for_token(
-    device_code: &str,
-    client_id: &str,
+    _device_code: &str,
+    _client_id: &str,
     portal_url: &str,
     interval: u64,
     expires_in: u64,
@@ -299,7 +299,7 @@ async fn mint_agent_key(
 
 async fn refresh_access_token(
     refresh_token: &str,
-    client_id: &str,
+    _client_id: &str,
     portal_url: &str,
 ) -> Result<TokenResponse> {
     let client = reqwest::Client::new();
@@ -555,7 +555,7 @@ fn update_agent_key(
 // ─── Main example entrypoint ─────────────────────────────────────────────────
 
 // #[tokio::main]
-async fn nous_oauth_login() -> Result<()> {
+async fn _nous_oauth_login() -> Result<()> {
     // use clap::Parser;
 
     // #[derive(clap::Parser)]
@@ -603,6 +603,9 @@ async fn nous_oauth_login() -> Result<()> {
     println!("  Scopes: {}", tokens.scope);
     println!("  Access token expires: {}", tokens.expires_at.to_rfc3339());
 
+    fn min(a: usize, b: usize) -> usize {
+        if a < b { a } else { b }
+    }
     if let Some(ref key) = tokens.agent_key {
         println!(
             "  Agent key: {}... (expires: {})",
@@ -615,8 +618,4 @@ async fn nous_oauth_login() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn min(a: usize, b: usize) -> usize {
-    if a < b { a } else { b }
 }
