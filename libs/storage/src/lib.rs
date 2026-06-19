@@ -5,6 +5,7 @@ pub mod error;
 pub mod migrations;
 pub mod tag;
 pub mod task;
+pub mod testing;
 pub mod tracing_setup;
 
 pub mod prelude {
