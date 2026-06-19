@@ -28,12 +28,16 @@ fn seed_tags() -> Vec<SeedTag> {
             implies: None,
         },
         SeedTag {
-            name: "backend".to_string(),
+            name: "programming".to_string(),
             implies: Some("work".to_string()),
         },
         SeedTag {
+            name: "backend".to_string(),
+            implies: Some("programming".to_string()),
+        },
+        SeedTag {
             name: "frontend".to_string(),
-            implies: Some("work".to_string()),
+            implies: Some("programming".to_string()),
         },
         SeedTag {
             name: "rust".to_string(),
@@ -45,6 +49,10 @@ fn seed_tags() -> Vec<SeedTag> {
         },
         SeedTag {
             name: "health".to_string(),
+            implies: Some("personal".to_string()),
+        },
+        SeedTag {
+            name: "life-admin".to_string(),
             implies: Some("personal".to_string()),
         },
     ]
@@ -254,7 +262,7 @@ mod tests {
         assert_eq!(tasks.len(), 8);
 
         let tags = store.list_tags().await?;
-        assert_eq!(tags.len(), 6);
+        assert_eq!(tags.len(), 8);
 
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
         assert!(task_with_parent.is_some());

@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# todo-core.workspace = true
+storage = { path = "../../libs/storage" }
+tokio.workspace = true
+jiff = { version = "0.2", features = ["serde"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

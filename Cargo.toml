@@ -26,6 +26,9 @@ env_logger = "0.11.10"
 thiserror = "^1.0"
 anyhow = "^1.0"
 snafu = { version = "0.9.1", features = ["backtrace"] }
+tracing = { version = "0.1", features = ["attributes", "log"] }
+tracing-subscriber = "0.3"
+jiff = { version = "0.2", features = ["serde"] }
 
 # Formats, codecs
 serde = { version = "1.0", features = ["derive"] }
