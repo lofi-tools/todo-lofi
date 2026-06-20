@@ -35,7 +35,6 @@ impl Render for TaskDetails {
 
         div()
             .relative()
-            .w(if is_open { px(420.) } else { px(0.) })
             .h_full()
             .overflow_hidden()
             .when(is_open, |this| {
@@ -85,7 +84,7 @@ impl Render for TaskDetails {
                             if let Some(deadline) = task.deadline {
                                 details = details.child(detail_row(
                                     "Deadline",
-                                    format!("{}", deadline),
+                                    format_deadline(deadline),
                                     muted_fg,
                                 ));
                             }
@@ -253,6 +252,31 @@ fn sub_row(label: &str, value: &str, muted_fg: gpui::Hsla) -> impl IntoElement {
                 .child(label.to_string()),
         )
         .child(div().text_sm().child(value.to_string()))
+}
+
+fn format_deadline(deadline: u64) -> String {
+    use jiff::Timestamp;
+
+    let now = Timestamp::now();
+    let dl = Timestamp::from_second(deadline as i64).unwrap_or(now);
+    let diff_secs = (dl.as_second() - now.as_second()).unsigned_abs();
+
+    let weekday = dl.strftime("%a").to_string();
+    let within_7_days = diff_secs <= 7 * 86400;
+    let within_365_days = diff_secs <= 365 * 86400;
+
+    if within_7_days {
+        weekday
+    } else if within_365_days {
+        format!("{}, {}", weekday, dl.strftime("%B %-d"))
+    } else {
+        format!(
+            "{}, {}, {}",
+            weekday,
+            dl.strftime("%B %-d"),
+            dl.strftime("%Y")
+        )
+    }
 }
 
 fn compute_priority_score(task: &UiTask, now_secs: u64) -> f64 {
