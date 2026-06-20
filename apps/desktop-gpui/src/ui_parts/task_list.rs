@@ -1,7 +1,7 @@
 use crate::task_store::TaskStore;
 use gpui::{
-    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Render, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Pixels, Render, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
     ActiveTheme, Sizable, StyledExt,
@@ -122,6 +122,7 @@ impl RenderOnce for TaskItemRow {
         let task_id = self.task_id;
         let is_completed = self.completed;
         let view = self.view.clone();
+        let view2 = self.view.clone();
         let tags = self.tags.clone();
 
         div()
@@ -134,12 +135,19 @@ impl RenderOnce for TaskItemRow {
             .rounded_md()
             .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
             .when(is_completed, |this| this.opacity(0.4))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.selected_task_id
+                        .update(cx, |id, _| *id = Some(task_id));
+                    cx.notify();
+                });
+            })
             .child(
                 crate::components::checkbox::Checkbox::new(format!("check-{}", task_id))
                     .checked(is_completed)
                     .with_size(Pixels::from(22.))
                     .on_click(move |_, _, cx| {
-                        view.update(cx, |this, cx| {
+                        view2.update(cx, |this, cx| {
                             let _ = this.toggle_task(task_id, cx);
                             cx.notify();
                         });
@@ -172,6 +180,7 @@ impl RenderOnce for TaskItemRow {
 
 pub struct TaskList {
     pub selected_tag: Entity<Option<String>>,
+    pub selected_task_id: Entity<Option<u64>>,
     pub task_store: Entity<TaskStore>,
     pub editing_index: Option<usize>,
     pub input_state: Entity<InputState>,

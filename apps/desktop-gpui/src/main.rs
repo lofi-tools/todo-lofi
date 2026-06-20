@@ -5,7 +5,7 @@ use storage::prelude::*;
 
 use crate::{
     task_store::TaskStore,
-    ui_parts::{navbar::NavBar, task_list::TaskList},
+    ui_parts::{navbar::NavBar, task_details::TaskDetails, task_list::TaskList},
 };
 
 pub mod ui_traits;
@@ -16,14 +16,17 @@ pub mod components {
 pub mod task_store;
 pub mod ui_parts {
     pub mod navbar;
+    pub mod task_details;
     pub mod task_list;
 }
 
 pub struct TodoApp {
     task_store: Entity<TaskStore>,
     selected_tag: Entity<Option<String>>,
+    selected_task_id: Entity<Option<u64>>,
     sidebar_ui: Entity<NavBar>,
     task_list_ui: Entity<TaskList>,
+    details_ui: Entity<TaskDetails>,
 }
 
 impl TodoApp {
@@ -35,6 +38,7 @@ impl TodoApp {
         });
         let selected_tag = cx.new(|_| None);
         let selected_path = cx.new(|_| Vec::new());
+        let selected_task_id = cx.new(|_| None);
         let sidebar_ui = cx.new(|_| NavBar {
             task_store: task_store.clone(),
             selected_tag: selected_tag.clone(),
@@ -43,16 +47,23 @@ impl TodoApp {
         let task_list_ui = cx.new(|_| TaskList {
             input_state: input_state.clone(),
             selected_tag: selected_tag.clone(),
+            selected_task_id: selected_task_id.clone(),
             task_store: task_store.clone(),
             editing_index: None,
             excluded_tags: HashSet::new(),
+        });
+        let details_ui = cx.new(|_| TaskDetails {
+            task_store: task_store.clone(),
+            selected_task_id: selected_task_id.clone(),
         });
 
         Self {
             task_store,
             selected_tag,
+            selected_task_id,
             sidebar_ui,
             task_list_ui,
+            details_ui,
         }
     }
 }
@@ -73,25 +84,31 @@ impl Render for TodoApp {
             .child(
                 div()
                     .flex_1()
-                    .v_flex()
-                    .p_8()
-                    .gap_6()
-                    .overflow_y_scrollbar()
+                    .h_flex()
                     .child(
                         div()
+                            .flex_1()
                             .v_flex()
-                            .gap_1()
-                            .w_full()
-                            .child(div().v_flex().gap_1().child(
-                                div().text_3xl().font_bold().ml(px(16.)).mb(px(16.)).child(
-                                    match selected_tag {
-                                        Some(tag) => format!("Tasks: {}", tag),
-                                        None => "All Tasks".to_string(),
-                                    },
-                                ),
-                            ))
-                            .child(self.task_list_ui.clone()),
-                    ),
+                            .p_8()
+                            .gap_6()
+                            .overflow_y_scrollbar()
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap_1()
+                                    .w_full()
+                                    .child(div().v_flex().gap_1().child(
+                                        div().text_3xl().font_bold().ml(px(16.)).mb(px(16.)).child(
+                                            match selected_tag {
+                                                Some(tag) => format!("Tasks: {}", tag),
+                                                None => "All Tasks".to_string(),
+                                            },
+                                        ),
+                                    ))
+                                    .child(self.task_list_ui.clone()),
+                            ),
+                    )
+                    .child(self.details_ui.clone()),
             )
     }
 }
