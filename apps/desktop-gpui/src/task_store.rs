@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use storage::prelude::*;
@@ -12,21 +12,16 @@ pub struct TaskStore {
     pub tag_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_parents: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    store: Arc<Mutex<TodoStore>>,
-    handle: tokio::runtime::Handle,
+    store: Arc<tokio::sync::Mutex<TodoStore>>,
 }
 
 impl TaskStore {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let config = StorageConfig {
+        let rt = tokio::runtime::Handle::current();
+        let store = rt.block_on(TodoStore::new(&StorageConfig {
             db_uri: "turso::memory:".to_string(),
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let store = rt.block_on(TodoStore::new(&config)).unwrap();
+        })).unwrap();
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
             completed: Arc::new(RwLock::new(HashSet::new())),
@@ -34,8 +29,7 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(HashMap::new())),
             tag_children: Arc::new(RwLock::new(HashMap::new())),
             tag_parents: Arc::new(RwLock::new(HashMap::new())),
-            store: Arc::new(Mutex::new(store)),
-            handle: tokio::runtime::Handle::current(),
+            store: Arc::new(tokio::sync::Mutex::new(store)),
         }
     }
 
@@ -86,8 +80,7 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(tag_descendants)),
             tag_children: Arc::new(RwLock::new(tag_children)),
             tag_parents: Arc::new(RwLock::new(tag_parents)),
-            store: Arc::new(Mutex::new(store)),
-            handle: tokio::runtime::Handle::current(),
+            store: Arc::new(tokio::sync::Mutex::new(store)),
         })
     }
 
@@ -202,36 +195,36 @@ impl TaskStore {
 
     pub fn insert_task(&self, _idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
         let store = self.store.clone();
-        let handle = self.handle.clone();
         let title = title.to_string();
-        let tasks = self.tasks.clone();
 
-        let new_task = handle.block_on(async {
-            let mut store = store
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock store: {}", e))?;
+        let new_task = {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut s = store.lock().await;
 
-            let task = store
-                .create_task(Task::create().title(title))
-                .await?;
+                let task = s
+                    .create_task(Task::create().title(title))
+                    .await?;
 
-            let all_tags = store.list_tags().await?;
-            for tag_name in &tags {
-                if let Some(tag) = all_tags.iter().find(|t| t.name == *tag_name) {
-                    store.assign_tag_to_task(task.id, tag.id).await?;
+                let all_tags = s.list_tags().await?;
+                for tag_name in &tags {
+                    if let Some(tag) = all_tags.iter().find(|t| t.name == *tag_name) {
+                        s.assign_tag_to_task(task.id, tag.id).await?;
+                    }
                 }
-            }
 
-            let mut meta = TaskWithMeta {
-                task,
-                direct_tags: Vec::new(),
-                inferred_tags: Vec::new(),
-            };
-            store.load_all_tags(&mut meta).await?;
-            Ok::<_, anyhow::Error>(meta)
-        })?;
+                let mut meta = TaskWithMeta {
+                    task,
+                    direct_tags: Vec::new(),
+                    inferred_tags: Vec::new(),
+                };
+                s.load_all_tags(&mut meta).await?;
+                Ok::<_, anyhow::Error>(meta)
+            })?
+        };
 
-        let mut tasks = tasks
+        let mut tasks = self
+            .tasks
             .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock tasks: {}", e))?;
         tasks.push(new_task);

@@ -191,7 +191,6 @@ pub struct TaskList {
 
 impl TaskList {
     fn save_task(&mut self, cx: &mut Context<Self>) {
-        let task_store = self.task_store.read(cx);
         let title = self
             .input_state
             .read(cx)
@@ -206,12 +205,12 @@ impl TaskList {
             let mut tags = Vec::new();
             if let Some(ref tag) = selected_tag {
                 tags.push(tag.clone());
-                if let Ok(ancestors) = task_store.ancestors_of(tag) {
+                if let Ok(ancestors) = self.task_store.read(cx).ancestors_of(tag) {
                     tags.extend(ancestors);
                 }
             }
-            let _ = task_store.insert_task(index, &title, tags);
             self.editing_index = None;
+            let _ = self.task_store.read(cx).insert_task(index, &title, tags);
             cx.notify();
         }
     }
