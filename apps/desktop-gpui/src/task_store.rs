@@ -1,24 +1,13 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
 };
 
 use storage::prelude::*;
 
-#[derive(Debug, Clone)]
-pub struct UiTask {
-    pub id: u64,
-    pub title: String,
-    pub completed: bool,
-    pub tags: Vec<String>,
-    pub description: Option<String>,
-    pub deadline: Option<u64>,
-    pub importance_factor: f64,
-    pub urgency_factor: f64,
-}
-
 pub struct TaskStore {
-    pub tasks: Arc<RwLock<Vec<UiTask>>>,
+    pub tasks: Arc<RwLock<Vec<TaskWithMeta>>>,
+    pub completed: Arc<RwLock<HashSet<u64>>>,
     pub top_level_tags: Arc<RwLock<Vec<String>>>,
     pub tag_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
@@ -30,6 +19,7 @@ impl TaskStore {
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
+            completed: Arc::new(RwLock::new(HashSet::new())),
             top_level_tags: Arc::new(RwLock::new(Vec::new())),
             tag_descendants: Arc::new(RwLock::new(HashMap::new())),
             tag_children: Arc::new(RwLock::new(HashMap::new())),
@@ -40,11 +30,10 @@ impl TaskStore {
     pub async fn load_from_storage(store: &mut TodoStore) -> anyhow::Result<Self> {
         store.seed().await?;
 
-        let tasks = store.list_tasks().await?;
+        let tasks = store.list_tasks_by_priority().await?;
         let all_tags = store.list_tags().await?;
         let top_level = store.get_top_level_tags().await?;
 
-        let mut ui_tasks = Vec::new();
         let mut tag_descendants = HashMap::new();
         let mut tag_children = HashMap::new();
         let mut tag_parents = HashMap::new();
@@ -72,30 +61,15 @@ impl TaskStore {
             top_level_names.push(tag.name.clone());
         }
 
-        for task in &tasks {
-            let direct_tags = store.get_direct_task_tags(task.id).await?;
-            let tag_names: Vec<String> = direct_tags.into_iter().map(|t| t.name).collect();
-
-            ui_tasks.push(UiTask {
-                id: task.id,
-                title: task.title.clone(),
-                completed: false,
-                tags: tag_names,
-                description: task.description.clone(),
-                deadline: task.deadline,
-                importance_factor: task.importance_factor,
-                urgency_factor: task.urgency_factor,
-            });
-        }
-
         tracing::info!(
-            tasks = ui_tasks.len(),
+            tasks = tasks.len(),
             top_level_tags = top_level_names.len(),
             "Loaded tasks from storage"
         );
 
         Ok(Self {
-            tasks: Arc::new(RwLock::new(ui_tasks)),
+            tasks: Arc::new(RwLock::new(tasks)),
+            completed: Arc::new(RwLock::new(HashSet::new())),
             top_level_tags: Arc::new(RwLock::new(top_level_names)),
             tag_descendants: Arc::new(RwLock::new(tag_descendants)),
             tag_children: Arc::new(RwLock::new(tag_children)),
@@ -103,13 +77,20 @@ impl TaskStore {
         })
     }
 
-    pub fn tasks(&self) -> anyhow::Result<Vec<UiTask>> {
+    pub fn tasks(&self) -> anyhow::Result<Vec<TaskWithMeta>> {
         let tasks = self
             .tasks
             .read()
             .map_err(|e| anyhow::anyhow!("Failed to read lock: {}", e))?;
 
         Ok(tasks.clone())
+    }
+
+    pub fn is_completed(&self, id: u64) -> bool {
+        self.completed
+            .read()
+            .map(|c| c.contains(&id))
+            .unwrap_or(false)
     }
 
     pub fn top_level_tags(&self) -> anyhow::Result<Vec<String>> {
@@ -129,7 +110,7 @@ impl TaskStore {
         Ok(map.get(tag).cloned().unwrap_or_default())
     }
 
-    pub fn tasks_for_tag(&self, tag: &str) -> anyhow::Result<Vec<UiTask>> {
+    pub fn tasks_for_tag(&self, tag: &str) -> anyhow::Result<Vec<TaskWithMeta>> {
         let descendants = {
             let map = self
                 .tag_descendants
@@ -142,9 +123,13 @@ impl TaskStore {
         tags_to_match.push(tag.to_string());
 
         let tasks = self.tasks()?;
-        let filtered: Vec<UiTask> = tasks
+        let filtered: Vec<TaskWithMeta> = tasks
             .into_iter()
-            .filter(|t| t.tags.iter().any(|tag| tags_to_match.contains(tag)))
+            .filter(|t| {
+                t.direct_tags
+                    .iter()
+                    .any(|tag| tags_to_match.contains(tag))
+            })
             .collect();
 
         Ok(filtered)
@@ -206,15 +191,22 @@ impl TaskStore {
     }
 
     pub fn insert_task(&self, idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
-        let task = UiTask {
+        let task = TaskWithMeta {
             id: 0,
             title: title.into(),
-            completed: false,
-            tags,
             description: None,
+            branch_name: None,
+            labels: None,
+            blocked_by: None,
             deadline: None,
             importance_factor: 1.0,
             urgency_factor: 1.0,
+            created_at: jiff::Timestamp::now(),
+            updated_at: jiff::Timestamp::now(),
+            parent_id: None,
+            priority_score: 1.0,
+            direct_tags: tags.clone(),
+            inferred_tags: tags,
         };
 
         let mut tasks = self
@@ -231,13 +223,15 @@ impl TaskStore {
     }
 
     pub fn toggle_task(&self, id: u64) -> anyhow::Result<()> {
-        let mut tasks = self
-            .tasks
+        let mut completed = self
+            .completed
             .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock tasks: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to lock completed: {}", e))?;
 
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            task.completed = !task.completed;
+        if completed.contains(&id) {
+            completed.remove(&id);
+        } else {
+            completed.insert(id);
         }
 
         Ok(())

@@ -1,9 +1,10 @@
-use crate::task_store::{TaskStore, UiTask};
+use crate::task_store::TaskStore;
 use gpui::{App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
 use gpui_component::{
     ActiveTheme, StyledExt,
     button::{Button, ButtonVariants},
 };
+use storage::prelude::TaskWithMeta;
 
 pub struct TaskDetails {
     pub task_store: Entity<TaskStore>,
@@ -11,7 +12,7 @@ pub struct TaskDetails {
 }
 
 impl TaskDetails {
-    fn get_selected_task(&self, cx: &App) -> Option<UiTask> {
+    fn get_selected_task(&self, cx: &App) -> Option<TaskWithMeta> {
         let task_id = *self.selected_task_id.read(cx);
         let task_id = task_id?;
         let task_store = self.task_store.read(cx);
@@ -48,51 +49,38 @@ impl Render for TaskDetails {
                 }
 
                 if let Some(deadline) = task.deadline {
-                    details = details.child(detail_row(
-                        "Deadline",
-                        format_deadline(deadline),
-                        muted_fg,
-                    ));
+                    details =
+                        details.child(detail_row("Deadline", format_deadline(deadline), muted_fg));
                 }
 
                 details = details.child(priority_section(&task, muted_fg));
 
-                if !task.tags.is_empty() {
+                if !task.direct_tags.is_empty() {
                     details = details.child(
-                        div().v_flex().gap_1().child(
-                            div()
-                                .text_xs()
-                                .font_semibold()
-                                .text_color(muted_fg)
-                                .child("Tags"),
-                        ).child(div().h_flex().gap_2().flex_wrap().children(
-                            task.tags.iter().map(|t| {
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .child(
                                 div()
-                                    .text_sm()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_sm()
-                                    .bg(cx.theme().muted)
+                                    .text_xs()
+                                    .font_semibold()
                                     .text_color(muted_fg)
-                                    .child(format!("#{}", t))
-                            }),
-                        )),
+                                    .child("Tags"),
+                            )
+                            .child(div().h_flex().gap_2().flex_wrap().children(
+                                task.direct_tags.iter().map(|t| {
+                                    div()
+                                        .text_sm()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(cx.theme().muted)
+                                        .text_color(muted_fg)
+                                        .child(format!("#{}", t))
+                                }),
+                            )),
                     );
                 }
-
-                details = details.child(
-                    div().v_flex().gap_1().child(
-                        div()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(muted_fg)
-                            .child("Status"),
-                    ).child(div().text_sm().child(if task.completed {
-                        "Completed"
-                    } else {
-                        "Open"
-                    })),
-                );
 
                 div()
                     .h_full()
@@ -134,12 +122,11 @@ fn detail_row(label: &str, value: String, muted_fg: gpui::Hsla) -> impl IntoElem
         .child(div().text_sm().child(value))
 }
 
-fn priority_section(task: &UiTask, muted_fg: gpui::Hsla) -> impl IntoElement {
+fn priority_section(task: &TaskWithMeta, muted_fg: gpui::Hsla) -> impl IntoElement {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let priority_score = compute_priority_score(task, now_secs);
 
     let deadline_factor = match task.deadline {
         None => 1.0,
@@ -163,7 +150,7 @@ fn priority_section(task: &UiTask, muted_fg: gpui::Hsla) -> impl IntoElement {
             div()
                 .v_flex()
                 .gap_1p5()
-                .child(priority_score_row(priority_score, muted_fg))
+                .child(priority_score_row(task.priority_score, muted_fg))
                 .child(sub_row(
                     "Importance",
                     &format!("{:.1}", task.importance_factor),
@@ -253,15 +240,4 @@ fn format_deadline(deadline: u64) -> String {
             dl.strftime("%Y")
         )
     }
-}
-
-fn compute_priority_score(task: &UiTask, now_secs: u64) -> f64 {
-    let deadline_factor = match task.deadline {
-        None => 1.0,
-        Some(dl) => {
-            let diff = dl as f64 - now_secs as f64;
-            86400.0_f64 / diff.max(1.0)
-        }
-    };
-    task.importance_factor * deadline_factor
 }

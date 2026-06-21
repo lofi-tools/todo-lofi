@@ -54,6 +54,7 @@ pub struct TaskWithMeta {
     pub updated_at: jiff::Timestamp,
     pub parent_id: Option<u64>,
     pub priority_score: f64,
+    pub direct_tags: Vec<String>,
     pub inferred_tags: Vec<String>,
 }
 
@@ -152,6 +153,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         updated_at,
         parent_id,
         priority_score,
+        direct_tags: Vec::new(),
         inferred_tags: Vec::new(),
     })
 }
@@ -230,7 +232,10 @@ impl TodoStore {
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            tasks.push(parse_task_from_row(&row)?);
+            let mut task = parse_task_from_row(&row)?;
+            let direct = self.get_direct_task_tags(task.id).await?;
+            task.direct_tags = direct.into_iter().map(|t| t.name).collect();
+            tasks.push(task);
         }
 
         Ok(tasks)
@@ -288,6 +293,8 @@ impl TodoStore {
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
+            let direct = self.get_direct_task_tags(task.id).await?;
+            task.direct_tags = direct.into_iter().map(|t| t.name).collect();
             let inferred = self.get_inferred_task_tags(task.id).await?;
             task.inferred_tags = inferred.into_iter().map(|t| t.name).collect();
             tasks.push(task);

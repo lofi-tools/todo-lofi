@@ -10,6 +10,7 @@ use gpui_component::{
     scroll::ScrollableElement,
 };
 use std::collections::HashSet;
+use storage::prelude::TaskWithMeta;
 
 #[derive(IntoElement)]
 struct PlusRow {
@@ -223,14 +224,15 @@ impl TaskList {
     fn build_task_rows(
         &self,
         view: &Entity<TaskList>,
-        filtered_tasks: &[crate::task_store::UiTask],
+        filtered_tasks: &[TaskWithMeta],
         _cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let task_store = self.task_store.read(_cx);
         filtered_tasks
             .iter()
             .map(|task| {
                 let display_tags: Vec<String> = task
-                    .tags
+                    .direct_tags
                     .iter()
                     .filter(|t| !self.excluded_tags.contains(t.as_str()))
                     .cloned()
@@ -239,7 +241,7 @@ impl TaskList {
                     view.clone(),
                     task.id,
                     task.title.clone(),
-                    task.completed,
+                    task_store.is_completed(task.id),
                     display_tags,
                 )
                 .into_any_element()
@@ -250,7 +252,7 @@ impl TaskList {
     fn build_interleaved_plus_rows(
         &self,
         view: &Entity<TaskList>,
-        filtered_tasks: &[crate::task_store::UiTask],
+        filtered_tasks: &[TaskWithMeta],
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let editing_index = cx.new(|_| self.editing_index);
