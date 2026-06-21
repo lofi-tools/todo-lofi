@@ -127,14 +127,7 @@ fn priority_section(task: &TaskWithMeta, muted_fg: gpui::Hsla) -> impl IntoEleme
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-
-    let deadline_factor = match task.deadline {
-        None => 1.0,
-        Some(dl) => {
-            let diff = dl as f64 - now_secs as f64;
-            86400.0_f64 / diff.max(1.0)
-        }
-    };
+    let deadline_factor = task.deadline_factor(now_secs);
 
     div()
         .v_flex()

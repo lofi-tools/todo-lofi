@@ -21,7 +21,6 @@ pub struct Task {
     pub description: Option<String>,
     pub branch_name: Option<String>,
     pub labels: Option<toasty::Json<Vec<String>>>,
-    pub blocked_by: Option<toasty::Json<Vec<BlockerRef>>>,
     pub deadline: Option<u64>,
     #[default(1.0)]
     pub importance_factor: f64,
@@ -46,7 +45,6 @@ pub struct TaskWithMeta {
     pub description: Option<String>,
     pub branch_name: Option<String>,
     pub labels: Option<toasty::Json<Vec<String>>>,
-    pub blocked_by: Option<toasty::Json<Vec<BlockerRef>>>,
     pub deadline: Option<u64>,
     pub importance_factor: f64,
     pub urgency_factor: f64,
@@ -58,9 +56,16 @@ pub struct TaskWithMeta {
     pub inferred_tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct BlockerRef {
-    pub id: Option<String>,
+impl TaskWithMeta {
+    pub fn deadline_factor(&self, now_secs: u64) -> f64 {
+        match self.deadline {
+            None => 1.0,
+            Some(dl) => {
+                let diff = dl as f64 - now_secs as f64;
+                86400.0 / diff.max(1.0)
+            }
+        }
+    }
 }
 
 impl Task {
@@ -130,14 +135,14 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         .unwrap_or_default()
         .as_secs();
 
-    let deadline_factor = match deadline {
-        None => 1.0,
-        Some(dl) => {
-            let diff = dl as f64 - now_secs as f64;
-            86400.0_f64 / diff.max(1.0)
-        }
-    };
-    let priority_score = importance_factor * deadline_factor;
+    // let deadline_factor = match deadline {
+    //     None => 1.0,
+    //     Some(dl) => {
+    //         let diff = dl as f64 - now_secs as f64;
+    //         86400.0_f64 / diff.max(1.0)
+    //     }
+    // };
+    // let priority_score = importance_factor * deadline_factor;
 
     Ok(TaskWithMeta {
         id,
@@ -145,7 +150,6 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         description,
         branch_name,
         labels,
-        blocked_by,
         deadline,
         importance_factor,
         urgency_factor,
