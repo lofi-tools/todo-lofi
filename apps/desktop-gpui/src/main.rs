@@ -119,27 +119,42 @@ fn main() {
         None => "turso::memory:".to_string(),
     };
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create Tokio runtime");
-
-    let task_store_data = rt.block_on(async {
-        let config = StorageConfig { db_uri };
-        let mut store = TodoStore::new(&config).await.unwrap();
-        if args.use_test_seed_data {
-            store.seed().await.unwrap();
-        }
-        TaskStore::load_from_storage(store).await.unwrap()
-    });
-
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
 
     app.run(move |cx| {
+        gpui_tokio::init(cx);
         gpui_component::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
 
-        let task_store_entity = cx.new(|_| task_store_data);
+        let task_store_entity = cx.new(|_| TaskStore::empty());
+
+        let use_test_seed_data = args.use_test_seed_data;
+        let init_task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let config = StorageConfig { db_uri };
+            let mut store = TodoStore::new(&config).await?;
+            if use_test_seed_data {
+                store.seed().await?;
+            }
+            TaskStore::load_from_storage(store).await
+        });
+
+        let entity = task_store_entity.clone();
+        cx.spawn(move |cx: &mut gpui::AsyncApp| {
+            let mut cx = cx.clone();
+            let entity = entity.clone();
+            async move {
+                match init_task.await {
+                    Ok(loaded) => {
+                        entity.update(&mut cx, |store, _cx| *store = loaded);
+                        cx.refresh();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to initialize database: {e}");
+                    }
+                }
+            }
+        })
+        .detach();
 
         cx.open_window(WindowOptions::default(), |window, cx| {
             let view = cx.new(|cx| TodoApp::new(window, cx, task_store_entity.clone()));

@@ -210,8 +210,27 @@ impl TaskList {
                 }
             }
             self.editing_index = None;
-            let _ = self.task_store.read(cx).insert_task(index, &title, tags);
-            cx.notify();
+            let tasks_handle = self.task_store.read(cx).tasks.clone();
+            let this = cx.entity().clone();
+            let insert_task = {
+                let ts = self.task_store.read(cx);
+                ts.insert_task(index, &title, tags, cx)
+            };
+            cx.spawn(move |_this, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    match insert_task.await {
+                        Ok(new_task) => {
+                            tasks_handle.write().unwrap().push(new_task);
+                            this.update(&mut cx, |_view, cx| cx.notify());
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to insert task: {e}");
+                        }
+                    }
+                }
+            })
+            .detach();
         }
     }
     fn toggle_task(&mut self, id: u64, cx: &mut Context<Self>) -> anyhow::Result<()> {

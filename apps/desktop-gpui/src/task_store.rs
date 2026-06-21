@@ -12,16 +12,11 @@ pub struct TaskStore {
     pub tag_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_parents: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    store: Arc<tokio::sync::Mutex<TodoStore>>,
+    store: Option<Arc<tokio::sync::Mutex<TodoStore>>>,
 }
 
 impl TaskStore {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        let rt = tokio::runtime::Handle::current();
-        let store = rt.block_on(TodoStore::new(&StorageConfig {
-            db_uri: "turso::memory:".to_string(),
-        })).unwrap();
+    pub fn empty() -> Self {
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
             completed: Arc::new(RwLock::new(HashSet::new())),
@@ -29,7 +24,7 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(HashMap::new())),
             tag_children: Arc::new(RwLock::new(HashMap::new())),
             tag_parents: Arc::new(RwLock::new(HashMap::new())),
-            store: Arc::new(tokio::sync::Mutex::new(store)),
+            store: None,
         }
     }
 
@@ -80,7 +75,7 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(tag_descendants)),
             tag_children: Arc::new(RwLock::new(tag_children)),
             tag_parents: Arc::new(RwLock::new(tag_parents)),
-            store: Arc::new(tokio::sync::Mutex::new(store)),
+            store: Some(Arc::new(tokio::sync::Mutex::new(store))),
         })
     }
 
@@ -193,40 +188,41 @@ impl TaskStore {
         Ok(result)
     }
 
-    pub fn insert_task(&self, _idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
-        let store = self.store.clone();
+    pub fn store_handle(&self) -> Arc<tokio::sync::Mutex<TodoStore>> {
+        self.store
+            .clone()
+            .expect("TaskStore not initialized")
+    }
+
+    pub fn insert_task(
+        &self,
+        _idx: usize,
+        title: &str,
+        tags: Vec<String>,
+        cx: &impl gpui::AppContext,
+    ) -> gpui::Task<anyhow::Result<TaskWithMeta>> {
+        let store = self.store_handle();
         let title = title.to_string();
 
-        let new_task = {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                let mut s = store.lock().await;
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
 
-                let task = s
-                    .create_task(Task::create().title(title))
-                    .await?;
+            let task = s
+                .create_task(Task::create().title(title))
+                .await?;
 
-                for tag_name in &tags {
-                    let _ = s.assign_tag_to_task(task.id, tag_name).await;
-                }
+            for tag_name in &tags {
+                let _ = s.assign_tag_to_task(task.id, tag_name).await;
+            }
 
-                let mut meta = TaskWithMeta {
-                    task,
-                    direct_tags: Vec::new(),
-                    inferred_tags: Vec::new(),
-                };
-                s.load_all_tags(&mut meta).await?;
-                Ok::<_, anyhow::Error>(meta)
-            })?
-        };
-
-        let mut tasks = self
-            .tasks
-            .write()
-            .map_err(|e| anyhow::anyhow!("Failed to lock tasks: {}", e))?;
-        tasks.push(new_task);
-
-        Ok(())
+            let mut meta = TaskWithMeta {
+                task,
+                direct_tags: Vec::new(),
+                inferred_tags: Vec::new(),
+            };
+            s.load_all_tags(&mut meta).await?;
+            Ok(meta)
+        })
     }
 
     pub fn toggle_task(&self, id: u64) -> anyhow::Result<()> {
