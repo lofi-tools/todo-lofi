@@ -206,11 +206,8 @@ impl TaskStore {
                     .create_task(Task::create().title(title))
                     .await?;
 
-                let all_tags = s.list_tags().await?;
                 for tag_name in &tags {
-                    if let Some(tag) = all_tags.iter().find(|t| t.name == *tag_name) {
-                        s.assign_tag_to_task(task.id, tag.id).await?;
-                    }
+                    let _ = s.assign_tag_to_task(task.id, tag_name).await;
                 }
 
                 let mut meta = TaskWithMeta {

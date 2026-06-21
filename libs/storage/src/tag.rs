@@ -12,6 +12,7 @@ pub struct Tag {
     #[key]
     #[auto]
     pub id: u64,
+    #[unique]
     pub name: String,
 }
 
@@ -45,6 +46,18 @@ impl TodoStore {
     pub async fn get_tag(&mut self, id: u64) -> QueryResult<Tag> {
         let tag = Tag::get_by_id(&mut self.db, id).await?;
         Ok(tag)
+    }
+
+    pub async fn get_tag_by_name(&mut self, name: &str) -> QueryResult<Option<Tag>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id, name FROM tags WHERE LOWER(name) = LOWER(?1)"#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .bind(name)
+        .exec(&mut self.db)
+        .await?;
+
+        Ok(rows.into_iter().next().and_then(|row| parse_tag_row(&row)))
     }
 
     pub async fn list_tags(&mut self) -> QueryResult<Vec<Tag>> {
@@ -225,22 +238,31 @@ impl TodoStore {
         Ok(tags)
     }
 
-    pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_id: u64) -> QueryResult<()> {
-        let existing = toasty::sql::query(
-            r#"SELECT 1 FROM direct_task_tags WHERE task_id = ?1 AND tag_id = ?2"#,
+    pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_name: &str) -> QueryResult<()> {
+        let lower = tag_name.to_lowercase();
+
+        let already_assigned = toasty::sql::query(
+            r#"SELECT 1 FROM direct_task_tags dtt
+               JOIN tags t ON t.id = dtt.tag_id
+               WHERE dtt.task_id = ?1 AND LOWER(t.name) = ?2"#,
         )
         .column_types([toasty::stmt::Type::I64])
         .bind(task_id as i64)
-        .bind(tag_id as i64)
+        .bind(lower.as_str())
         .exec(&mut self.db)
         .await?;
 
-        if existing.is_empty() {
+        if already_assigned.is_empty() {
+            let tag = match self.get_tag_by_name(tag_name).await? {
+                Some(tag) => tag,
+                None => self.create_tag(tag_name).await?,
+            };
+
             toasty::sql::statement(
                 r#"INSERT INTO direct_task_tags (task_id, tag_id) VALUES (?1, ?2)"#,
             )
             .bind(task_id as i64)
-            .bind(tag_id as i64)
+            .bind(tag.id as i64)
             .exec(&mut self.db)
             .await?;
         }
@@ -489,7 +511,7 @@ mod tests {
             .await?;
 
         let tag = storage.create_tag("Python").await?;
-        storage.assign_tag_to_task(task.id, tag.id).await?;
+        storage.assign_tag_to_task(task.id, &tag.name).await?;
 
         let tags = storage.get_direct_task_tags(task.id).await?;
         assert_eq!(tags.len(), 1);
@@ -555,7 +577,7 @@ mod tests {
             .create_task(Task::create().title("Learn Python".to_string()))
             .await?;
 
-        storage.assign_tag_to_task(task.id, python.id).await?;
+        storage.assign_tag_to_task(task.id, &python.name).await?;
 
         let inferred = storage.get_inferred_task_tags(task.id).await?;
         assert_eq!(inferred.len(), 3);
@@ -583,7 +605,7 @@ mod tests {
             .create_task(Task::create().title("React project".to_string()))
             .await?;
 
-        storage.assign_tag_to_task(task.id, react.id).await?;
+        storage.assign_tag_to_task(task.id, &react.name).await?;
 
         let inferred = storage.get_inferred_task_tags(task.id).await?;
         assert_eq!(inferred.len(), 3);
@@ -618,19 +640,21 @@ mod tests {
         let task_react = storage
             .create_task(Task::create().title("React app".to_string()))
             .await?;
-        storage.assign_tag_to_task(task_react.id, react.id).await?;
+        storage
+            .assign_tag_to_task(task_react.id, &react.name)
+            .await?;
 
         let task_rust = storage
             .create_task(Task::create().title("Rust CLI".to_string()))
             .await?;
-        storage.assign_tag_to_task(task_rust.id, rust.id).await?;
+        storage.assign_tag_to_task(task_rust.id, &rust.name).await?;
 
         let task_python = storage
             .create_task(Task::create().title("Python script".to_string()))
             .await?;
         let python = storage.create_tag("Python").await?;
         storage
-            .assign_tag_to_task(task_python.id, python.id)
+            .assign_tag_to_task(task_python.id, &python.name)
             .await?;
 
         let programming_tasks = storage.list_tasks_by_tag(programming.id).await?;
@@ -666,7 +690,7 @@ mod tests {
         let task = storage
             .create_task(Task::create().title("React app".to_string()))
             .await?;
-        storage.assign_tag_to_task(task.id, react.id).await?;
+        storage.assign_tag_to_task(task.id, &react.name).await?;
 
         let programming_tasks = storage.list_tasks_by_tag(programming.id).await?;
         assert_eq!(programming_tasks.len(), 1);
