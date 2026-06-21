@@ -40,23 +40,24 @@ pub struct Task {
 
 #[derive(Debug, Clone)]
 pub struct TaskWithMeta {
-    pub id: u64,
-    pub title: String,
-    pub description: Option<String>,
-    pub branch_name: Option<String>,
-    pub labels: Option<toasty::Json<Vec<String>>>,
-    pub deadline: Option<u64>,
-    pub importance_factor: f64,
-    pub urgency_factor: f64,
-    pub created_at: jiff::Timestamp,
-    pub updated_at: jiff::Timestamp,
-    pub parent_id: Option<u64>,
-    pub priority_score: f64,
+    pub task: Task,
     pub direct_tags: Vec<String>,
     pub inferred_tags: Vec<String>,
 }
 
+impl std::ops::Deref for TaskWithMeta {
+    type Target = Task;
+
+    fn deref(&self) -> &Self::Target {
+        &self.task
+    }
+}
+
 impl TaskWithMeta {
+    pub fn priority_score(&self, now_secs: u64) -> f64 {
+        self.importance_factor * self.deadline_factor(now_secs)
+    }
+
     pub fn deadline_factor(&self, now_secs: u64) -> f64 {
         match self.deadline {
             None => 1.0,
@@ -107,10 +108,6 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         .get(4)
         .and_then(|v| v.as_str())
         .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
-    let blocked_by = record
-        .get(5)
-        .and_then(|v| v.as_str())
-        .map(|s| toasty::Json(serde_json::from_str(s).unwrap_or_default()));
     let deadline = record.get(6).and_then(|v| v.to_u64());
     let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
     let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
@@ -130,21 +127,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         .parse::<jiff::Timestamp>()?;
     let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // let deadline_factor = match deadline {
-    //     None => 1.0,
-    //     Some(dl) => {
-    //         let diff = dl as f64 - now_secs as f64;
-    //         86400.0_f64 / diff.max(1.0)
-    //     }
-    // };
-    // let priority_score = importance_factor * deadline_factor;
-
-    Ok(TaskWithMeta {
+    let task = Task {
         id,
         title,
         description,
@@ -156,7 +139,12 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         created_at,
         updated_at,
         parent_id,
-        priority_score,
+        subtasks: Deferred::default(),
+        parent: Deferred::default(),
+    };
+
+    Ok(TaskWithMeta {
+        task,
         direct_tags: Vec::new(),
         inferred_tags: Vec::new(),
     })
@@ -341,9 +329,9 @@ mod tests {
                     .description(Some("Do Task 1".to_string()))
                     .branch_name(Some("fix/task-1".to_string()))
                     .labels(toasty::Json(vec!["bug".to_string(), "backend".to_string()]))
-                    .blocked_by(toasty::Json(vec![BlockerRef {
-                        id: Some("task_00".to_string()),
-                    }]))
+                    // .blocked_by(toasty::Json(vec![BlockerRef {
+                    //     id: Some("task_00".to_string()),
+                    // }]))
                     .importance_factor(1.0)
                     .urgency_factor(1.0),
             )
@@ -387,7 +375,6 @@ mod tests {
                         .description(None)
                         .branch_name(None)
                         .labels(Some(toasty::Json(vec![])))
-                        .blocked_by(Some(toasty::Json(vec![])))
                         .importance_factor(1.0)
                         .urgency_factor(1.0),
                 )

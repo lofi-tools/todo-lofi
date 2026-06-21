@@ -128,6 +128,7 @@ fn priority_section(task: &TaskWithMeta, muted_fg: gpui::Hsla) -> impl IntoEleme
         .unwrap_or_default()
         .as_secs();
     let deadline_factor = task.deadline_factor(now_secs);
+    let priority_score = task.priority_score(now_secs);
 
     div()
         .v_flex()
@@ -143,7 +144,7 @@ fn priority_section(task: &TaskWithMeta, muted_fg: gpui::Hsla) -> impl IntoEleme
             div()
                 .v_flex()
                 .gap_1p5()
-                .child(priority_score_row(task.priority_score, muted_fg))
+                .child(priority_score_row(priority_score, muted_fg))
                 .child(sub_row(
                     "Importance",
                     &format!("{:.1}", task.importance_factor),

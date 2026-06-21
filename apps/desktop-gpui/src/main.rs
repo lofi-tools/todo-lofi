@@ -130,7 +130,7 @@ fn main() {
         if args.use_test_seed_data {
             store.seed().await.unwrap();
         }
-        TaskStore::load_from_storage(&mut store).await.unwrap()
+        TaskStore::load_from_storage(store).await.unwrap()
     });
 
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);

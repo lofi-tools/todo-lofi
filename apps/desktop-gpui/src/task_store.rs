@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use storage::prelude::*;
@@ -12,11 +12,21 @@ pub struct TaskStore {
     pub tag_descendants: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_children: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub tag_parents: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    store: Arc<Mutex<TodoStore>>,
+    handle: tokio::runtime::Handle,
 }
 
 impl TaskStore {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        let config = StorageConfig {
+            db_uri: "turso::memory:".to_string(),
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let store = rt.block_on(TodoStore::new(&config)).unwrap();
         Self {
             tasks: Arc::new(RwLock::new(Vec::new())),
             completed: Arc::new(RwLock::new(HashSet::new())),
@@ -24,10 +34,12 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(HashMap::new())),
             tag_children: Arc::new(RwLock::new(HashMap::new())),
             tag_parents: Arc::new(RwLock::new(HashMap::new())),
+            store: Arc::new(Mutex::new(store)),
+            handle: tokio::runtime::Handle::current(),
         }
     }
 
-    pub async fn load_from_storage(store: &mut TodoStore) -> anyhow::Result<Self> {
+    pub async fn load_from_storage(mut store: TodoStore) -> anyhow::Result<Self> {
         store.seed().await?;
 
         let tasks = store.list_tasks_by_priority().await?;
@@ -74,6 +86,8 @@ impl TaskStore {
             tag_descendants: Arc::new(RwLock::new(tag_descendants)),
             tag_children: Arc::new(RwLock::new(tag_children)),
             tag_parents: Arc::new(RwLock::new(tag_parents)),
+            store: Arc::new(Mutex::new(store)),
+            handle: tokio::runtime::Handle::current(),
         })
     }
 
@@ -125,11 +139,7 @@ impl TaskStore {
         let tasks = self.tasks()?;
         let filtered: Vec<TaskWithMeta> = tasks
             .into_iter()
-            .filter(|t| {
-                t.direct_tags
-                    .iter()
-                    .any(|tag| tags_to_match.contains(tag))
-            })
+            .filter(|t| t.direct_tags.iter().any(|tag| tags_to_match.contains(tag)))
             .collect();
 
         Ok(filtered)
@@ -190,35 +200,42 @@ impl TaskStore {
         Ok(result)
     }
 
-    pub fn insert_task(&self, idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
-        let task = TaskWithMeta {
-            id: 0,
-            title: title.into(),
-            description: None,
-            branch_name: None,
-            labels: None,
-            blocked_by: None,
-            deadline: None,
-            importance_factor: 1.0,
-            urgency_factor: 1.0,
-            created_at: jiff::Timestamp::now(),
-            updated_at: jiff::Timestamp::now(),
-            parent_id: None,
-            priority_score: 1.0,
-            direct_tags: tags.clone(),
-            inferred_tags: tags,
-        };
+    pub fn insert_task(&self, _idx: usize, title: &str, tags: Vec<String>) -> anyhow::Result<()> {
+        let store = self.store.clone();
+        let handle = self.handle.clone();
+        let title = title.to_string();
+        let tasks = self.tasks.clone();
 
-        let mut tasks = self
-            .tasks
+        let new_task = handle.block_on(async {
+            let mut store = store
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock store: {}", e))?;
+
+            let task = store
+                .create_task(Task::create().title(title))
+                .await?;
+
+            let all_tags = store.list_tags().await?;
+            for tag_name in &tags {
+                if let Some(tag) = all_tags.iter().find(|t| t.name == *tag_name) {
+                    store.assign_tag_to_task(task.id, tag.id).await?;
+                }
+            }
+
+            let mut meta = TaskWithMeta {
+                task,
+                direct_tags: Vec::new(),
+                inferred_tags: Vec::new(),
+            };
+            store.load_all_tags(&mut meta).await?;
+            Ok::<_, anyhow::Error>(meta)
+        })?;
+
+        let mut tasks = tasks
             .write()
             .map_err(|e| anyhow::anyhow!("Failed to lock tasks: {}", e))?;
+        tasks.push(new_task);
 
-        if idx > tasks.len() {
-            anyhow::bail!("Index {} out of bounds, max index is {}", idx, tasks.len());
-        }
-
-        tasks.insert(idx, task);
         Ok(())
     }
 
