@@ -24,13 +24,16 @@
       pkgs.cargo-watch
     ];
 
-    # wd = "$(git rev-parse --show-toplevel)";
-    scripts = mapAttrs pkgs.writeShellScriptBin {
+    bash.wd = "$(git rev-parse --show-toplevel)";
+    bash.thisDir = "${bash.wd}/apps/desktop-gpui";
+    scripts = with bash;  mapAttrs pkgs.writeShellScriptBin {
       dbg-env = '' ${concatStringsSep "\n" (attrValues (mapAttrs (n: v: "printf \"${n}=${v}\\n\"") env))} '';
       dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.my-nix.install-xcode-global.DEV_DIR}" xcodebuild -version '';
       # xcrun = ''${env.DEVELOPER_DIR}/Contents/Developer/usr/bin/xcrun'';
       # metal = ''${env.DEVELOPER_DIR}/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal $@'';
       pdg = "cargo watch -x 'run -p desktop-gpui'";
+      dg = ''cargo run -p desktop-gpui -- --config-path ${thisDir}/config.example.json --use-test-seed-data'';
+      dreset = '' rm -f ${thisDir}/.cache/todo.db; rm -f ${thisDir}/.cache/todo.db-wal'';
     };
 
     env = {

@@ -21,6 +21,32 @@ pub mod ui_parts {
     pub mod task_list;
 }
 
+#[derive(argh::FromArgs)]
+/// todo-lofi desktop application
+struct Args {
+    /// path to the JSON configuration file
+    #[argh(option)]
+    config_path: Option<String>,
+
+    /// pre-load hardcoded seed test data into the database
+    #[argh(switch)]
+    use_test_seed_data: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct AppConfig {
+    db_uri: String,
+}
+
+impl AppConfig {
+    fn load(path: &str) -> Self {
+        let contents = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read config file `{path}`: {e}"));
+        serde_json::from_str(&contents)
+            .unwrap_or_else(|e| panic!("failed to parse config file `{path}`: {e}"))
+    }
+}
+
 pub struct TodoApp {
     selected_task_id: Entity<Option<u64>>,
     sidebar_ui: Entity<NavBar>,
@@ -86,16 +112,24 @@ impl Render for TodoApp {
 }
 
 fn main() {
+    let args: Args = argh::from_env();
+
+    let db_uri = match args.config_path {
+        Some(path) => AppConfig::load(&path).db_uri,
+        None => "turso::memory:".to_string(),
+    };
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Failed to create Tokio runtime");
 
     let task_store_data = rt.block_on(async {
-        let config = StorageConfig {
-            db_uri: "turso::memory:".to_string(),
-        };
+        let config = StorageConfig { db_uri };
         let mut store = TodoStore::new(&config).await.unwrap();
+        if args.use_test_seed_data {
+            store.seed().await.unwrap();
+        }
         TaskStore::load_from_storage(&mut store).await.unwrap()
     });
 

@@ -29,7 +29,7 @@
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
 
           bash.wd = "$(git rev-parse --show-toplevel)";
-          scripts = mapAttrs (n: s: pkgs.writeShellScriptBin n s) {
+          scripts = mapAttrs pkgs.writeShellScriptBin {
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
             dt = ''set -e;  cd desktop; cargo tauri dev '';
             ccheck = ''set -ex;

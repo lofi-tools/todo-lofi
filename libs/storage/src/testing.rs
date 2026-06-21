@@ -187,6 +187,15 @@ fn seed_assignments() -> Vec<SeedAssignment> {
 
 impl TodoStore {
     pub async fn seed(&mut self) -> crate::QueryResult<()> {
+        if !self.list_tasks().await?.is_empty() {
+            tracing::info!("Database already seeded, skipping");
+            return Ok(());
+        }
+        if !self.list_tags().await?.is_empty() {
+            tracing::info!("Tags already seeded, skipping");
+            return Ok(());
+        }
+
         let tags = seed_tags();
         let mut tag_map = std::collections::HashMap::new();
 
