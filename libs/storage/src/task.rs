@@ -1,6 +1,6 @@
 use crate::TodoStore;
 use derive_entity_id::EntityId;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use toasty::Deferred;
 use toasty::Embed;
 use toasty::Model;
@@ -156,7 +156,10 @@ impl TodoStore {
         &mut self,
         create: <Task as Model>::Create,
     ) -> crate::QueryResult<Task> {
-        let created = create.exec(&mut self.db).await?;
+        let created = create
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::CreateTaskSnafu)?;
         Ok(created)
     }
 
@@ -171,19 +174,26 @@ impl TodoStore {
 
     #[fastrace::trace]
     pub async fn get_task(&mut self, id: u64) -> crate::QueryResult<Task> {
-        let task = Task::get_by_id(&mut self.db, id).await?;
+        let task = Task::get_by_id(&mut self.db, id)
+            .await
+            .context(crate::error::GetTaskSnafu { id })?;
         Ok(task)
     }
 
     #[fastrace::trace]
     pub async fn list_tasks(&mut self) -> crate::QueryResult<Vec<Task>> {
-        let tasks = Task::all().exec(&mut self.db).await?;
+        let tasks = Task::all()
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::ListTasksByPrioritySnafu)?;
         Ok(tasks)
     }
 
     #[fastrace::trace]
     pub async fn delete_task(&mut self, id: u64) -> crate::QueryResult<()> {
-        Task::delete_by_id(&mut self.db, id).await?;
+        Task::delete_by_id(&mut self.db, id)
+            .await
+            .context(crate::error::DeleteTaskSnafu { id })?;
         Ok(())
     }
 
@@ -220,7 +230,8 @@ impl TodoStore {
             toasty::stmt::Type::I64,
         ])
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::ListTasksByPrioritySnafu)?;
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
@@ -279,7 +290,8 @@ impl TodoStore {
                 toasty::stmt::Type::I64,
             ])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::ListTasksByTagSnafu { tag_id })?;
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {

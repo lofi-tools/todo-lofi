@@ -1,5 +1,6 @@
 use crate::{QueryResult, TodoStore};
 use derive_entity_id::EntityId;
+use snafu::ResultExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use toasty::Model;
 
@@ -39,13 +40,19 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
 
 impl TodoStore {
     pub async fn create_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
-        let tag = Tag::create().name(name.into()).exec(&mut self.db).await?;
+        let name = name.into();
+        let tag = Tag::create()
+            .name(name.clone())
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::CreateTagSnafu { name })?;
         Ok(tag)
     }
 
     pub async fn get_tag(&mut self, id: u64) -> QueryResult<Tag> {
-        let tag = Tag::get_by_id(&mut self.db, id).await?;
-        Ok(tag)
+        Tag::get_by_id(&mut self.db, id)
+            .await
+            .context(crate::error::GetTagSnafu { id })
     }
 
     pub async fn get_tag_by_name(&mut self, name: &str) -> QueryResult<Option<Tag>> {
@@ -55,18 +62,28 @@ impl TodoStore {
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
         .bind(name)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::FindTagByNameSnafu {
+            name: name.to_string(),
+        })?;
 
         Ok(rows.into_iter().next().and_then(|row| parse_tag_row(&row)))
     }
 
     pub async fn list_tags(&mut self) -> QueryResult<Vec<Tag>> {
-        let tags = Tag::all().exec(&mut self.db).await?;
+        let tags = Tag::all()
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "list all tags",
+            })?;
         Ok(tags)
     }
 
     pub async fn delete_tag(&mut self, id: u64) -> QueryResult<()> {
-        Tag::delete_by_id(&mut self.db, id).await?;
+        Tag::delete_by_id(&mut self.db, id)
+            .await
+            .context(crate::error::DeleteTagSnafu { id })?;
         Ok(())
     }
 
@@ -88,7 +105,11 @@ impl TodoStore {
         .bind(implier_id as i64)
         .bind(implied_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::AddTagImplicationSnafu {
+            implier_id,
+            implied_id,
+        })?;
 
         if existing.is_empty() {
             if self.would_create_cycle(implier_id, implied_id).await? {
@@ -106,7 +127,11 @@ impl TodoStore {
             .bind(implier_id as i64)
             .bind(implied_id as i64)
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::AddTagImplicationSnafu {
+                implier_id,
+                implied_id,
+            })?;
         }
 
         Ok(())
@@ -116,7 +141,10 @@ impl TodoStore {
         let rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "check for cycles",
+            })?;
 
         let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
         for row in rows {
@@ -167,7 +195,11 @@ impl TodoStore {
         .bind(implier_id as i64)
         .bind(implied_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::RemoveTagImplicationSnafu {
+            implier_id,
+            implied_id,
+        })?;
         Ok(())
     }
 
@@ -181,7 +213,10 @@ impl TodoStore {
         )
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "get top-level tags",
+        })?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -204,7 +239,10 @@ impl TodoStore {
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
         .bind(parent_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: format!("get children of tag {}", parent_id),
+        })?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -227,7 +265,10 @@ impl TodoStore {
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
         .bind(child_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: format!("get parents of tag {}", child_id),
+        })?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -250,7 +291,11 @@ impl TodoStore {
         .bind(task_id as i64)
         .bind(lower.as_str())
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::AssignTagToTaskSnafu {
+            task_id,
+            tag_name: tag_name.to_string(),
+        })?;
 
         if already_assigned.is_empty() {
             let tag = match self.get_tag_by_name(tag_name).await? {
@@ -264,7 +309,11 @@ impl TodoStore {
             .bind(task_id as i64)
             .bind(tag.id as i64)
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::AssignTagToTaskSnafu {
+                task_id,
+                tag_name: tag_name.to_string(),
+            })?;
         }
 
         Ok(())
@@ -277,7 +326,8 @@ impl TodoStore {
         .bind(task_id as i64)
         .bind(tag_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::RemoveTagFromTaskSnafu { task_id, tag_id })?;
         Ok(())
     }
 
@@ -293,7 +343,8 @@ impl TodoStore {
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
         .bind(task_id as i64)
         .exec(&mut self.db)
-        .await?;
+        .await
+        .context(crate::error::LoadTaskTagsSnafu { task_id })?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -310,7 +361,8 @@ impl TodoStore {
                 .column_types([toasty::stmt::Type::I64])
                 .bind(task_id as i64)
                 .exec(&mut self.db)
-                .await?;
+                .await
+                .context(crate::error::LoadTaskTagsSnafu { task_id })?;
 
         let direct_tag_ids: Vec<u64> = direct_rows
             .iter()
@@ -326,7 +378,10 @@ impl TodoStore {
         let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: format!("load inferred tags for task {}", task_id),
+            })?;
 
         let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
         for row in imp_rows {
@@ -364,7 +419,10 @@ impl TodoStore {
         let rows = toasty::sql::query(&query)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: format!("fetch inferred tag details for task {}", task_id),
+            })?;
 
         let mut tags = Vec::new();
         for row in rows {
@@ -379,7 +437,10 @@ impl TodoStore {
         let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: format!("load implications for descendants of tag {}", tag_id),
+            })?;
 
         let mut children_map: HashMap<u64, Vec<u64>> = HashMap::new();
         for row in imp_rows {
@@ -425,7 +486,10 @@ impl TodoStore {
         let rows = toasty::sql::query(&query)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
             .exec(&mut self.db)
-            .await?;
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: format!("fetch descendant tag details for tag {}", tag_id),
+            })?;
 
         let mut tags = Vec::new();
         for row in rows {
