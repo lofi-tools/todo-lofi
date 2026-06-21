@@ -1,12 +1,13 @@
 use crate::task_store::TaskStore;
 use gpui::{
-    App, AppContext, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Pixels, Render, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, Context, Entity, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Pixels, Render, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, Sizable, StyledExt, scroll::ScrollableElement,
+    ActiveTheme, Sizable, StyledExt,
     button::{Button, ButtonVariants},
     input::{Input, InputState},
+    scroll::ScrollableElement,
 };
 use std::collections::HashSet;
 
@@ -218,6 +219,72 @@ impl TaskList {
         task_store.toggle_task(id)?;
         Ok(())
     }
+
+    fn build_task_rows(
+        &self,
+        view: &Entity<TaskList>,
+        filtered_tasks: &[crate::task_store::UiTask],
+        _cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        filtered_tasks
+            .iter()
+            .map(|task| {
+                let display_tags: Vec<String> = task
+                    .tags
+                    .iter()
+                    .filter(|t| !self.excluded_tags.contains(t.as_str()))
+                    .cloned()
+                    .collect();
+                TaskItemRow::new(
+                    view.clone(),
+                    task.id,
+                    task.title.clone(),
+                    task.completed,
+                    display_tags,
+                )
+                .into_any_element()
+            })
+            .collect()
+    }
+
+    fn build_interleaved_plus_rows(
+        &self,
+        view: &Entity<TaskList>,
+        filtered_tasks: &[crate::task_store::UiTask],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let editing_index = cx.new(|_| self.editing_index);
+        let task_rows = self.build_task_rows(view, filtered_tasks, cx);
+
+        let mut elements = Vec::with_capacity(task_rows.len() * 2 + 1);
+        elements.push(
+            PlusRow::new(
+                self.input_state.clone(),
+                editing_index.clone(),
+                view.clone(),
+                0,
+            )
+            .into_any_element(),
+        );
+
+        let mut task_iter = task_rows.into_iter();
+        for (i, _task) in filtered_tasks.iter().enumerate() {
+            if let Some(row) = task_iter.next() {
+                elements.push(row);
+            }
+            elements.push(
+                PlusRow::new(
+                    self.input_state.clone(),
+                    editing_index.clone(),
+                    view.clone(),
+                    i + 1,
+                )
+                .into_any_element(),
+            );
+        }
+
+        elements
+    }
 }
 
 impl Render for TaskList {
@@ -283,54 +350,7 @@ impl Render for TaskList {
                                 },
                             ))
                             .v_flex()
-                            .child(PlusRow::new(
-                                self.input_state.clone(),
-                                cx.new(|_| self.editing_index),
-                                view.clone(),
-                                0,
-                            ))
-                            .children((0..=filtered_tasks.len()).flat_map(|i| {
-                                let task = filtered_tasks.get(i);
-
-                                let should_show = task.is_some();
-
-                                if !should_show {
-                                    return vec![].into_iter();
-                                }
-
-                                let mut elements: Vec<_> = Vec::new();
-
-                                if let Some(task) = task {
-                                    let display_tags: Vec<String> = task
-                                        .tags
-                                        .iter()
-                                        .filter(|t| !self.excluded_tags.contains(t.as_str()))
-                                        .cloned()
-                                        .collect();
-                                    elements.push(
-                                        TaskItemRow::new(
-                                            view.clone(),
-                                            task.id,
-                                            task.title.clone(),
-                                            task.completed,
-                                            display_tags,
-                                        )
-                                        .into_any_element(),
-                                    );
-                                }
-
-                                elements.push(
-                                    PlusRow::new(
-                                        self.input_state.clone(),
-                                        cx.new(|_| self.editing_index),
-                                        view.clone(),
-                                        i + 1,
-                                    )
-                                    .into_any_element(),
-                                );
-
-                                elements.into_iter()
-                            })),
+                            .children(self.build_interleaved_plus_rows(&view, &filtered_tasks, cx)),
                     ),
             )
     }
