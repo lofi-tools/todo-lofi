@@ -233,8 +233,7 @@ impl TodoStore {
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
-            let direct = self.get_direct_task_tags(task.id).await?;
-            task.direct_tags = direct.into_iter().map(|t| t.name).collect();
+            self.load_direct_tags(&mut task).await?;
             tasks.push(task);
         }
 
@@ -293,14 +292,29 @@ impl TodoStore {
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
-            let direct = self.get_direct_task_tags(task.id).await?;
-            task.direct_tags = direct.into_iter().map(|t| t.name).collect();
-            let inferred = self.get_inferred_task_tags(task.id).await?;
-            task.inferred_tags = inferred.into_iter().map(|t| t.name).collect();
+            self.load_all_tags(&mut task).await?;
             tasks.push(task);
         }
 
         Ok(tasks)
+    }
+
+    pub async fn load_direct_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        let tags = self.get_direct_task_tags(task.id).await?;
+        task.direct_tags = tags.into_iter().map(|t| t.name).collect();
+        Ok(())
+    }
+
+    pub async fn load_inferred_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        let tags = self.get_inferred_task_tags(task.id).await?;
+        task.inferred_tags = tags.into_iter().map(|t| t.name).collect();
+        Ok(())
+    }
+
+    pub async fn load_all_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        self.load_direct_tags(task).await?;
+        self.load_inferred_tags(task).await?;
+        Ok(())
     }
 }
 
