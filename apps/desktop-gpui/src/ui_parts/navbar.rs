@@ -56,6 +56,7 @@ impl Render for NavBar {
 
         div()
             .w_64()
+            .flex_none()
             .h_full()
             .border_r_1()
             .border_color(cx.theme().border)

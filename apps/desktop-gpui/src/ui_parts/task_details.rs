@@ -1,8 +1,5 @@
 use crate::task_store::{TaskStore, UiTask};
-use gpui::{
-    App, Context, Empty, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::FluentBuilder, px,
-};
+use gpui::{App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
 use gpui_component::{
     ActiveTheme, StyledExt,
     button::{Button, ButtonVariants},
@@ -29,118 +26,97 @@ impl TaskDetails {
 impl Render for TaskDetails {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let task = self.get_selected_task(cx);
-        let is_open = task.is_some();
         let selected_task_id = self.selected_task_id.clone();
         let muted_fg = cx.theme().muted_foreground;
 
         div()
             .relative()
             .h_full()
-            .overflow_hidden()
-            .when(is_open, |this| {
-                this.border_l_1()
-                    .border_color(cx.theme().border)
-                    .bg(gpui::rgba(0x2525_25ff))
-            })
-            .child(
+            .flex_1()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(gpui::rgba(0x2525_25ff))
+            .children(task.map(|task| {
+                let mut details = div().v_flex().gap_3();
+
+                details = details.child(detail_row("Title", task.title.clone(), muted_fg));
+
+                if let Some(ref desc) = task.description
+                    && !desc.is_empty()
+                {
+                    details = details.child(detail_row("Description", desc.clone(), muted_fg));
+                }
+
+                if let Some(deadline) = task.deadline {
+                    details = details.child(detail_row(
+                        "Deadline",
+                        format_deadline(deadline),
+                        muted_fg,
+                    ));
+                }
+
+                details = details.child(priority_section(&task, muted_fg));
+
+                if !task.tags.is_empty() {
+                    details = details.child(
+                        div().v_flex().gap_1().child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(muted_fg)
+                                .child("Tags"),
+                        ).child(div().h_flex().gap_2().flex_wrap().children(
+                            task.tags.iter().map(|t| {
+                                div()
+                                    .text_sm()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .bg(cx.theme().muted)
+                                    .text_color(muted_fg)
+                                    .child(format!("#{}", t))
+                            }),
+                        )),
+                    );
+                }
+
+                details = details.child(
+                    div().v_flex().gap_1().child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(muted_fg)
+                            .child("Status"),
+                    ).child(div().text_sm().child(if task.completed {
+                        "Completed"
+                    } else {
+                        "Open"
+                    })),
+                );
+
                 div()
                     .h_full()
                     .v_flex()
-                    .when(is_open, |this| {
-                        this.p_4().gap_4().child(
-                            div()
-                                .h_flex()
-                                .justify_between()
-                                .items_center()
-                                .child(div().text_lg().font_bold().child("Task Details"))
-                                .child(
-                                    Button::new("close-details")
-                                        .ghost()
-                                        .size_6()
-                                        .label("×")
-                                        .on_click(move |_, _, _cx| {
-                                            selected_task_id.update(_cx, |id, _| *id = None);
-                                        }),
-                                ),
-                        )
-                    })
-                    .children(task.map(|task| {
-                        div().v_flex().gap_3().child({
-                            let mut details = div().v_flex().gap_3();
-
-                            details =
-                                details.child(detail_row("Title", task.title.clone(), muted_fg));
-
-                            if let Some(ref desc) = task.description
-                                && !desc.is_empty()
-                            {
-                                details = details.child(detail_row(
-                                    "Description",
-                                    desc.clone(),
-                                    muted_fg,
-                                ));
-                            }
-
-                            if let Some(deadline) = task.deadline {
-                                details = details.child(detail_row(
-                                    "Deadline",
-                                    format_deadline(deadline),
-                                    muted_fg,
-                                ));
-                            }
-
-                            details = details.child(priority_section(&task, muted_fg));
-
-                            if !task.tags.is_empty() {
-                                details = details.child(
-                                    div()
-                                        .v_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .font_semibold()
-                                                .text_color(muted_fg)
-                                                .child("Tags"),
-                                        )
-                                        .child(div().h_flex().gap_2().flex_wrap().children(
-                                            task.tags.iter().map(|t| {
-                                                div()
-                                                    .text_sm()
-                                                    .px_2()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .bg(cx.theme().muted)
-                                                    .text_color(muted_fg)
-                                                    .child(format!("#{}", t))
-                                            }),
-                                        )),
-                                );
-                            }
-
-                            details = details.child(
-                                div()
-                                    .v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_semibold()
-                                            .text_color(muted_fg)
-                                            .child("Status"),
-                                    )
-                                    .child(div().text_sm().child(if task.completed {
-                                        "Completed"
-                                    } else {
-                                        "Open"
-                                    })),
-                            );
-
-                            details.into_any_element()
-                        })
-                    }))
-                    .when(!is_open, |this| this.child(Empty)),
-            )
+                    .p_4()
+                    .gap_4()
+                    .child(
+                        div()
+                            .h_flex()
+                            .justify_between()
+                            .items_center()
+                            .child(div().text_lg().font_bold().child("Task Details"))
+                            .child(
+                                Button::new("close-details")
+                                    .ghost()
+                                    .size_6()
+                                    .label("×")
+                                    .on_click(move |_, _, cx| {
+                                        selected_task_id.update(cx, |id, _| *id = None);
+                                    }),
+                            ),
+                    )
+                    .child(details)
+            }))
     }
 }
 

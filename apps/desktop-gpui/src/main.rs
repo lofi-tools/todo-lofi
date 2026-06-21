@@ -1,5 +1,6 @@
 use gpui::*;
-use gpui_component::{input::*, scroll::ScrollableElement, *};
+use gpui::prelude::FluentBuilder;
+use gpui_component::{input::*, *};
 use std::collections::HashSet;
 use storage::prelude::*;
 
@@ -21,8 +22,6 @@ pub mod ui_parts {
 }
 
 pub struct TodoApp {
-    task_store: Entity<TaskStore>,
-    selected_tag: Entity<Option<String>>,
     selected_task_id: Entity<Option<u64>>,
     sidebar_ui: Entity<NavBar>,
     task_list_ui: Entity<TaskList>,
@@ -58,8 +57,6 @@ impl TodoApp {
         });
 
         Self {
-            task_store,
-            selected_tag,
             selected_task_id,
             sidebar_ui,
             task_list_ui,
@@ -70,10 +67,7 @@ impl TodoApp {
 
 impl Render for TodoApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _view = cx.entity().clone();
-        let selected_tag = self.selected_tag.read(cx);
-        let task_store = self.task_store.read(cx);
-        let _all_tasks = task_store.tasks().unwrap();
+        let has_details = self.selected_task_id.read(cx).is_some();
 
         div()
             .flex()
@@ -85,30 +79,8 @@ impl Render for TodoApp {
                 div()
                     .flex_1()
                     .h_flex()
-                    .child(
-                        div()
-                            .flex_1()
-                            .v_flex()
-                            .p_8()
-                            .gap_6()
-                            .overflow_y_scrollbar()
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .gap_1()
-                                    .w_full()
-                                    .child(div().v_flex().gap_1().child(
-                                        div().text_3xl().font_bold().ml(px(16.)).mb(px(16.)).child(
-                                            match selected_tag {
-                                                Some(tag) => format!("Tasks: {}", tag),
-                                                None => "All Tasks".to_string(),
-                                            },
-                                        ),
-                                    ))
-                                    .child(self.task_list_ui.clone()),
-                            ),
-                    )
-                    .child(self.details_ui.clone()),
+                    .child(self.task_list_ui.clone())
+                    .when(has_details, |this| this.child(self.details_ui.clone())),
             )
     }
 }

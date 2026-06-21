@@ -4,7 +4,7 @@ use gpui::{
     Pixels, Render, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
 };
 use gpui_component::{
-    ActiveTheme, Sizable, StyledExt,
+    ActiveTheme, Sizable, StyledExt, scroll::ScrollableElement,
     button::{Button, ButtonVariants},
     input::{Input, InputState},
 };
@@ -250,62 +250,88 @@ impl Render for TaskList {
             None => task_store.tasks().unwrap_or_default(),
         };
 
+        let title = match selected_tag.as_deref() {
+            Some(tag) => format!("Tasks: {}", tag),
+            None => "All Tasks".to_string(),
+        };
+
         div()
-            .on_action(cx.listener(
-                |this, _action: &gpui_component::input::Escape, _window, cx| {
-                    this.editing_index = None;
-                    cx.notify();
-                },
-            ))
+            .flex_1()
             .v_flex()
-            .relative()
-            .child(PlusRow::new(
-                self.input_state.clone(),
-                cx.new(|_| self.editing_index),
-                view.clone(),
-                0,
-            ))
-            .children((0..=filtered_tasks.len()).flat_map(|i| {
-                let task = filtered_tasks.get(i);
-
-                let should_show = task.is_some();
-
-                if !should_show {
-                    return vec![].into_iter();
-                }
-
-                let mut elements: Vec<_> = Vec::new();
-
-                if let Some(task) = task {
-                    let display_tags: Vec<String> = task
-                        .tags
-                        .iter()
-                        .filter(|t| !self.excluded_tags.contains(t.as_str()))
-                        .cloned()
-                        .collect();
-                    elements.push(
-                        TaskItemRow::new(
-                            view.clone(),
-                            task.id,
-                            task.title.clone(),
-                            task.completed,
-                            display_tags,
-                        )
-                        .into_any_element(),
-                    );
-                }
-
-                elements.push(
-                    PlusRow::new(
-                        self.input_state.clone(),
-                        cx.new(|_| self.editing_index),
-                        view.clone(),
-                        i + 1,
+            .p_8()
+            .gap_6()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .font_bold()
+                            .ml(px(16.))
+                            .mb(px(16.))
+                            .child(title),
                     )
-                    .into_any_element(),
-                );
+                    .child(
+                        div()
+                            .on_action(cx.listener(
+                                |this, _action: &gpui_component::input::Escape, _window, cx| {
+                                    this.editing_index = None;
+                                    cx.notify();
+                                },
+                            ))
+                            .v_flex()
+                            .child(PlusRow::new(
+                                self.input_state.clone(),
+                                cx.new(|_| self.editing_index),
+                                view.clone(),
+                                0,
+                            ))
+                            .children((0..=filtered_tasks.len()).flat_map(|i| {
+                                let task = filtered_tasks.get(i);
 
-                elements.into_iter()
-            }))
+                                let should_show = task.is_some();
+
+                                if !should_show {
+                                    return vec![].into_iter();
+                                }
+
+                                let mut elements: Vec<_> = Vec::new();
+
+                                if let Some(task) = task {
+                                    let display_tags: Vec<String> = task
+                                        .tags
+                                        .iter()
+                                        .filter(|t| !self.excluded_tags.contains(t.as_str()))
+                                        .cloned()
+                                        .collect();
+                                    elements.push(
+                                        TaskItemRow::new(
+                                            view.clone(),
+                                            task.id,
+                                            task.title.clone(),
+                                            task.completed,
+                                            display_tags,
+                                        )
+                                        .into_any_element(),
+                                    );
+                                }
+
+                                elements.push(
+                                    PlusRow::new(
+                                        self.input_state.clone(),
+                                        cx.new(|_| self.editing_index),
+                                        view.clone(),
+                                        i + 1,
+                                    )
+                                    .into_any_element(),
+                                );
+
+                                elements.into_iter()
+                            })),
+                    ),
+            )
     }
 }
