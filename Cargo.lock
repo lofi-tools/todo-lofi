@@ -6201,6 +6201,8 @@ dependencies = [
  "gpui_platform",
  "storage",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

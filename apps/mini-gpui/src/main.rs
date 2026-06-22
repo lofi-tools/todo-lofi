@@ -3,6 +3,8 @@ use gpui_component::input::*;
 use gpui_component::{StyledExt, Theme, ThemeMode};
 use std::sync::Arc;
 use storage::prelude::*;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 struct MiniTodo {
     tasks: Vec<storage::Task>,
@@ -75,11 +77,12 @@ impl MiniTodo {
         let input_clone = input.clone();
         let subscription = cx.subscribe(&input, move |this, _, event, cx| {
             if let gpui_component::input::InputEvent::PressEnter { .. } = event {
-                eprintln!("[subscribe] PressEnter received");
+                tracing::info!("PressEnter received");
                 let title = input_clone.read(cx).text().to_string();
                 let title = title.trim().to_string();
-                eprintln!("[subscribe] title: '{title}'");
+                tracing::info!(title, "extracted from input");
                 if title.is_empty() {
+                    tracing::info!("title is empty, returning");
                     return;
                 }
                 this.insert_task(title, cx);
@@ -98,35 +101,32 @@ impl MiniTodo {
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
-        eprintln!("[insert_task] called with title: {title}");
+        tracing::info!(title, "insert_task called");
         let store = self.store.clone();
         let handle = self.runtime_handle.clone();
         self.insert_task = Some(cx.spawn(async move |this, cx| {
-            eprintln!("[insert_task] spawn started, awaiting Tokio task...");
+            tracing::info!("spawn started, awaiting Tokio task...");
             let new_tasks = handle
                 .spawn(async move {
-                    eprintln!("[insert_task] Tokio: acquiring store lock...");
+                    tracing::info!("Tokio: acquiring store lock...");
                     let mut s = store.lock().await;
-                    eprintln!("[insert_task] Tokio: creating task...");
+                    tracing::info!("Tokio: creating task...");
                     let _ = s
                         .create_task(storage::Task::create().title(title))
                         .await;
-                    eprintln!("[insert_task] Tokio: listing tasks...");
+                    tracing::info!("Tokio: listing tasks...");
                     let tasks = s.list_tasks().await.unwrap_or_default();
-                    eprintln!("[insert_task] Tokio: got {} tasks", tasks.len());
+                    tracing::info!(count = tasks.len(), "Tokio: tasks fetched");
                     tasks
                 })
                 .await
                 .unwrap();
-            eprintln!(
-                "[insert_task] Tokio task done, updating entity with {} tasks",
-                new_tasks.len()
-            );
+            tracing::info!(count = new_tasks.len(), "Tokio task done, updating entity");
 
             this.update(cx, |this, cx| {
                 this.tasks = new_tasks;
                 this.needs_clear = true;
-                eprintln!("[insert_task] calling cx.notify()");
+                tracing::info!("calling cx.notify()");
                 cx.notify();
             })
             .ok();
@@ -134,7 +134,21 @@ impl MiniTodo {
     }
 }
 
+fn init_logging() {
+    let debug = std::env::args().any(|arg| arg == "--debug" || arg == "-d");
+    let filter = if debug {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_target(true))
+        .with(filter)
+        .init();
+}
+
 fn main() {
+    init_logging();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
