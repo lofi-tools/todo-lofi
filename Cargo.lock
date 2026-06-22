@@ -6193,6 +6193,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mini-gpui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-component",
+ "gpui_platform",
+ "gpui_tokio",
+ "storage",
+ "tokio",
+]
+
+[[package]]
 name = "minimad"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
