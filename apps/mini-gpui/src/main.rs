@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 struct MiniTodo {
     tasks: Vec<storage::Task>,
     input: Entity<InputState>,
-    store: Option<Arc<tokio::sync::Mutex<TodoStore>>>,
+    store: Arc<tokio::sync::Mutex<TodoStore>>,
     needs_clear: bool,
     insert_task: Option<gpui::Task<()>>,
     _subscription: Subscription,
@@ -67,7 +67,11 @@ impl Render for MiniTodo {
 }
 
 impl MiniTodo {
-    fn new(input: Entity<InputState>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        input: Entity<InputState>,
+        store: Arc<tokio::sync::Mutex<TodoStore>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input_clone = input.clone();
         let subscription = cx.subscribe(&input, move |this, _, event, cx| {
             if let gpui_component::input::InputEvent::PressEnter { .. } = event {
@@ -86,7 +90,7 @@ impl MiniTodo {
         Self {
             tasks: Vec::new(),
             input,
-            store: None,
+            store,
             needs_clear: false,
             insert_task: None,
             _subscription: subscription,
@@ -94,12 +98,8 @@ impl MiniTodo {
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
-        let Some(store) = self.store.clone() else {
-            tracing::error!("Store not initialized");
-            return;
-        };
-
         tracing::info!(title, "insert_task called");
+        let store = self.store.clone();
         let task = gpui_tokio::Tokio::spawn(cx, async move {
             tracing::info!("Tokio: acquiring store lock...");
             let mut s = store.lock().await;
@@ -159,7 +159,7 @@ fn main() {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
 
-        let init_task = gpui_tokio::Tokio::spawn(cx, async move {
+        let init_task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let config = StorageConfig {
                 db_uri: "turso::memory:".to_string(),
             };
@@ -169,43 +169,45 @@ fn main() {
             Ok::<_, anyhow::Error>((Arc::new(tokio::sync::Mutex::new(store)), tasks))
         });
 
-        cx.open_window(WindowOptions::default(), |window, cx| {
-            Theme::change(ThemeMode::Dark, Some(window), cx);
+        cx.spawn(|cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                match init_task.await {
+                    Ok((store, tasks)) => {
+                        cx.open_window(WindowOptions::default(), |window, cx| {
+                            Theme::change(ThemeMode::Dark, Some(window), cx);
 
-            let input = cx.new(|cx| {
-                let mut input_state = InputState::new(window, cx);
-                input_state.set_placeholder("New task...", window, cx);
-                input_state
-            });
-
-            let mini = cx.new(|cx| MiniTodo::new(input, cx));
-
-            let entity = mini.clone();
-            cx.spawn(move |cx: &mut AsyncApp| {
-                let mut cx = cx.clone();
-                let entity = entity.clone();
-                async move {
-                    match init_task.await {
-                        Ok(Ok((store, tasks))) => {
-                            entity.update(&mut cx, |mini, cx| {
-                                mini.store = Some(store);
-                                mini.tasks = tasks;
-                                cx.notify();
+                            let input = cx.new(|cx| {
+                                let mut input_state = InputState::new(window, cx);
+                                input_state.set_placeholder("New task...", window, cx);
+                                input_state
                             });
-                        }
-                        Ok(Err(e)) => {
-                            tracing::error!("Failed to initialize store: {e}");
-                        }
-                        Err(e) => {
-                            tracing::error!("Store init task panicked: {e}");
-                        }
+
+                            let mini = cx.new(|cx| MiniTodo::new(input, store, cx));
+
+                            let entity = mini.clone();
+                            cx.spawn(move |cx: &mut AsyncApp| {
+                                let mut cx = cx.clone();
+                                let entity = entity.clone();
+                                async move {
+                                    entity.update(&mut cx, |mini, cx| {
+                                        mini.tasks = tasks;
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .detach();
+
+                            cx.new(|cx| gpui_component::Root::new(mini, window, cx))
+                        })
+                        .expect("Failed to open window");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to initialize store: {e}");
                     }
                 }
-            })
-            .detach();
-
-            cx.new(|cx| gpui_component::Root::new(mini, window, cx))
+            }
         })
-        .expect("Failed to open window");
+        .detach();
     });
 }
