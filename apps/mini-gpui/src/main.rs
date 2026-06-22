@@ -49,6 +49,7 @@ impl Render for MiniTodo {
                     .gap_2()
                     .children(tasks.into_iter().map(|task| {
                         div()
+                            .id(("task", task.id))
                             .h_flex()
                             .gap_3()
                             .py_1()

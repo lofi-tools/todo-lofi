@@ -64,7 +64,7 @@
             # SNAFU_RAW_ERROR_MESSAGES = 1;
             # RUST_LIB_BACKTRACE = 1;
             # RUST_BACKTRACE = "1";
-            RUST_LOG = "info"; # "toasty=debug";
+            RUST_LOG = "mini_gpui=debug,info"; # "toasty=debug";
           };
 
           # checks = {
