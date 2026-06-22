@@ -1,15 +1,36 @@
-use gpui::*;
+use gpui::{
+    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, WindowOptions, div, rgb,
+};
 use gpui_component::input::*;
 use gpui_component::{StyledExt, Theme, ThemeMode};
 use std::sync::Arc;
 use storage::prelude::*;
-use tracing_subscriber::prelude::*;
+use storage::task::TaskCreate;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
+
+struct Store(Arc<tokio::sync::Mutex<TodoStore>>);
+impl Store {
+    fn insert_task(
+        &self,
+        create: TaskCreate,
+        cx: &impl AppContext,
+    ) -> gpui::Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let _ = s.create_task(create).await;
+            let tasks = s.list_tasks().await.unwrap_or_default();
+            Ok(tasks)
+        })
+    }
+}
 
 struct MiniTodo {
     tasks: Vec<storage::Task>,
     input: Entity<InputState>,
-    store: Arc<tokio::sync::Mutex<TodoStore>>,
+    store: Store,
     needs_clear: bool,
     insert_task: Option<gpui::Task<()>>,
     _subscription: Subscription,
@@ -67,11 +88,7 @@ impl Render for MiniTodo {
 }
 
 impl MiniTodo {
-    fn new(
-        input: Entity<InputState>,
-        store: Arc<tokio::sync::Mutex<TodoStore>>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
         let input_clone = input.clone();
         let subscription = cx.subscribe(&input, move |this, _, event, cx| {
             if let gpui_component::input::InputEvent::PressEnter { .. } = event {
@@ -98,41 +115,24 @@ impl MiniTodo {
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
-        tracing::info!(title, "insert_task called");
-        let store = self.store.clone();
-        let task = gpui_tokio::Tokio::spawn(cx, async move {
-            tracing::info!("Tokio: acquiring store lock...");
-            let mut s = store.lock().await;
-            tracing::info!("Tokio: creating task...");
-            let _ = s
-                .create_task(storage::Task::create().title(title))
-                .await;
-            tracing::info!("Tokio: listing tasks...");
-            let tasks = s.list_tasks().await.unwrap_or_default();
-            tracing::info!(count = tasks.len(), "Tokio: tasks fetched");
-            Ok::<_, anyhow::Error>(tasks)
-        });
+        let create_task = self
+            .store
+            .insert_task(TaskCreate::default().title(title), cx);
 
         self.insert_task = Some(cx.spawn(async move |this, cx| {
-            tracing::info!("spawn started, awaiting Tokio task...");
-            match task.await {
-                Ok(Ok(new_tasks)) => {
-                    tracing::info!(count = new_tasks.len(), "Tokio task done, updating entity");
-                    this.update(cx, |this, cx| {
-                        this.tasks = new_tasks;
-                        this.needs_clear = true;
-                        tracing::info!("calling cx.notify()");
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("Failed to insert task: {e}");
-                }
+            let new_tasks = match create_task.await {
+                Ok(new_tasks) => new_tasks,
                 Err(e) => {
-                    tracing::error!("Tokio task panicked: {e}");
+                    tracing::error!("Failed to insert task: {e}");
+                    return;
                 }
-            }
+            };
+            this.update(cx, |this, cx| {
+                this.tasks = new_tasks;
+                this.needs_clear = true;
+                cx.notify();
+            })
+            .ok();
         }));
     }
 }
@@ -166,7 +166,7 @@ fn main() {
             let mut store = TodoStore::new(&config).await?;
             store.seed().await?;
             let tasks = store.list_tasks().await.unwrap_or_default();
-            Ok::<_, anyhow::Error>((Arc::new(tokio::sync::Mutex::new(store)), tasks))
+            Ok::<_, anyhow::Error>((Store(Arc::new(tokio::sync::Mutex::new(store))), tasks))
         });
 
         cx.spawn(|cx: &mut AsyncApp| {

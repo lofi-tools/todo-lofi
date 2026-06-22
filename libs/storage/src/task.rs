@@ -37,6 +37,21 @@ pub struct Task {
     #[belongs_to(key = parent_id, references = id)]
     pub parent: Deferred<Option<Task>>,
 }
+impl Task {
+    /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
+    pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
+        let deadline_factor = match self.deadline {
+            None => 1.0,
+            Some(dl) => {
+                let diff = dl as f64 - now_secs as f64;
+                86400.0_f64 / diff.max(1.0)
+            }
+        };
+        self.importance_factor * deadline_factor
+    }
+}
+
+pub type TaskCreate = <Task as toasty::schema::Model>::Create;
 
 #[derive(Debug, Clone)]
 pub struct TaskWithMeta {
@@ -44,15 +59,12 @@ pub struct TaskWithMeta {
     pub direct_tags: Vec<String>,
     pub inferred_tags: Vec<String>,
 }
-
 impl std::ops::Deref for TaskWithMeta {
     type Target = Task;
-
     fn deref(&self) -> &Self::Target {
         &self.task
     }
 }
-
 impl TaskWithMeta {
     pub fn priority_score(&self, now_secs: u64) -> f64 {
         self.importance_factor * self.deadline_factor(now_secs)
@@ -66,20 +78,6 @@ impl TaskWithMeta {
                 86400.0 / diff.max(1.0)
             }
         }
-    }
-}
-
-impl Task {
-    /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
-    pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
-        let deadline_factor = match self.deadline {
-            None => 1.0,
-            Some(dl) => {
-                let diff = dl as f64 - now_secs as f64;
-                86400.0_f64 / diff.max(1.0)
-            }
-        };
-        self.importance_factor * deadline_factor
     }
 }
 
