@@ -58,6 +58,14 @@
             testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
 
             mini = '' cargo watch -x "run -p mini-gpui" '';
+
+            skills = with bash; ''set -ex;
+              for f in "${wd}"/docs/agent_skills/*.md; do
+                [ -f "$f" ] || continue
+                target="${wd}/.agents/skills/$(basename "$f" .md)/SKILL.md"
+                mkdir -p "$(dirname "$target")";  cp "$f" "$target"
+              done
+            '';
           };
 
           env = {
