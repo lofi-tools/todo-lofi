@@ -90,58 +90,71 @@ impl NavBar {
         }
     }
 
-    fn toggle_tag(&mut self, tag_name: &str, tag_id: u64, cx: &mut Context<Self>) {
-        if self.selected_path.iter().any(|p| p == tag_name) {
+    fn navigate_to_tag(&mut self, tag_name: &str, _tag_id: u64, path: &[String], cx: &mut Context<Self>) {
+        if self.selected_path == path {
             self.selected_path.retain(|p| p != tag_name);
-        } else {
-            self.selected_path.push(tag_name.to_string());
-            if !self.children_cache.contains_key(&tag_id) {
-                let store = self.store.clone();
-                let fetch_task = store.get_children(tag_id, cx);
-                self._fetch_children = Some(cx.spawn(async move |this, cx| {
-                    match fetch_task.await {
-                        Ok(children) => {
-                            this.update(cx, |this, cx| {
-                                this.children_cache.insert(tag_id, children);
-                                this._fetch_children = None;
-                                cx.notify();
-                            })
-                            .ok();
+            cx.notify();
+            return;
+        }
+        self.selected_path = path.to_vec();
+
+        let mut current_children = self.top_level_tags.clone();
+        for name in &self.selected_path {
+            if let Some(tag) = current_children.iter().find(|t| t.name == *name) {
+                if !self.children_cache.contains_key(&tag.id) {
+                    let store = self.store.clone();
+                    let id = tag.id;
+                    let fetch_task = store.get_children(id, cx);
+                    self._fetch_children = Some(cx.spawn(async move |this, cx| {
+                        match fetch_task.await {
+                            Ok(children) => {
+                                this.update(cx, |this, cx| {
+                                    this.children_cache.insert(id, children);
+                                    this._fetch_children = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to fetch children: {e}");
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to fetch children: {e}");
-                        }
-                    }
-                }));
+                    }));
+                    break;
+                }
+                current_children = self.children_cache.get(&tag.id).cloned().unwrap_or_default();
             }
         }
         cx.notify();
     }
 
-    fn collect_visible_tags(&self) -> Vec<(String, u64, usize, bool)> {
+    fn collect_visible_tags(&self) -> Vec<(String, u64, usize, bool, Vec<String>)> {
         let mut result = Vec::new();
 
         fn walk(
             tag: &Tag,
             depth: usize,
+            ancestors: &[String],
             selected_path: &[String],
             children_cache: &HashMap<u64, Vec<Tag>>,
-            result: &mut Vec<(String, u64, usize, bool)>,
+            result: &mut Vec<(String, u64, usize, bool, Vec<String>)>,
         ) {
             let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
             let has_children = !children.is_empty();
-            result.push((tag.name.clone(), tag.id, depth, has_children));
+            let mut path = ancestors.to_vec();
+            path.push(tag.name.clone());
+            result.push((tag.name.clone(), tag.id, depth, has_children, path.clone()));
 
             let is_on_path = selected_path.iter().any(|p| p == &tag.name);
             if is_on_path {
                 for child in &children {
-                    walk(child, depth + 1, selected_path, children_cache, result);
+                    walk(child, depth + 1, &path, selected_path, children_cache, result);
                 }
             }
         }
 
         for tag in &self.top_level_tags {
-            walk(tag, 0, &self.selected_path, &self.children_cache, &mut result);
+            walk(tag, 0, &[], &self.selected_path, &self.children_cache, &mut result);
         }
 
         result
@@ -151,7 +164,6 @@ impl NavBar {
 impl Render for NavBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible_tags = self.collect_visible_tags();
-        let selected_path = self.selected_path.clone();
 
         div()
             .w_64()
@@ -179,30 +191,14 @@ impl Render for NavBar {
                     .rounded_md()
                     .hover(|s| s.bg(rgb(0x2a2a2a))),
             )
-            .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, has_children)| {
-                let is_on_path = selected_path.contains(&tag_name);
+            .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, _has_children, path)| {
                 let tag_for_click = tag_name.clone();
-
-                let disclosure = if has_children {
-                    let indicator = if is_on_path { "▼" } else { "▶" };
-                    div()
-                        .w_5()
-                        .flex_none()
-                        .h_flex()
-                        .justify_center()
-                        .items_center()
-                        .text_xs()
-                        .text_color(rgb(0xa3a3a3))
-                        .child(indicator)
-                } else {
-                    div().w_5().flex_none()
-                };
+                let path_for_click = path;
 
                 div()
                     .h_flex()
                     .items_center()
                     .ml(px(depth as f32 * 8.0))
-                    .child(disclosure)
                     .child(
                         div()
                             .flex_1()
@@ -214,7 +210,7 @@ impl Render for NavBar {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
-                                    this.toggle_tag(&tag_for_click, tag_id, cx);
+                                    this.navigate_to_tag(&tag_for_click, tag_id, &path_for_click, cx);
                                 }),
                             ),
                     )
