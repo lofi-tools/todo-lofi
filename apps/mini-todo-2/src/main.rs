@@ -1,6 +1,7 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, Styled, Subscription, Task, Window, WindowOptions, div, px, rgb,
+    AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, Styled, Subscription, Task, Window, WindowOptions, div,
+    px, rgb,
 };
 use gpui_component::input::*;
 use gpui_component::{StyledExt, Theme, ThemeMode};
@@ -52,6 +53,12 @@ impl Store {
     }
 }
 
+#[derive(Clone)]
+enum NavBarEvent {
+    TagSelected(Vec<String>),
+    AllTasks,
+}
+
 struct NavBar {
     store: Store,
     top_level_tags: Vec<Tag>,
@@ -93,10 +100,12 @@ impl NavBar {
     fn navigate_to_tag(&mut self, tag_name: &str, _tag_id: u64, path: &[String], cx: &mut Context<Self>) {
         if self.selected_path == path {
             self.selected_path.retain(|p| p != tag_name);
+            cx.emit(NavBarEvent::AllTasks);
             cx.notify();
             return;
         }
         self.selected_path = path.to_vec();
+        cx.emit(NavBarEvent::TagSelected(path.to_vec()));
 
         let mut current_children = self.top_level_tags.clone();
         for name in &self.selected_path {
@@ -161,6 +170,8 @@ impl NavBar {
     }
 }
 
+impl EventEmitter<NavBarEvent> for NavBar {}
+
 impl Render for NavBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible_tags = self.collect_visible_tags();
@@ -189,7 +200,15 @@ impl Render for NavBar {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .hover(|s| s.bg(rgb(0x2a2a2a))),
+                    .hover(|s| s.bg(rgb(0x2a2a2a)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.selected_path.clear();
+                            cx.emit(NavBarEvent::AllTasks);
+                            cx.notify();
+                        }),
+                    ),
             )
             .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, _has_children, path)| {
                 let tag_for_click = tag_name.clone();
@@ -330,14 +349,67 @@ impl Render for TaskList {
 struct Layout {
     task_list: Entity<TaskList>,
     nav_bar: Entity<NavBar>,
+    _fetch_tasks: Option<gpui::Task<()>>,
+    _subscription: Subscription,
 }
 
 impl Layout {
     fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
-        let task_list = cx.new(|cx| TaskList::new(input, store, cx));
+        let task_list = cx.new(|cx| TaskList::new(input, store.clone(), cx));
 
-        Self { task_list, nav_bar }
+        let subscribe_store = store.clone();
+        let subscription = cx.subscribe(&nav_bar, move |this, _nav_bar, event, cx| match event {
+            NavBarEvent::TagSelected(path) => {
+                let last = path.last().cloned().unwrap_or_default();
+                let store = subscribe_store.clone();
+                let fetch = cx.spawn(async move |this, cx| {
+                    // TODO: resolve tag_id from path when list_tasks_by_tag supports it
+                    // For now, use the last tag name to find its id
+                    let tag_id = {
+                        let mut s = store.0.lock().await;
+                        s.get_tag_by_name(&last).await.ok().flatten().map(|t| t.id)
+                    };
+                    let Some(tag_id) = tag_id else { return; };
+                    let tasks = {
+                        let mut s = store.0.lock().await;
+                        s.list_tasks_by_tag(tag_id).await.unwrap_or_default()
+                    };
+                    let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
+                    this.update(cx, |this, cx| {
+                        this.task_list.update(cx, |list, _| list.set_tasks(tasks));
+                        this._fetch_tasks = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                this._fetch_tasks = Some(fetch);
+            }
+            NavBarEvent::AllTasks => {
+                let store = subscribe_store.clone();
+                let fetch = cx.spawn(async move |this, cx| {
+                    let tasks = {
+                        let mut s = store.0.lock().await;
+                        s.list_tasks_by_priority().await.unwrap_or_default()
+                    };
+                    let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
+                    this.update(cx, |this, cx| {
+                        this.task_list.update(cx, |list, _| list.set_tasks(tasks));
+                        this._fetch_tasks = None;
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                this._fetch_tasks = Some(fetch);
+            }
+        });
+
+        Self {
+            task_list,
+            nav_bar,
+            _fetch_tasks: None,
+            _subscription: subscription,
+        }
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<storage::Task>, cx: &mut Context<Self>) {
@@ -384,7 +456,8 @@ fn main() {
             };
             let mut store = TodoStore::new(&config).await?;
             store.seed().await?;
-            let tasks = store.list_tasks().await.unwrap_or_default();
+            let tasks_with_meta = store.list_tasks_by_priority().await.unwrap_or_default();
+            let tasks = tasks_with_meta.into_iter().map(|t| t.task).collect();
             Ok::<_, anyhow::Error>((Store::new(store), tasks))
         });
 
