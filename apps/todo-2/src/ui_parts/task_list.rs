@@ -4,9 +4,11 @@ use gpui::{
 };
 use gpui_component::StyledExt;
 use gpui_component::input::*;
+use gpui_component::Sizable;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
+use crate::components::Checkbox;
 use crate::store::Store;
 
 pub struct TaskList {
@@ -153,6 +155,10 @@ impl Render for TaskList {
                     .v_flex()
                     .gap_2()
                     .children(tasks.into_iter().map(|task| {
+                        let task_id = task.id;
+                        let done = task.done;
+                        let store = self.store.clone();
+
                         div()
                             .id(("task", task.id))
                             .h_flex()
@@ -161,6 +167,26 @@ impl Render for TaskList {
                             .px_3()
                             .rounded_md()
                             .hover(|s| s.bg(rgb(0x2a2a2aff)))
+                            .child(
+                                Checkbox::new(("checkbox", task.id))
+                                    .with_size(gpui_component::Size::Small)
+                                    .checked(done)
+                                    .on_click(move |new_done, _window, cx| {
+                                        let store = store.clone();
+                                        let new_done = *new_done;
+                                        cx.spawn(async move |this, cx| {
+                                            let _ = store.toggle_task_done(task_id, new_done, cx).await;
+                                            this.update(cx, |this, cx| {
+                                                if let Some(t) = this.tasks_cache.iter_mut().find(|t| t.id == task_id) {
+                                                    t.done = new_done;
+                                                }
+                                                cx.notify();
+                                            })
+                                            .ok();
+                                        })
+                                        .detach();
+                                    }),
+                            )
                             .child(
                                 div()
                                     .text_base()
