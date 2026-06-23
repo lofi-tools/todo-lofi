@@ -51,8 +51,10 @@ impl Store {
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
+            tracing::info!(task_id, done, "toggle_task_done: before update");
             let mut s = store.lock().await;
             s.update_task_done(task_id, done).await?;
+            tracing::info!(task_id, done, "toggle_task_done: after update, ok");
             Ok(())
         })
     }
@@ -65,6 +67,7 @@ impl Store {
         let store = self.0.clone();
         let tag_name = tag_name.to_string();
         gpui_tokio::Tokio::spawn_result(cx, async move {
+            tracing::info!(tag_name, "list_tasks_by_tag_name: start");
             let mut s = store.lock().await;
             let tag_id = s
                 .get_tag_by_name(&tag_name)
@@ -72,7 +75,11 @@ impl Store {
                 .map(|t| t.id)
                 .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
             let tasks = s.list_tasks_by_tag(tag_id).await?;
-            Ok(tasks.into_iter().map(|t| t.task).collect())
+            let result: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
+            for t in &result {
+                tracing::info!(task_id = t.id, done = t.done, "list_tasks_by_tag_name: task");
+            }
+            Ok(result)
         })
     }
 }

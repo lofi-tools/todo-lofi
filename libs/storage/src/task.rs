@@ -110,22 +110,27 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let deadline = record.get(6).and_then(|v| v.to_u64());
     let importance_factor = record.get(7).and_then(|v| v.to_f64()).unwrap_or(1.0);
     let urgency_factor = record.get(8).and_then(|v| v.to_f64()).unwrap_or(1.0);
+    let done_raw = record.get(9);
+    let done = match done_raw {
+        Some(toasty::stmt::Value::Bool(b)) => *b,
+        Some(toasty::stmt::Value::I64(n)) => *n != 0,
+        _ => false,
+    };
     let created_at = record
-        .get(9)
+        .get(10)
         .and_then(|v| v.as_str())
         .context(crate::error::UnexpectedValueSnafu {
             message: "expected string for created_at",
         })?
         .parse::<jiff::Timestamp>()?;
     let updated_at = record
-        .get(10)
+        .get(11)
         .and_then(|v| v.as_str())
         .context(crate::error::UnexpectedValueSnafu {
             message: "expected string for updated_at",
         })?
         .parse::<jiff::Timestamp>()?;
-    let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
-    let done = record.get(12).and_then(|v| v.to_i64()).map(|v| v != 0).unwrap_or(false);
+    let parent_id = record.get(12).and_then(|v| v.to_i64()).map(|id| id as u64);
 
     let task = Task {
         id,
@@ -166,11 +171,13 @@ impl TodoStore {
 
     #[fastrace::trace]
     pub async fn update_task_done(&mut self, id: u64, done: bool) -> crate::QueryResult<()> {
+        tracing::info!(id, done, "update_task_done: executing");
         Task::update_by_id(id)
             .done(done)
             .exec(&mut self.db)
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;
+        tracing::info!(id, done, "update_task_done: done");
         Ok(())
     }
 
@@ -205,7 +212,7 @@ impl TodoStore {
             r#"
             SELECT
                 id, title, description, branch_name, labels, blocked_by,
-                deadline, importance_factor, urgency_factor, created_at, updated_at,
+                deadline, importance_factor, urgency_factor, done, created_at, updated_at,
                 parent_id
             FROM tasks
             ORDER BY
@@ -227,6 +234,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::F64,
             toasty::stmt::Type::F64,
+            toasty::stmt::Type::Bool,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::I64,
@@ -260,7 +268,7 @@ impl TodoStore {
             r#"
             SELECT DISTINCT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
-                t.deadline, t.importance_factor, t.urgency_factor, t.created_at, t.updated_at,
+                t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
                 t.parent_id
             FROM tasks t
             JOIN direct_task_tags dtt ON dtt.task_id = t.id
@@ -287,6 +295,7 @@ impl TodoStore {
                 toasty::stmt::Type::I64,
                 toasty::stmt::Type::F64,
                 toasty::stmt::Type::F64,
+                toasty::stmt::Type::Bool,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::I64,
@@ -536,6 +545,43 @@ mod tests {
             )
             .await?;
         assert_eq!(no_deadline.compute_priority_score(start_timestamp), 3.0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_done_roundtrip_via_list_queries() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let task = storage
+            .create_task(Task::create().title("Roundtrip task"))
+            .await?;
+
+        // Initially not done
+        let tasks = storage.list_tasks_by_priority().await?;
+        let t = tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert!(!t.done, "task should start as not done");
+
+        // Mark done
+        storage.update_task_done(task.id, true).await?;
+
+        // Verify via list_tasks_by_priority
+        let tasks = storage.list_tasks_by_priority().await?;
+        let t = tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert!(
+            t.done,
+            "task should be done after update (list_tasks_by_priority)"
+        );
+
+        // Verify via list_tasks_by_tag
+        let tag = storage.create_tag("roundtrip-tag").await?;
+        storage.assign_tag_to_task(task.id, &tag.name).await?;
+        let tasks = storage.list_tasks_by_tag(tag.id).await?;
+        let t = tasks.iter().find(|t| t.id == task.id).unwrap();
+        assert!(
+            t.done,
+            "task should be done after update (list_tasks_by_tag)"
+        );
 
         Ok(())
     }

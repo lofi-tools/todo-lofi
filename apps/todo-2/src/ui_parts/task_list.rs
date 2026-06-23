@@ -70,6 +70,9 @@ impl TaskListView {
                             s.list_tasks_by_priority().await.unwrap_or_default()
                         };
                         let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
+                        for t in &tasks {
+                            tracing::info!(task_id = t.id, done = t.done, "AllTasks: task");
+                        }
                         this.update(cx, |this, cx| {
                             this.set_tasks(tasks, cx);
                             this._fetch_tasks = None;
