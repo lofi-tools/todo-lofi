@@ -1,9 +1,10 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, Subscription, Task, Window, WindowOptions, div, rgb,
+    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Render, Styled, Subscription, Task, Window, WindowOptions, div, px, rgb,
 };
 use gpui_component::input::*;
 use gpui_component::{StyledExt, Theme, ThemeMode};
+use std::collections::HashMap;
 use std::sync::Arc;
 use storage::prelude::*;
 use storage::task::TaskCreate;
@@ -32,31 +33,43 @@ impl Store {
         })
     }
 
-    fn list_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
+    fn list_top_level_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            let tags = s.list_tags().await.unwrap_or_default();
+            let tags = s.get_top_level_tags().await.unwrap_or_default();
             Ok(tags)
+        })
+    }
+
+    fn get_children(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let children = s.get_children(tag_id).await.unwrap_or_default();
+            Ok(children)
         })
     }
 }
 
 struct NavBar {
-    _store: Store,
-    cached_tags: Vec<Tag>,
+    store: Store,
+    top_level_tags: Vec<Tag>,
+    children_cache: HashMap<u64, Vec<Tag>>,
+    selected_path: Vec<String>,
     _fetch_tags: Option<Task<()>>,
+    _fetch_children: Option<Task<()>>,
 }
 
 impl NavBar {
     fn new(store: Store, cx: &mut Context<Self>) -> Self {
         let fetch_store = store.clone();
-        let fetch_task = fetch_store.list_tags(cx);
+        let fetch_task = fetch_store.list_top_level_tags(cx);
 
         let _fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
             Ok(tags) => {
                 this.update(cx, |this, cx| {
-                    this.cached_tags = tags;
+                    this.top_level_tags = tags;
                     this._fetch_tags = None;
                     cx.notify();
                 })
@@ -68,16 +81,77 @@ impl NavBar {
         }));
 
         Self {
-            _store: store,
-            cached_tags: Vec::new(),
+            store,
+            top_level_tags: Vec::new(),
+            children_cache: HashMap::new(),
+            selected_path: Vec::new(),
             _fetch_tags,
+            _fetch_children: None,
         }
+    }
+
+    fn toggle_tag(&mut self, tag_name: &str, tag_id: u64, cx: &mut Context<Self>) {
+        if self.selected_path.iter().any(|p| p == tag_name) {
+            self.selected_path.retain(|p| p != tag_name);
+        } else {
+            self.selected_path.push(tag_name.to_string());
+            if !self.children_cache.contains_key(&tag_id) {
+                let store = self.store.clone();
+                let fetch_task = store.get_children(tag_id, cx);
+                self._fetch_children = Some(cx.spawn(async move |this, cx| {
+                    match fetch_task.await {
+                        Ok(children) => {
+                            this.update(cx, |this, cx| {
+                                this.children_cache.insert(tag_id, children);
+                                this._fetch_children = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to fetch children: {e}");
+                        }
+                    }
+                }));
+            }
+        }
+        cx.notify();
+    }
+
+    fn collect_visible_tags(&self) -> Vec<(String, u64, usize, bool)> {
+        let mut result = Vec::new();
+
+        fn walk(
+            tag: &Tag,
+            depth: usize,
+            selected_path: &[String],
+            children_cache: &HashMap<u64, Vec<Tag>>,
+            result: &mut Vec<(String, u64, usize, bool)>,
+        ) {
+            let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
+            let has_children = !children.is_empty();
+            result.push((tag.name.clone(), tag.id, depth, has_children));
+
+            let is_on_path = selected_path.iter().any(|p| p == &tag.name);
+            if is_on_path {
+                for child in &children {
+                    walk(child, depth + 1, selected_path, children_cache, result);
+                }
+            }
+        }
+
+        for tag in &self.top_level_tags {
+            walk(tag, 0, &self.selected_path, &self.children_cache, &mut result);
+        }
+
+        result
     }
 }
 
 impl Render for NavBar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let tags = self.cached_tags.clone();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible_tags = self.collect_visible_tags();
+        let selected_path = self.selected_path.clone();
 
         div()
             .w_64()
@@ -105,14 +179,45 @@ impl Render for NavBar {
                     .rounded_md()
                     .hover(|s| s.bg(rgb(0x2a2a2a))),
             )
-            .children(tags.into_iter().map(|tag| {
+            .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, has_children)| {
+                let is_on_path = selected_path.contains(&tag_name);
+                let tag_for_click = tag_name.clone();
+
+                let disclosure = if has_children {
+                    let indicator = if is_on_path { "▼" } else { "▶" };
+                    div()
+                        .w_5()
+                        .flex_none()
+                        .h_flex()
+                        .justify_center()
+                        .items_center()
+                        .text_xs()
+                        .text_color(rgb(0xa3a3a3))
+                        .child(indicator)
+                } else {
+                    div().w_5().flex_none()
+                };
+
                 div()
-                    .id(("tag", tag.id))
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .hover(|s| s.bg(rgb(0x2a2a2a)))
-                    .child(tag.name)
+                    .h_flex()
+                    .items_center()
+                    .ml(px(depth as f32 * 8.0))
+                    .child(disclosure)
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(tag_name)
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .hover(|s| s.bg(rgb(0x2a2a2a)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.toggle_tag(&tag_for_click, tag_id, cx);
+                                }),
+                            ),
+                    )
             }))
     }
 }
