@@ -84,6 +84,9 @@ pub enum QueryErr {
     #[snafu(display("delete task {id}: {source}"))]
     DeleteTask { id: u64, source: toasty::Error },
 
+    #[snafu(display("update task {id}: {source}"))]
+    UpdateTask { id: u64, source: toasty::Error },
+
     #[snafu(display("list tasks by priority: {source}"))]
     ListTasksByPriority { source: toasty::Error },
 

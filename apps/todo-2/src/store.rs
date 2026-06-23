@@ -42,4 +42,18 @@ impl Store {
             Ok(children)
         })
     }
+
+    pub fn toggle_task_done(
+        &self,
+        task_id: u64,
+        done: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.update_task_done(task_id, done).await?;
+            Ok(())
+        })
+    }
 }

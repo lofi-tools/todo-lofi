@@ -1,18 +1,17 @@
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Styled, Subscription,
-    Window, div, rgb,
+    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    div, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::input::*;
-use gpui_component::Sizable;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
-use crate::components::Checkbox;
+use super::task_view::TaskView;
 use crate::store::Store;
 
-pub struct TaskList {
-    tasks_cache: Vec<storage::Task>,
+pub struct TaskListView {
+    task_views: Vec<Entity<TaskView>>,
     input: Entity<InputState>,
     store: Store,
     input_needs_clear: bool,
@@ -21,7 +20,7 @@ pub struct TaskList {
     _nav_subscription: Subscription,
 }
 
-impl TaskList {
+impl TaskListView {
     pub fn new(
         input: Entity<InputState>,
         store: Store,
@@ -60,7 +59,7 @@ impl TaskList {
                         };
                         let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
                         this.update(cx, |this, cx| {
-                            this.tasks_cache = tasks;
+                            this.set_tasks(tasks, cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -77,7 +76,7 @@ impl TaskList {
                         };
                         let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
                         this.update(cx, |this, cx| {
-                            this.tasks_cache = tasks;
+                            this.set_tasks(tasks, cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -88,7 +87,7 @@ impl TaskList {
             });
 
         Self {
-            tasks_cache: Vec::new(),
+            task_views: Vec::new(),
             input,
             store,
             input_needs_clear: false,
@@ -112,7 +111,7 @@ impl TaskList {
                 }
             };
             this.update(cx, |this, cx| {
-                this.tasks_cache = new_tasks;
+                this.set_tasks(new_tasks, cx);
                 this.input_needs_clear = true;
                 cx.notify();
             })
@@ -120,12 +119,15 @@ impl TaskList {
         }));
     }
 
-    pub fn set_tasks(&mut self, tasks: Vec<storage::Task>) {
-        self.tasks_cache = tasks;
+    pub fn set_tasks(&mut self, tasks: Vec<storage::Task>, cx: &mut Context<Self>) {
+        self.task_views = tasks
+            .into_iter()
+            .map(|task| cx.new(|cx| TaskView::new(task, self.store.clone(), cx)))
+            .collect();
     }
 }
 
-impl Render for TaskList {
+impl Render for TaskListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.input_needs_clear {
             self.input_needs_clear = false;
@@ -133,8 +135,6 @@ impl Render for TaskList {
                 state.set_value("", window, cx);
             });
         }
-
-        let tasks = self.tasks_cache.clone();
 
         div()
             .flex_1()
@@ -145,7 +145,7 @@ impl Render for TaskList {
                 div()
                     .text_2xl()
                     .font_bold()
-                    .text_color(rgb(0xe5e5e5ff))
+                    .text_color(rgb(0xe5e5e5))
                     .child("Mini Todo"),
             )
             .child(Input::new(&self.input))
@@ -154,46 +154,7 @@ impl Render for TaskList {
                     .flex_1()
                     .v_flex()
                     .gap_2()
-                    .children(tasks.into_iter().map(|task| {
-                        let task_id = task.id;
-                        let done = task.done;
-                        let store = self.store.clone();
-
-                        div()
-                            .id(("task", task.id))
-                            .h_flex()
-                            .gap_3()
-                            .py_1()
-                            .px_3()
-                            .rounded_md()
-                            .hover(|s| s.bg(rgb(0x2a2a2aff)))
-                            .child(
-                                Checkbox::new(("checkbox", task.id))
-                                    .with_size(gpui_component::Size::Small)
-                                    .checked(done)
-                                    .on_click(move |new_done, _window, cx| {
-                                        let store = store.clone();
-                                        let new_done = *new_done;
-                                        cx.spawn(async move |this, cx| {
-                                            let _ = store.toggle_task_done(task_id, new_done, cx).await;
-                                            this.update(cx, |this, cx| {
-                                                if let Some(t) = this.tasks_cache.iter_mut().find(|t| t.id == task_id) {
-                                                    t.done = new_done;
-                                                }
-                                                cx.notify();
-                                            })
-                                            .ok();
-                                        })
-                                        .detach();
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_base()
-                                    .text_color(rgb(0xa3a3a3ff))
-                                    .child(task.title.clone()),
-                            )
-                    })),
+                    .children(self.task_views.iter().cloned()),
             )
     }
 }

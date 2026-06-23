@@ -10,23 +10,25 @@ use tracing_subscriber::prelude::*;
 
 use store::Store;
 use ui_parts::navbar::NavBar;
-use ui_parts::task_list::TaskList;
+use ui_parts::task_list::TaskListView;
 
+mod components;
 mod store;
 mod ui_parts {
     pub mod navbar;
     pub mod task_list;
+    pub mod task_view;
 }
 
 struct Layout {
-    pub task_list: Entity<TaskList>,
+    pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
 }
 
 impl Layout {
     fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
-        let task_list = cx.new(|cx| TaskList::new(input, store.clone(), nav_bar.clone(), cx));
+        let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
 
         Self { task_list, nav_bar }
     }
@@ -85,7 +87,7 @@ fn main() {
                                 let entity = entity.clone();
                                 async move {
                                     entity.update(&mut cx, |mini, cx| {
-                                        mini.task_list.update(cx, |list, _| list.set_tasks(tasks));
+                                        mini.task_list.update(cx, |list, cx| list.set_tasks(tasks, cx));
                                     });
                                 }
                             })

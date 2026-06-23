@@ -5,7 +5,6 @@ use toasty::Deferred;
 use toasty::Embed;
 use toasty::Model;
 use toasty::schema::Model;
-use toasty::stmt::IntoExpr;
 
 // TODO after https://github.com/tokio-rs/toasty/issues/1040: use as key once embed keys work with parent/subtasks relationship
 #[derive(EntityId, Embed, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
@@ -26,6 +25,8 @@ pub struct Task {
     pub importance_factor: f64,
     #[default(1.0)]
     pub urgency_factor: f64,
+    #[default(false)]
+    pub done: bool,
     #[default(jiff::Timestamp::now())]
     pub created_at: jiff::Timestamp,
     #[update(jiff::Timestamp::now())]
@@ -124,6 +125,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         })?
         .parse::<jiff::Timestamp>()?;
     let parent_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
+    let done = record.get(12).and_then(|v| v.to_i64()).map(|v| v != 0).unwrap_or(false);
 
     let task = Task {
         id,
@@ -134,6 +136,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         deadline,
         importance_factor,
         urgency_factor,
+        done,
         created_at,
         updated_at,
         parent_id,
@@ -162,12 +165,13 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
-    pub async fn update_task_by_id(
-        &mut self,
-        _id: u64,
-        _update: impl IntoExpr<u64>,
-    ) -> crate::QueryResult<()> {
-        todo!()
+    pub async fn update_task_done(&mut self, id: u64, done: bool) -> crate::QueryResult<()> {
+        Task::update_by_id(id)
+            .done(done)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
     }
 
     #[fastrace::trace]
