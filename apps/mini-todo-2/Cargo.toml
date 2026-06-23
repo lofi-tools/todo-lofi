@@ -1,0 +1,18 @@
+[package]
+name = "mini-todo-2"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+storage = { path = "../../libs/storage" }
+tokio = { workspace = true, features = ["sync", "rt"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+  "font-kit",
+] }
+gpui_tokio = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
