@@ -1,0 +1,193 @@
+use gpui::{
+    Context, EventEmitter, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    Styled, Task, Window, div, px, rgb,
+};
+use gpui_component::StyledExt;
+use std::collections::HashMap;
+use storage::prelude::*;
+
+use crate::store::Store;
+
+#[derive(Clone)]
+pub enum NavBarEvent {
+    TagSelected(Vec<String>),
+    AllTasks,
+}
+
+pub struct NavBar {
+    store: Store,
+    top_level_tags: Vec<Tag>,
+    children_cache: HashMap<u64, Vec<Tag>>,
+    selected_path: Vec<String>,
+    _fetch_tags: Option<Task<()>>,
+    _fetch_children: Option<Task<()>>,
+}
+
+impl NavBar {
+    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+        let fetch_store = store.clone();
+        let fetch_task = fetch_store.list_top_level_tags(cx);
+
+        let _fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
+            Ok(tags) => {
+                this.update(cx, |this, cx| {
+                    this.top_level_tags = tags;
+                    this._fetch_tags = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch tags: {e}");
+            }
+        }));
+
+        Self {
+            store,
+            top_level_tags: Vec::new(),
+            children_cache: HashMap::new(),
+            selected_path: Vec::new(),
+            _fetch_tags,
+            _fetch_children: None,
+        }
+    }
+
+    fn navigate_to_tag(&mut self, tag_name: &str, _tag_id: u64, path: &[String], cx: &mut Context<Self>) {
+        if self.selected_path == path {
+            self.selected_path.retain(|p| p != tag_name);
+            cx.emit(NavBarEvent::AllTasks);
+            cx.notify();
+            return;
+        }
+        self.selected_path = path.to_vec();
+        cx.emit(NavBarEvent::TagSelected(path.to_vec()));
+
+        let mut current_children = self.top_level_tags.clone();
+        for name in &self.selected_path {
+            if let Some(tag) = current_children.iter().find(|t| t.name == *name) {
+                if !self.children_cache.contains_key(&tag.id) {
+                    let store = self.store.clone();
+                    let id = tag.id;
+                    let fetch_task = store.get_children(id, cx);
+                    self._fetch_children = Some(cx.spawn(async move |this, cx| {
+                        match fetch_task.await {
+                            Ok(children) => {
+                                this.update(cx, |this, cx| {
+                                    this.children_cache.insert(id, children);
+                                    this._fetch_children = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to fetch children: {e}");
+                            }
+                        }
+                    }));
+                    break;
+                }
+                current_children = self.children_cache.get(&tag.id).cloned().unwrap_or_default();
+            }
+        }
+        cx.notify();
+    }
+
+    fn collect_visible_tags(&self) -> Vec<(String, u64, usize, bool, Vec<String>)> {
+        let mut result = Vec::new();
+
+        fn walk(
+            tag: &Tag,
+            depth: usize,
+            ancestors: &[String],
+            selected_path: &[String],
+            children_cache: &HashMap<u64, Vec<Tag>>,
+            result: &mut Vec<(String, u64, usize, bool, Vec<String>)>,
+        ) {
+            let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
+            let has_children = !children.is_empty();
+            let mut path = ancestors.to_vec();
+            path.push(tag.name.clone());
+            result.push((tag.name.clone(), tag.id, depth, has_children, path.clone()));
+
+            let is_on_path = selected_path.iter().any(|p| p == &tag.name);
+            if is_on_path {
+                for child in &children {
+                    walk(child, depth + 1, &path, selected_path, children_cache, result);
+                }
+            }
+        }
+
+        for tag in &self.top_level_tags {
+            walk(tag, 0, &[], &self.selected_path, &self.children_cache, &mut result);
+        }
+
+        result
+    }
+}
+
+impl EventEmitter<NavBarEvent> for NavBar {}
+
+impl Render for NavBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible_tags = self.collect_visible_tags();
+
+        div()
+            .w_64()
+            .flex_none()
+            .h_full()
+            .bg(rgb(0x1e1e1e))
+            .border_r_1()
+            .border_color(rgb(0x333333))
+            .p_4()
+            .v_flex()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(rgb(0xa3a3a3))
+                    .mb_2()
+                    .child("Tags"),
+            )
+            .child(
+                div()
+                    .child("All Tasks")
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .hover(|s| s.bg(rgb(0x2a2a2a)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.selected_path.clear();
+                            cx.emit(NavBarEvent::AllTasks);
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, _has_children, path)| {
+                let tag_for_click = tag_name.clone();
+                let path_for_click = path;
+
+                div()
+                    .h_flex()
+                    .items_center()
+                    .ml(px(depth as f32 * 8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(tag_name)
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .hover(|s| s.bg(rgb(0x2a2a2a)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.navigate_to_tag(&tag_for_click, tag_id, &path_for_click, cx);
+                                }),
+                            ),
+                    )
+            }))
+    }
+}
