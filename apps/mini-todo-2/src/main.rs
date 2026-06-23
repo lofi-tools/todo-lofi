@@ -84,9 +84,9 @@ impl Render for NavBar {
             .w_64()
             .flex_none()
             .h_full()
-            .bg(rgb(0x1e1e1eff))
+            .bg(rgb(0x1e1e1e))
             .border_r_1()
-            .border_color(rgb(0x333333ff))
+            .border_color(rgb(0x333333))
             .p_4()
             .v_flex()
             .gap_2()
@@ -94,7 +94,7 @@ impl Render for NavBar {
                 div()
                     .text_sm()
                     .font_semibold()
-                    .text_color(rgb(0xa3a3a3ff))
+                    .text_color(rgb(0xa3a3a3))
                     .mb_2()
                     .child("Tags"),
             )
@@ -104,7 +104,7 @@ impl Render for NavBar {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .hover(|s| s.bg(rgb(0x2a2a2aff))),
+                    .hover(|s| s.bg(rgb(0x2a2a2a))),
             )
             .children(tags.into_iter().map(|tag| {
                 div()
@@ -112,7 +112,7 @@ impl Render for NavBar {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .hover(|s| s.bg(rgb(0x2a2a2aff)))
+                    .hover(|s| s.bg(rgb(0x2a2a2a)))
                     .child(tag.name)
             }))
     }
@@ -121,6 +121,7 @@ impl Render for NavBar {
 struct MiniTodo {
     tasks: Vec<storage::Task>,
     input: Entity<InputState>,
+    nav_bar: Entity<NavBar>,
     store: Store,
     needs_clear: bool,
     insert_task: Option<gpui::Task<()>>,
@@ -142,8 +143,7 @@ impl Render for MiniTodo {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(0x1a1a1a))
-            .child(cx.new(|cx| NavBar::new(self.store.clone(), cx)))
+            .child(self.nav_bar.clone())
             .child(
                 div()
                     .flex_1()
@@ -201,9 +201,12 @@ impl MiniTodo {
             }
         });
 
+        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+
         Self {
             tasks: Vec::new(),
             input,
+            nav_bar,
             store,
             needs_clear: false,
             insert_task: None,
@@ -295,7 +298,9 @@ fn main() {
                             })
                             .detach();
 
-                            cx.new(|cx| gpui_component::Root::new(mini, window, cx))
+                            cx.new(|cx| {
+                                gpui_component::Root::new(mini, window, cx).bg(rgb(0x1a1a1a))
+                            })
                         })
                         .expect("Failed to open window");
                     }
