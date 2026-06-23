@@ -57,7 +57,7 @@
             mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
             testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
 
-            mini = '' cargo watch -x "run -p mini-todo-2" '';
+            t2 = '' cargo watch -x "run -p todo-2" '';
 
             skills = with bash; ''set -ex;
               for f in "${wd}"/docs/agent_skills/*.md; do

@@ -1,5 +1,5 @@
 [package]
-name = "mini-todo-2"
+name = "todo-2"
 version.workspace = true
 edition.workspace = true
 
