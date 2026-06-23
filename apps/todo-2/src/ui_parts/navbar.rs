@@ -1,5 +1,5 @@
 use gpui::{
-    Context, EventEmitter, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
     Styled, Task, Window, div, px, rgb,
 };
 use gpui_component::StyledExt;
@@ -130,6 +130,8 @@ impl EventEmitter<NavBarEvent> for NavBar {}
 impl Render for NavBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible_tags = self.collect_visible_tags();
+        let selected_tag = self.selected_path.last().cloned();
+        let is_all_tasks = self.selected_path.is_empty();
 
         div()
             .w_64()
@@ -151,13 +153,14 @@ impl Render for NavBar {
             )
             .child(
                 div()
+                    .id("all-tasks")
                     .child("All Tasks")
                     .px_3()
                     .py_1()
                     .rounded_md()
+                    .bg(if is_all_tasks { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
                     .hover(|s| s.bg(rgb(0x2a2a2a)))
-                    .on_mouse_down(
-                        MouseButton::Left,
+                    .on_click(
                         cx.listener(|this, _, _, cx| {
                             this.selected_path.clear();
                             cx.emit(NavBarEvent::AllTasks);
@@ -168,6 +171,7 @@ impl Render for NavBar {
             .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, _has_children, path)| {
                 let tag_for_click = tag_name.clone();
                 let path_for_click = path;
+                let is_selected = selected_tag.as_deref() == Some(&tag_name);
 
                 div()
                     .h_flex()
@@ -175,14 +179,15 @@ impl Render for NavBar {
                     .ml(px(depth as f32 * 8.0))
                     .child(
                         div()
+                            .id(("tag", tag_id))
                             .flex_1()
                             .child(tag_name)
                             .px_2()
                             .py_0p5()
                             .rounded_md()
+                            .bg(if is_selected { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
                             .hover(|s| s.bg(rgb(0x2a2a2a)))
-                            .on_mouse_down(
-                                MouseButton::Left,
+                            .on_click(
                                 cx.listener(move |this, _, _, cx| {
                                     this.navigate_to_tag(&tag_for_click, tag_id, &path_for_click, cx);
                                 }),
