@@ -8,11 +8,11 @@ use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
-use super::task_row::TaskView;
+use super::task_row::TaskRow;
 use crate::store::Store;
 
 pub struct TaskListView {
-    task_views: Vec<Entity<TaskView>>,
+    task_views: Vec<Entity<TaskRow>>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -127,7 +127,7 @@ impl TaskListView {
         self.task_views = tasks
             .into_iter()
             .map(|task| {
-                cx.new(|cx| TaskView::new(task, self.store.clone(), selected_path.to_vec(), cx))
+                cx.new(|cx| TaskRow::new(task, self.store.clone(), selected_path.to_vec(), cx))
             })
             .collect();
     }

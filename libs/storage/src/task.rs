@@ -247,6 +247,7 @@ impl TodoStore {
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
             self.load_direct_tags(&mut task).await?;
+            self.load_inferred_tags(&mut task).await?;
             tasks.push(task);
         }
 

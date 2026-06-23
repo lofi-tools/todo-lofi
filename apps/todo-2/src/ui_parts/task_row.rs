@@ -1,5 +1,6 @@
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
+    prelude::FluentBuilder,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -8,13 +9,13 @@ use storage::TaskWithMeta;
 use crate::components::Checkbox;
 use crate::store::Store;
 
-pub struct TaskView {
+pub struct TaskRow {
     task: TaskWithMeta,
     store: Store,
     selected_path: Vec<String>,
 }
 
-impl TaskView {
+impl TaskRow {
     pub fn new(
         task: TaskWithMeta,
         store: Store,
@@ -27,13 +28,9 @@ impl TaskView {
             selected_path,
         }
     }
-
-    pub fn set_selected_path(&mut self, path: Vec<String>) {
-        self.selected_path = path;
-    }
 }
 
-impl Render for TaskView {
+impl Render for TaskRow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let task_id = self.task.id;
         let done = self.task.done;
@@ -51,8 +48,9 @@ impl Render for TaskView {
         div()
             .id(("task", task_id))
             .h_flex()
+            .h(px(44.))
+            .items_center()
             .gap_3()
-            .py_1()
             .px_3()
             .rounded_md()
             .hover(|s| s.bg(rgb(0x2a2a2a)))
@@ -83,7 +81,8 @@ impl Render for TaskView {
                     .child(
                         div()
                             .text_base()
-                            .text_color(rgb(0xa3a3a3))
+                            .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                            .when(done, |this| this.line_through())
                             .child(self.task.title.clone()),
                     )
                     .child(
@@ -92,10 +91,9 @@ impl Render for TaskView {
                             .gap_1()
                             .children(visible_tags.into_iter().map(|tag| {
                                 div()
-                                    .text_xs()
-                                    .px_1p5()
-                                    .py_0p5()
-                                    .rounded_sm()
+                                    .text_size(px(10.))
+                                    .px(px(4.))
+                                    .rounded(px(2.))
                                     .bg(rgb(0x2a2a2a))
                                     .text_color(rgb(0xa3a3a3))
                                     .child(format!("#{tag}"))
