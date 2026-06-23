@@ -46,18 +46,13 @@ impl TaskListView {
                     let last = path.last().cloned().unwrap_or_default();
                     let store = nav_store.clone();
                     let fetch = cx.spawn(async move |this, cx| {
-                        let tag_id = {
-                            let mut s = store.0.lock().await;
-                            s.get_tag_by_name(&last).await.ok().flatten().map(|t| t.id)
+                        let tasks = match store.list_tasks_by_tag_name(&last, cx).await {
+                            Ok(tasks) => tasks,
+                            Err(e) => {
+                                tracing::error!("Failed to fetch tasks by tag: {e}");
+                                return;
+                            }
                         };
-                        let Some(tag_id) = tag_id else {
-                            return;
-                        };
-                        let tasks = {
-                            let mut s = store.0.lock().await;
-                            s.list_tasks_by_tag(tag_id).await.unwrap_or_default()
-                        };
-                        let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
                         this.update(cx, |this, cx| {
                             this.set_tasks(tasks, cx);
                             this._fetch_tasks = None;
