@@ -1,6 +1,6 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
-    WindowOptions, div, rgb,
+    WindowOptions, div, px, rgb,
 };
 use gpui_component::input::*;
 use gpui_component::{Theme, ThemeMode};
@@ -40,8 +40,28 @@ impl Render for Layout {
             .flex()
             .flex_row()
             .size_full()
-            .child(self.nav_bar.clone())
-            .child(self.task_list.clone())
+            .child(
+                div()
+                    .w(px(256.))
+                    .flex_none()
+                    .child(self.nav_bar.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(self.task_list.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child("Details"),
+                    ),
+            )
     }
 }
 

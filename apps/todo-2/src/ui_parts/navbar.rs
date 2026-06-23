@@ -134,8 +134,6 @@ impl Render for NavBar {
         let is_all_tasks = self.selected_path.is_empty();
 
         div()
-            .w_64()
-            .flex_none()
             .h_full()
             .bg(rgb(0x1e1e1e))
             .border_r_1()
