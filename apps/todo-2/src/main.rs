@@ -60,8 +60,7 @@ fn main() {
             };
             let mut store = TodoStore::new(&config).await?;
             store.seed().await?;
-            let tasks_with_meta = store.list_tasks_by_priority().await.unwrap_or_default();
-            let tasks = tasks_with_meta.into_iter().map(|t| t.task).collect();
+            let tasks = store.list_tasks_by_priority().await.unwrap_or_default();
             Ok::<_, anyhow::Error>((Store::new(store), tasks))
         });
 

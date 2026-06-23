@@ -4,6 +4,7 @@ use gpui::{
 };
 use gpui_component::StyledExt;
 use gpui_component::input::*;
+use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
@@ -14,6 +15,7 @@ pub struct TaskListView {
     task_views: Vec<Entity<TaskView>>,
     input: Entity<InputState>,
     store: Store,
+    selected_path: Vec<String>,
     input_needs_clear: bool,
     _fetch_tasks: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
@@ -43,6 +45,7 @@ impl TaskListView {
         let nav_subscription =
             cx.subscribe(&nav_bar, move |this, _nav_bar, event, cx| match event {
                 NavBarEvent::TagSelected(path) => {
+                    this.selected_path = path.clone();
                     let last = path.last().cloned().unwrap_or_default();
                     let store = nav_store.clone();
                     let fetch = cx.spawn(async move |this, cx| {
@@ -54,7 +57,7 @@ impl TaskListView {
                             }
                         };
                         this.update(cx, |this, cx| {
-                            this.set_tasks(tasks, cx);
+                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -63,18 +66,15 @@ impl TaskListView {
                     this._fetch_tasks = Some(fetch);
                 }
                 NavBarEvent::AllTasks => {
+                    this.selected_path.clear();
                     let store = nav_store.clone();
                     let fetch = cx.spawn(async move |this, cx| {
                         let tasks = {
                             let mut s = store.0.lock().await;
                             s.list_tasks_by_priority().await.unwrap_or_default()
                         };
-                        let tasks: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
-                        for t in &tasks {
-                            tracing::info!(task_id = t.id, done = t.done, "AllTasks: task");
-                        }
                         this.update(cx, |this, cx| {
-                            this.set_tasks(tasks, cx);
+                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -88,6 +88,7 @@ impl TaskListView {
             task_views: Vec::new(),
             input,
             store,
+            selected_path: Vec::new(),
             input_needs_clear: false,
             _fetch_tasks: None,
             _input_subscription: input_subscription,
@@ -109,7 +110,7 @@ impl TaskListView {
                 }
             };
             this.update(cx, |this, cx| {
-                this.set_tasks(new_tasks, cx);
+                this.set_tasks_with_path(new_tasks, &this.selected_path.clone(), cx);
                 this.input_needs_clear = true;
                 cx.notify();
             })
@@ -117,11 +118,22 @@ impl TaskListView {
         }));
     }
 
-    pub fn set_tasks(&mut self, tasks: Vec<storage::Task>, cx: &mut Context<Self>) {
+    fn set_tasks_with_path(
+        &mut self,
+        tasks: Vec<TaskWithMeta>,
+        selected_path: &[String],
+        cx: &mut Context<Self>,
+    ) {
         self.task_views = tasks
             .into_iter()
-            .map(|task| cx.new(|cx| TaskView::new(task, self.store.clone(), cx)))
+            .map(|task| {
+                cx.new(|cx| TaskView::new(task, self.store.clone(), selected_path.to_vec(), cx))
+            })
             .collect();
+    }
+
+    pub fn set_tasks(&mut self, tasks: Vec<TaskWithMeta>, cx: &mut Context<Self>) {
+        self.set_tasks_with_path(tasks, &self.selected_path.clone(), cx);
     }
 }
 

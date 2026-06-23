@@ -15,12 +15,12 @@ impl Store {
         &self,
         create: TaskCreate,
         cx: &impl AppContext,
-    ) -> gpui::Task<anyhow::Result<Vec<storage::Task>>> {
+    ) -> gpui::Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             let _ = s.create_task(create).await;
-            let tasks = s.list_tasks().await.unwrap_or_default();
+            let tasks = s.list_tasks_by_priority().await.unwrap_or_default();
             Ok(tasks)
         })
     }
@@ -63,7 +63,7 @@ impl Store {
         &self,
         tag_name: &str,
         cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+    ) -> Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
         let store = self.0.clone();
         let tag_name = tag_name.to_string();
         gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -75,11 +75,10 @@ impl Store {
                 .map(|t| t.id)
                 .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
             let tasks = s.list_tasks_by_tag(tag_id).await?;
-            let result: Vec<_> = tasks.into_iter().map(|t| t.task).collect();
-            for t in &result {
-                tracing::info!(task_id = t.id, done = t.done, "list_tasks_by_tag_name: task");
+            for t in &tasks {
+                tracing::info!(task_id = t.task.id, done = t.task.done, "list_tasks_by_tag_name: task");
             }
-            Ok(result)
+            Ok(tasks)
         })
     }
 }
