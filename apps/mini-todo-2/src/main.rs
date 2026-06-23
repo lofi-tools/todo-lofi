@@ -55,7 +55,6 @@ impl NavBar {
 
         let _fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
             Ok(tags) => {
-                tracing::info!("Fetched {:?} tags", tags);
                 this.update(cx, |this, cx| {
                     this.cached_tags = tags;
                     this._fetch_tags = None;
@@ -118,98 +117,35 @@ impl Render for NavBar {
     }
 }
 
-struct MiniTodo {
+struct TaskList {
     tasks: Vec<storage::Task>,
     input: Entity<InputState>,
-    nav_bar: Entity<NavBar>,
     store: Store,
     needs_clear: bool,
-    insert_task: Option<gpui::Task<()>>,
+    _insert_task: Option<gpui::Task<()>>,
     _subscription: Subscription,
 }
 
-impl Render for MiniTodo {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.needs_clear {
-            self.needs_clear = false;
-            self.input.update(cx, |state, cx| {
-                state.set_value("", window, cx);
-            });
-        }
-
-        let tasks = self.tasks.clone();
-
-        div()
-            .flex()
-            .flex_row()
-            .size_full()
-            .child(self.nav_bar.clone())
-            .child(
-                div()
-                    .flex_1()
-                    .v_flex()
-                    .p_8()
-                    .gap_4()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_bold()
-                            .text_color(rgb(0xe5e5e5ff))
-                            .child("Mini Todo"),
-                    )
-                    .child(Input::new(&self.input))
-                    .child(
-                        div()
-                            .flex_1()
-                            .v_flex()
-                            .gap_2()
-                            .children(tasks.into_iter().map(|task| {
-                                div()
-                                    .id(("task", task.id))
-                                    .h_flex()
-                                    .gap_3()
-                                    .py_1()
-                                    .px_3()
-                                    .rounded_md()
-                                    .hover(|s| s.bg(rgb(0x2a2a2aff)))
-                                    .child(
-                                        div()
-                                            .text_base()
-                                            .text_color(rgb(0xa3a3a3ff))
-                                            .child(task.title.clone()),
-                                    )
-                            })),
-                    ),
-            )
-    }
-}
-
-impl MiniTodo {
+impl TaskList {
     fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
         let input_clone = input.clone();
         let subscription = cx.subscribe(&input, move |this, _, event, cx| {
             if let gpui_component::input::InputEvent::PressEnter { .. } = event {
-                tracing::info!("PressEnter received");
                 let title = input_clone.read(cx).text().to_string();
                 let title = title.trim().to_string();
-                tracing::info!(title, "extracted from input");
                 if title.is_empty() {
-                    tracing::info!("title is empty, returning");
                     return;
                 }
                 this.insert_task(title, cx);
             }
         });
 
-        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
-
         Self {
             tasks: Vec::new(),
             input,
-            nav_bar,
             store,
             needs_clear: false,
-            insert_task: None,
+            _insert_task: None,
             _subscription: subscription,
         }
     }
@@ -219,7 +155,7 @@ impl MiniTodo {
             .store
             .insert_task(TaskCreate::default().title(title), cx);
 
-        self.insert_task = Some(cx.spawn(async move |this, cx| {
+        self._insert_task = Some(cx.spawn(async move |this, cx| {
             let new_tasks = match create_task.await {
                 Ok(new_tasks) => new_tasks,
                 Err(e) => {
@@ -234,6 +170,88 @@ impl MiniTodo {
             })
             .ok();
         }));
+    }
+
+    pub fn set_tasks(&mut self, tasks: Vec<storage::Task>) {
+        self.tasks = tasks;
+    }
+}
+
+impl Render for TaskList {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.needs_clear {
+            self.needs_clear = false;
+            self.input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+
+        let tasks = self.tasks.clone();
+
+        div()
+            .flex_1()
+            .v_flex()
+            .p_8()
+            .gap_4()
+            .child(
+                div()
+                    .text_2xl()
+                    .font_bold()
+                    .text_color(rgb(0xe5e5e5ff))
+                    .child("Mini Todo"),
+            )
+            .child(Input::new(&self.input))
+            .child(
+                div()
+                    .flex_1()
+                    .v_flex()
+                    .gap_2()
+                    .children(tasks.into_iter().map(|task| {
+                        div()
+                            .id(("task", task.id))
+                            .h_flex()
+                            .gap_3()
+                            .py_1()
+                            .px_3()
+                            .rounded_md()
+                            .hover(|s| s.bg(rgb(0x2a2a2aff)))
+                            .child(
+                                div()
+                                    .text_base()
+                                    .text_color(rgb(0xa3a3a3ff))
+                                    .child(task.title.clone()),
+                            )
+                    })),
+            )
+    }
+}
+
+struct Layout {
+    task_list: Entity<TaskList>,
+    nav_bar: Entity<NavBar>,
+}
+
+impl Layout {
+    fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
+        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+        let task_list = cx.new(|cx| TaskList::new(input, store, cx));
+
+        Self { task_list, nav_bar }
+    }
+
+    pub fn set_tasks(&mut self, tasks: Vec<storage::Task>, cx: &mut Context<Self>) {
+        self.task_list.update(cx, |list, _| list.set_tasks(tasks));
+    }
+}
+
+impl Render for Layout {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .child(self.nav_bar.clone())
+            .child(self.task_list.clone())
     }
 }
 
@@ -259,7 +277,7 @@ fn main() {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
 
-        let init_task = gpui_tokio::Tokio::spawn_result(cx, async move {
+        let init_store = gpui_tokio::Tokio::spawn_result(cx, async move {
             let config = StorageConfig {
                 db_uri: "turso::memory:".to_string(),
             };
@@ -272,7 +290,7 @@ fn main() {
         cx.spawn(|cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
-                match init_task.await {
+                match init_store.await {
                     Ok((store, tasks)) => {
                         cx.open_window(WindowOptions::default(), |window, cx| {
                             Theme::change(ThemeMode::Dark, Some(window), cx);
@@ -283,7 +301,7 @@ fn main() {
                                 input_state
                             });
 
-                            let mini = cx.new(|cx| MiniTodo::new(input, store, cx));
+                            let mini = cx.new(|cx| Layout::new(input, store, cx));
 
                             let entity = mini.clone();
                             cx.spawn(move |cx: &mut AsyncApp| {
@@ -291,8 +309,7 @@ fn main() {
                                 let entity = entity.clone();
                                 async move {
                                     entity.update(&mut cx, |mini, cx| {
-                                        mini.tasks = tasks;
-                                        cx.notify();
+                                        mini.set_tasks(tasks, cx);
                                     });
                                 }
                             })
