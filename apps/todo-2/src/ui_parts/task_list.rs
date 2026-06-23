@@ -7,7 +7,7 @@ use gpui_component::input::*;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
-use super::task_view::TaskView;
+use super::task_row::TaskView;
 use crate::store::Store;
 
 pub struct TaskListView {

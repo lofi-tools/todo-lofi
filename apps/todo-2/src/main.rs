@@ -17,7 +17,7 @@ mod store;
 mod ui_parts {
     pub mod navbar;
     pub mod task_list;
-    pub mod task_view;
+    pub mod task_row;
 }
 
 struct Layout {
@@ -87,7 +87,8 @@ fn main() {
                                 let entity = entity.clone();
                                 async move {
                                     entity.update(&mut cx, |mini, cx| {
-                                        mini.task_list.update(cx, |list, cx| list.set_tasks(tasks, cx));
+                                        mini.task_list
+                                            .update(cx, |list, cx| list.set_tasks(tasks, cx));
                                     });
                                 }
                             })

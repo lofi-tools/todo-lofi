@@ -1,14 +1,13 @@
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Div, ElementId, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, relative, svg,
+    AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _, relative, rgb,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, IconName, Selectable, Sizable, Size, StyledExt as _, text::Text,
-    v_flex,
+    ActiveTheme, Disableable, Selectable, Sizable, Size, StyleSized,
+    StyledExt as _, text::Text, v_flex,
 };
-use gpui_component::{IconNamed, StyleSized};
-use std::{rc::Rc, time::Duration};
+use std::rc::Rc;
 
 /// A Checkbox element.
 #[derive(IntoElement)]
@@ -25,7 +24,6 @@ pub struct Checkbox {
 }
 
 impl Checkbox {
-    /// Create a new Checkbox with the given id.
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
@@ -40,21 +38,11 @@ impl Checkbox {
         }
     }
 
-    /// Set the label for the checkbox.
-    pub fn label(mut self, label: impl Into<Text>) -> Self {
-        self.label = Some(label.into());
-        self
-    }
-
-    /// Set the checked state for the checkbox.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
     }
 
-    /// Set the click handler for the checkbox.
-    ///
-    /// The `&bool` parameter indicates the new checked state after the click.
     pub fn on_click(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(handler));
         self
@@ -119,71 +107,35 @@ impl Sizable for Checkbox {
 }
 
 pub(crate) fn checkbox_check_icon(
-    id: ElementId,
-    size: Size,
+    _id: ElementId,
+    _size: Size,
     checked: bool,
     disabled: bool,
-    window: &mut Window,
-    cx: &mut App,
+    _window: &mut Window,
+    _cx: &mut App,
 ) -> impl IntoElement {
-    let toggle_state = window.use_keyed_state(id, cx, |_, _| checked);
     let color = if disabled {
-        cx.theme().primary_foreground.opacity(0.5)
+        gpui::black().opacity(0.5)
     } else {
-        cx.theme().primary_foreground
+        gpui::black()
     };
 
-    svg()
+    div()
         .absolute()
-        .top_px()
-        .left_px()
-        .map(|svg| svg.size_with(size))
+        .top_0()
+        .left_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .h_full()
         .text_color(color)
-        .map(|this| match checked {
-            true => this.path(IconName::Check.path()),
-            _ => this,
-        })
-        .map(|this| {
-            if !disabled && checked != *toggle_state.read(cx) {
-                let duration = Duration::from_secs_f64(0.25);
-                cx.spawn({
-                    let toggle_state = toggle_state.clone();
-                    async move |cx| {
-                        cx.background_executor().timer(duration).await;
-                        toggle_state.update(cx, |this, _| *this = checked);
-                    }
-                })
-                .detach();
-
-                this.with_animation(
-                    ElementId::NamedInteger("toggle".into(), checked as u64),
-                    Animation::new(Duration::from_secs_f64(0.25)),
-                    move |this, delta| {
-                        this.opacity(if checked { 1.0 * delta } else { 1.0 - delta })
-                    },
-                )
-                .into_any_element()
-            } else {
-                this.into_any_element()
-            }
-        })
+        .when(checked, |this| this.child("✓"))
 }
 
 impl RenderOnce for Checkbox {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let checked = self.checked;
-
-        let border_color = if checked {
-            cx.theme().primary
-        } else {
-            cx.theme().foreground.opacity(0.4)
-        };
-        let color = if self.disabled {
-            border_color.opacity(0.5)
-        } else {
-            border_color
-        };
-        let radius = cx.theme().radius.min(px(4.));
 
         div().child(
             self.base
@@ -210,13 +162,14 @@ impl RenderOnce for Checkbox {
                         .relative()
                         .map(|svg| svg.size_with(self.size))
                         .flex_shrink_0()
-                        .border_1()
-                        .border_color(color)
-                        .rounded(radius)
-                        .when(cx.theme().shadow && !self.disabled, |this| this.shadow_xs())
+                        .rounded_full()
+                        .when(!checked, |this| {
+                            this.border_1()
+                                .border_color(rgb(0xffffff))
+                        })
                         .map(|this| match checked {
-                            false => this.bg(cx.theme().input_background()),
-                            _ => this.bg(color),
+                            false => this.bg(rgb(0x1a1a1a)),
+                            _ => this.bg(rgb(0x666666)),
                         })
                         .child(checkbox_check_icon(
                             self.id,

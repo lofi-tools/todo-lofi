@@ -1,5 +1,5 @@
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, rgb,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -35,15 +35,17 @@ impl Render for TaskView {
             .hover(|s| s.bg(rgb(0x2a2a2a)))
             .child(
                 Checkbox::new(("checkbox", task_id))
-                    .with_size(gpui_component::Size::Small)
+                    .with_size(px(22.))
                     .checked(done)
                     .on_click(move |new_done, _window, cx| {
                         let store = store.clone();
                         let entity = entity.clone();
                         let new_done = *new_done;
                         cx.spawn(async move |cx| {
-                            let _ = store.toggle_task_done(task_id, new_done, cx).await;
-                            let _ = entity.update(cx, |this, cx| {
+                            if let Err(e) = store.toggle_task_done(task_id, new_done, cx).await {
+                                tracing::error!(?e, "Failed toggle_task_done");
+                            }
+                            entity.update(cx, |this, cx| {
                                 this.task.done = new_done;
                                 cx.notify();
                             });
