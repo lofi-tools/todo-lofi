@@ -40,6 +40,16 @@ pub enum ToolStatus {
     Error,
 }
 
+/// Provider/model picker shown by `/model`.
+#[derive(Debug, Clone)]
+pub struct ModelPickerState {
+    /// (provider, model) entries in display order.
+    pub entries: Vec<(String, String)>,
+    pub selected: usize,
+    /// Joined "provider/model" id of the current selection (for the marker).
+    pub current: String,
+}
+
 /// Overlay currently displayed on top of the main content.
 #[derive(Debug, Clone)]
 pub enum Overlay {
@@ -47,6 +57,7 @@ pub enum Overlay {
     Help,
     Permission(PermissionOverlay),
     Recovery(RecoveryOverlay),
+    ModelPicker(ModelPickerState),
     Graph(crate::tui::widgets::graph::GraphOverlayState),
 }
 
@@ -58,6 +69,7 @@ impl PartialEq for Overlay {
                 | (Self::Help, Self::Help)
                 | (Self::Permission(_), Self::Permission(_))
                 | (Self::Recovery(_), Self::Recovery(_))
+                | (Self::ModelPicker(_), Self::ModelPicker(_))
                 | (Self::Graph(_), Self::Graph(_))
         )
     }
@@ -267,6 +279,18 @@ impl AppState {
         self.turns.push(Turn {
             role: TurnRole::User,
             content: text.to_string(),
+            tools: Vec::new(),
+            thinking: None,
+        });
+        self.messages_dirty = true;
+        self.dirty = true;
+    }
+
+    /// Add a system (status) turn.
+    pub fn push_system(&mut self, text: impl Into<String>) {
+        self.turns.push(Turn {
+            role: TurnRole::System,
+            content: text.into(),
             tools: Vec::new(),
             thinking: None,
         });

@@ -1,9 +1,6 @@
-use ai_providers::poolside;
-// use cersei::events::AgentEvent;
 use crate::cli_commands::Cli;
 use crate::config::AppConfig;
-use cersei::tools::permissions::AllowAll;
-use cersei::{Agent, OpenAi};
+use crate::providers::AgentRuntime;
 use clap::Parser;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -12,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub mod acp;
 pub mod cli_commands;
 pub mod config;
+pub mod providers;
 pub mod signals;
 pub mod tui;
 
@@ -44,58 +42,22 @@ async fn main() -> anyhow::Result<()> {
         return acp::run_server(cli, config).await;
     }
 
-    let agent = Arc::new(build_agent_wip().await?);
+    let runtime = Arc::new(AgentRuntime::new(&config)?);
 
     let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
     if let Some(prompt_text) = prompt {
-        let prompt_text = prompt_text.to_string();
-        let stream = agent.run_stream(&prompt_text);
-        dbg!(&stream.collect_text().await.unwrap());
+        let stream = runtime.agent().run_stream(prompt_text);
+        let text = stream.collect_text().await?;
+        dbg!(&text);
     } else {
-        run_tui_app(cli, config, agent).await?;
+        run_tui_app(cli, config, runtime).await?;
     }
 
     // fastrace::flush();
     Ok(())
 }
 
-async fn build_agent_wip() -> anyhow::Result<Agent> {
-    let api_key = poolside::load_key()?;
-    // let client = reqwest::Client::new();
-    // let models: serde_json::Value = client
-    //     .get("https://inference.poolside.ai/v1/models")
-    //     .bearer_auth(&api_key)
-    //     .send()
-    //     .await?
-    //     .json()
-    //     .await?;
-    // println!("Available models: {:#?}", models);
-
-    // let provider = OpenAi::builder()
-    //     .base_url("http://127.0.0.1:1234/v1")
-    //     .api_key("")
-    //     .model("qwen3.6-27b-mtplx-optimized-speed")
-    //     .build()?;
-    // let provider = ai_providers::poolside::provider()?;
-    let model = "poolside/laguna-xs.2";
-    let provider = OpenAi::builder()
-        .base_url("https://inference.poolside.ai/v1")
-        .api_key(api_key)
-        .model(model)
-        .build()?;
-    let agent = Agent::builder()
-        .provider(provider)
-        .model(model)
-        // .tools(cersei::tools::coding())
-        // .system_prompt("Coding assistant, be concise.")
-        .max_turns(5)
-        .permission_policy(AllowAll)
-        .working_dir(".")
-        .build()?;
-    Ok(agent)
-}
-
-pub async fn run_tui_app(_cli: Cli, config: AppConfig, agent: Arc<Agent>) -> anyhow::Result<()> {
+pub async fn run_tui_app(_cli: Cli, config: AppConfig, runtime: Arc<AgentRuntime>) -> anyhow::Result<()> {
     // let theme = Theme::from_name(&config.theme);
 
     // Resolve or create session ID
@@ -175,7 +137,7 @@ pub async fn run_tui_app(_cli: Cli, config: AppConfig, agent: Arc<Agent>) -> any
     // } else {
     // TUI mode (default interactive)
     tui::run_repl(
-        agent,
+        runtime,
         &config,
         // &memory_manager,
         // &session_id,

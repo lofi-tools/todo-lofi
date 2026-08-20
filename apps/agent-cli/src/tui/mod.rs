@@ -1,5 +1,5 @@
 // use crate::config::AppConfig;
-use cersei::Agent;
+use crate::providers::AgentRuntime;
 // use cersei::memory::manager::MemoryManager;
 use crossterm::{
     event::{
@@ -30,7 +30,7 @@ pub type Terminal = ratatui::Terminal<CrosstermBackend<io::Stdout>>;
 
 /// Main entry point for the TUI. Sets up terminal, runs the event loop, cleans up.
 pub async fn run_repl(
-    agent: Arc<Agent>,
+    runtime: Arc<AgentRuntime>,
     config: &AppConfig,
     // memory_manager: &MemoryManager,
     // session_id: &str,
@@ -44,7 +44,7 @@ pub async fn run_repl(
     // let agent = Arc::new(agent);
     let result = event_loop::run(
         &mut terminal,
-        agent,
+        runtime,
         config,
         // memory_manager,
         // session_id,

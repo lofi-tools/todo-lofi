@@ -876,12 +876,12 @@ pub mod overlay {
     //! Modal overlays: help, permission, recovery.
 
     use crate::tui::{
-        app::{AppState, Overlay, PermissionOverlay, RecoveryOverlay},
+        app::{AppState, ModelPickerState, Overlay, PermissionOverlay, RecoveryOverlay},
         theme::Theme,
     };
     use ratatui::{
         prelude::*,
-        widgets::{Block, Borders, Clear, Paragraph, Wrap},
+        widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     };
 
     pub fn render(f: &mut Frame, state: &AppState, theme: &Theme) {
@@ -890,6 +890,7 @@ pub mod overlay {
             Overlay::Help => render_help(f, theme),
             Overlay::Permission(p) => render_permission(f, p, theme),
             Overlay::Recovery(r) => render_recovery(f, r, theme),
+            Overlay::ModelPicker(p) => render_model_picker(f, p, theme),
             Overlay::Graph(g) => super::graph::render(f, g, theme),
         }
     }
@@ -928,7 +929,7 @@ pub mod overlay {
             Line::from("  /help        Show this help"),
             Line::from("  /clear       Clear conversation"),
             Line::from("  /cost        Show usage and cost"),
-            Line::from("  /model       Show current model"),
+            Line::from("  /model       Switch provider/model"),
             Line::from("  /memory      Memory info"),
             Line::from("  /sessions    Session info"),
             Line::from("  /diff        Open git diff panel"),
@@ -1033,6 +1034,42 @@ pub mod overlay {
 
         let widget = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
         f.render_widget(widget, area);
+    }
+
+    fn render_model_picker(f: &mut Frame, p: &ModelPickerState, theme: &Theme) {
+        let area = centered_rect(f.area(), 60, 70);
+        f.render_widget(Clear, area);
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(p.selected.min(p.entries.len().saturating_sub(1))));
+
+        let items: Vec<ListItem> = p
+            .entries
+            .iter()
+            .map(|(provider, model)| {
+                let id = crate::providers::display_model_id(provider, model);
+                let marker = if id == p.current { " ●" } else { "  " };
+                let label = format!("{marker} {id}");
+                ListItem::new(label)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(" Provider / Model (↑↓ select, Enter switch, Esc close) ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.border_style())
+                    .style(Style::default().bg(theme.bg)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">");
+
+        f.render_stateful_widget(list, area, &mut list_state);
     }
 
     fn render_recovery(f: &mut Frame, r: &RecoveryOverlay, theme: &Theme) {

@@ -7,15 +7,15 @@
 // use crate::config::AppConfig;
 use crate::{
     config::AppConfig,
+    providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, Overlay, SidePanelTab, ToolCall, ToolStatus},
+        app::{AppState, ModelPickerState, Overlay, SidePanelTab, ToolCall, ToolStatus},
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
     },
 };
-use cersei::Agent;
 use cersei::events::{AgentEvent, AgentStream};
 // use cersei::memory::manager::MemoryManager;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -27,7 +27,7 @@ const TICK_RATE: Duration = Duration::from_millis(16); // ~62 FPS
 
 pub async fn run(
     terminal: &mut Terminal,
-    agent: Arc<Agent>,
+    runtime: Arc<AgentRuntime>,
     config: &AppConfig,
     // _memory_manager: &MemoryManager,
     // session_id: &str,
@@ -90,12 +90,14 @@ pub async fn run(
                     event_count += 1;
                     match event::read()? {
                         Event::Key(key) => {
-                            if let Some(prompt) = handle_key(&mut state, key, config, &cancel_token) {
+                            if let Some(prompt) =
+                                handle_key(&mut state, key, config, &cancel_token, &runtime)
+                            {
                                 state.push_user(&prompt);
                                 state.is_streaming = true;
                                 state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
-                                agent_stream = Some(agent.run_stream(&prompt));
+                                agent_stream = Some(runtime.agent().run_stream(&prompt));
                             }
                             state.dirty = true;
                         }
@@ -179,12 +181,12 @@ fn handle_key(
     key: KeyEvent,
     config: &AppConfig,
     cancel_token: &CancellationToken,
+    runtime: &Arc<AgentRuntime>,
 ) -> Option<String> {
-    // Handle overlay-specific keys first
-    // if state.overlay != Overlay::None {
-    //     handle_overlay_key(state, key);
-    //     return None;
-    // }
+    // Model picker gets full key handling while open.
+    if matches!(state.overlay, Overlay::ModelPicker(_)) {
+        return handle_model_picker_key(state, key, runtime);
+    }
 
     // ── Side panel focused: j/k scroll, Tab switches tabs, Esc returns focus ──
     if state.side_panel_focused {
@@ -326,7 +328,7 @@ fn handle_key(
             state.cursor_pos = 0;
 
             if input_text.starts_with('/') {
-                handle_slash_command(state, &input_text, config);
+                handle_slash_command(state, &input_text, config, runtime);
                 return None;
             }
 
@@ -412,6 +414,53 @@ fn handle_key(
     None
 }
 
+/// Handle keys while the provider/model picker is open.
+fn handle_model_picker_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    runtime: &Arc<AgentRuntime>,
+) -> Option<String> {
+    let Overlay::ModelPicker(picker) = &mut state.overlay else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            picker.selected = picker.selected.saturating_sub(1);
+            state.dirty = true;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if picker.selected + 1 < picker.entries.len() {
+                picker.selected += 1;
+            }
+            state.dirty = true;
+        }
+        KeyCode::Enter => {
+            if picker.entries.is_empty() {
+                state.overlay = Overlay::None;
+                state.dirty = true;
+                return None;
+            }
+            let idx = picker.selected.min(picker.entries.len() - 1);
+            let (provider, model) = picker.entries[idx].clone();
+            let label = crate::providers::display_model_id(&provider, &model);
+            state.overlay = Overlay::None;
+            match runtime.switch(&provider, &model) {
+                Ok(()) => {
+                    state.model = model;
+                    state.push_system(format!("Switched to {label}"));
+                }
+                Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.overlay = Overlay::None;
+            state.dirty = true;
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     match event {
         AgentEvent::TextDelta(text) => {
@@ -494,7 +543,12 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
     }
 }
 
-fn handle_slash_command(state: &mut AppState, input: &str, config: &AppConfig) {
+fn handle_slash_command(
+    state: &mut AppState,
+    input: &str,
+    config: &AppConfig,
+    runtime: &Arc<AgentRuntime>,
+) {
     let cmd = input
         .trim_start_matches('/')
         .split_whitespace()
@@ -618,15 +672,40 @@ fn handle_slash_command(state: &mut AppState, input: &str, config: &AppConfig) {
         //     });
         // }
         "model" => {
-            state.turns.push(crate::tui::app::Turn {
-                role: crate::tui::app::TurnRole::System,
-                content: format!(
-                    "Current model: {}\nChange with: abstract --model <provider/model>",
-                    state.model
-                ),
-                tools: Vec::new(),
-                thinking: None,
-            });
+            let rest = input
+                .trim_start_matches('/')
+                .strip_prefix("model")
+                .map(str::trim)
+                .unwrap_or("");
+            if rest.is_empty() {
+                // Open the picker.
+                let (provider, model) = runtime.current();
+                let current = crate::providers::display_model_id(&provider, &model);
+                let entries = runtime.entries();
+                let selected = entries
+                    .iter()
+                    .position(|(p, m)| crate::providers::display_model_id(p, m) == current)
+                    .unwrap_or(0);
+                state.overlay = Overlay::ModelPicker(ModelPickerState {
+                    entries,
+                    selected,
+                    current,
+                });
+            } else {
+                match runtime.select_text(rest) {
+                    Ok((provider, model)) => {
+                        let label = crate::providers::display_model_id(&provider, &model);
+                        match runtime.switch(&provider, &model) {
+                            Ok(()) => {
+                                state.model = model;
+                                state.push_system(format!("Switched to {label}"));
+                            }
+                            Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+                        }
+                    }
+                    Err(e) => state.push_system(format!("{e}")),
+                }
+            }
         }
         // "cost" => {
         //     // Estimate cost if provider didn't report it

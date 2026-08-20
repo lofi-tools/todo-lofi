@@ -13,11 +13,11 @@
 
 use crate::cli_commands::Cli;
 use crate::config::AppConfig;
+use crate::providers;
 use anyhow::Context as _;
 use cersei::events::AgentEvent;
-use cersei::tools::permissions::{AllowAll, AllowReadOnly};
 use cersei::types::{Message, Role, StopReason};
-use cersei::{Agent, OpenAi};
+use cersei::Agent;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,8 +34,6 @@ const CONTEXT_WINDOW: u64 = 128_000;
 /// How long to keep draining the agent stream after a cancel request before
 /// replying anyway (tool executions in cersei cannot always be aborted).
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
-const POOLSIDE_BASE_URL: &str = "https://inference.poolside.ai/v1";
-const DEFAULT_MODEL: &str = "poolside/laguna-xs-2.1";
 
 // ─── JSON-RPC 2.0 wire types ────────────────────────────────────────────────
 
@@ -318,6 +316,7 @@ struct SetModeParams {
 struct AcpSession {
     id: String,
     cwd: PathBuf,
+    provider: String,
     model: String,
     mode: String,
     messages: Vec<Message>,
@@ -333,35 +332,29 @@ struct AcpSession {
 struct AcpServer {
     connection: AcpConnection,
     sessions: Mutex<HashMap<String, Arc<Mutex<AcpSession>>>>,
-    api_key: String,
+    config: AppConfig,
+    default_provider: String,
     default_model: String,
     max_turns: u32,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
-    // Prefer the env var so no subprocess (`pool-key-file`) is spawned, which
-    // would print to stdout and corrupt the NDJSON stream. Only fall back to
-    // the subprocess at startup, before the protocol begins.
-    let api_key = std::env::var("POOLSIDE_API_KEY").unwrap_or_else(|_| {
-        ai_providers::poolside::load_key().unwrap_or_default()
-    });
-    if api_key.is_empty() {
-        anyhow::bail!("POOLSIDE_API_KEY is not set and could not be loaded");
-    }
-
-    let default_model = if config.model.is_empty() || config.model == "auto" {
-        DEFAULT_MODEL.to_string()
-    } else {
-        config.model.clone()
-    };
+    // Fail fast if the configured default provider/model can't be resolved
+    // (missing api_key etc.), before the protocol starts.
+    let (default_provider, default_model) =
+        providers::default_selection(&config).context("no usable provider/model configured")?;
+    providers::resolve(&config, &default_provider, &default_model)
+        .context("failed to resolve default provider/model (check api_key settings)")?;
+    let max_turns = config.max_turns;
 
     let (connection, writer_task) = AcpConnection::new();
     let server = Arc::new(AcpServer {
         connection,
         sessions: Mutex::new(HashMap::new()),
-        api_key,
+        config,
+        default_provider,
         default_model,
-        max_turns: config.max_turns,
+        max_turns,
     });
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -559,6 +552,77 @@ impl AcpServer {
         })
     }
 
+    /// Flat list of all "provider/model" ids across configured providers.
+    fn models_value(&self, session: &Arc<Mutex<AcpSession>>) -> Value {
+        let (provider, model) = {
+            let guard = session.lock();
+            (guard.provider.clone(), guard.model.clone())
+        };
+        let available: Vec<Value> = providers::entries(&self.config)
+            .into_iter()
+            .map(|(p, m)| {
+                let id = providers::display_model_id(&p, &m);
+                json!({ "modelId": id, "name": id })
+            })
+            .collect();
+        json!({
+            "availableModels": available,
+            "currentModelId": providers::display_model_id(&provider, &model),
+        })
+    }
+
+    /// Config options: provider + model (dependent) + mode.
+    fn config_options(&self, session: &Arc<Mutex<AcpSession>>) -> Value {
+        let (session_provider, session_model, session_mode) = {
+            let guard = session.lock();
+            (guard.provider.clone(), guard.model.clone(), guard.mode.clone())
+        };
+        let provider_names: Vec<Value> = providers::providers(&self.config)
+            .into_iter()
+            .map(|p| json!({ "value": p.name, "name": p.name }))
+            .collect();
+        let model_options: Vec<Value> = providers::provider(&self.config, &session_provider)
+            .map(|p| {
+                p.models
+                    .into_iter()
+                    .map(|m| {
+                        let id = providers::display_model_id(&session_provider, &m);
+                        json!({ "value": id, "name": id })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        json!([
+            {
+                "id": "provider",
+                "name": "Provider",
+                "type": "select",
+                "currentValue": session_provider,
+                "options": provider_names,
+            },
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": providers::display_model_id(&session_provider, &session_model),
+                "options": model_options,
+            },
+            {
+                "id": "mode",
+                "name": "Mode",
+                "description": "Tool permission mode",
+                "category": "mode",
+                "type": "select",
+                "currentValue": session_mode,
+                "options": [
+                    { "value": "auto", "name": "Auto", "description": "Auto-approves all tools" },
+                    { "value": "readonly", "name": "Read-only", "description": "Denies tools that modify files or run commands" },
+                ],
+            },
+        ])
+    }
+
     fn handle_new_session(&self, id: Value, params: NewSessionParams) {
         let session_id = uuid_short();
         let cwd = resolve_cwd(params.cwd);
@@ -578,6 +642,7 @@ impl AcpServer {
         let session = Arc::new(Mutex::new(AcpSession {
             id: session_id.clone(),
             cwd,
+            provider: self.default_provider.clone(),
             model: self.default_model.clone(),
             mode: "auto".to_string(),
             messages: Vec::new(),
@@ -588,7 +653,6 @@ impl AcpServer {
         self.sessions.lock().insert(session_id.clone(), Arc::clone(&session));
 
         let guard = session.lock();
-        let model = guard.model.clone();
         let mode = guard.mode.clone();
         drop(guard);
 
@@ -597,8 +661,8 @@ impl AcpServer {
             json!({
                 "sessionId": session_id,
                 "modes": modes(&mode),
-                "models": models(&model),
-                "configOptions": config_options(&model, &mode),
+                "models": self.models_value(&session),
+                "configOptions": self.config_options(&session),
             }),
         );
     }
@@ -691,28 +755,54 @@ impl AcpServer {
                 };
                 guard.mode = mode.to_string();
             }
+            "provider" => {
+                let name = match value.as_str() {
+                    Some(n) => n,
+                    None => {
+                        self.connection
+                            .error(id, -32602, "Invalid value for config option 'provider'");
+                        return;
+                    }
+                };
+                let model = match providers::default_model(&self.config, name) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        self.connection
+                            .error(id, -32602, format!("Unknown provider: {name}"));
+                        return;
+                    }
+                };
+                guard.provider = name.to_string();
+                guard.model = model;
+            }
             "model" => {
-                let model = match value.as_str() {
-                    Some(m) if m == guard.model => m,
-                    _ => {
+                let text = match value.as_str() {
+                    Some(t) => t,
+                    None => {
                         self.connection
                             .error(id, -32602, "Invalid value for config option 'model'");
                         return;
                     }
                 };
-                guard.model = model.to_string();
+                let (provider, model) = match providers::resolve_selection(&self.config, &guard.provider, text) {
+                    Ok(sel) => sel,
+                    Err(e) => {
+                        self.connection.error(id, -32602, format!("Invalid model: {e}"));
+                        return;
+                    }
+                };
+                guard.provider = provider;
+                guard.model = model;
             }
             other => {
                 self.connection.error(id, -32602, format!("Unknown config option: {other}"));
                 return;
             }
         }
-        let model = guard.model.clone();
-        let mode = guard.mode.clone();
         drop(guard);
 
         self.connection
-            .response(id, json!({ "configOptions": config_options(&model, &mode) }));
+            .response(id, json!({ "configOptions": self.config_options(&session) }));
     }
 
     fn handle_set_mode(&self, id: Value, params: SetModeParams) {
@@ -767,12 +857,17 @@ impl AcpServer {
                 return;
             }
         };
-        if model_id != session.lock().model {
-            self.connection.error(id, -32602, format!("Invalid or unavailable model: {model_id}"));
-            return;
+        let current_provider = session.lock().provider.clone();
+        match providers::resolve_selection(&self.config, &current_provider, &model_id) {
+            Ok((provider, model)) => {
+                session.lock().provider = provider;
+                session.lock().model = model;
+                self.connection.response(id, json!({}));
+            }
+            Err(e) => {
+                self.connection.error(id, -32602, format!("Invalid or unavailable model: {e}"));
+            }
         }
-        session.lock().model = model_id;
-        self.connection.response(id, json!({}));
     }
 
     /// Build a fresh agent for one prompt run. A fresh agent per run lets each
@@ -780,40 +875,37 @@ impl AcpServer {
     /// single-use), while conversation history is re-seeded via `with_messages`.
     fn build_agent(
         &self,
-        model: &str,
-        mode: &str,
-        cwd: &PathBuf,
-        session_id: &str,
-        messages: Vec<Message>,
+        session: &Arc<Mutex<AcpSession>>,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<Arc<Agent>> {
-        let provider = OpenAi::builder()
-            .base_url(POOLSIDE_BASE_URL)
-            .api_key(self.api_key.clone())
-            .model(model)
-            .build()
-            .context("failed to build provider")?;
-
-        let mut builder = Agent::builder()
-            .provider(provider)
-            .model(model)
-            .tools(cersei::tools::coding())
-            .max_turns(self.max_turns)
-            .working_dir(cwd)
-            .session_id(session_id)
-            .cancel_token(cancel_token)
-            .with_messages(messages);
+        let (provider, model, cwd, mode, messages, session_id) = {
+            let guard = session.lock();
+            (
+                guard.provider.clone(),
+                guard.model.clone(),
+                guard.cwd.clone(),
+                guard.mode.clone(),
+                guard.messages.clone(),
+                guard.id.clone(),
+            )
+        };
+        let resolved = providers::resolve(&self.config, &provider, &model)
+            .with_context(|| format!("failed to resolve provider '{provider}'"))?;
         // The ACP permission flow is not wired to cersei's InteractivePolicy
         // (permission responses never reach the runner), so only policies that
         // decide autonomously are offered.
-        builder = match mode {
-            "readonly" => builder.permission_policy(AllowReadOnly),
-            _ => builder.permission_policy(AllowAll),
-        };
-
-        Ok(Arc::new(
-            builder.build().context("failed to build agent")?,
-        ))
+        providers::build_agent(
+            &resolved,
+            providers::BuildParams {
+                working_dir: cwd,
+                max_turns: self.max_turns,
+                session_id: Some(session_id),
+                messages,
+                tools: cersei::tools::coding(),
+                cancel_token,
+                readonly: mode == "readonly",
+            },
+        )
     }
 
     async fn handle_prompt(
@@ -849,19 +941,7 @@ impl AcpServer {
             guard.run_seq
         };
 
-        let (messages, mode, model, cwd) = {
-            let guard = session.lock();
-            (guard.messages.clone(), guard.mode.clone(), guard.model.clone(), guard.cwd.clone())
-        };
-
-        let agent = match self.build_agent(
-            &model,
-            &mode,
-            &cwd,
-            &session_id,
-            messages,
-            cancel_token.clone(),
-        ) {
+        let agent = match self.build_agent(&session, cancel_token.clone()) {
             Ok(a) => a,
             Err(e) => {
                 self.clear_pending(&session, run_id);
@@ -1069,42 +1149,6 @@ fn modes(mode: &str) -> Value {
         ],
         "currentModeId": mode,
     })
-}
-
-fn models(model: &str) -> Value {
-    json!({
-        "availableModels": [
-            { "modelId": model, "name": model },
-        ],
-        "currentModelId": model,
-    })
-}
-
-fn config_options(model: &str, mode: &str) -> Value {
-    json!([
-        {
-            "id": "mode",
-            "name": "Mode",
-            "description": "Tool permission mode",
-            "category": "mode",
-            "type": "select",
-            "currentValue": mode,
-            "options": [
-                { "value": "auto", "name": "Auto", "description": "Auto-approves all tools" },
-                { "value": "readonly", "name": "Read-only", "description": "Denies tools that modify files or run commands" },
-            ],
-        },
-        {
-            "id": "model",
-            "name": "Model",
-            "category": "model",
-            "type": "select",
-            "currentValue": model,
-            "options": [
-                { "value": model, "name": model },
-            ],
-        },
-    ])
 }
 
 fn acp_stop_reason(stop_reason: &StopReason) -> &'static str {

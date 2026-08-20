@@ -36,6 +36,10 @@ pub struct AppConfig {
     pub hooks: Vec<HookEntry>,
     #[serde(default)]
     pub proxy: ProxyConfig,
+    /// Per-provider overrides (base_url, api_key, models). Keys extend or
+    /// override the built-in providers (poolside, openrouter, groq, nvidia).
+    #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
     #[serde(default)]
     pub benchmark_mode: bool,
     #[serde(default)]
@@ -71,6 +75,7 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
             proxy: ProxyConfig::default(),
+            providers: std::collections::HashMap::new(),
             benchmark_mode: false,
             embedding_api: false,
             output_format: "text".into(),
@@ -79,8 +84,21 @@ impl Default for AppConfig {
     }
 }
 
+/// Per-provider config-file entry. All fields optional: set only what you want
+/// to override from the built-in defaults (or define a brand-new provider).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderConfigEntry {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// `!command` (shell output), `env:VAR`, or a literal key.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
 /// Proxy configuration for routing through VibeProxy or similar local proxies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProxyConfig {
     /// Enable proxy auto-detection.
     #[serde(default = "default_true")]
@@ -168,15 +186,15 @@ pub fn graph_db_path() -> PathBuf {
 pub fn load() -> AppConfig {
     let mut config = AppConfig::default();
 
-    // // Layer 2: global config
-    // if let Some(loaded) = load_toml_file(&global_config_path()) {
-    //     merge(&mut config, loaded);
-    // }
+    // Layer 2: global config (~/.abstract/config.toml)
+    if let Some(loaded) = load_toml_file(&global_config_path()) {
+        merge(&mut config, loaded);
+    }
 
-    // // Layer 3: project config
-    // if let Some(loaded) = load_toml_file(&project_config_path()) {
-    //     merge(&mut config, loaded);
-    // }
+    // Layer 3: project config (.abstract/config.toml)
+    if let Some(loaded) = load_toml_file(&project_config_path()) {
+        merge(&mut config, loaded);
+    }
 
     // Layer 4: environment variables
     apply_env(&mut config);
@@ -184,56 +202,51 @@ pub fn load() -> AppConfig {
     config
 }
 
-// fn load_toml_file(path: &Path) -> Option<AppConfig> {
-//     let content = std::fs::read_to_string(path).ok()?;
-//     toml::from_str(&content).ok()
-// }
+fn load_toml_file(path: &std::path::Path) -> Option<AppConfig> {
+    let content = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&content).ok()
+}
 
-// fn merge(base: &mut AppConfig, overlay: AppConfig) {
-//     // Only override non-default values
-//     if overlay.model != AppConfig::default().model {
-//         base.model = overlay.model;
-//     }
-//     if overlay.provider != AppConfig::default().provider {
-//         base.provider = overlay.provider;
-//     }
-//     if overlay.max_turns != AppConfig::default().max_turns {
-//         base.max_turns = overlay.max_turns;
-//     }
-//     if overlay.max_tokens != AppConfig::default().max_tokens {
-//         base.max_tokens = overlay.max_tokens;
-//     }
-//     if overlay.effort != AppConfig::default().effort {
-//         base.effort = overlay.effort;
-//     }
-//     if overlay.output_style != AppConfig::default().output_style {
-//         base.output_style = overlay.output_style;
-//     }
-//     if overlay.theme != AppConfig::default().theme {
-//         base.theme = overlay.theme;
-//     }
-//     if !overlay.auto_compact && AppConfig::default().auto_compact {
-//         base.auto_compact = false;
-//     }
-//     if !overlay.graph_memory && AppConfig::default().graph_memory {
-//         base.graph_memory = false;
-//     }
-//     if overlay.permissions_mode != AppConfig::default().permissions_mode {
-//         base.permissions_mode = overlay.permissions_mode;
-//     }
-//     if !overlay.fallback_models.is_empty() {
-//         base.fallback_models = overlay.fallback_models;
-//     }
-//     if !overlay.mcp_servers.is_empty() {
-//         base.mcp_servers = overlay.mcp_servers;
-//     }
-//     if !overlay.hooks.is_empty() {
-//         base.hooks = overlay.hooks;
-//     }
-//     if overlay.compression_level != AppConfig::default().compression_level {
-//         base.compression_level = overlay.compression_level;
-//     }
-// }
+/// Overlay config-file values onto the defaults, only touching fields the
+/// file explicitly set (i.e. fields that differ from the defaults).
+fn merge(base: &mut AppConfig, overlay: AppConfig) {
+    let defaults = AppConfig::default();
+    macro_rules! copy_if_set {
+        ($field:ident) => {
+            if overlay.$field != defaults.$field {
+                base.$field = overlay.$field;
+            }
+        };
+    }
+    copy_if_set!(model);
+    copy_if_set!(provider);
+    copy_if_set!(max_turns);
+    copy_if_set!(max_tokens);
+    copy_if_set!(effort);
+    copy_if_set!(output_style);
+    copy_if_set!(theme);
+    copy_if_set!(auto_compact);
+    copy_if_set!(graph_memory);
+    copy_if_set!(permissions_mode);
+    copy_if_set!(working_dir);
+    copy_if_set!(output_format);
+    copy_if_set!(compression_level);
+    copy_if_set!(embedding_api);
+    copy_if_set!(benchmark_mode);
+    copy_if_set!(proxy);
+    if !overlay.fallback_models.is_empty() {
+        base.fallback_models = overlay.fallback_models;
+    }
+    if !overlay.mcp_servers.is_empty() {
+        base.mcp_servers = overlay.mcp_servers;
+    }
+    if !overlay.hooks.is_empty() {
+        base.hooks = overlay.hooks;
+    }
+    if !overlay.providers.is_empty() {
+        base.providers = overlay.providers;
+    }
+}
 
 fn apply_env(config: &mut AppConfig) {
     if let Ok(v) = std::env::var("ABSTRACT_MODEL") {
@@ -268,6 +281,14 @@ fn apply_env(config: &mut AppConfig) {
 pub fn apply_cli_overrides(cli: &Cli, config: &mut AppConfig) {
     if let Some(m) = &cli.model {
         config.model = resolve_model_alias(m);
+        // Derive the provider from the model's prefix ("groq/compound",
+        // "openrouter/...") unless the user picked a provider explicitly.
+        if cli.provider.is_none()
+            && let Some(prefix) = config.model.split('/').next()
+            && !prefix.is_empty()
+        {
+            config.provider = prefix.to_string();
+        }
     }
     if let Some(p) = &cli.provider {
         config.provider = p.clone();
@@ -312,16 +333,18 @@ pub fn apply_cli_overrides(cli: &Cli, config: &mut AppConfig) {
 }
 
 fn resolve_model_alias(alias: &str) -> String {
+    // Model ids are "provider/model". Providers that aren't built in are
+    // reached through openrouter.
     match alias {
-        "opus" => "anthropic/claude-opus-4-6".into(),
-        "sonnet" => "anthropic/claude-sonnet-4-6".into(),
-        "haiku" => "anthropic/claude-haiku-4-5".into(),
-        "gpt4o" | "4o" => "openai/gpt-4o".into(),
-        "gemini" => "google/gemini-3.1-pro-preview".into(),
+        "opus" => "openrouter/anthropic/claude-opus-4-6".into(),
+        "sonnet" => "openrouter/anthropic/claude-sonnet-4-6".into(),
+        "haiku" => "openrouter/anthropic/claude-haiku-4-5".into(),
+        "gpt4o" | "4o" => "openrouter/openai/gpt-4o".into(),
+        "gemini" => "openrouter/google/gemini-3.1-pro-preview".into(),
         "llama" => "groq/llama-3.1-70b-versatile".into(),
-        "deepseek" => "deepseek/deepseek-chat".into(),
-        "grok" => "xai/grok-2".into(),
-        "mistral" => "mistral/mistral-large-latest".into(),
+        "deepseek" => "openrouter/deepseek/deepseek-chat".into(),
+        "grok" => "openrouter/x-ai/grok-2".into(),
+        "mistral" => "openrouter/mistralai/mistral-large-latest".into(),
         other => other.into(),
     }
 }
