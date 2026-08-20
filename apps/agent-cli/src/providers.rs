@@ -135,6 +135,33 @@ fn builtin_providers() -> Vec<Provider> {
                 "qwen/qwen2.5-72b-instruct".into(),
             ],
         },
+        Provider {
+            name: "tokenrouter".into(),
+            base_url: "https://api.tokenrouter.com/v1".into(),
+            api_key: "env:TOKENROUTER_API_KEY".into(),
+            // TokenRouter is a unified gateway; this is a curated subset of its
+            // coding-capable chat models (all exposed over the OpenAI-compatible
+            // endpoint). The `-free` variants are zero-ratio (free) on the
+            // gateway.
+            free_models: vec![
+                "deepseek/deepseek-v4-pro-0813-free".into(),
+                "qwen/qwen3.8-max-free".into(),
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".into(),
+            ],
+            models: vec![
+                "deepseek/deepseek-v4-pro-0813-free".into(),
+                "qwen/qwen3.8-max-free".into(),
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".into(),
+                "deepseek/deepseek-v4-pro-0813".into(),
+                "deepseek/deepseek-v4-flash".into(),
+                "qwen/qwen3-coder-next".into(),
+                "openai/gpt-oss-120b".into(),
+                "moonshotai/kimi-k2.7-code".into(),
+                "mistralai/devstral-2512".into(),
+                "z-ai/glm-5.2".into(),
+                "x-ai/grok-4.5".into(),
+            ],
+        },
     ]
 }
 
