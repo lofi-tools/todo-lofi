@@ -563,14 +563,36 @@ pub mod header {
     }
 }
 pub mod input {
-    //! Input widget: multi-line textarea with wrapping.
+    //! Input widget: multi-line textarea with wrapping and a rounded border.
 
     use crate::tui::{app::AppState, theme::Theme};
-    use ratatui::{prelude::*, widgets::Paragraph};
+    use ratatui::{
+        prelude::*,
+        widgets::{Block, Borders, BorderType, Paragraph},
+    };
+
+    /// Minimum/maximum number of content lines (excluding the border).
+    const MIN_CONTENT_LINES: u16 = 2;
+    const MAX_CONTENT_LINES: u16 = 10;
+    /// Height consumed by the rounded border (top + bottom).
+    const BORDER_LINES: u16 = 2;
 
     pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+        let border_color = if state.side_panel_focused {
+            theme.dim
+        } else {
+            theme.border_strong
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border_color))
+            .style(Style::default().bg(theme.input_bg));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
         let prompt = if state.is_streaming { "  " } else { "> " };
-        let width = area.width as usize;
+        let width = inner.width as usize;
         if width < 4 {
             return;
         }
@@ -585,8 +607,8 @@ pub mod input {
             cursor_visual_pos(&state.input, state.cursor_pos, prompt, usable);
 
         // Scroll so cursor row is visible
-        let scroll = if cursor_row as u16 >= area.height {
-            cursor_row as u16 - area.height + 1
+        let scroll = if cursor_row as u16 >= inner.height {
+            cursor_row as u16 - inner.height + 1
         } else {
             0
         };
@@ -595,26 +617,93 @@ pub mod input {
         let widget = Paragraph::new(lines)
             .style(Style::default().fg(theme.fg).bg(theme.input_bg))
             .scroll((scroll, 0));
-        f.render_widget(widget, area);
+        f.render_widget(widget, inner);
 
         if !state.is_streaming {
-            let cx = area.x + cursor_col as u16;
-            let cy = area.y + (cursor_row as u16).saturating_sub(scroll);
+            let cx = inner.x + cursor_col as u16;
+            let cy = inner.y + (cursor_row as u16).saturating_sub(scroll);
             f.set_cursor_position((
-                cx.min(area.right().saturating_sub(1)),
-                cy.min(area.bottom().saturating_sub(1)),
+                cx.min(inner.right().saturating_sub(1)),
+                cy.min(inner.bottom().saturating_sub(1)),
             ));
         }
     }
 
-    /// Desired height for the input area.
+    /// Desired total height for the input area (content + border).
     pub fn desired_height(input: &str, width: u16) -> u16 {
         if width < 4 {
-            return 1;
+            return MIN_CONTENT_LINES + BORDER_LINES;
         }
-        let usable = (width as usize).saturating_sub(2);
+        let usable = (width as usize).saturating_sub(4);
         let lines = visual_lines(input, "> ", usable);
-        (lines.len() as u16).clamp(1, 10)
+        (lines.len() as u16).clamp(MIN_CONTENT_LINES, MAX_CONTENT_LINES) + BORDER_LINES
+    }
+
+    /// Render the fuzzy `/` command selector popup anchored above the input.
+    pub fn render_command_selector(
+        f: &mut Frame,
+        input_area: Rect,
+        state: &AppState,
+        theme: &Theme,
+    ) {
+        use crate::tui::app::CommandMatch;
+        use ratatui::widgets::{Clear, List, ListItem, ListState};
+
+        let Some(sel) = &state.command_selector else { return };
+        if sel.matches.is_empty() {
+            return;
+        }
+
+        let popup_width = 48.min(input_area.width.saturating_sub(4)).max(16);
+        let rows = (sel.matches.len() as u16).min(8);
+        let popup_height = rows + BORDER_LINES;
+        let x = input_area.x + 1;
+        // Place directly above the input; if there isn't room, pin to the top.
+        let y = input_area.y.saturating_sub(popup_height);
+        let area = Rect {
+            x,
+            y,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        f.render_widget(Clear, area);
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(sel.selected.min(sel.matches.len() - 1)));
+
+        let items: Vec<ListItem> = sel
+            .matches
+            .iter()
+            .map(|m: &CommandMatch| {
+                let name = Span::styled(
+                    format!("/{}", m.name),
+                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                );
+                let desc = Span::styled(
+                    format!("  {}", m.description),
+                    Style::default().fg(theme.dim),
+                );
+                ListItem::new(Line::from(vec![name, desc]))
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.border_strong))
+                    .style(Style::default().bg(theme.bg_raised)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::REVERSED),
+            )
+            .highlight_symbol("▶ ");
+
+        f.render_stateful_widget(list, area, &mut list_state);
     }
 
     /// Build the visual lines as they appear on screen.

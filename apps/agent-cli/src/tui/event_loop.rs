@@ -107,6 +107,7 @@ pub async fn run(
                         Event::Paste(text) if !state.is_streaming => {
                             state.input.insert_str(state.cursor_pos, &text);
                             state.cursor_pos += text.len();
+                            state.refresh_command_selector();
                             state.dirty = true;
                         }
                         Event::Resize(_, _) => {
@@ -146,7 +147,7 @@ async fn poll_agent_stream(stream: &mut Option<AgentStream>) -> Option<AgentEven
 fn draw(terminal: &mut Terminal, state: &mut AppState, theme: &Theme) -> anyhow::Result<()> {
     // Compute input height with terminal width
     let term_width = terminal.size()?.width;
-    let input_h = input::desired_height(&state.input, term_width.saturating_sub(4));
+    let input_h = input::desired_height(&state.input, term_width);
 
     terminal.draw(|f| {
         let layout = layout::compute(f.area(), input_h, state.side_panel_open);
@@ -155,6 +156,7 @@ fn draw(terminal: &mut Terminal, state: &mut AppState, theme: &Theme) -> anyhow:
         messages::render(f, layout.main.messages, state, theme);
         status::render(f, layout.main.status, state, theme);
         input::render(f, layout.main.input, state, theme);
+        input::render_command_selector(f, layout.main.input, state, theme);
         footer::render(
             f,
             layout.main.footer,
@@ -186,6 +188,13 @@ fn handle_key(
     // Model picker gets full key handling while open.
     if matches!(state.overlay, Overlay::ModelPicker(_)) {
         return handle_model_picker_key(state, key, runtime);
+    }
+
+    // Fuzzy command selector gets key handling while open.
+    if state.command_selector.is_some()
+        && handle_command_selector_key(state, key, config, runtime)
+    {
+        return None;
     }
 
     // ── Side panel focused: j/k scroll, Tab switches tabs, Esc returns focus ──
@@ -259,6 +268,7 @@ fn handle_key(
             } else {
                 state.input.clear();
                 state.cursor_pos = 0;
+                state.refresh_command_selector();
             }
         }
 
@@ -307,14 +317,17 @@ fn handle_key(
         (KeyModifiers::ALT, KeyCode::Enter) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.refresh_command_selector();
         }
         (KeyModifiers::SHIFT, KeyCode::Enter) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.refresh_command_selector();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('j')) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.refresh_command_selector();
         }
 
         // Enter — submit input
@@ -326,6 +339,7 @@ fn handle_key(
 
             state.input.clear();
             state.cursor_pos = 0;
+            state.command_selector = None;
 
             if input_text.starts_with('/') {
                 handle_slash_command(state, &input_text, config, runtime);
@@ -341,21 +355,25 @@ fn handle_key(
         (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
             state.cursor_pos -= 1;
             state.input.remove(state.cursor_pos);
+            state.refresh_command_selector();
         }
 
         // Delete
         (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
             state.input.remove(state.cursor_pos);
+            state.refresh_command_selector();
         }
 
         // Left arrow
         (_, KeyCode::Left) if !state.is_streaming && state.cursor_pos > 0 => {
             state.cursor_pos -= 1;
+            state.refresh_command_selector();
         }
 
         // Right arrow
         (_, KeyCode::Right) if !state.is_streaming && state.cursor_pos < state.input.len() => {
             state.cursor_pos += 1;
+            state.refresh_command_selector();
         }
 
         // Up arrow — scroll if input empty, else history
@@ -370,6 +388,7 @@ fn handle_key(
                 state.history_index = Some(idx);
                 state.input = state.input_history[idx].clone();
                 state.cursor_pos = state.input.len();
+                state.refresh_command_selector();
             }
         }
         (_, KeyCode::Up) if state.is_streaming => {
@@ -389,6 +408,7 @@ fn handle_key(
                     state.input.clear();
                     state.cursor_pos = 0;
                 }
+                state.refresh_command_selector();
             } else if state.input.is_empty() {
                 state.scroll.scroll_down(1);
             }
@@ -406,12 +426,61 @@ fn handle_key(
         (_, KeyCode::Char(c)) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, c);
             state.cursor_pos += 1;
+            state.refresh_command_selector();
         }
 
         _ => {}
     }
 
     None
+}
+
+/// Handle keys while the fuzzy `/` command selector is open.
+fn handle_command_selector_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    config: &AppConfig,
+    runtime: &Arc<AgentRuntime>,
+) -> bool {
+    let Some(sel) = &mut state.command_selector else {
+        return false;
+    };
+    let len = sel.matches.len();
+    if len == 0 {
+        state.command_selector = None;
+        return false;
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            sel.selected = sel.selected.saturating_sub(1);
+            state.dirty = true;
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if sel.selected + 1 < len {
+                sel.selected += 1;
+                state.dirty = true;
+            }
+            true
+        }
+        KeyCode::Enter | KeyCode::Tab => {
+            // Run the selected command as if typed.
+            let name = sel.matches[sel.selected].name.clone();
+            let input_text = format!("/{name}");
+            state.command_selector = None;
+            state.input.clear();
+            state.cursor_pos = 0;
+            handle_slash_command(state, &input_text, config, runtime);
+            state.dirty = true;
+            true
+        }
+        KeyCode::Esc => {
+            state.command_selector = None;
+            state.dirty = true;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Handle keys while the provider/model picker is open.

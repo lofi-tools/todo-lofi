@@ -50,6 +50,81 @@ pub struct ModelPickerState {
     pub current: String,
 }
 
+/// A single command shown in the fuzzy `/` selector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandMatch {
+    pub name: String,
+    pub description: &'static str,
+}
+
+/// Fuzzy command selector popup shown while typing a `/` command.
+#[derive(Debug, Clone)]
+pub struct CommandSelectorState {
+    /// The query that produced these matches (text after `/`).
+    pub query: String,
+    pub matches: Vec<CommandMatch>,
+    pub selected: usize,
+}
+
+/// All slash commands, in display order. Must mirror `handle_slash_command`.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("model", "Switch provider/model"),
+    ("help", "Show help"),
+    ("clear", "Clear conversation"),
+    ("panel", "Toggle side panel"),
+    ("diff", "Open git diff panel"),
+    ("files", "Open file tree panel"),
+    ("rewind", "Rewind last turn"),
+    ("memory", "Memory info"),
+    ("compact", "Context compaction info"),
+    ("proxy", "Proxy status"),
+    ("exit", "Exit"),
+];
+
+/// Subsequence-match `query` against `candidate`; lower score is a better match.
+fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let q: Vec<char> = query.chars().collect();
+    let mut qi = 0;
+    let mut score: u32 = 0;
+    let mut prev: Option<usize> = None;
+    for (i, c) in candidate.chars().enumerate() {
+        if qi < q.len() && c == q[qi] {
+            // Matches at the start and adjacent matches score better.
+            score += match prev {
+                Some(p) => (i - p) as u32 + 1,
+                None => (i as u32) * 2 + 1,
+            };
+            prev = Some(i);
+            qi += 1;
+        }
+    }
+    if qi == q.len() {
+        Some(score)
+    } else {
+        None
+    }
+}
+
+/// Commands matching `query`, best matches first.
+pub fn filter_commands(query: &str) -> Vec<CommandMatch> {
+    let mut scored: Vec<(u32, CommandMatch)> = SLASH_COMMANDS
+        .iter()
+        .filter_map(|(name, description)| {
+            fuzzy_score(query, name).map(|score| {
+                (score, CommandMatch {
+                    name: name.to_string(),
+                    description,
+                })
+            })
+        })
+        .collect();
+    scored.sort_by_key(|(score, m)| (*score, m.name.clone()));
+    scored.into_iter().map(|(_, m)| m).collect()
+}
+
 /// Overlay currently displayed on top of the main content.
 #[derive(Debug, Clone)]
 pub enum Overlay {
@@ -196,6 +271,9 @@ pub struct AppState {
     /// Pending permission response sender (for TUI-based permission flow).
     pub pending_permission_tx: Option<oneshot::Sender<PermissionDecision>>,
 
+    // ── Command selector (fuzzy `/` popup) ──
+    pub command_selector: Option<CommandSelectorState>,
+
     // ── Animation ──
     pub frame_count: u64,
 
@@ -247,10 +325,45 @@ impl AppState {
             side_panel_tree: String::new(),
             overlay: Overlay::None,
             pending_permission_tx: None,
+            command_selector: None,
             frame_count: 0,
             should_quit: false,
             dirty: true,
         }
+    }
+
+    /// Recompute the fuzzy command selector from the current input.
+    /// Called after any input mutation while not streaming.
+    pub fn refresh_command_selector(&mut self) {
+        let input = &self.input;
+        let at_end = self.cursor_pos == input.len();
+        if self.is_streaming || !input.starts_with('/') || !at_end {
+            self.command_selector = None;
+            return;
+        }
+        let query = input[1..].to_string();
+        let matches = filter_commands(&query);
+        if matches.is_empty() {
+            self.command_selector = None;
+            return;
+        }
+        let query_changed = self
+            .command_selector
+            .as_ref()
+            .is_none_or(|s| s.query != query);
+        let selected = if query_changed {
+            0
+        } else {
+            self.command_selector
+                .as_ref()
+                .map(|s| s.selected.min(matches.len() - 1))
+                .unwrap_or(0)
+        };
+        self.command_selector = Some(CommandSelectorState {
+            query,
+            matches,
+            selected,
+        });
     }
 
     /// Commit the current streaming text into a completed turn.
@@ -324,4 +437,34 @@ impl AppState {
     // pub fn set_shared_mode(&mut self, mode: SharedPermissionMode) {
     //     self.shared_permission_mode = Some(mode);
     // }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_lists_all_commands() {
+        let matches = filter_commands("");
+        assert_eq!(matches.len(), SLASH_COMMANDS.len());
+    }
+
+    #[test]
+    fn fuzzy_prefix_matches() {
+        let matches = filter_commands("mod");
+        assert_eq!(matches[0].name, "model");
+        assert!(matches.iter().all(|m| m.name.starts_with("mod")));
+    }
+
+    #[test]
+    fn fuzzy_subsequence_matches() {
+        // "mdl" is a subsequence of "model" but not a prefix.
+        let names: Vec<String> = filter_commands("mdl").into_iter().map(|m| m.name).collect();
+        assert!(names.iter().any(|n| n == "model"), "{names:?}");
+    }
+
+    #[test]
+    fn non_match_returns_empty() {
+        assert!(filter_commands("zzz-nope").is_empty());
+    }
 }
