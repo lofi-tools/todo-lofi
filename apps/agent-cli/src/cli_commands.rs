@@ -46,6 +46,10 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Run an Agent Client Protocol (ACP) server over stdio (JSON-RPC 2.0 NDJSON)
+    #[arg(long)]
+    pub acp: bool,
+
     /// Enable verbose/debug logging
     #[arg(short, long)]
     pub verbose: bool,

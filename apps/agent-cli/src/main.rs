@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
+pub mod acp;
 pub mod cli_commands;
 pub mod config;
 pub mod signals;
@@ -37,6 +38,12 @@ async fn main() -> anyhow::Result<()> {
     // Load config with CLI overrides
     let mut config = config::load();
     config::apply_cli_overrides(&cli, &mut config);
+
+    // ACP server mode: speak Agent Client Protocol over stdio.
+    if cli.acp {
+        return acp::run_server(cli, config).await;
+    }
+
     let agent = Arc::new(build_agent_wip().await?);
 
     let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
