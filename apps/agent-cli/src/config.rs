@@ -40,6 +40,10 @@ pub struct AppConfig {
     /// override the built-in providers (poolside, openrouter, groq, nvidia).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
+    /// Only show free coding models by default (TUI picker and ACP
+    /// `availableModels`). Set to `false` to show every configured model.
+    #[serde(default = "default_true")]
+    pub free_models_only: bool,
     #[serde(default)]
     pub benchmark_mode: bool,
     #[serde(default)]
@@ -76,6 +80,7 @@ impl Default for AppConfig {
             hooks: Vec::new(),
             proxy: ProxyConfig::default(),
             providers: std::collections::HashMap::new(),
+            free_models_only: true,
             benchmark_mode: false,
             embedding_api: false,
             output_format: "text".into(),
@@ -231,6 +236,7 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     copy_if_set!(working_dir);
     copy_if_set!(output_format);
     copy_if_set!(compression_level);
+    copy_if_set!(free_models_only);
     copy_if_set!(embedding_api);
     copy_if_set!(benchmark_mode);
     copy_if_set!(proxy);
@@ -275,6 +281,9 @@ fn apply_env(config: &mut AppConfig) {
     }
     if let Ok(v) = std::env::var("ABSTRACT_COMPRESSION") {
         config.compression_level = v;
+    }
+    if let Ok(v) = std::env::var("ABSTRACT_FREE_MODELS_ONLY") {
+        config.free_models_only = v == "1" || v.eq_ignore_ascii_case("true");
     }
 }
 
