@@ -7,7 +7,7 @@
       # pkgs.darwin.xcode_26_1_Apple_silicon # comment out for first build
       # pkgs.apple-sdk_26
       # TODO try symlinkJoin of xcode and exo.metal-toolchain
-      # pkgs.own.my-nix.install-xcode-global
+      # pkgs.own.install-xcode-global
     ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
       /*  pkgs.webkitgtk */
       /*  pkgs.gtk3 */
@@ -28,7 +28,7 @@
     bash.thisDir = "${bash.wd}/apps/desktop-gpui";
     scripts = with bash;  mapAttrs pkgs.writeShellScriptBin {
       dbg-env = '' ${concatStringsSep "\n" (attrValues (mapAttrs (n: v: "printf \"${n}=${v}\\n\"") env))} '';
-      dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.my-nix.install-xcode-global.DEV_DIR}" xcodebuild -version '';
+      dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.install-xcode-global.DEV_DIR}" xcodebuild -version '';
       # xcrun = ''${env.DEVELOPER_DIR}/Contents/Developer/usr/bin/xcrun'';
       # metal = ''${env.DEVELOPER_DIR}/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal $@'';
       pdg = "cargo watch -x 'run -p desktop-gpui'";
@@ -37,8 +37,8 @@
     };
 
     env = {
-      # DEVELOPER_DIR = pkgs.own.my-nix.install-xcode-global.DEV_DIR;
-      # SDKROOT = pkgs.own.my-nix.install-xcode-global.SDKROOT;
+      # DEVELOPER_DIR = pkgs.own.install-xcode-global.DEV_DIR;
+      # SDKROOT = pkgs.own.install-xcode-global.SDKROOT;
       # NIX_LDFLAGS = "-F/System/Library/Frameworks -F/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks";
       # # Tells the compiler where to find the headers if a build script (-sys crate) compiles C/C++ code
       # BINDGEN_EXTRA_CLANG_ARGS = "-F/System/Library/Frameworks";
@@ -61,7 +61,7 @@
     myDevShell.buildInputs = buildDeps ++ runtimeDeps ++ devDeps ++ (attrValues scripts);
     myDevShell.shellHooks = {
       configure_C = l.concatStringsSep "\n" (l.mapAttrsToList (name: value: "export ${name}=\"${value}\"") env);
-      # install-xcode = '' ${pkgs.own.my-nix.install-xcode-global}/bin/install-xcode-global '';
+      # install-xcode = '' ${pkgs.own.install-xcode-global}/bin/install-xcode-global '';
       # # install-metal = ''xcodebuild -importComponent metalToolchain -importPath .cache/Metal.dmg'';
       # # use-os-xcrun = ''export PATH="/usr/bin:/usr/local/bin:$PATH"'';
       # #     DEVELOPER_DIR = unsafeDiscardStringContext DEV_DIR;

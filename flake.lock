@@ -2,11 +2,11 @@
   "nodes": {
     "crane": {
       "locked": {
-        "lastModified": 1779041105,
-        "narHash": "sha256-nnGD2f8OlAZT2i5OfwikJsw+ifWfiA4d6A8BWlgOXV0=",
+        "lastModified": 1781825982,
+        "narHash": "sha256-SlXKwIRIhrOSAcTjCB3ftPLzJWZStQIPS7J1FlZPnKk=",
         "owner": "ipetkov",
         "repo": "crane",
-        "rev": "10e6e3cb966f7cfcc789fe5eee7a85f3188ce08b",
+        "rev": "469fd08d0bcf6926321fa973c6777fbc87785dd7",
         "type": "github"
       },
       "original": {
@@ -28,11 +28,11 @@
         "tools": "tools"
       },
       "locked": {
-        "lastModified": 1779086314,
-        "narHash": "sha256-b6CxnOLQhIcd8qWx6vFExNW4JBxXx6m3fTJmCngny0o=",
+        "lastModified": 1786983599,
+        "narHash": "sha256-rQIRr+W9krbNlJfqFtwMFWvwVZ1zLHal0kFOb+km540=",
         "owner": "nmrshll",
         "repo": "nix-utils",
-        "rev": "7276f3902e64f9e6f480a937e609caa319b4205e",
+        "rev": "c0eeb53adc7cf7b0ac5f98aee55300e8a1aee3dc",
         "type": "github"
       },
       "original": {
@@ -125,11 +125,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1778987862,
-        "narHash": "sha256-V3qGt9P1eJP/r/1ONablphfGiH0RP4agQhrRANpDYx8=",
+        "lastModified": 1782875958,
+        "narHash": "sha256-5eqDcnBjb1424HRQdnhuhNOBZguq1Z2tqSa2OMF/m2c=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "6f44d8874ac29806c8d5cae42bf8e19ebb5ce0d3",
+        "rev": "13139aefa973f3d96c60c0fbab801de058ae25ca",
         "type": "github"
       },
       "original": {
@@ -153,11 +153,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1779046325,
-        "narHash": "sha256-+sm4908w8eodr3W2SLCpmMNz1mxVB0QMl5qcq8dI/rw=",
+        "lastModified": 1781800794,
+        "narHash": "sha256-0HX2R05ASGAWpCumA7p4fU1c9ldDIDToR/NBloTk3bc=",
         "ref": "refs/heads/main",
-        "rev": "8387ecc359c9211c8e27c0897603bf2f700fe8f7",
-        "revCount": 106,
+        "rev": "c677a9de6b1c69364faddad51009265f7cb2ccd4",
+        "revCount": 111,
         "type": "git",
         "url": "ssh://git@gitlab.com/nmrshll/tools.git"
       },
