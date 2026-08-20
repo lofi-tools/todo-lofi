@@ -336,6 +336,8 @@ struct AcpServer {
     default_provider: String,
     default_model: String,
     max_turns: u32,
+    /// Provider fallback on errors / rate limits, shared across sessions.
+    fallback: providers::FallbackManager,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
@@ -346,6 +348,7 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
     providers::resolve(&config, &default_provider, &default_model)
         .context("failed to resolve default provider/model (check api_key settings)")?;
     let max_turns = config.max_turns;
+    let fallback = providers::FallbackManager::new(&config);
 
     let (connection, writer_task) = AcpConnection::new();
     let server = Arc::new(AcpServer {
@@ -355,6 +358,7 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         default_provider,
         default_model,
         max_turns,
+        fallback,
     });
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -941,7 +945,7 @@ impl AcpServer {
             guard.run_seq
         };
 
-        let agent = match self.build_agent(&session, cancel_token.clone()) {
+        let mut agent = match self.build_agent(&session, cancel_token.clone()) {
             Ok(a) => a,
             Err(e) => {
                 self.clear_pending(&session, run_id);
@@ -954,6 +958,11 @@ impl AcpServer {
 
         let mut cancelled = false;
         let mut terminal: Option<TerminalOutcome> = None;
+        let mut current_provider = session.lock().provider.clone();
+        // Once the run has produced any output, a retry can't be transparent
+        // (partial text/tool results would be duplicated), so fallback only
+        // happens on failures before the first event.
+        let mut produced_output = false;
         loop {
             let event = if cancelled {
                 // Keep draining briefly after a cancel so in-flight tool results
@@ -979,11 +988,60 @@ impl AcpServer {
                     break;
                 }
                 Some(AgentEvent::Error(e)) => {
+                    // Provider errors / rate limits usually hit on the first
+                    // request, before any output — fall back to the next
+                    // provider in priority order.
+                    let next = if produced_output || cancelled {
+                        None
+                    } else {
+                        self.fallback.next_provider(&current_provider)
+                    };
+                    if let Some(next) = next {
+                        self.fallback.record_failure(&current_provider);
+                        let rebuilt = (|| -> anyhow::Result<Arc<Agent>> {
+                            // Drop the failed run's pushed prompt so the retry
+                            // re-pushes it exactly once.
+                            let mut messages = agent.messages();
+                            providers::drop_trailing_user_message(&mut messages);
+                            let model = providers::default_model(&self.config, &next)?;
+                            {
+                                let mut guard = session.lock();
+                                guard.messages = messages;
+                                guard.provider = next.clone();
+                                guard.model = model;
+                            }
+                            self.build_agent(&session, cancel_token.clone())
+                        })();
+                        if let Ok(new_agent) = rebuilt {
+                            self.connection.send_update(
+                                &session_id,
+                                SessionUpdate::AgentMessageChunk {
+                                    content: TextContent::new(format!(
+                                        "⚠ {current_provider} failed ({e}) — retrying on {next}"
+                                    )),
+                                    message_id: None,
+                                },
+                            );
+                            stream = new_agent.run_stream(&text);
+                            agent = new_agent;
+                            current_provider = next;
+                            continue;
+                        }
+                    }
                     session.lock().messages = agent.messages();
                     terminal = Some(TerminalOutcome::Error(e));
                     break;
                 }
                 Some(other) => {
+                    // Only actual model/tool output blocks a retry — lifecycle
+                    // events like TurnStart fire before the provider call.
+                    produced_output |= matches!(
+                        other,
+                        AgentEvent::TextDelta(_)
+                            | AgentEvent::ThinkingDelta(_)
+                            | AgentEvent::ToolStart { .. }
+                            | AgentEvent::ToolEnd { .. }
+                    );
                     self.handle_event(&session, other).await;
                 }
                 None => {

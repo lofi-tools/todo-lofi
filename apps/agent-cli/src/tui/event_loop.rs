@@ -25,6 +25,60 @@ use tokio_util::sync::CancellationToken;
 
 const TICK_RATE: Duration = Duration::from_millis(16); // ~62 FPS
 
+/// A single agent run, with enough state to transparently retry on another
+/// provider when the current one errors before producing any output.
+struct AgentRun {
+    stream: AgentStream,
+    /// The prompt being run (re-sent to the retry agent).
+    prompt: String,
+    /// Provider the current stream is running on.
+    provider: String,
+    /// Whether any output event has been emitted yet.
+    produced_output: bool,
+}
+
+/// If `event` is a provider error from a run that hasn't produced output yet,
+/// retry the run on the next provider in priority order. Returns true when the
+/// error was handled by a fallback (and the event should be swallowed).
+fn try_fallback(
+    state: &mut AppState,
+    runtime: &Arc<AgentRuntime>,
+    run: &mut AgentRun,
+    event: &AgentEvent,
+) -> bool {
+    let AgentEvent::Error(msg) = event else {
+        // Only actual model/tool output blocks a retry — lifecycle events like
+        // TurnStart fire before the provider call fails.
+        run.produced_output |= matches!(
+            event,
+            AgentEvent::TextDelta(_)
+                | AgentEvent::ThinkingDelta(_)
+                | AgentEvent::ToolStart { .. }
+                | AgentEvent::ToolEnd { .. }
+        );
+        return false;
+    };
+    if run.produced_output || !runtime.fallback_enabled() {
+        return false;
+    }
+    let Some(next) = runtime.next_fallback_provider(&run.provider) else {
+        return false;
+    };
+    runtime.record_failure(&run.provider);
+    match runtime.fallback_to(&next) {
+        Ok(()) => {
+            state.push_system(format!(
+                "{} failed ({}) — falling back to {next}",
+                run.provider, msg
+            ));
+            run.provider = next;
+            run.stream = runtime.agent().run_stream(&run.prompt);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub async fn run(
     terminal: &mut Terminal,
     runtime: Arc<AgentRuntime>,
@@ -43,7 +97,7 @@ pub async fn run(
         // &config.effort
     );
     // state.set_shared_mode(shared_mode);
-    let mut agent_stream: Option<AgentStream> = None;
+    let mut agent_run: Option<AgentRun> = None;
 
     // Initial render
     draw(terminal, &mut state, &theme)?;
@@ -66,17 +120,24 @@ pub async fn run(
             // }
 
             // ── Agent stream events ─────────────────────────────────────
-            event = poll_agent_stream(&mut agent_stream) => {
+            event = poll_agent_run(&mut agent_run) => {
                 match event {
                     Some(agent_event) => {
-                        handle_agent_event(&mut state, agent_event);
+                        let fell_back = if let Some(run) = agent_run.as_mut() {
+                            try_fallback(&mut state, &runtime, run, &agent_event)
+                        } else {
+                            false
+                        };
+                        if !fell_back {
+                            handle_agent_event(&mut state, agent_event);
+                        }
                     }
                     None => {
                         if state.is_streaming {
                             state.commit_turn();
                             state.is_streaming = false;
                         }
-                        agent_stream = None;
+                        agent_run = None;
                     }
                 }
                 state.dirty = true;
@@ -97,7 +158,12 @@ pub async fn run(
                                 state.is_streaming = true;
                                 state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
-                                agent_stream = Some(runtime.agent().run_stream(&prompt));
+                                agent_run = Some(AgentRun {
+                                    stream: runtime.agent().run_stream(&prompt),
+                                    prompt: prompt.clone(),
+                                    provider: runtime.current().0,
+                                    produced_output: false,
+                                });
                             }
                             state.dirty = true;
                         }
@@ -137,9 +203,9 @@ pub async fn run(
     Ok(())
 }
 
-async fn poll_agent_stream(stream: &mut Option<AgentStream>) -> Option<AgentEvent> {
-    match stream {
-        Some(s) => s.next().await,
+async fn poll_agent_run(run: &mut Option<AgentRun>) -> Option<AgentEvent> {
+    match run {
+        Some(r) => r.stream.next().await,
         None => std::future::pending().await,
     }
 }

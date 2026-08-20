@@ -32,11 +32,11 @@ to run):
 
 ## Configuration
 
-Configuration is layered TOML, merged in this order (later wins):
+Configuration is layered JSON, merged in this order (later wins):
 
 1. Built-in defaults
-2. `~/.abstract/config.toml` — user-global config
-3. `.abstract/config.toml` — per-project config (overrides the global file)
+2. `~/.abstract/config.json` — user-global config
+3. `.abstract/config.json` — per-project config (overrides the global file)
 4. Environment variables (`ABSTRACT_*`)
 5. CLI flags (`--model`, `--provider`, `--fast`, …)
 
@@ -46,82 +46,124 @@ Start with a project config:
 mkdir -p .abstract
 ```
 
+> Legacy `.toml` configs (`~/.abstract/config.toml`, `.abstract/config.toml`)
+> are still read when no `.json` file exists, so existing setups keep working.
+> The format switched to JSON in this version.
+
 ### Config file shape
 
-```toml
-# .abstract/config.toml  (or ~/.abstract/config.toml)
+```json
+{
+  "provider": "auto",
+  "model": "auto",
+  "max_turns": 50,
+  "max_tokens": 16384,
+  "effort": "medium",
+  "permissions_mode": "interactive",
+  "theme": "dark",
+  "output_style": "default",
+  "auto_compact": true,
+  "graph_memory": true,
+  "output_format": "text",
+  "compression_level": "off",
+  "free_models_only": true,
 
-# Default provider/model. "auto" picks the first configured provider and its
-# first model. A bare model id like "groq/compound" implies its provider.
-provider = "auto"
-model = "auto"
+  "fallback": {
+    "enabled": true,
+    "cooldown_seconds": 300,
+    "priority": ["poolside", "openrouter", "groq", "nvidia", "tokenrouter"]
+  },
 
-# Only show free coding models in the /model picker and the ACP
-# availableModels. Set to false to show every configured model.
-free_models_only = true
+  "fallback_models": ["poolside/laguna-xs-2.1"],
 
-# Agent behavior
-max_turns = 50
-max_tokens = 16384
-effort = "medium"          # low | medium | max
-permissions_mode = "interactive"  # interactive | allow_all
-working_dir = "."
+  "mcp_servers": [
+    {
+      "name": "my-tools",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  ],
 
-# TUI appearance
-theme = "dark"
-output_style = "default"
-auto_compact = true
-graph_memory = true
-output_format = "text"     # text | stream-json
-compression_level = "off"  # off | minimal | aggressive
+  "hooks": [
+    { "event": "on_turn_end", "command": "echo turn done" }
+  ],
 
-# Fallback models tried in order when the primary model errors
-fallback_models = ["poolside/laguna-xs-2.1"]
-
-# MCP servers started for the agent (name → launch command)
-[[mcp_servers]]
-name = "my-tools"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-
-# Hooks run on agent events
-[[hooks]]
-event = "on_turn_end"
-command = "echo turn done"
-
-# Optional local proxy (VibeProxy or compatible)
-[proxy]
-enabled = true
-force = false
-url = "http://localhost:8317/v1"
+  "proxy": {
+    "enabled": true,
+    "force": false,
+    "url": "http://localhost:8317/v1"
+  }
+}
 ```
+
+Notes:
+
+- `provider`/`model`: `"auto"` picks the first configured provider and its
+  first model; a bare model id like `"groq/compound"` implies its provider.
+- `free_models_only`: only show free coding models in the `/model` picker and
+  the ACP `availableModels`. Set to `false` to show every configured model.
+- `working_dir`: project directory (defaults to the launch directory).
+
+### Provider fallback
+
+On a provider error or rate limit during a run, the agent automatically retries
+the run on the next provider — in both the TUI and the ACP server.
+
+```json
+"fallback": {
+  "enabled": true,
+  "cooldown_seconds": 300,
+  "priority": ["poolside", "openrouter", "groq", "nvidia"]
+}
+```
+
+- `priority` lists providers in preference order. The failed provider is
+  skipped and the most-preferred available one is tried next. Empty priority
+  (or entries that don't name a configured provider) fall back to registry
+  order: built-ins first, then config-file providers.
+- `cooldown_seconds` is the "long cooldown": once a provider fails it is
+  excluded from fallback for this long (default 300s = 5 minutes), so it isn't
+  hammered again immediately.
+- `enabled: false` disables fallback entirely.
+
+Fallback only triggers when the run fails **before producing any output**
+(which is where provider errors and rate limits hit — on the first request).
+Once the agent has started streaming a response or made tool calls, an error is
+surfaced normally instead of being retried, to avoid duplicating partial work.
+When a fallback happens you'll see a notice in the TUI (or an
+`agent_message_chunk` notification over ACP) saying which provider failed and
+which it fell back to.
 
 ### Providers
 
-Providers are OpenAI-compatible and configured under `[providers.NAME]`. The
-built-ins are `poolside`, `openrouter`, `groq` and `nvidia`. A `[providers.NAME]`
-section either overrides a built-in (by name) or defines a brand-new provider.
-All fields are optional; only set what you want to override.
+Providers are OpenAI-compatible and configured under the `providers` object.
+The built-ins are `poolside`, `openrouter`, `groq`, `nvidia` and `tokenrouter`
+(the tokenrouter.com unified gateway). A `providers.NAME` entry either
+overrides a built-in (by name) or defines a brand-new provider. All fields are optional; only set what you want to
+override.
 
-```toml
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-# api_key: see "API keys" below
-api_key = "env:OPENROUTER_API_KEY"
-# Overriding `models` takes full control of the list — free-model filtering
-# (free_models_only) no longer applies to it.
-models = [
-  "openrouter/free",
-  "openai/gpt-oss-20b:free",
-  "cohere/north-mini-code:free",
-]
+```json
+"providers": {
+  "openrouter": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "env:OPENROUTER_API_KEY",
+    "models": [
+      "openrouter/free",
+      "openai/gpt-oss-20b:free",
+      "cohere/north-mini-code:free"
+    ]
+  },
 
-# A brand-new provider:
-[providers.acme]
-base_url = "https://acme.example.com/v1"
-api_key = "!kubectl get secret api-key -o jsonpath='{.data.key}' | base64 -d"
-models = ["acme/big", "acme/small"]
+  "acme": {
+    "base_url": "https://acme.example.com/v1",
+    "api_key": "!kubectl get secret api-key -o jsonpath='{.data.key}' | base64 -d",
+    "models": ["acme/big", "acme/small"]
+  }
+}
 ```
+
+Overriding `models` takes full control of the list — free-model filtering
+(`free_models_only`) no longer applies to it.
 
 #### API keys
 
@@ -144,11 +186,8 @@ to its free coding models, so the picker and ACP `availableModels` never
 surprise you with a bill. The per-provider free lists are curated from the
 providers' current free tiers — e.g. groq's `groq/compound` / `groq/compound-mini`
 are free while `openai/gpt-oss-*` on groq are paid, and openrouter exposes
-zero-priced `:free` variants of coding models. To see paid models too:
-
-```toml
-free_models_only = false
-```
+zero-priced `:free` variants of coding models. To see paid models too, set
+`"free_models_only": false`.
 
 ### Environment variables
 
@@ -178,4 +217,4 @@ free_models_only = false
 `session/set_config_option` and `session/cancel`. `session/new` advertises
 `provider` + `model` config options and `availableModels` (respecting
 `free_models_only`), so clients can switch provider/model — same registry as
-the TUI's `/model`.
+the TUI's `/model`. Prompt runs use the same provider fallback as the TUI.

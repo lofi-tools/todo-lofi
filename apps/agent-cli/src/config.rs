@@ -1,11 +1,14 @@
-//! TOML configuration with layered loading.
+//! JSON configuration with layered loading.
 //!
 //! Priority (lowest → highest):
 //! 1. Hardcoded defaults
-//! 2. ~/.abstract/config.toml  (user global)
-//! 3. .abstract/config.toml    (project local)
+//! 2. ~/.abstract/config.json   (user global)
+//! 3. .abstract/config.json     (project local)
 //! 4. Environment variables     (ABSTRACT_MODEL, etc.)
 //! 5. CLI flags
+//!
+//! Legacy `.toml` files are still read when no `.json` file exists, so
+//! existing configs keep working after the format switch.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -36,8 +39,12 @@ pub struct AppConfig {
     pub hooks: Vec<HookEntry>,
     #[serde(default)]
     pub proxy: ProxyConfig,
+    /// Fallback across providers on errors / rate limits.
+    #[serde(default)]
+    pub fallback: FallbackConfig,
     /// Per-provider overrides (base_url, api_key, models). Keys extend or
-    /// override the built-in providers (poolside, openrouter, groq, nvidia).
+    /// override the built-in providers (poolside, openrouter, groq, nvidia,
+    /// tokenrouter).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
     /// Only show free coding models by default (TUI picker and ACP
@@ -79,6 +86,7 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
             proxy: ProxyConfig::default(),
+            fallback: FallbackConfig::default(),
             providers: std::collections::HashMap::new(),
             free_models_only: true,
             benchmark_mode: false,
@@ -126,11 +134,40 @@ impl Default for ProxyConfig {
     }
 }
 
+/// Provider fallback: on an error or rate limit, retry the run on the next
+/// provider in `priority` order. Failed providers cool down for
+/// `cooldown_seconds` before they can be tried again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FallbackConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How long a provider stays excluded after a failure, in seconds.
+    #[serde(default = "default_fallback_cooldown")]
+    pub cooldown_seconds: u64,
+    /// Provider names in priority order. Empty = registry order (built-ins
+    /// first, then config-file providers).
+    #[serde(default)]
+    pub priority: Vec<String>,
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cooldown_seconds: default_fallback_cooldown(),
+            priority: Vec::new(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
 fn default_proxy_url() -> String {
     "http://localhost:8317/v1".into()
+}
+fn default_fallback_cooldown() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,13 +202,21 @@ pub fn project_config_dir() -> PathBuf {
         .join(".abstract")
 }
 
-/// ~/.abstract/config.toml
+/// ~/.abstract/config.json
 pub fn global_config_path() -> PathBuf {
-    global_config_dir().join("config.toml")
+    global_config_dir().join("config.json")
 }
 
-/// .abstract/config.toml
+/// .abstract/config.json
 pub fn project_config_path() -> PathBuf {
+    project_config_dir().join("config.json")
+}
+
+// Legacy pre-JSON paths; still read when no `.json` file exists.
+fn legacy_global_config_path() -> PathBuf {
+    global_config_dir().join("config.toml")
+}
+fn legacy_project_config_path() -> PathBuf {
     project_config_dir().join("config.toml")
 }
 
@@ -191,13 +236,17 @@ pub fn graph_db_path() -> PathBuf {
 pub fn load() -> AppConfig {
     let mut config = AppConfig::default();
 
-    // Layer 2: global config (~/.abstract/config.toml)
-    if let Some(loaded) = load_toml_file(&global_config_path()) {
+    // Layer 2: global config (~/.abstract/config.json, legacy .toml fallback)
+    if let Some(loaded) =
+        load_json_file(&global_config_path()).or_else(|| load_toml_file(&legacy_global_config_path()))
+    {
         merge(&mut config, loaded);
     }
 
-    // Layer 3: project config (.abstract/config.toml)
-    if let Some(loaded) = load_toml_file(&project_config_path()) {
+    // Layer 3: project config (.abstract/config.json, legacy .toml fallback)
+    if let Some(loaded) =
+        load_json_file(&project_config_path()).or_else(|| load_toml_file(&legacy_project_config_path()))
+    {
         merge(&mut config, loaded);
     }
 
@@ -205,6 +254,11 @@ pub fn load() -> AppConfig {
     apply_env(&mut config);
 
     config
+}
+
+fn load_json_file(path: &std::path::Path) -> Option<AppConfig> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 fn load_toml_file(path: &std::path::Path) -> Option<AppConfig> {
@@ -237,6 +291,7 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     copy_if_set!(output_format);
     copy_if_set!(compression_level);
     copy_if_set!(free_models_only);
+    copy_if_set!(fallback);
     copy_if_set!(embedding_api);
     copy_if_set!(benchmark_mode);
     copy_if_set!(proxy);

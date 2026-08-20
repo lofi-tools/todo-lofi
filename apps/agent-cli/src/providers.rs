@@ -1,9 +1,10 @@
 //! Provider registry: built-in providers, config-file overrides, API key
 //! resolution, and shared agent construction.
 //!
-//! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq and
-//! nvidia nim. Their base URL / api key / models can be overridden — or new
-//! providers added — via the config file's `[providers.NAME]` section.
+//! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
+//! nvidia nim, and the tokenrouter gateway. Their base URL / api key / models
+//! can be overridden — or new providers added — via the config file's
+//! `[providers.NAME]` section.
 //!
 //! An `api_key` value in config is either:
 //! - `!command` — run the rest as a shell command and use its trimmed stdout,
@@ -13,12 +14,13 @@
 use crate::config::AppConfig;
 use anyhow::Context as _;
 use cersei::tools::permissions::{AllowAll, AllowReadOnly};
-use cersei::types::Message;
+use cersei::types::{Message, Role};
 use cersei::{Agent, OpenAi};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// A configured provider (built-in defaults merged with the config file).
@@ -302,6 +304,71 @@ pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::
     })
 }
 
+/// Drop the trailing user message left behind by a failed run (the prompt that
+/// `run_stream` pushed) so a retry can re-seed the conversation and re-push the
+/// prompt exactly once. Only safe to call when the failed run produced no
+/// output, in which case the trailing user message is guaranteed to be the
+/// prompt.
+pub fn drop_trailing_user_message(messages: &mut Vec<Message>) {
+    if matches!(messages.last(), Some(m) if m.role == Role::User) {
+        messages.pop();
+    }
+}
+
+/// Tracks which providers are in a failure cooldown and the order in which
+/// fallback should try them.
+pub struct FallbackManager {
+    enabled: bool,
+    /// Provider names in priority order (most preferred first).
+    priority: Vec<String>,
+    cooldown: Duration,
+    /// provider name → cooldown expiry.
+    failures: Mutex<HashMap<String, Instant>>,
+}
+
+impl FallbackManager {
+    pub fn new(config: &AppConfig) -> Self {
+        let mut priority = config.fallback.priority.clone();
+        // Drop priority entries that don't name a configured provider, and
+        // default to the registry order (built-ins first).
+        let known: Vec<String> = providers(config).into_iter().map(|p| p.name).collect();
+        priority.retain(|name| known.contains(name));
+        if priority.is_empty() {
+            priority = known;
+        }
+        Self {
+            enabled: config.fallback.enabled,
+            priority,
+            cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Mark `provider` as failed; it won't be selected for fallback again
+    /// until the cooldown expires.
+    pub fn record_failure(&self, provider: &str) {
+        self.failures
+            .lock()
+            .insert(provider.to_string(), Instant::now() + self.cooldown);
+    }
+
+    /// The most preferred provider to fall back to after `current` failed,
+    /// skipping the current provider and any still cooling down.
+    pub fn next_provider(&self, current: &str) -> Option<String> {
+        let now = Instant::now();
+        let mut failures = self.failures.lock();
+        failures.retain(|_, until| *until > now);
+        self.priority
+            .iter()
+            .find(|name| name.as_str() != current && !failures.contains_key(name.as_str()))
+            .cloned()
+    }
+}
+
 /// Resolve a user-facing reference like "groq", "openrouter/auto", or a bare
 /// model name into a concrete (provider, model) pair. Used by `/model <text>`
 /// and ACP `session/set_config_option`.
@@ -393,6 +460,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
 /// Holds the live agent and lets the TUI switch provider/model at runtime.
 pub struct AgentRuntime {
     inner: Mutex<AgentRuntimeInner>,
+    fallback: FallbackManager,
 }
 
 struct AgentRuntimeInner {
@@ -425,6 +493,7 @@ impl AgentRuntime {
                 model,
                 config: config.clone(),
             }),
+            fallback: FallbackManager::new(config),
         })
     }
 
@@ -446,6 +515,52 @@ impl AgentRuntime {
     pub fn select_text(&self, text: &str) -> anyhow::Result<(String, String)> {
         let config = &self.inner.lock().config;
         resolve_selection(config, "", text)
+    }
+
+    // ── Provider fallback ───────────────────────────────────────────────
+
+    pub fn fallback_enabled(&self) -> bool {
+        self.fallback.enabled()
+    }
+
+    /// The next provider to fall back to after `current` failed, or None if
+    /// every other provider is cooling down.
+    pub fn next_fallback_provider(&self, current: &str) -> Option<String> {
+        self.fallback.next_provider(current)
+    }
+
+    pub fn record_failure(&self, provider: &str) {
+        self.fallback.record_failure(provider);
+    }
+
+    /// Rebuild the agent on a different provider, preserving the conversation
+    /// (minus the failed run's just-pushed prompt).
+    pub fn fallback_to(&self, provider: &str) -> anyhow::Result<()> {
+        let (config, working_dir, max_turns) = {
+            let g = self.inner.lock();
+            (g.config.clone(), g.config.working_dir.clone(), g.config.max_turns)
+        };
+        let model = default_model(&config, provider)?;
+        let resolved = resolve(&config, provider, &model)?;
+        let mut messages = self.inner.lock().agent.messages();
+        drop_trailing_user_message(&mut messages);
+        let agent = build_agent(
+            &resolved,
+            BuildParams {
+                working_dir,
+                max_turns,
+                session_id: None,
+                messages,
+                tools: Vec::new(),
+                cancel_token: CancellationToken::new(),
+                readonly: false,
+            },
+        )?;
+        let mut g = self.inner.lock();
+        g.agent = agent;
+        g.provider = provider.to_string();
+        g.model = model;
+        Ok(())
     }
 
     /// Rebuild the agent with a new provider/model.
@@ -584,6 +699,86 @@ mod tests {
         let openrouter = provider(&config, "openrouter").unwrap();
         assert!(openrouter.models.contains(&"openrouter/auto".to_string()));
         assert!(openrouter.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
+    }
+
+    #[test]
+    fn tokenrouter_builtin_provider() {
+        let config = AppConfig::default();
+        let tr = provider(&config, "tokenrouter").unwrap();
+        assert_eq!(tr.base_url, "https://api.tokenrouter.com/v1");
+        assert_eq!(tr.api_key, "env:TOKENROUTER_API_KEY");
+        // With the free filter on (default), only the free gateway models show.
+        assert_eq!(
+            tr.models,
+            vec![
+                "deepseek/deepseek-v4-pro-0813-free",
+                "qwen/qwen3.8-max-free",
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            ]
+        );
+        // The paid coding models appear once the filter is off.
+        let mut config = AppConfig::default();
+        config.free_models_only = false;
+        let tr = provider(&config, "tokenrouter").unwrap();
+        assert!(tr.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
+        assert!(tr.models.contains(&"qwen/qwen3-coder-next".to_string()));
+        assert!(tr.models.contains(&"openai/gpt-oss-120b".to_string()));
+        // Resolution wires up the gateway base URL.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("TOKENROUTER_API_KEY", "tr-test-key") };
+        let resolved = resolve(&config, "tokenrouter", "qwen/qwen3-coder-next").unwrap();
+        assert_eq!(resolved.base_url, "https://api.tokenrouter.com/v1");
+        assert_eq!(resolved.model, "qwen/qwen3-coder-next");
+        assert_eq!(resolved.api_key, "tr-test-key");
+    }
+
+    #[test]
+    fn fallback_priority_and_cooldown() {
+        let config = AppConfig::default();
+        let fb = FallbackManager::new(&config);
+        assert!(fb.enabled());
+        // Default priority is the registry order, current provider excluded.
+        assert_eq!(fb.next_provider("poolside").unwrap(), "openrouter");
+        fb.record_failure("openrouter");
+        assert_eq!(fb.next_provider("poolside").unwrap(), "groq");
+        fb.record_failure("groq");
+        fb.record_failure("nvidia");
+        fb.record_failure("tokenrouter");
+        // All alternates cooling down → nothing left to fall back to.
+        assert_eq!(fb.next_provider("poolside"), None);
+    }
+
+    #[test]
+    fn fallback_custom_priority() {
+        let mut config = AppConfig::default();
+        config.fallback.priority = vec!["groq".into(), "nvidia".into()];
+        let fb = FallbackManager::new(&config);
+        assert_eq!(fb.next_provider("poolside").unwrap(), "groq");
+        assert_eq!(fb.next_provider("groq").unwrap(), "nvidia");
+    }
+
+    #[test]
+    fn fallback_can_be_disabled() {
+        let mut config = AppConfig::default();
+        config.fallback.enabled = false;
+        let fb = FallbackManager::new(&config);
+        assert!(!fb.enabled());
+    }
+
+    #[test]
+    fn drop_trailing_user_message_strips_prompt() {
+        let mut messages = vec![
+            Message::user("first prompt"),
+            Message::assistant("a reply"),
+            Message::user("second prompt"),
+        ];
+        drop_trailing_user_message(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.last().unwrap().role, Role::Assistant);
+        // Empty / already-stripped conversations are left alone.
+        let mut empty = Vec::new();
+        drop_trailing_user_message(&mut empty);
+        assert!(empty.is_empty());
     }
 
     #[test]
