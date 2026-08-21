@@ -141,9 +141,11 @@ Then pick it like any other model: `/model combos/coding` in the TUI, or set
   skipped with a warning.
 - `fallback.cooldown_seconds` is the "long cooldown" (default 300s = 5
   minutes): once an entry fails it is excluded from fallback for this long, so
-  a rate-limited provider isn't hammered again immediately. Cooldowns are
-  tracked in memory for the lifetime of the process — a full database isn't
-  needed for a few minutes of rate-limit state.
+  a rate-limited provider isn't hammered again immediately.
+- Cooldowns **persist across restarts** in a small JSON file (`~/.abstract/
+  cooldowns.json` by default) — just a few minutes of rate-limit state, so a
+  tiny file is all it takes (no database). Relocate or disable it via
+  `fallback.cooldowns_file` (an empty string disables persistence).
 - `fallback.enabled: false` turns combo fallback off (combos then just run on
   their first entry).
 - `combos` entries can also be written as objects:

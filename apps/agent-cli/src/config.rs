@@ -151,6 +151,12 @@ pub struct FallbackConfig {
     /// How long a combo entry stays excluded after a failure, in seconds.
     #[serde(default = "default_fallback_cooldown")]
     pub cooldown_seconds: u64,
+    /// Where combo cooldowns are persisted so a rate-limited provider stays
+    /// cooled down across restarts of the process. Defaults to
+    /// `~/.abstract/cooldowns.json`; set to a path to relocate, or to an empty
+    /// string to disable persistence.
+    #[serde(default)]
+    pub cooldowns_file: Option<PathBuf>,
 }
 
 impl Default for FallbackConfig {
@@ -158,6 +164,7 @@ impl Default for FallbackConfig {
         Self {
             enabled: true,
             cooldown_seconds: default_fallback_cooldown(),
+            cooldowns_file: None,
         }
     }
 }
@@ -255,6 +262,12 @@ pub fn history_path() -> PathBuf {
 /// ~/.abstract/graph.db
 pub fn graph_db_path() -> PathBuf {
     global_config_dir().join("graph.db")
+}
+
+/// ~/.abstract/cooldowns.json — combo cooldown state persisted across
+/// restarts (override via `fallback.cooldowns_file`).
+pub fn cooldowns_path() -> PathBuf {
+    global_config_dir().join("cooldowns.json")
 }
 
 // ─── Loading ───────────────────────────────────────────────────────────────

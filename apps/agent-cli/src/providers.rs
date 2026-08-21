@@ -18,9 +18,9 @@ use cersei::types::{Message, Role};
 use cersei::{Agent, OpenAi};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 /// A configured provider (built-in defaults merged with the config file).
@@ -518,25 +518,49 @@ pub struct FallbackEntry {
 /// Tracks which combo entries are in a failure cooldown and the order in
 /// which a combo should try them. Cloning shares the cooldown state, so
 /// per-run clones keep failures recorded by earlier runs of the same combo.
+///
+/// Expiries are wall-clock times persisted to a small JSON file (default
+/// `~/.abstract/cooldowns.json`), so a rate-limited provider stays cooled down
+/// across restarts of the process.
 #[derive(Clone)]
 pub struct FallbackManager {
     enabled: bool,
     /// Entries in priority order (most preferred first).
     priority: Vec<FallbackEntry>,
+    state: Arc<FallbackState>,
+}
+
+struct FallbackState {
     cooldown: Duration,
-    /// "provider\0model" → cooldown expiry.
-    failures: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Where expiries are persisted across restarts.
+    cooldown_file: PathBuf,
+    /// "provider\0model" → cooldown expiry (wall clock).
+    failures: Mutex<HashMap<String, SystemTime>>,
 }
 
 impl FallbackManager {
     /// `entries` is the combo's fallback list in order. An empty list (a
     /// non-combo selection) means fallback is disabled.
     pub fn new(config: &AppConfig, entries: Vec<FallbackEntry>) -> Self {
+        let cooldown_file = match &config.fallback.cooldowns_file {
+            Some(path) if !path.as_os_str().is_empty() => path.clone(),
+            // Empty string disables persistence.
+            Some(_) => PathBuf::new(),
+            None => crate::config::cooldowns_path(),
+        };
+        let failures = if cooldown_file.as_os_str().is_empty() {
+            Mutex::new(HashMap::new())
+        } else {
+            Mutex::new(load_persisted_failures(&cooldown_file))
+        };
         Self {
             enabled: config.fallback.enabled && !entries.is_empty(),
             priority: entries,
-            cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
-            failures: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(FallbackState {
+                cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
+                cooldown_file,
+                failures,
+            }),
         }
     }
 
@@ -549,25 +573,93 @@ impl FallbackManager {
     }
 
     /// Mark an entry as failed; it won't be selected for fallback again until
-    /// the cooldown expires.
+    /// the cooldown expires. The new expiry is persisted so it survives a
+    /// restart (best-effort: a failed write only logs a warning).
     pub fn record_failure(&self, provider: &str, model: &str) {
-        self.failures.lock().insert(
+        let mut failures = self.state.failures.lock();
+        failures.insert(
             Self::key(provider, model),
-            Instant::now() + self.cooldown,
+            SystemTime::now() + self.state.cooldown,
         );
+        if !self.state.cooldown_file.as_os_str().is_empty() {
+            persist_failures(&self.state.cooldown_file, &failures);
+        }
     }
 
     /// The most preferred entry to fall back to after `(provider, model)`
     /// failed, skipping the current entry and any still cooling down.
     pub fn next_entry(&self, provider: &str, model: &str) -> Option<FallbackEntry> {
-        let now = Instant::now();
-        let mut failures = self.failures.lock();
+        let now = SystemTime::now();
+        let mut failures = self.state.failures.lock();
         failures.retain(|_, until| *until > now);
         self.priority.iter().find(|e| {
             (e.provider != provider || e.model != model)
                 && !failures.contains_key(&Self::key(&e.provider, &e.model))
         })
         .cloned()
+    }
+}
+
+/// Read persisted expiries from `path` (unix-epoch millis), dropping expired
+/// and unreadable entries. A missing file just means no state yet.
+fn load_persisted_failures(path: &Path) -> HashMap<String, SystemTime> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return HashMap::new(),
+    };
+    let parsed: HashMap<String, u64> = match serde_json::from_str(&content) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!(
+                "warning: ignoring unreadable cooldown state {}: {e}",
+                path.display()
+            );
+            return HashMap::new();
+        }
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    parsed
+        .into_iter()
+        .filter_map(|(key, expires_at)| {
+            (expires_at > now_ms)
+                .then(|| (key, UNIX_EPOCH + Duration::from_millis(expires_at)))
+        })
+        .collect()
+}
+
+/// Write the non-expired expiries to `path` as a JSON map of "key" →
+/// unix-epoch millis. Written atomically (temp file + rename) so a crash can't
+/// corrupt the state; failures only log a warning since losing a cooldown is
+/// not fatal.
+fn persist_failures(path: &Path, failures: &HashMap<String, SystemTime>) {
+    let now = SystemTime::now();
+    let map: HashMap<String, u64> = failures
+        .iter()
+        .filter(|(_, until)| **until > now)
+        .map(|(key, until)| {
+            let millis = until
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            (key.clone(), millis)
+        })
+        .collect();
+    let content = match serde_json::to_string(&map) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("warning: failed to serialize cooldown state: {e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, content).and_then(|_| std::fs::rename(&tmp, path)) {
+        eprintln!(
+            "warning: failed to persist cooldown state to {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -1017,9 +1109,19 @@ mod tests {
         assert_eq!(resolved.api_key, "tr-test-key");
     }
 
+    /// A config whose cooldowns persist to a unique temp file, so tests never
+    /// touch (or depend on) the real `~/.abstract/cooldowns.json`.
+    fn isolated_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.fallback.cooldowns_file = Some(
+            std::env::temp_dir().join(format!("agent-cooldowns-{}.json", uuid::Uuid::new_v4())),
+        );
+        config
+    }
+
     #[test]
     fn fallback_priority_and_cooldown() {
-        let config = AppConfig::default();
+        let config = isolated_config();
         let entries = vec![
             FallbackEntry {
                 provider: "poolside".into(),
@@ -1049,7 +1151,7 @@ mod tests {
 
     #[test]
     fn fallback_can_be_disabled() {
-        let mut config = AppConfig::default();
+        let mut config = isolated_config();
         config.fallback.enabled = false;
         let entries = vec![FallbackEntry {
             provider: "groq".into(),
@@ -1061,7 +1163,7 @@ mod tests {
 
     #[test]
     fn fallback_skips_current_entry() {
-        let config = AppConfig::default();
+        let config = isolated_config();
         let entries = vec![
             FallbackEntry {
                 provider: "groq".into(),
@@ -1086,10 +1188,99 @@ mod tests {
 
     #[test]
     fn plain_selection_has_no_fallback() {
-        let config = AppConfig::default();
+        let config = isolated_config();
         let fb = fallback_for(&config, "groq", "groq/compound");
         assert!(!fb.enabled());
         assert!(fb.next_entry("groq", "groq/compound").is_none());
+    }
+
+    #[test]
+    fn cooldowns_persist_across_instances() {
+        let config = isolated_config();
+        let path = config.fallback.cooldowns_file.clone().unwrap();
+        let entries = vec![
+            FallbackEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            },
+            FallbackEntry {
+                provider: "nvidia".into(),
+                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
+            },
+            FallbackEntry {
+                provider: "poolside".into(),
+                model: "poolside/laguna-xs-2.1".into(),
+            },
+        ];
+        let fb = FallbackManager::new(&config, entries.clone());
+        fb.record_failure("groq", "groq/compound");
+        drop(fb);
+
+        // The failure was written to the cooldown file as a future timestamp.
+        let persisted: HashMap<String, u64> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let expiry = persisted["groq\0groq/compound"];
+        assert!(expiry > now_ms);
+
+        // A fresh manager (simulating a restart) still skips groq: starting
+        // from nvidia, the next candidate skips groq (cooling down) → poolside.
+        let fb2 = FallbackManager::new(&config, entries);
+        let next = fb2.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("poolside", "poolside/laguna-xs-2.1"));
+    }
+
+    #[test]
+    fn persisted_cooldowns_expire() {
+        let config = isolated_config();
+        let path = config.fallback.cooldowns_file.clone().unwrap();
+        // A stale expiry from a previous run (already past) is dropped on load.
+        let expired_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 1_000;
+        let map = HashMap::from([("groq\0groq/compound".to_string(), expired_ms)]);
+        std::fs::write(&path, serde_json::to_string(&map).unwrap()).unwrap();
+
+        let entries = vec![
+            FallbackEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            },
+            FallbackEntry {
+                provider: "nvidia".into(),
+                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
+            },
+        ];
+        let fb = FallbackManager::new(&config, entries);
+        // groq is no longer cooling down, so it's picked again.
+        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+    }
+
+    #[test]
+    fn empty_cooldowns_file_disables_persistence() {
+        let mut config = AppConfig::default();
+        config.fallback.cooldowns_file = Some(std::path::PathBuf::new());
+        let entries = vec![
+            FallbackEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            },
+            FallbackEntry {
+                provider: "nvidia".into(),
+                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
+            },
+        ];
+        let fb = FallbackManager::new(&config, entries);
+        // In-memory cooldown still works without persistence.
+        fb.record_failure("groq", "groq/compound");
+        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1");
+        assert!(next.is_none()); // groq cooling down, nvidia current
     }
 
     #[test]

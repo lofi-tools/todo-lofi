@@ -491,7 +491,7 @@ pub mod header {
 
         let mode_str = state.permission_mode.label();
 
-        let text = Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 " abstract",
                 Style::default()
@@ -500,18 +500,36 @@ pub mod header {
             ),
             Span::styled(" | ", Style::default().fg(theme.dim)),
             Span::styled(&state.model, Style::default().fg(theme.fg)),
-            Span::styled(" | ", Style::default().fg(theme.dim)),
-            Span::styled(mode_str, mode_style(state.permission_mode, theme)),
-            Span::styled(" | ", Style::default().fg(theme.dim)),
-            Span::styled(&tokens_str, Style::default().fg(theme.dim)),
-            Span::styled(" | ", Style::default().fg(theme.dim)),
-            Span::styled(&cost_str, Style::default().fg(theme.fg)),
-            Span::styled(" | ", Style::default().fg(theme.dim)),
-            // Span::styled(&state.session_id, Style::default().fg(theme.dim)),
-        ]);
+        ];
+        // While a combo is active the agent runs on a concrete entry which can
+        // differ from the selection (after a fallback) — show it dimmed after
+        // an arrow, e.g. `combos/coding → openrouter/openrouter/free`.
+        if let Some(suffix) = effective_suffix(&state.model, &state.effective_model) {
+            spans.push(Span::styled(suffix, Style::default().fg(theme.dim)));
+        }
+        spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        spans.push(Span::styled(mode_str, mode_style(state.permission_mode, theme)));
+        spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        spans.push(Span::styled(&tokens_str, Style::default().fg(theme.dim)));
+        spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        spans.push(Span::styled(&cost_str, Style::default().fg(theme.fg)));
+        spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
+        // Span::styled(&state.session_id, Style::default().fg(theme.dim)),
+
+        let text = Line::from(spans);
 
         let header = Paragraph::new(text).style(theme.header_style());
         f.render_widget(header, area);
+    }
+
+    /// The dimmed " → effective" suffix shown in the header when the agent runs
+    /// on a different model than the selection (a combo fallback), or None
+    /// when the selection and the effective model match.
+    fn effective_suffix(model: &str, effective: &Option<String>) -> Option<String> {
+        match effective {
+            Some(eff) if eff != model => Some(format!(" → {eff}")),
+            _ => None,
+        }
     }
 
     fn mode_style(mode: crate::tui::app::PermissionMode, theme: &Theme) -> Style {
@@ -560,6 +578,30 @@ pub mod header {
         let input_cost = (input_tokens as f64 / 1_000_000.0) * input_per_m;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * output_per_m;
         input_cost + output_cost
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn effective_suffix_shown_only_when_it_differs() {
+            // Plain selection: no effective entry shown.
+            assert_eq!(effective_suffix("groq/compound", &None), None);
+            assert_eq!(
+                effective_suffix("groq/compound", &Some("groq/compound".into())),
+                None
+            );
+            // Combo running on a (fallback) entry: suffix names the concrete
+            // model while the selection stays the combo.
+            assert_eq!(
+                effective_suffix(
+                    "combos/coding",
+                    &Some("openrouter/openrouter/free".into()),
+                ),
+                Some(" → openrouter/openrouter/free".into())
+            );
+        }
     }
 }
 pub mod input {
@@ -2059,6 +2101,7 @@ pub mod tool_call {
             }
         }
 
+        #[test]
         #[test]
         fn renders_nested_subagent_activity() {
             let theme = Theme::enterprise();

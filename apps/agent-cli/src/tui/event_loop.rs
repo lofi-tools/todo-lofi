@@ -76,6 +76,10 @@ fn try_fallback(
                 msg,
                 crate::providers::display_model_id(&next.provider, &next.model),
             ));
+            state.effective_model = Some(crate::providers::display_model_id(
+                &next.provider,
+                &next.model,
+            ));
             run.provider = next.provider;
             run.model = next.model;
             run.stream = runtime.agent().run_stream(&run.prompt);
@@ -97,7 +101,13 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // let theme = Theme::from_name(&config.theme);
     let theme = Theme::enterprise();
-    let mut state = AppState::new(&config.model, Some(runtime.subscribe_subagents()));
+    let (init_provider, init_model) = runtime.current();
+    let mut state = AppState::new(
+        &crate::providers::display_model_id(&init_provider, &init_model),
+        Some(runtime.subscribe_subagents()),
+    );
+    let (eff_provider, eff_model) = runtime.effective();
+    state.effective_model = Some(crate::providers::display_model_id(&eff_provider, &eff_model));
     // state.set_shared_mode(shared_mode);
     let mut agent_run: Option<AgentRun> = None;
 
@@ -1451,7 +1461,11 @@ fn handle_model_picker_key(
             state.overlay = Overlay::None;
             match runtime.switch(&provider, &model) {
                 Ok(()) => {
-                    state.model = model;
+                    state.model = label.clone();
+                    state.effective_model = Some(crate::providers::display_model_id(
+                        &runtime.effective().0,
+                        &runtime.effective().1,
+                    ));
                     state.push_system(format!("Switched to {label}"));
                 }
                 Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
@@ -1897,7 +1911,11 @@ fn handle_slash_command(
                         let label = crate::providers::display_model_id(&provider, &model);
                         match runtime.switch(&provider, &model) {
                             Ok(()) => {
-                                state.model = model;
+                                state.model = label.clone();
+                                state.effective_model = Some(crate::providers::display_model_id(
+                                    &runtime.effective().0,
+                                    &runtime.effective().1,
+                                ));
                                 state.push_system(format!("Switched to {label}"));
                             }
                             Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),

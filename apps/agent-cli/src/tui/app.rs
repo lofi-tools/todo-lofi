@@ -305,6 +305,10 @@ pub struct AppState {
 
     // ── Status ──
     pub model: String,
+    /// Display id ("provider/model") of the concrete model the agent runs on.
+    /// Differs from `model` while a combo is active (e.g. after the combo
+    /// fell back to another entry); the header shows it after the selection.
+    pub effective_model: Option<String>,
     // pub session_id: String,
     // pub effort: String,
     pub input_tokens: u64,
@@ -371,6 +375,7 @@ impl AppState {
             virtual_list: crate::tui::virtual_list::VirtualList::new(),
             messages_dirty: true,
             model: model.to_string(),
+            effective_model: None,
             // session_id: if session_id.len() > 8 {
             //     session_id[..8].to_string()
             // } else {
