@@ -291,6 +291,10 @@ pub struct AppState {
     pub messages_area: Option<(u16, u16, u16, u16)>,
     /// Vertical scroll of the input content from the last frame — for mouse hit-testing.
     pub input_scroll: u16,
+    /// Cursor position the input scroll was last aligned to. When the cursor
+    /// moves (typing/navigation/click) the view follows it again; otherwise a
+    /// wheel-scrolled offset is preserved.
+    pub input_scroll_cursor: usize,
     /// Active mouse text selection, if any.
     pub selection: Option<Selection>,
 
@@ -361,6 +365,7 @@ impl AppState {
             input_area: None,
             messages_area: None,
             input_scroll: 0,
+            input_scroll_cursor: 0,
             selection: None,
             scroll: ScrollState::new(),
             virtual_list: crate::tui::virtual_list::VirtualList::new(),

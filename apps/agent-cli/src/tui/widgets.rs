@@ -639,14 +639,27 @@ pub mod input {
 
         let rows = layout(&state.input, usable);
 
-        // Scroll so the cursor row is visible.
+        // Scroll the input content: follow the cursor when it moved, otherwise
+        // preserve a wheel-scrolled offset. The cursor is only pulled into view
+        // when it leaves the visible rows, so clicking within the box or
+        // scrolling with the wheel never makes the view jump.
         let (cursor_row, cursor_col) = cursor_in_rows(&rows, &state.input, state.cursor_pos);
-        let scroll = if cursor_row as u16 >= inner.height {
-            cursor_row as u16 - inner.height + 1
-        } else {
-            0
-        };
-        state.input_scroll = scroll;
+        let max_scroll = rows.len().saturating_sub(inner.height as usize);
+        if state.input_scroll_cursor != state.cursor_pos {
+            state.input_scroll_cursor = state.cursor_pos;
+            let view_top = state.input_scroll as usize;
+            let view_bottom = view_top + inner.height as usize;
+            if cursor_row >= view_bottom {
+                // Below the fold: bring it into view at the bottom edge.
+                state.input_scroll = (cursor_row - inner.height as usize + 1) as u16;
+            } else if cursor_row < view_top {
+                // Above the fold: bring it into view at the top edge.
+                state.input_scroll = cursor_row as u16;
+            }
+        }
+        // Clamp a wheel-scrolled offset to the available range.
+        state.input_scroll = state.input_scroll.min(max_scroll as u16);
+        let scroll = state.input_scroll;
 
         // Highlight the selected bytes (if any) with inverse video.
         let sel = state.input_selection();

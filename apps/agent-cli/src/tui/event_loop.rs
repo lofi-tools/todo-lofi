@@ -374,26 +374,27 @@ fn handle_key(
             }
         }
 
-        // Select all — macOS Cmd+A selects the input text when it has content
-        // (text-field convention); with an empty or read-only input it selects
-        // the output document instead.
+        // Select all — macOS Cmd+A with the cursor in the input box selects
+        // the input text only (text-field convention), even when the input is
+        // empty (a no-op selection). The output document is only selected when
+        // the input is read-only (streaming), since the cursor isn't there.
         (KeyModifiers::SUPER, KeyCode::Char('a')) => {
-            if !state.is_streaming && !state.input.is_empty() {
-                select_all_input(state);
-            } else {
+            if state.is_streaming {
                 select_all_output(state);
+            } else {
+                select_all_input(state);
             }
             state.dirty = true;
         }
-        // Ctrl+A — readline start-of-line in the input; select all output when
-        // the input is empty or read-only.
+        // Ctrl+A — readline start-of-line in the input; while streaming the
+        // input is read-only so it selects the output document instead.
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
-            if !state.is_streaming && !state.input.is_empty() {
+            if state.is_streaming {
+                select_all_output(state);
+            } else {
                 state.cursor_pos = line_start(&state.input, state.cursor_pos);
                 state.selection = None;
                 state.refresh_command_selector();
-            } else {
-                select_all_output(state);
             }
             state.dirty = true;
         }
@@ -901,6 +902,24 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             state.dirty = true;
             return;
         }
+        // Wheel over the input box scrolls the input when its content exceeds
+        // the box; otherwise the output scrolls as before.
+        MouseEventKind::ScrollUp
+            if mouse_is_over_input(state, mouse.row, mouse.column)
+                && input_overflow_rows(state).is_some_and(|overflow| overflow > 0) =>
+        {
+            state.input_scroll = state.input_scroll.saturating_sub(3);
+            state.dirty = true;
+            return;
+        }
+        MouseEventKind::ScrollDown
+            if mouse_is_over_input(state, mouse.row, mouse.column)
+                && input_overflow_rows(state).is_some_and(|overflow| overflow > 0) =>
+        {
+            state.input_scroll = state.input_scroll.saturating_add(3);
+            state.dirty = true;
+            return;
+        }
         MouseEventKind::ScrollUp => {
             state.scroll.scroll_up(3);
             state.dirty = true;
@@ -1097,6 +1116,26 @@ fn line_end(input: &str, pos: usize) -> usize {
         Some(i) => pos + i,
         None => input.len(),
     }
+}
+
+/// Whether the mouse position is inside the input box.
+fn mouse_is_over_input(state: &AppState, row: u16, col: u16) -> bool {
+    matches!(
+        state.input_area,
+        Some((x, y, w, h)) if row >= y && row < y + h && col >= x && col < x + w
+    )
+}
+
+/// How many content rows the input overflows its box by (0 when it fits).
+fn input_overflow_rows(state: &AppState) -> Option<usize> {
+    let (_, _, w, h) = state.input_area?;
+    if w < 4 || h < 2 {
+        return None;
+    }
+    let prompt = if state.is_streaming { "  " } else { "> " };
+    let usable = (w as usize).saturating_sub(2).saturating_sub(prompt.len());
+    let rows = input::layout(&state.input, usable);
+    Some(rows.len().saturating_sub(h as usize - 2))
 }
 
 /// Map a click position to an input-box byte offset, if it lands inside the box.
@@ -2382,6 +2421,78 @@ mod tests {
         assert!(s.selection.is_none());
     }
 
+    fn scroll_up(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::MouseEventKind;
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn scroll_down(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::MouseEventKind;
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn wheel_over_input_scrolls_input_when_it_overflows() {
+        // 12 logical lines over a 4-row box (2 content rows inside the
+        // border): the input overflows and the wheel scrolls it.
+        let mut s = state();
+        s.input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12".into();
+        s.input_area = Some((0, 10, 20, 4)); // inner height 2, usable 14
+
+        // Scrolling down inside the box moves the input scroll.
+        handle_mouse(&mut s, scroll_down(11, 5));
+        assert_eq!(s.input_scroll, 3);
+        handle_mouse(&mut s, scroll_down(11, 5));
+        assert_eq!(s.input_scroll, 6);
+
+        // Scrolling back up reduces it, but never below zero.
+        handle_mouse(&mut s, scroll_up(11, 5));
+        assert_eq!(s.input_scroll, 3);
+        handle_mouse(&mut s, scroll_up(11, 5));
+        assert_eq!(s.input_scroll, 0);
+        handle_mouse(&mut s, scroll_up(11, 5));
+        assert_eq!(s.input_scroll, 0);
+
+        // The output scroll is untouched by input-box wheel events.
+        assert_eq!(s.scroll.offset, 0);
+
+        // A wheel event outside the input box still scrolls the output (give
+        // the output real content so it has somewhere to scroll).
+        s.input_area = None;
+        s.messages_area = Some((0, 0, 20, 8));
+        s.scroll.update_dimensions(100, 8);
+        handle_mouse(&mut s, scroll_up(3, 5)); // unsticks sticky-bottom
+        let offset_after_up = s.scroll.offset;
+        handle_mouse(&mut s, scroll_up(3, 5));
+        assert!(s.scroll.offset < offset_after_up);
+    }
+
+    #[test]
+    fn wheel_over_input_does_not_scroll_when_content_fits() {
+        // Short input in a tall box: no overflow, so the wheel falls through
+        // to the output scroll as before.
+        let mut s = state();
+        s.input = "hi".into();
+        s.input_area = Some((0, 10, 20, 6));
+        s.messages_area = Some((0, 0, 20, 8));
+        s.scroll.update_dimensions(100, 8);
+        handle_mouse(&mut s, scroll_up(12, 5)); // unsticks sticky-bottom
+        let offset_after_up = s.scroll.offset;
+        handle_mouse(&mut s, scroll_up(12, 5));
+        assert_eq!(s.input_scroll, 0);
+        assert!(s.scroll.offset < offset_after_up);
+    }
+
     #[test]
     fn word_navigation_boundaries() {
         // "one two three  four": words at bytes 0..3, 4..7, 8..13, 15..19.
@@ -2471,6 +2582,38 @@ mod tests {
         s.input = "hi there".into();
         select_all_input(&mut s);
         assert_eq!(s.selection_text().as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn cmd_a_targets_input_only_when_cursor_is_there() {
+        use crossterm::event::KeyModifiers as M;
+
+        // Cursor in the input box (not streaming): Cmd+A selects the input
+        // text, even when the input is empty (an empty selection, not the
+        // output document).
+        let mut s = state();
+        s.input = "hello".into();
+        handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
+        assert_eq!(s.selection_text().as_deref(), Some("hello"));
+        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+
+        // Empty input: Cmd+A stays in the input (zero-width selection, which
+        // yields no text) rather than grabbing the output document.
+        let mut s = state();
+        handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
+        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+        assert_eq!(s.selection_text(), None);
+
+        // Streaming: the input is read-only (cursor isn't there), so Cmd+A
+        // selects the output document.
+        let mut s = state();
+        s.is_streaming = true;
+        s.virtual_list.set_committed(vec![crate::tui::virtual_list::VItem::new(
+            ratatui::prelude::Line::from("streamed output"),
+        )]);
+        handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
+        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Output, .. })));
+        assert_eq!(s.selection_text().as_deref(), Some("streamed output"));
     }
 
     #[test]
