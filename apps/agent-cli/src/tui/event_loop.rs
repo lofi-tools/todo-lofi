@@ -457,6 +457,17 @@ fn handle_key(
             return Some(input_text);
         }
 
+        // Cmd+Backspace — delete from the start of the line to the cursor
+        (KeyModifiers::SUPER, KeyCode::Backspace) if !state.is_streaming => {
+            let start = line_start(&state.input, state.cursor_pos);
+            if start < state.cursor_pos {
+                state.input.replace_range(start..state.cursor_pos, "");
+                state.cursor_pos = start;
+            }
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
         // Backspace — remove the char before the cursor
         (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
             if let Some((char_start, _)) =
@@ -472,6 +483,20 @@ fn handle_key(
         // Delete — remove the char at the cursor
         (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
             state.input.remove(state.cursor_pos);
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
+        // Cmd+Left — jump to the start of the line
+        (KeyModifiers::SUPER, KeyCode::Left) if !state.is_streaming => {
+            state.cursor_pos = line_start(&state.input, state.cursor_pos);
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
+        // Cmd+Right — jump to the end of the line
+        (KeyModifiers::SUPER, KeyCode::Right) if !state.is_streaming => {
+            state.cursor_pos = line_end(&state.input, state.cursor_pos);
             state.selection = None;
             state.refresh_command_selector();
         }
@@ -569,20 +594,76 @@ fn is_copy_shortcut(modifiers: KeyModifiers, code: KeyCode) -> bool {
         || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
 }
 
-/// Copy the current selection to the terminal clipboard, if there is one.
+/// Copy the current selection to the clipboard, if there is one.
 fn copy_selection(state: &AppState) {
     if let Some(text) = state.selection_text() {
-        write_osc52_clipboard(&text);
+        copy_to_clipboard(&text);
     }
+}
+
+/// Copy `text` to the system clipboard. Prefers the platform clipboard tool
+/// (`pbcopy` / `wl-copy` / `xclip` / `clip`), which works in every terminal,
+/// and falls back to the OSC 52 terminal sequence when no tool is available
+/// (some terminals ignore OSC 52 entirely).
+fn copy_to_clipboard(text: &str) {
+    let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    } else {
+        &[
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+    for (command, args) in commands {
+        if copy_via_command(command, args, text) {
+            return;
+        }
+    }
+    write_osc52_clipboard(text);
+}
+
+/// Write `text` to the system clipboard through `command`'s stdin, returning
+/// true when the process exited successfully.
+fn copy_via_command(command: &str, args: &[&str], text: &str) -> bool {
+    use std::io::Write;
+    let Ok(mut child) = std::process::Command::new(command)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return false;
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return false;
+    };
+    if stdin.write_all(text.as_bytes()).is_err() {
+        return false;
+    }
+    // Closing stdin sends EOF so the tool finishes writing.
+    drop(stdin);
+    child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
 /// Write `text` to the terminal clipboard via the OSC 52 escape sequence
 /// (supported by iTerm2, kitty, WezTerm, Alacritty, VSCode, tmux, ...).
 fn write_osc52_clipboard(text: &str) {
     use std::io::Write;
-    let encoded = base64_encode(text.as_bytes());
-    let _ = std::io::stdout().write_all(format!("\x1b]52;c;{encoded}\x1b\\").as_bytes());
+    let _ = write_osc52(&mut std::io::stdout(), text);
     let _ = std::io::stdout().flush();
+}
+
+/// The OSC 52 clipboard control sequence for `text`.
+fn write_osc52(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+    let encoded = base64_encode(text.as_bytes());
+    writer.write_all(format!("\x1b]52;c;{encoded}\x1b\\").as_bytes())
 }
 
 /// Minimal standard base64 encoder (RFC 4648) for OSC 52 payloads.
@@ -705,12 +786,33 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             }
         }
         // Release — the selection stays (until the next click) so it can be copied.
-        MouseEventKind::Up(MouseButton::Left) => {
+        // Any-button match: some terminals encode releases without the button.
+        MouseEventKind::Up(_) => {
             if let Some(sel) = state.selection.as_mut() {
                 sel.dragging = false;
             }
         }
         _ => {}
+    }
+}
+
+/// Byte offset of the start of the logical line containing `pos` (the byte
+/// right after the previous `\n`, or 0).
+fn line_start(input: &str, pos: usize) -> usize {
+    let pos = input.floor_char_boundary(pos.min(input.len()));
+    input[..pos]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0)
+}
+
+/// Byte offset just past the end of the logical line containing `pos` (the
+/// next `\n`, or the end of the input).
+fn line_end(input: &str, pos: usize) -> usize {
+    let pos = input.floor_char_boundary(pos.min(input.len()));
+    match input[pos..].find('\n') {
+        Some(i) => pos + i,
+        None => input.len(),
     }
 }
 
@@ -1650,6 +1752,44 @@ mod tests {
         assert_eq!(truncate("héllo", 4), "hél...");
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn line_navigation_boundaries() {
+        let input = "hello\nworld foo"; // 15 bytes, '\n' at 5
+        // Middle of the second line.
+        assert_eq!(line_start(input, 9), 6);
+        assert_eq!(line_end(input, 9), 15);
+        // First line.
+        assert_eq!(line_start(input, 3), 0);
+        assert_eq!(line_end(input, 3), 5);
+        // Sitting on the newline: start of line 1, end of line 1.
+        assert_eq!(line_start(input, 5), 0);
+        assert_eq!(line_end(input, 5), 5);
+        // Just past the newline.
+        assert_eq!(line_start(input, 6), 6);
+        assert_eq!(line_end(input, 6), 15);
+        // End of input.
+        assert_eq!(line_start(input, 15), 6);
+        assert_eq!(line_end(input, 15), 15);
+        // Empty input.
+        assert_eq!(line_start("", 0), 0);
+        assert_eq!(line_end("", 0), 0);
+        // Multi-byte content never panics: a position inside 'é' (bytes 1..3)
+        // snaps back to a char boundary before slicing.
+        // "héllo\nwörld" = 13 bytes, '\n' at 6.
+        assert_eq!(line_start("héllo\nwörld", 8), 7);
+        assert_eq!(line_end("héllo\nwörld", 2), 6); // floor(2) = 0 → line 1 ends at 6
+    }
+
+    #[test]
+    fn osc52_sequence_is_well_formed() {
+        let mut buf = Vec::new();
+        write_osc52(&mut buf, "hi").unwrap();
+        assert_eq!(buf, b"\x1b]52;c;aGk=\x1b\\");
+        let mut buf = Vec::new();
+        write_osc52(&mut buf, "").unwrap();
+        assert_eq!(buf, b"\x1b]52;c;\x1b\\");
     }
 
     #[test]
