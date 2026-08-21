@@ -1179,13 +1179,20 @@ pub mod messages {
                     items.push(VItem::new(Line::default()));
                 }
                 TurnRole::System => {
-                    let wrapped = wrap_text(&turn.content, width as usize);
+                    let border = Style::default().fg(theme.border);
+                    items.push(VItem::new(Line::from(Span::styled(
+                        "  ┌─ system",
+                        border,
+                    ))));
+                    // Leave room for the left border prefix so wrapped rows fit.
+                    let wrapped = wrap_text(&turn.content, (width as usize).saturating_sub(7));
                     for wline in &wrapped {
-                        items.push(VItem::new(Line::from(Span::styled(
-                            format!("  [system] {}", wline),
-                            theme.dimmed(),
-                        ))));
+                        items.push(VItem::new(Line::from(vec![
+                            Span::styled("  │ ", border),
+                            Span::styled(wline.clone(), theme.dimmed()),
+                        ])));
                     }
+                    items.push(VItem::new(Line::from(Span::styled("  └─", border))));
                     items.push(VItem::new(Line::default()));
                 }
             }
@@ -1301,6 +1308,42 @@ pub mod messages {
         #[test]
         fn wraps_ascii_at_word_boundaries() {
             assert_eq!(wrap_text("hello world", 5), vec!["hello", "world"]);
+        }
+
+        #[test]
+        fn system_turns_render_as_inline_block() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{Turn, TurnRole},
+                theme::Theme,
+            };
+
+            let turn = Turn {
+                role: TurnRole::System,
+                content: "model a failed — falling back to model b".into(),
+                tools: Vec::new(),
+                thinking: None,
+            };
+            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|item| {
+                    item.line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            assert_eq!(
+                texts,
+                vec![
+                    "  ┌─ system",
+                    "  │ model a failed — falling back to model b",
+                    "  └─",
+                    ""
+                ]
+            );
         }
     }
 }
