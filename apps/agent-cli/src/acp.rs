@@ -7,9 +7,13 @@
 //! - `session/prompt` (streams `session/update` notifications and replies with a stop reason)
 //! - `session/set_config_option` (plus `session/set_mode` and `unstable_set_session_model`)
 //! - `session/cancel` (notification)
+//! - `fs/read_text_file` / `fs/write_text_file` (agent-initiated requests to the
+//!   client, gated by the `clientCapabilities.fs` advertised during `initialize`)
 //!
 //! Requests are newline-delimited JSON-RPC 2.0 on stdin; responses and
 //! `session/update` notifications are newline-delimited JSON-RPC 2.0 on stdout.
+//! The agent also sends its own requests (`fs/*`) to the client and awaits the
+//! matching JSON-RPC response, correlating by `id`.
 
 use crate::cli_commands::Cli;
 use crate::config::AppConfig;
@@ -24,8 +28,10 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 const PROTOCOL_VERSION: i64 = 1;
@@ -37,12 +43,19 @@ const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
 // ─── JSON-RPC 2.0 wire types ────────────────────────────────────────────────
 
+/// Incoming JSON-RPC message. A message with `method` is a request (if `id`
+/// is present) or a notification (no `id`); a message with `result` or
+/// `error` and no `method` is a response to one of our outbound requests.
 #[derive(Deserialize)]
 struct RpcMessage {
     method: Option<String>,
     id: Option<Value>,
     #[serde(default)]
     params: Option<Value>,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<RpcErrorBody>,
 }
 
 #[derive(Serialize)]
@@ -59,7 +72,7 @@ struct RpcFailure<'a> {
     error: RpcErrorBody,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct RpcErrorBody {
     code: i64,
     message: String,
@@ -72,10 +85,34 @@ struct RpcNotification<'a> {
     params: Value,
 }
 
+#[derive(Serialize)]
+struct RpcRequest<'a> {
+    jsonrpc: &'a str,
+    id: Value,
+    method: &'a str,
+    params: Value,
+}
+
+/// A pending outbound request awaiting the client's JSON-RPC response.
+type PendingResponse = oneshot::Sender<RpcResponse>;
+
+/// The outcome of an outbound request: either the client's `result` payload,
+/// or a JSON-RPC error it returned. A dropped response channel (peer gone) is
+/// surfaced as `Err` on the receiver rather than a variant.
+enum RpcResponse {
+    Result(Value),
+    Error(RpcErrorBody),
+}
+
 /// Serializes all writes to stdout so responses and streaming notifications
 /// from concurrent tasks stay ordered and never interleave mid-line.
 struct AcpConnection {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Outstanding outbound JSON-RPC requests (agent -> client), keyed by the
+    /// integer `id` we assigned. The sender completes the waiting caller.
+    pending: Mutex<HashMap<i64, PendingResponse>>,
+    /// Monotonic source of unique request ids for outbound requests.
+    next_request_id: AtomicI64,
 }
 
 impl AcpConnection {
@@ -95,7 +132,7 @@ impl AcpConnection {
                 }
             }
         });
-        (Self { tx }, writer)
+        (Self { tx, pending: Mutex::new(HashMap::new()), next_request_id: AtomicI64::new(1) }, writer)
     }
 
     fn send_line(&self, line: String) {
@@ -138,6 +175,45 @@ impl AcpConnection {
 
     fn send_update(&self, session_id: &str, update: SessionUpdate) {
         self.notification("session/update", json!({ "sessionId": session_id, "update": update }));
+    }
+
+    /// Route an inbound JSON-RPC response (a message with `id` but no
+    /// `method`) to the outbound caller waiting on that id. Returns true when
+    /// a pending caller was found. Errors are delivered as `RpcResponse::Error`.
+    fn deliver_response(&self, id: &Value, result: Option<Value>, error: Option<RpcErrorBody>) {
+        // ids we mint are integers; ignore anything else (e.g. a stray client
+        // request sharing an id) rather than risk misrouting.
+        let Some(id_int) = id.as_i64() else { return };
+        let sender = self.pending.lock().remove(&id_int);
+        let Some(sender) = sender else { return };
+        let response = match error {
+            Some(err) => RpcResponse::Error(err),
+            None => RpcResponse::Result(result.unwrap_or(Value::Null)),
+        };
+        // The receiver may have timed out and dropped its end; ignore that.
+        let _ = sender.send(response);
+    }
+
+    /// Send a JSON-RPC request to the client and return a receiver for the
+    /// matching response. The caller owns the id and must await the receiver
+    /// (with a timeout) to avoid leaking the pending entry.
+    fn request(&self, method: &str, params: Value) -> (i64, oneshot::Receiver<RpcResponse>) {
+        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().insert(id, tx);
+        self.send(&RpcRequest {
+            jsonrpc: "2.0",
+            id: json!(id),
+            method,
+            params,
+        });
+        (id, rx)
+    }
+
+    /// Drop a pending outbound request without delivering a response (used on
+    /// timeout/cancel so the entry doesn't linger).
+    fn forget_request(&self, id: i64) {
+        self.pending.lock().remove(&id);
     }
 }
 
@@ -251,6 +327,59 @@ struct Cost {
 }
 
 // ─── Request params ─────────────────────────────────────────────────────────
+
+/// `initialize` request params. The client advertises capabilities here; we
+/// only act on `clientCapabilities.fs` (read/write text file support).
+#[derive(Deserialize, Default)]
+struct InitializeParams {
+    #[serde(default, rename = "protocolVersion")]
+    #[allow(dead_code)] // part of the initialize wire format
+    protocol_version: Option<i64>,
+    #[serde(default, rename = "clientCapabilities")]
+    client_capabilities: Option<ClientCapabilities>,
+}
+
+#[derive(Deserialize, Default)]
+struct ClientCapabilities {
+    #[serde(default)]
+    fs: Option<FileSystemCapabilities>,
+}
+
+/// Which `fs/*` methods the client supports. Per the spec, omitted/`null`
+/// means unsupported, so missing fields default to `false`.
+#[derive(Deserialize, Default, Clone, Copy)]
+struct FileSystemCapabilities {
+    #[serde(default, rename = "readTextFile")]
+    read_text_file: bool,
+    #[serde(default, rename = "writeTextFile")]
+    write_text_file: bool,
+}
+
+/// Params for `fs/read_text_file`.
+#[derive(Serialize)]
+struct ReadTextFileParams<'a> {
+    #[serde(rename = "sessionId")]
+    session_id: &'a str,
+    path: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<u32>,
+}
+
+/// Params for `fs/write_text_file`.
+#[derive(Serialize)]
+struct WriteTextFileParams<'a> {
+    #[serde(rename = "sessionId")]
+    session_id: &'a str,
+    path: &'a str,
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ReadTextFileResult {
+    content: String,
+}
 
 #[derive(Deserialize)]
 struct NewSessionParams {
@@ -372,6 +501,9 @@ struct AcpServer {
     default_provider: String,
     default_model: String,
     max_turns: u32,
+    /// Filesystem methods the client advertised during `initialize`. Defaults
+    /// to none until the client tells us otherwise.
+    client_fs: Mutex<FileSystemCapabilities>,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
@@ -394,6 +526,7 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         default_provider,
         default_model,
         max_turns,
+        client_fs: Mutex::new(FileSystemCapabilities::default()),
     });
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -432,6 +565,14 @@ impl AcpServer {
         };
 
         let id = rpc.id.unwrap_or(Value::Null);
+
+        // A message with no `method` and a present `id` is a response to one
+        // of our outbound requests (`fs/*` etc.). Route it to the waiter.
+        if rpc.method.is_none() && !id.is_null() {
+            self.connection.deliver_response(&id, rpc.result, rpc.error);
+            return;
+        }
+
         let method = match rpc.method {
             Some(m) => m,
             None => return, // not a request or notification
@@ -440,6 +581,10 @@ impl AcpServer {
 
         match method.as_str() {
             "initialize" => {
+                let init_params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
+                if let Some(fs) = init_params.client_capabilities.as_ref().and_then(|c| c.fs) {
+                    *self.client_fs.lock() = fs;
+                }
                 self.connection.response(id, self.initialize());
             }
             "authenticate" | "logout" => {
@@ -982,6 +1127,78 @@ impl AcpServer {
         )
     }
 
+    /// Maximum wait for a client `fs/*` response before giving up. The client
+    /// may be slow (e.g. prompting the user for a write), but an unbounded
+    /// wait would hang the agent run that triggered it.
+    const FS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Read a text file from the client's environment (including unsaved
+    /// editor state) via `fs/read_text_file`. Requires the client to have
+    /// advertised `fs.readTextFile`. `path` must be absolute.
+    async fn read_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<String> {
+        if !self.client_fs.lock().read_text_file {
+            anyhow::bail!("client did not advertise fs.readTextFile capability");
+        }
+        let params = serde_json::to_value(ReadTextFileParams {
+            session_id,
+            path,
+            line,
+            limit,
+        })
+        .context("failed to serialize fs/read_text_file params")?;
+        let result = self.fs_request("fs/read_text_file", params).await?;
+        let parsed: ReadTextFileResult = serde_json::from_value(result)
+            .context("invalid fs/read_text_file response")?;
+        Ok(parsed.content)
+    }
+
+    /// Write or create a text file in the client's environment via
+    /// `fs/write_text_file`. Requires the client to have advertised
+    /// `fs.writeTextFile`. The client creates the file if it doesn't exist.
+    async fn write_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        if !self.client_fs.lock().write_text_file {
+            anyhow::bail!("client did not advertise fs.writeTextFile capability");
+        }
+        let params = serde_json::to_value(WriteTextFileParams {
+            session_id,
+            path,
+            content,
+        })
+        .context("failed to serialize fs/write_text_file params")?;
+        self.fs_request("fs/write_text_file", params).await?;
+        Ok(())
+    }
+
+    /// Send a `fs/*` request to the client and await the correlated response.
+    /// Times out after [`FS_REQUEST_TIMEOUT`] to avoid hanging the run. Errors
+    /// from the client (a JSON-RPC error response) propagate as `anyhow`.
+    async fn fs_request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        let (id, rx) = self.connection.request(method, params);
+        match tokio::time::timeout(Self::FS_REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(RpcResponse::Result(value))) => Ok(value),
+            Ok(Ok(RpcResponse::Error(err))) => {
+                Err(anyhow::anyhow!("{method} failed: [{code}] {message}", code = err.code, message = err.message))
+            }
+            // Sender dropped without sending: the connection was torn down.
+            Ok(Err(_)) => Err(anyhow::anyhow!("{method} response channel closed")),
+            Err(_) => {
+                self.connection.forget_request(id);
+                Err(anyhow::anyhow!("{method} timed out after {FS_REQUEST_TIMEOUT:?}", FS_REQUEST_TIMEOUT = Self::FS_REQUEST_TIMEOUT))
+            }
+        }
+    }
+
     async fn handle_prompt(
         self: &Arc<Self>,
         id: Value,
@@ -1449,6 +1666,7 @@ mod tests {
             default_provider: "test".into(),
             default_model: "test/test-model".into(),
             max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities::default()),
         };
 
         // Plain selection: no effectiveModelId (it equals currentModelId).
@@ -1485,5 +1703,138 @@ mod tests {
         assert_eq!(value["sessionUpdate"], "model_changed");
         assert_eq!(value["modelId"], "combos/coding");
         assert_eq!(value["effectiveModelId"], "test/test-2");
+    }
+
+    #[test]
+    fn initialize_params_parse_fs_capabilities() {
+        // A client advertising both fs methods.
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": { "readTextFile": true, "writeTextFile": true }
+            }
+        }))
+        .unwrap();
+        let fs = params.client_capabilities.unwrap().fs.unwrap();
+        assert!(fs.read_text_file);
+        assert!(fs.write_text_file);
+
+        // Omitted capabilities default to false (unsupported).
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {}
+        }))
+        .unwrap();
+        let fs = params.client_capabilities.unwrap().fs.unwrap_or_default();
+        assert!(!fs.read_text_file);
+        assert!(!fs.write_text_file);
+
+        // Missing clientCapabilities entirely is valid (defaults).
+        let params: InitializeParams = serde_json::from_value(json!({ "protocolVersion": 1 }))
+            .unwrap();
+        assert!(params.client_capabilities.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_text_file_round_trip_through_client() {
+        // Server whose client advertised fs.readTextFile support.
+        let (connection, writer) = AcpConnection::new();
+        let server = Arc::new(AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities {
+                read_text_file: true,
+                write_text_file: false,
+            }),
+        });
+
+        // Simulated client: once read_text_file has registered its outbound
+        // request (id 1, the first id minted), reply with a content payload.
+        let server_for_client = Arc::clone(&server);
+        let _client = tokio::spawn(async move {
+            // read_text_file sends its request synchronously before awaiting,
+            // so a single yield is enough for the registration to land.
+            tokio::task::yield_now().await;
+            server_for_client
+                .connection
+                .deliver_response(&json!(1), Some(json!({ "content": "hello\n" })), None);
+        });
+
+        let content = server.read_text_file("sess", "/abs/path", None, None).await;
+        writer.abort();
+        assert_eq!(content.unwrap(), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_rejected_without_capability() {
+        let (connection, writer) = AcpConnection::new();
+        let server = AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities::default()),
+        };
+        let err = server.read_text_file("sess", "/abs/path", None, None).await;
+        assert!(err.is_err());
+        assert!(format!("{:?}", err).contains("readTextFile"));
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn write_text_file_rejected_without_capability() {
+        let (connection, writer) = AcpConnection::new();
+        let server = AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities::default()),
+        };
+        let err = server.write_text_file("sess", "/abs/path", "contents").await;
+        assert!(err.is_err());
+        assert!(format!("{:?}", err).contains("writeTextFile"));
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn fs_request_propagates_client_error() {
+        let (connection, writer) = AcpConnection::new();
+        let server = Arc::new(AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities {
+                read_text_file: true,
+                write_text_file: true,
+            }),
+        });
+        // Simulate a client that rejects the first fs/read_text_file request.
+        let server_for_client = Arc::clone(&server);
+        let _client = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            server_for_client.connection.deliver_response(
+                &json!(1),
+                None,
+                Some(RpcErrorBody { code: -32603, message: "permission denied".into() }),
+            );
+        });
+
+        let err = server.read_text_file("sess", "/abs/path", None, None).await;
+        assert!(err.is_err());
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("permission denied"));
+        writer.abort();
     }
 }
