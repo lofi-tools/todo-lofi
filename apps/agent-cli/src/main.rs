@@ -11,6 +11,7 @@ pub mod cli_commands;
 pub mod config;
 pub mod providers;
 pub mod signals;
+pub mod tools;
 pub mod tui;
 
 #[tokio::main]

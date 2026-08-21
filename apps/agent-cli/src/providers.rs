@@ -38,6 +38,19 @@ pub struct Provider {
     pub models: Vec<String>,
 }
 
+/// The full tool set for the agent: cersei's coding tools (file
+/// read/write/edit, glob/grep, bash, web fetch/search — the pi.dev-style
+/// basics) plus the `ReadDocs` (Context7 library docs) and `SyntheticOutput`
+/// (structured output) tools, matching the freebuff agent's tool surface
+/// (`read_files`/`write_file`/`str_replace`, `code_search`/`find_files`,
+/// `run_terminal_command`, `web_search`/`read_docs`/`read_url`, `set_output`).
+pub fn agent_tools() -> Vec<Box<dyn cersei::tools::Tool>> {
+    let mut tools = cersei::tools::coding();
+    tools.push(Box::new(crate::tools::ReadDocsTool));
+    tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
+    tools
+}
+
 /// A provider/model selection with the API key already resolved.
 #[derive(Debug, Clone)]
 pub struct Resolved {
@@ -508,9 +521,7 @@ impl AgentRuntime {
                 max_turns: config.max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                // Same basic tools as the ACP server and pi.dev: file
-                // read/write/edit, glob/grep, bash, and web fetch/search.
-                tools: cersei::tools::coding(),
+                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },
@@ -580,7 +591,7 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages,
-                tools: cersei::tools::coding(),
+                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },
@@ -606,7 +617,7 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                tools: cersei::tools::coding(),
+                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },

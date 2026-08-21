@@ -905,7 +905,7 @@ impl AcpServer {
                 max_turns: self.max_turns,
                 session_id: Some(session_id),
                 messages,
-                tools: cersei::tools::coding(),
+                tools: providers::agent_tools(),
                 cancel_token,
                 readonly: mode == "readonly",
             },

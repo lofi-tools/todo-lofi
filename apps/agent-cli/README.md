@@ -209,9 +209,11 @@ zero-priced `:free` variants of coding models. To see paid models too, set
 `cargo run -p agent-cli -- --help` lists everything. The most useful ones:
 `--model`, `--provider`, `--fast`, `--max`, `--headless`, `--resume`,
 `--no-permissions`, `--acp`, `--proxy`, `-C <dir>`. `-p "<prompt>"` runs a
-single prompt non-interactively with the agent's tools (file read/write/edit,
-glob/grep, bash, web) and streams the reply to stdout — the same basic tool
-set pi.dev gives its agent, and handy for scripting tests.
+single prompt non-interactively with the agent's tools and streams the reply
+to stdout — handy for scripting tests. The agent's tool set mirrors the
+freebuff agent's surface: file `read`/`write`/`edit`, `glob`/`grep` (ripgrep)
+and code search, `bash`, `web search`/`read_url`/`ReadDocs` (Context7 library
+docs), and `SyntheticOutput` (structured output).
 
 ## ACP server
 
