@@ -42,6 +42,48 @@ pub type FollowupSink = Arc<Mutex<Vec<Followup>>>;
 /// receiver and the sends are dropped.
 pub type SubAgentEventSink = Option<broadcast::Sender<SubAgentActivity>>;
 
+/// Bridges the agent's filesystem tools to the ACP client's environment.
+/// `fs/read_text_file` returns unsaved editor buffers; `fs/write_text_file`
+/// lets the client track edits the agent made during a run. Implemented by
+/// the ACP server; the TUI/headless paths supply `None` (no editor to consult).
+#[async_trait::async_trait]
+pub trait AcpFs: Send + Sync {
+    /// `true` if the client advertised `fs.readTextFile`. Lets the wrapping
+    /// Read tool skip the round-trip entirely when the client can't help.
+    fn supports_read_text_file(&self) -> bool;
+
+    /// Read `path` from the client. `line` is 1-based, `limit` a line cap, per
+    /// the ACP `fs/read_text_file` schema. Errors propagate to the caller so
+    /// it can fall back to the local filesystem.
+    async fn read_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<String>;
+
+    /// `true` if the client advertised `fs.writeTextFile`. Lets the wrapping
+    /// write/edit tools skip the mirror round-trip when the client can't track.
+    fn supports_write_text_file(&self) -> bool;
+
+    /// Write `content` to `path` in the client's environment via
+    /// `fs/write_text_file`. The client creates the file if it doesn't exist.
+    /// Errors propagate to the caller so the wrapping tool can treat a failed
+    /// mirror as non-fatal (the disk write already succeeded).
+    async fn write_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<()>;
+}
+
+/// Shared handle to an optional ACP client-filesystem bridge. `None` means
+/// the run isn't backed by an ACP client (TUI/`-p`), so the wrapping file
+/// tools read/write the local filesystem directly with no client mirroring.
+pub type AcpFsSink = Option<Arc<dyn AcpFs>>;
+
 /// A single piece of sub-agent activity, tagged with the run id of the
 /// sub-agent that produced it. The TUI uses `run_id` to attach events to the
 /// right `spawn_agents` parent call even when they arrive out of order.

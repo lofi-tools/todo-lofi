@@ -48,12 +48,23 @@ pub fn agent_tools(
     parent: crate::subagents::ParentHandle,
     followups: crate::subagents::FollowupSink,
     events: crate::subagents::SubAgentEventSink,
+    fs_reader: crate::subagents::AcpFsSink,
     readonly: bool,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
+    // Replace the built-in Read with a version that consults the ACP
+    // client's filesystem first, so unsaved editor buffers are visible.
+    tools.retain(|t| t.name() != "Read");
+    tools.push(Box::new(crate::tools::ClientReadTool::new(fs_reader.clone())));
+    // Replace the built-in Write/Edit with versions that mirror successful
+    // edits to the ACP client via `fs/write_text_file`, so the editor tracks
+    // changes made during the run.
+    tools.retain(|t| t.name() != "Write" && t.name() != "Edit");
+    tools.push(Box::new(crate::tools::ClientWriteTool::new(fs_reader.clone())));
+    tools.push(Box::new(crate::tools::ClientEditTool::new(fs_reader)));
     tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
@@ -98,6 +109,9 @@ pub struct BuildParams {
     /// Broadcast channel that sub-agent activity is forwarded to (the TUI
     /// subscribes to render nested tool calls). None in headless/ACP mode.
     pub subagent_events: crate::subagents::SubAgentEventSink,
+    /// Optional ACP client-filesystem bridge; when present the wrapping file
+    /// tools consult/mirror the client's editor buffers. None in TUI/`-p`.
+    pub fs_reader: crate::subagents::AcpFsSink,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -732,6 +746,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         params.parent.clone(),
         params.followups.clone(),
         params.subagent_events.clone(),
+        params.fs_reader.clone(),
         params.readonly,
     );
     let mut builder = Agent::builder()
@@ -808,6 +823,7 @@ impl AgentRuntime {
                 parent: parent.clone(),
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
+                fs_reader: None,
             },
         )?;
         let fallback = fallback_for(config, &provider, &model);
@@ -916,6 +932,7 @@ impl AgentRuntime {
                 parent: parent.clone(),
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
+                fs_reader: None,
             },
         )?;
         let mut g = self.inner.lock();
@@ -953,6 +970,7 @@ impl AgentRuntime {
                 parent: parent.clone(),
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
+                fs_reader: None,
             },
         )?;
         let fallback = fallback_for(&config, provider, model);

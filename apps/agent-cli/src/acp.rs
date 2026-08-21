@@ -1090,7 +1090,7 @@ impl AcpServer {
     /// `provider`/`model` are the concrete selection to run on — normally the
     /// session's, or a combo fallback entry during a transparent retry.
     fn build_agent(
-        &self,
+        self: &Arc<Self>,
         session: &Arc<Mutex<AcpSession>>,
         cancel_token: CancellationToken,
         provider: &str,
@@ -1110,6 +1110,9 @@ impl AcpServer {
         // The ACP permission flow is not wired to cersei's InteractivePolicy
         // (permission responses never reach the runner), so only policies that
         // decide autonomously are offered.
+        // The agent's Read tool consults this server (the ACP client's fs)
+        // before the local disk, so unsaved editor buffers are visible.
+        let fs_reader: Arc<dyn crate::subagents::AcpFs> = Arc::clone(self) as Arc<_>;
         providers::build_agent(
             &resolved,
             providers::BuildParams {
@@ -1123,6 +1126,7 @@ impl AcpServer {
                 followups: Arc::new(parking_lot::Mutex::new(Vec::new())),
                 // No TUI consumer for sub-agent activity in ACP mode.
                 subagent_events: None,
+                fs_reader: Some(fs_reader),
             },
         )
     }
@@ -1482,6 +1486,39 @@ impl AcpServer {
             }
             _ => {}
         }
+    }
+}
+
+/// Lets the agent's Read tool reach the ACP client's filesystem (unsaved
+/// editor buffers) via the same `fs/read_text_file` request path. The session
+/// id is supplied by the `ToolContext` at execute time.
+#[async_trait::async_trait]
+impl crate::subagents::AcpFs for AcpServer {
+    fn supports_read_text_file(&self) -> bool {
+        self.client_fs.lock().read_text_file
+    }
+
+    async fn read_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<String> {
+        self.read_text_file(session_id, path, line, limit).await
+    }
+
+    fn supports_write_text_file(&self) -> bool {
+        self.client_fs.lock().write_text_file
+    }
+
+    async fn write_text_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        self.write_text_file(session_id, path, content).await
     }
 }
 
