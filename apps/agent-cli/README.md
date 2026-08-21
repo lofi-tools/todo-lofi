@@ -215,6 +215,27 @@ freebuff agent's surface: file `read`/`write`/`edit`, `glob`/`grep` (ripgrep)
 and code search, `bash`, `web search`/`read_url`/`ReadDocs` (Context7 library
 docs), and `SyntheticOutput` (structured output).
 
+## Sub-agents
+
+Like freebuff's built-in agents, the agent can delegate focused sub-tasks to
+specialized sub-agents via the `spawn_agents` tool (listed in its system
+prompt, with when-to-spawn guidance for each). Sub-agents run in parallel,
+each with its own system prompt, tool set, and a fresh provider session on the
+same model. The catalog (`src/subagents.rs`):
+
+| Agent id         | Tool set                                   | When to spawn                     |
+|------------------|--------------------------------------------|-----------------------------------|
+| `researcher-web` | `WebSearch`, `WebFetch`                    | Answers depending on current web info |
+| `researcher-docs`| `ReadDocs` (Context7)                      | Library/framework API questions   |
+| `code-searcher`  | (mechanical — runs `searchQueries` in `params` directly, no LLM) | Find where a symbol/pattern appears |
+| `code-reviewer`  | none (reviews the recent changes in the parent conversation) | After significant file changes |
+
+Each agent also ends its response with a `suggest_followups` tool call; the
+suggestions are rendered as a "Suggested next steps" list in the TUI and in
+`-p` mode. Read-only sessions (ACP `readonly` mode) don't get `spawn_agents`
+since sub-agents run with full permissions. Sub-agent runs are capped at 120
+seconds so a stuck agent can't hang the parent run.
+
 ## ACP server
 
 `agent-cli --acp` implements the Agent Client Protocol v1 over stdio

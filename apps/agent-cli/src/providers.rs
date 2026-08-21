@@ -40,11 +40,15 @@ pub struct Provider {
 
 /// The full tool set for the agent: cersei's coding tools (file
 /// read/write/edit, glob/grep, bash, web fetch/search — the pi.dev-style
-/// basics) plus the `ReadDocs` (Context7 library docs) and `SyntheticOutput`
-/// (structured output) tools, matching the freebuff agent's tool surface
-/// (`read_files`/`write_file`/`str_replace`, `code_search`/`find_files`,
-/// `run_terminal_command`, `web_search`/`read_docs`/`read_url`, `set_output`).
-pub fn agent_tools() -> Vec<Box<dyn cersei::tools::Tool>> {
+/// basics) plus the `ReadDocs` (Context7 library docs), `SyntheticOutput`
+/// (structured output), `spawn_agents` (freebuff-style sub-agents), and
+/// `suggest_followups` tools — matching the freebuff agent's tool surface.
+pub fn agent_tools(
+    resolved: &Resolved,
+    parent: crate::subagents::ParentHandle,
+    followups: crate::subagents::FollowupSink,
+    readonly: bool,
+) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
     // passthrough, per-file and global result caps — freebuff-style).
@@ -52,6 +56,15 @@ pub fn agent_tools() -> Vec<Box<dyn cersei::tools::Tool>> {
     tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
+    tools.push(Box::new(crate::subagents::SuggestFollowupsTool::new(followups)));
+    // Read-only sessions (ACP readonly mode) can't spawn sub-agents: the
+    // sub-agents run with AllowAll and could modify files.
+    if !readonly {
+        tools.push(Box::new(crate::subagents::SpawnAgentsTool::new(
+            resolved.clone(),
+            parent,
+        )));
+    }
     tools
 }
 
@@ -70,10 +83,14 @@ pub struct BuildParams {
     pub max_turns: u32,
     pub session_id: Option<String>,
     pub messages: Vec<Message>,
-    pub tools: Vec<Box<dyn cersei::tools::Tool>>,
     pub cancel_token: CancellationToken,
     /// Use a read-only permission policy (denies modifying/executing tools).
     pub readonly: bool,
+    /// Filled with a weak handle to the built agent, so sub-agents with
+    /// `include_message_history` can inherit the parent conversation.
+    pub parent: crate::subagents::ParentHandle,
+    /// Sink where the `suggest_followups` tool stores suggestions.
+    pub followups: crate::subagents::FollowupSink,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -477,26 +494,33 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         .build()
         .context("failed to build provider")?;
 
+    let tools = agent_tools(resolved, params.parent.clone(), params.followups.clone(), params.readonly);
     let mut builder = Agent::builder()
         .provider(provider)
         .model(&resolved.model)
         .max_turns(params.max_turns)
         .working_dir(params.working_dir)
         .cancel_token(params.cancel_token)
-        .with_messages(params.messages);
+        .with_messages(params.messages)
+        .tools(tools);
     if let Some(session_id) = params.session_id {
         builder = builder.session_id(session_id);
-    }
-    if !params.tools.is_empty() {
-        builder = builder.tools(params.tools);
     }
     builder = if params.readonly {
         builder.permission_policy(AllowReadOnly)
     } else {
-        builder.permission_policy(AllowAll)
+        // The spawner system prompt lists the sub-agents and when to spawn
+        // them (freebuff's prompt-encoded workflow). Read-only sessions skip
+        // it since they can't spawn sub-agents.
+        builder
+            .permission_policy(AllowAll)
+            .system_prompt(crate::subagents::spawner_system_prompt())
     };
 
-    Ok(Arc::new(builder.build().context("failed to build agent")?))
+    let agent = Arc::new(builder.build().context("failed to build agent")?);
+    // Make the built agent visible to sub-agents that inherit history.
+    *params.parent.lock() = Some(Arc::downgrade(&agent));
+    Ok(agent)
 }
 
 // ─── Runtime agent holder (TUI) ─────────────────────────────────────────────
@@ -512,12 +536,16 @@ struct AgentRuntimeInner {
     provider: String,
     model: String,
     config: AppConfig,
+    parent: crate::subagents::ParentHandle,
+    followups: crate::subagents::FollowupSink,
 }
 
 impl AgentRuntime {
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let (provider, model) = default_selection(config)?;
         let resolved = resolve(config, &provider, &model)?;
+        let parent = Arc::new(Mutex::new(None));
+        let followups = Arc::new(Mutex::new(Vec::new()));
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -525,9 +553,10 @@ impl AgentRuntime {
                 max_turns: config.max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
+                parent: parent.clone(),
+                followups: followups.clone(),
             },
         )?;
         Ok(Self {
@@ -536,6 +565,8 @@ impl AgentRuntime {
                 provider,
                 model,
                 config: config.clone(),
+                parent,
+                followups,
             }),
             fallback: FallbackManager::new(config),
         })
@@ -543,6 +574,12 @@ impl AgentRuntime {
 
     pub fn agent(&self) -> Arc<Agent> {
         self.inner.lock().agent.clone()
+    }
+
+    /// Drain the followup suggestions collected by the `suggest_followups`
+    /// tool during the last run.
+    pub fn take_followups(&self) -> Vec<crate::subagents::Followup> {
+        std::mem::take(&mut *self.inner.lock().followups.lock())
     }
 
     pub fn current(&self) -> (String, String) {
@@ -580,9 +617,15 @@ impl AgentRuntime {
     /// Rebuild the agent on a different provider, preserving the conversation
     /// (minus the failed run's just-pushed prompt).
     pub fn fallback_to(&self, provider: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns) = {
+        let (config, working_dir, max_turns, parent, followups) = {
             let g = self.inner.lock();
-            (g.config.clone(), g.config.working_dir.clone(), g.config.max_turns)
+            (
+                g.config.clone(),
+                g.config.working_dir.clone(),
+                g.config.max_turns,
+                g.parent.clone(),
+                g.followups.clone(),
+            )
         };
         let model = default_model(&config, provider)?;
         let resolved = resolve(&config, provider, &model)?;
@@ -595,9 +638,10 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages,
-                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
+                parent: parent.clone(),
+                followups: followups.clone(),
             },
         )?;
         let mut g = self.inner.lock();
@@ -609,9 +653,15 @@ impl AgentRuntime {
 
     /// Rebuild the agent with a new provider/model.
     pub fn switch(&self, provider: &str, model: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns) = {
+        let (config, working_dir, max_turns, parent, followups) = {
             let g = self.inner.lock();
-            (g.config.clone(), g.config.working_dir.clone(), g.config.max_turns)
+            (
+                g.config.clone(),
+                g.config.working_dir.clone(),
+                g.config.max_turns,
+                g.parent.clone(),
+                g.followups.clone(),
+            )
         };
         let resolved = resolve(&config, provider, model)?;
         let agent = build_agent(
@@ -621,9 +671,10 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                tools: agent_tools(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
+                parent: parent.clone(),
+                followups: followups.clone(),
             },
         )?;
         let mut g = self.inner.lock();

@@ -905,9 +905,10 @@ impl AcpServer {
                 max_turns: self.max_turns,
                 session_id: Some(session_id),
                 messages,
-                tools: providers::agent_tools(),
                 cancel_token,
                 readonly: mode == "readonly",
+                parent: Arc::new(parking_lot::Mutex::new(None)),
+                followups: Arc::new(parking_lot::Mutex::new(Vec::new())),
             },
         )
     }

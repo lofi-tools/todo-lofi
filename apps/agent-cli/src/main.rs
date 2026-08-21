@@ -11,6 +11,7 @@ pub mod cli_commands;
 pub mod config;
 pub mod providers;
 pub mod signals;
+pub mod subagents;
 pub mod tools;
 pub mod tui;
 
@@ -147,6 +148,16 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
         }
     }
     println!();
+
+    // Render the followup suggestions the agent proposed via the
+    // suggest_followups tool (freebuff renders these as clickable cards).
+    let followups = runtime.take_followups();
+    if !followups.is_empty() {
+        println!("\nSuggested next steps:");
+        for followup in followups {
+            println!("  • {} — {}", followup.label, followup.prompt);
+        }
+    }
     Ok(())
 }
 

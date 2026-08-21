@@ -130,7 +130,7 @@ pub async fn run(
                             false
                         };
                         if !fell_back {
-                            handle_agent_event(&mut state, agent_event);
+                            handle_agent_event(&mut state, &runtime, agent_event);
                         }
                     }
                     None => {
@@ -647,7 +647,7 @@ fn handle_model_picker_key(
     None
 }
 
-fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
+fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: AgentEvent) {
     match event {
         AgentEvent::TextDelta(text) => {
             state.streaming_text.push_str(&text);
@@ -724,6 +724,17 @@ fn handle_agent_event(state: &mut AppState, event: AgentEvent) {
         AgentEvent::Complete(_) => {
             state.commit_turn();
             state.is_streaming = false;
+            // Render the followup suggestions the agent proposed via the
+            // suggest_followups tool.
+            let followups = runtime.take_followups();
+            if !followups.is_empty() {
+                let body = followups
+                    .iter()
+                    .map(|f| format!("• {} — {}", f.label, f.prompt))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                state.push_system(format!("Suggested next steps:\n{body}"));
+            }
         }
         _ => {}
     }
