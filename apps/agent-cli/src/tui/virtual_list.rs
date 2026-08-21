@@ -74,6 +74,25 @@ impl VirtualList {
         self.committed_items = items;
     }
 
+    /// The rendered text of the item at `idx` (its spans joined in order), or
+    /// an empty string when `idx` is out of range. Used for selection
+    /// hit-testing and copying.
+    pub fn row_text(&self, idx: usize) -> String {
+        let item = if idx < self.committed_items.len() {
+            self.committed_items.get(idx)
+        } else {
+            self.streaming_items.get(idx - self.committed_items.len())
+        };
+        item.map(|it| {
+            it.line
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+    }
+
     /// Set streaming items (rebuilt every frame).
     pub fn set_streaming(&mut self, items: Vec<VItem>) {
         self.streaming_items = items;
@@ -125,8 +144,15 @@ impl VirtualList {
         self.scroll_offset = self.max_offset();
     }
 
-    /// Render only visible items directly to the buffer.
-    pub fn render(&self, area: Rect, buf: &mut Buffer) {
+    /// Render only visible items directly to the buffer. `selection` is the
+    /// normalized output selection `(start_row, start_col, end_row, end_col)`;
+    /// the selected bytes of overlapping rows get the REVERSED modifier.
+    pub fn render(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        selection: Option<(u16, usize, u16, usize)>,
+    ) {
         let offset = self.effective_offset();
         let total = self.total_height();
         let committed_len = self.committed_items.len() as u16;
@@ -183,8 +209,21 @@ impl VirtualList {
                 height: 1,
             };
 
+            // Highlight the selected bytes of this row, if it overlaps.
+            let line = if let Some((start_row, start_col, end_row, end_col)) = selection {
+                if idx >= start_row && idx <= end_row {
+                    let row_start_col = if idx == start_row { start_col } else { 0 };
+                    let row_end_col = if idx == end_row { end_col } else { usize::MAX };
+                    highlight_line(&item.line, row_start_col, row_end_col)
+                } else {
+                    item.line.clone()
+                }
+            } else {
+                item.line.clone()
+            };
+
             // Render line directly to buffer
-            let para = Paragraph::new(vec![item.line.clone()]);
+            let para = Paragraph::new(vec![line]);
             para.render(line_area, buf);
 
             screen_y += 1;
@@ -192,8 +231,87 @@ impl VirtualList {
     }
 }
 
+/// A copy of `line` with bytes `[start..end)` (in the joined span text)
+/// styled with the REVERSED modifier; everything else keeps its style.
+fn highlight_line(line: &Line<'static>, start: usize, end: usize) -> Line<'static> {
+    let mut spans_out = Vec::new();
+    let mut pos = 0usize;
+    for span in &line.spans {
+        let text = span.content.to_string();
+        let span_end = pos + text.len();
+        let a = start.saturating_sub(pos).min(text.len());
+        let b = end.saturating_sub(pos).min(text.len());
+        if a >= b {
+            // Fully outside the selection (or zero-width overlap).
+            spans_out.push(span.clone());
+        } else {
+            if a > 0 {
+                spans_out.push(Span::styled(text[..a].to_string(), span.style));
+            }
+            spans_out.push(Span::styled(
+                text[a..b].to_string(),
+                span.style.add_modifier(Modifier::REVERSED),
+            ));
+            if b < text.len() {
+                spans_out.push(Span::styled(text[b..].to_string(), span.style));
+            }
+        }
+        pos = span_end;
+    }
+    Line::from(spans_out)
+}
+
 impl Default for VirtualList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn row_text_joins_spans_in_order() {
+        let mut list = VirtualList::new();
+        list.set_committed(vec![VItem::new(Line::from(vec![
+            Span::raw("ab"),
+            Span::styled("cd", Style::default().fg(Color::Red)),
+        ]))]);
+        list.set_streaming(vec![VItem::new(Line::from("ef"))]);
+        assert_eq!(list.row_text(0), "abcd");
+        assert_eq!(list.row_text(1), "ef");
+        assert_eq!(list.row_text(2), ""); // out of range
+    }
+
+    #[test]
+    fn highlight_line_marks_only_selected_bytes() {
+        let line = Line::from(vec![Span::raw("hello"), Span::raw(" world")]);
+        let out = highlight_line(&line, 2, 8);
+        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["he", "llo", " wo", "rld"]);
+        assert!(out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(out.spans[2].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[3].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn highlight_line_handles_zero_width_and_whole_line() {
+        let line = Line::from(vec![Span::raw("hello"), Span::raw(" world")]);
+        // Zero-width selection changes nothing.
+        let unchanged = highlight_line(&line, 5, 5);
+        let texts: Vec<String> = unchanged
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(texts, vec!["hello", " world"]);
+        // Whole-line selection marks every span.
+        let all = highlight_line(&line, 0, 11);
+        assert!(all
+            .spans
+            .iter()
+            .all(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
     }
 }

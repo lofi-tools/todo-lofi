@@ -10,7 +10,7 @@ use crate::{
     providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, ModelPickerState, Overlay, SidePanelTab, ToolCall, ToolStatus},
+        app::{AppState, ModelPickerState, Overlay, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
@@ -23,6 +23,7 @@ use ratatui::prelude::Rect;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use unicode_width::UnicodeWidthChar;
 
 const TICK_RATE: Duration = Duration::from_millis(16); // ~62 FPS
 
@@ -178,6 +179,7 @@ pub async fn run(
                         Event::Paste(text) if !state.is_streaming => {
                             state.input.insert_str(state.cursor_pos, &text);
                             state.cursor_pos += text.len();
+                            state.selection = None;
                             state.refresh_command_selector();
                             state.dirty = true;
                         }
@@ -277,6 +279,13 @@ fn handle_key(
     cancel_token: &CancellationToken,
     runtime: &Arc<AgentRuntime>,
 ) -> Option<String> {
+    // Copy the active selection (Cmd+C on macOS, Ctrl+Shift+C elsewhere). This
+    // works in every mode, including while the side panel is focused.
+    if is_copy_shortcut(key.modifiers, key.code) {
+        copy_selection(state);
+        return None;
+    }
+
     // Model picker gets full key handling while open.
     if matches!(state.overlay, Overlay::ModelPicker(_)) {
         return handle_model_picker_key(state, key, runtime);
@@ -351,6 +360,7 @@ fn handle_key(
 
         // Ctrl+C — cancel or quit
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            state.selection = None;
             if state.is_streaming {
                 cancel_token.cancel();
                 state.is_streaming = false;
@@ -409,16 +419,19 @@ fn handle_key(
         (KeyModifiers::ALT, KeyCode::Enter) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.selection = None;
             state.refresh_command_selector();
         }
         (KeyModifiers::SHIFT, KeyCode::Enter) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.selection = None;
             state.refresh_command_selector();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('j')) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, '\n');
             state.cursor_pos += 1;
+            state.selection = None;
             state.refresh_command_selector();
         }
 
@@ -430,6 +443,7 @@ fn handle_key(
             }
 
             state.input.clear();
+            state.selection = None;
             state.cursor_pos = 0;
             state.command_selector = None;
 
@@ -451,12 +465,14 @@ fn handle_key(
                 state.input.remove(char_start);
                 state.cursor_pos = char_start;
             }
+            state.selection = None;
             state.refresh_command_selector();
         }
 
         // Delete — remove the char at the cursor
         (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
             state.input.remove(state.cursor_pos);
+            state.selection = None;
             state.refresh_command_selector();
         }
 
@@ -467,6 +483,7 @@ fn handle_key(
             {
                 state.cursor_pos = char_start;
             }
+            state.selection = None;
             state.refresh_command_selector();
         }
 
@@ -475,6 +492,7 @@ fn handle_key(
             if let Some(ch) = state.input[state.cursor_pos..].chars().next() {
                 state.cursor_pos += ch.len_utf8();
             }
+            state.selection = None;
             state.refresh_command_selector();
         }
 
@@ -490,6 +508,7 @@ fn handle_key(
                 state.history_index = Some(idx);
                 state.input = state.input_history[idx].clone();
                 state.cursor_pos = state.input.len();
+                state.selection = None;
                 state.refresh_command_selector();
             }
         }
@@ -510,6 +529,7 @@ fn handle_key(
                     state.input.clear();
                     state.cursor_pos = 0;
                 }
+                state.selection = None;
                 state.refresh_command_selector();
             } else if state.input.is_empty() {
                 state.scroll.scroll_down(1);
@@ -528,6 +548,7 @@ fn handle_key(
         (_, KeyCode::Char(c)) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, c);
             state.cursor_pos += c.len_utf8();
+            state.selection = None;
             state.refresh_command_selector();
         }
 
@@ -537,8 +558,64 @@ fn handle_key(
     None
 }
 
-/// Handle mouse events: scroll wheel scrolls the output zone; a left click
-/// inside the input box moves the cursor to the clicked character.
+/// Whether `key` is the copy shortcut: Cmd+C on macOS, Ctrl+Shift+C elsewhere.
+fn is_copy_shortcut(modifiers: KeyModifiers, code: KeyCode) -> bool {
+    if code != KeyCode::Char('c') {
+        return false;
+    }
+    // Compare the full modifier bitmask: an or-pattern like
+    // `(CONTROL | SHIFT, _)` would match Ctrl+C or Shift+C, not the combo.
+    modifiers == KeyModifiers::SUPER
+        || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+}
+
+/// Copy the current selection to the terminal clipboard, if there is one.
+fn copy_selection(state: &AppState) {
+    if let Some(text) = state.selection_text() {
+        write_osc52_clipboard(&text);
+    }
+}
+
+/// Write `text` to the terminal clipboard via the OSC 52 escape sequence
+/// (supported by iTerm2, kitty, WezTerm, Alacritty, VSCode, tmux, ...).
+fn write_osc52_clipboard(text: &str) {
+    use std::io::Write;
+    let encoded = base64_encode(text.as_bytes());
+    let _ = std::io::stdout().write_all(format!("\x1b]52;c;{encoded}\x1b\\").as_bytes());
+    let _ = std::io::stdout().flush();
+}
+
+/// Minimal standard base64 encoder (RFC 4648) for OSC 52 payloads.
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Handle mouse events: the scroll wheel scrolls the focused area; a left
+/// click-drag selects text in the output or input box (a plain click in the
+/// input box also moves the cursor to the clicked character).
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -567,17 +644,81 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         _ => {}
     }
 
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+    if state.overlay != Overlay::None {
         return;
     }
-    if state.is_streaming || state.overlay != Overlay::None {
-        return;
+
+    match mouse.kind {
+        // Left button down — start a selection in the widget under the cursor.
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(pos) = output_click_pos(state, mouse.row, mouse.column) {
+                state.selection = Some(Selection {
+                    target: SelectionTarget::Output,
+                    anchor: pos,
+                    active: pos,
+                    dragging: true,
+                });
+                state.dirty = true;
+            } else if let Some(pos) = input_click_pos(state, mouse.row, mouse.column) {
+                if !state.is_streaming && pos != state.cursor_pos {
+                    state.cursor_pos = pos;
+                }
+                state.selection = Some(Selection {
+                    target: SelectionTarget::Input,
+                    anchor: SelectionPoint::Input(pos),
+                    active: SelectionPoint::Input(pos),
+                    dragging: true,
+                });
+                state.refresh_command_selector();
+                state.dirty = true;
+            } else {
+                // Click outside both boxes clears any selection.
+                state.selection = None;
+                state.dirty = true;
+            }
+        }
+        // Drag — extend the active endpoint of the current selection.
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(target) = state.selection.as_ref().map(|s| s.target) else {
+                return;
+            };
+            match target {
+                SelectionTarget::Output => {
+                    if let Some(pos) = output_click_pos(state, mouse.row, mouse.column) {
+                        if let Some(sel) = state.selection.as_mut() {
+                            sel.active = pos;
+                        }
+                        state.dirty = true;
+                    }
+                }
+                SelectionTarget::Input => {
+                    if let Some(pos) = input_click_pos(state, mouse.row, mouse.column) {
+                        if let Some(sel) = state.selection.as_mut() {
+                            sel.active = SelectionPoint::Input(pos);
+                        }
+                        if !state.is_streaming && pos != state.cursor_pos {
+                            state.cursor_pos = pos;
+                        }
+                        state.dirty = true;
+                    }
+                }
+            }
+        }
+        // Release — the selection stays (until the next click) so it can be copied.
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(sel) = state.selection.as_mut() {
+                sel.dragging = false;
+            }
+        }
+        _ => {}
     }
-    let Some((x, y, w, h)) = state.input_area else {
-        return;
-    };
+}
+
+/// Map a click position to an input-box byte offset, if it lands inside the box.
+fn input_click_pos(state: &AppState, row: u16, col: u16) -> Option<usize> {
+    let (x, y, w, h) = state.input_area?;
     if w < 4 || h < 2 {
-        return;
+        return None;
     }
     // The input is drawn inside a 1-cell rounded border.
     let inner = Rect {
@@ -586,20 +727,48 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         width: w.saturating_sub(2),
         height: h.saturating_sub(2),
     };
-    let (row, col) = (mouse.row, mouse.column);
     if row < inner.y || row >= inner.bottom() || col < inner.x || col >= inner.right() {
-        return;
+        return None;
     }
     let prompt = if state.is_streaming { "  " } else { "> " };
     let usable = (inner.width as usize).saturating_sub(prompt.len());
     let content_row = (row - inner.y) as usize + state.input_scroll as usize;
     let content_col = (col - inner.x) as usize;
-    let pos = input::char_pos_at_click(&state.input, prompt, usable, content_row, content_col);
-    if pos != state.cursor_pos {
-        state.cursor_pos = pos;
-        state.refresh_command_selector();
-        state.dirty = true;
+    Some(input::char_pos_at_click(
+        &state.input,
+        prompt,
+        usable,
+        content_row,
+        content_col,
+    ))
+}
+
+/// Map a click position to an output `(row, byte offset)` pair, if it lands
+/// inside the messages box. The row is clamped to the available content and
+/// the byte offset lands on a char boundary.
+fn output_click_pos(state: &AppState, row: u16, col: u16) -> Option<SelectionPoint> {
+    let (x, y, w, h) = state.messages_area?;
+    if row < y || row >= y + h || col < x || col >= x + w {
+        return None;
     }
+    let total = state.virtual_list.total_height();
+    if total == 0 {
+        return None;
+    }
+    let offset = state.virtual_list.effective_offset();
+    let idx = ((offset as u32 + (row - y) as u32).min(total as u32 - 1)) as usize;
+    let text = state.virtual_list.row_text(idx);
+    let col_in = (col - x) as usize;
+    // Walk chars accumulating display width to land on a char boundary.
+    let mut width = 0usize;
+    for (i, ch) in text.char_indices() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > col_in {
+            return Some(SelectionPoint::Output(idx, i));
+        }
+        width += ch_width;
+    }
+    Some(SelectionPoint::Output(idx, text.len()))
 }
 
 /// Handle keys while the fuzzy `/` command selector is open.
@@ -1481,5 +1650,112 @@ mod tests {
         assert_eq!(truncate("héllo", 4), "hél...");
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn base64_encodes_standard_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        // Non-ASCII bytes round-trip through the same alphabet.
+        assert_eq!(base64_encode("—".as_bytes()), "4oCU");
+    }
+
+    #[test]
+    fn copy_shortcut_matches_platform_conventions() {
+        use crossterm::event::KeyModifiers as M;
+        assert!(is_copy_shortcut(M::SUPER, KeyCode::Char('c'))); // macOS Cmd+C
+        assert!(is_copy_shortcut(M::CONTROL | M::SHIFT, KeyCode::Char('c'))); // Ctrl+Shift+C
+        // Plain Ctrl+C keeps its existing cancel/quit/clear meaning.
+        assert!(!is_copy_shortcut(M::CONTROL, KeyCode::Char('c')));
+        assert!(!is_copy_shortcut(M::SUPER, KeyCode::Char('v')));
+        assert!(!is_copy_shortcut(KeyModifiers::NONE, KeyCode::Char('c')));
+    }
+
+    fn left_down(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn left_drag(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn left_up(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_drag_selects_input_text_and_follows_cursor() {
+        let mut s = state();
+        s.input = "hello world".into();
+        s.input_area = Some((0, 10, 24, 4)); // inner box: x=1..23, y=11..13, usable 20
+
+        // Click inside the input, then drag right.
+        handle_mouse(&mut s, left_down(11, 1));
+        assert_eq!(s.cursor_pos, 0);
+        handle_mouse(&mut s, left_drag(11, 7));
+        handle_mouse(&mut s, left_up(11, 7));
+
+        let sel = s.selection.expect("selection started");
+        assert_eq!(sel.target, SelectionTarget::Input);
+        assert!(!sel.dragging);
+        assert_eq!(s.cursor_pos, 4); // cursor follows the drag endpoint
+        assert_eq!(s.selection_text().as_deref(), Some("hell"));
+
+        // A click outside both boxes clears the old selection.
+        s.input_area = None;
+        s.messages_area = Some((0, 0, 10, 10));
+        handle_mouse(&mut s, left_down(20, 30));
+        assert!(s.selection.is_none());
+    }
+
+    #[test]
+    fn mouse_drag_selects_output_text_across_rows() {
+        use crate::tui::virtual_list::VItem;
+        use ratatui::prelude::*;
+
+        let mut s = state();
+        s.messages_area = Some((2, 0, 20, 10));
+        // The app sets the viewport every frame; without it the sticky-bottom
+        // offset would clamp every click to the last row.
+        s.virtual_list.set_viewport(10);
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("line one")),
+            VItem::new(Line::from("line two")),
+        ]);
+
+        handle_mouse(&mut s, left_down(0, 3));
+        handle_mouse(&mut s, left_drag(1, 9));
+        handle_mouse(&mut s, left_up(1, 9));
+
+        let sel = s.selection.expect("selection started");
+        assert_eq!(sel.target, SelectionTarget::Output);
+        assert_eq!(s.selection_text().as_deref(), Some("ine one\nline tw"));
+
+        // A click outside both boxes clears the selection.
+        handle_mouse(&mut s, left_down(5, 30));
+        assert!(s.selection.is_none());
     }
 }

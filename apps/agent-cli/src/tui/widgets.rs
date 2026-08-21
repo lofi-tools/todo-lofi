@@ -589,6 +589,7 @@ pub mod input {
     /// One visual row of the editor. `start..end` is the byte range of the
     /// input string that this row renders (excluding its prefix). Rows are
     /// contiguous in display space, skipping the `\n` bytes of the input.
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct VisualRow {
         /// Whether this is the very first row (it gets the `> ` prompt prefix).
         pub is_first: bool,
@@ -647,14 +648,37 @@ pub mod input {
         };
         state.input_scroll = scroll;
 
+        // Highlight the selected bytes (if any) with inverse video.
+        let sel = state.input_selection();
         let lines: Vec<Line> = rows
             .iter()
             .map(|row| {
-                Line::raw(format!(
-                    "{}{}",
-                    row.prefix(prompt),
-                    &state.input[row.start..row.end]
-                ))
+                let content = &state.input[row.start..row.end];
+                let mut spans = vec![Span::raw(row.prefix(prompt))];
+                let highlight = sel.map(|(sel_start, sel_end)| {
+                    let rel_start = sel_start.saturating_sub(row.start).min(content.len());
+                    let rel_end = sel_end.saturating_sub(row.start).min(content.len());
+                    (rel_start, rel_end)
+                });
+                if let Some((rel_start, rel_end)) = highlight {
+                    if rel_start < rel_end {
+                        if rel_start > 0 {
+                            spans.push(Span::raw(&content[..rel_start]));
+                        }
+                        spans.push(Span::styled(
+                            &content[rel_start..rel_end],
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        ));
+                        if rel_end < content.len() {
+                            spans.push(Span::raw(&content[rel_end..]));
+                        }
+                    } else {
+                        spans.push(Span::raw(content));
+                    }
+                } else {
+                    spans.push(Span::raw(content));
+                }
+                Line::from(spans)
             })
             .collect();
         let widget = Paragraph::new(lines)
@@ -724,9 +748,11 @@ pub mod input {
             let mut width = 0usize;
             let mut end = start;
             let mut last_space_end = None;
+            let mut overflow_char: Option<char> = None;
             for (i, ch) in line[start..].char_indices() {
                 let w = ch.width().unwrap_or(0);
                 if width + w > usable {
+                    overflow_char = Some(ch);
                     break;
                 }
                 width += w;
@@ -735,12 +761,18 @@ pub mod input {
                     last_space_end = Some(end);
                 }
             }
-            // Break after the last space that fit (keeping it at the end of
-            // this row) so the next row starts with a real word.
-            if let Some(space_end) = last_space_end {
-                if space_end < end && space_end > start {
-                    end = space_end;
-                }
+            // Only break at a space when the row actually overflowed — a line
+            // that fits must stay on one row, otherwise typing any char after
+            // a space jumps the cursor to the next line. A space typed at a
+            // full row wraps alone (starts the next row) instead of pulling
+            // earlier text down.
+            if overflow_char.is_some()
+                && let Some(space_end) = last_space_end
+                && space_end < end
+                && space_end > start
+                && overflow_char != Some(' ')
+            {
+                end = space_end;
             }
             if end == start {
                 // A single char wider than the whole row: emit it alone so we
@@ -905,6 +937,23 @@ pub mod input {
         }
 
         #[test]
+        fn no_early_break_after_space_when_line_fits() {
+            // A line that fits must stay on one row, even right after a space
+            // (this used to jump the cursor to the next line when typing).
+            assert_eq!(wrap_segment("hi t", 6), vec![(0, 4)]);
+            assert_eq!(wrap_segment("hi the", 6), vec![(0, 6)]);
+            assert_eq!(wrap_segment("hello wor", 9), vec![(0, 9)]);
+        }
+
+        #[test]
+        fn space_at_full_row_wraps_alone() {
+            // "hi the" fills the row exactly; the space starts the next row
+            // instead of pulling "the" down with it.
+            assert_eq!(wrap_segment("hi the ", 6), vec![(0, 6), (6, 7)]);
+            assert_eq!(wrap_segment("aa bbb ", 6), vec![(0, 6), (6, 7)]);
+        }
+
+        #[test]
         fn layout_multi_line_and_empty() {
             assert_eq!(rows("ab\ncd", 20), vec![(true, 0, 2), (false, 3, 5)]);
             assert_eq!(rows("", 20), vec![(true, 0, 0)]);
@@ -929,10 +978,21 @@ pub mod input {
 
         #[test]
         fn cursor_position_wrapped_lines() {
-            // Cursor at the wrap point renders at the start of the continuation.
-            assert_eq!(cursor("hello world", 6), (1, 2));
+            // A line that fits never wraps (it used to split after the space
+            // and put the cursor on a phantom second row).
+            assert_eq!(cursor("hello world", 6), (0, 8)); // after the space
             assert_eq!(cursor("hello world", 5), (0, 7)); // after 'hello'
-            assert_eq!(cursor("hello world", 11), (1, 7)); // after 'world'
+            assert_eq!(cursor("hello world", 11), (0, 13)); // after 'world'
+            // At a genuinely narrow width the wrap point renders at the start
+            // of the continuation.
+            let rows = layout("hello world foo", 6);
+            assert_eq!(rows, vec![
+                VisualRow { is_first: true, start: 0, end: 6 },
+                VisualRow { is_first: false, start: 6, end: 12 },
+                VisualRow { is_first: false, start: 12, end: 15 },
+            ]);
+            assert_eq!(cursor_in_rows(&rows, "hello world foo", 6), (1, 2));
+            assert_eq!(cursor_in_rows(&rows, "hello world foo", 12), (2, 2));
         }
 
         #[test]
@@ -963,6 +1023,7 @@ pub mod input {
             assert_eq!(visual_lines("ab\ncd", "> ", 20), vec!["> ab", "  cd"]);
             assert_eq!(visual_lines("", "> ", 20), vec!["> "]);
         }
+
     }
 }
 pub mod messages {
@@ -972,7 +1033,7 @@ pub mod messages {
     //! streaming content is rebuilt every frame (only a few lines).
 
     use crate::tui::{
-        app::{AppState, TurnRole},
+        app::{AppState, Selection, SelectionTarget, TurnRole},
         theme::Theme,
         virtual_list::VItem,
         widgets::tool_call::render_tool_call,
@@ -982,8 +1043,23 @@ pub mod messages {
     pub fn render(f: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
         let width = area.width.saturating_sub(4);
 
+        // Remember where the messages box is so mouse drags can be mapped back
+        // to a text position.
+        state.messages_area = Some((area.x, area.y, area.width, area.height));
+
         // Rebuild committed items only when dirty or width changed
         if state.messages_dirty || state.virtual_list.width_changed(width) {
+            // Rebuilding shifts rows — a stale output selection would highlight
+            // the wrong text.
+            if matches!(
+                state.selection,
+                Some(Selection {
+                    target: SelectionTarget::Output,
+                    ..
+                })
+            ) {
+                state.selection = None;
+            }
             let committed = build_committed_lines(&state.turns, theme, width, state.frame_count);
             state.virtual_list.set_committed(committed);
             state.virtual_list.set_width(width);
@@ -1004,8 +1080,9 @@ pub mod messages {
         state.virtual_list.scroll_offset = state.scroll.effective_offset();
         state.virtual_list.sticky_bottom = state.scroll.sticky_bottom;
 
-        // Render visible items to buffer
-        state.virtual_list.render(area, f.buffer_mut());
+        // Render visible items to buffer, highlighting any output selection.
+        let sel = state.output_selection().map(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
+        state.virtual_list.render(area, f.buffer_mut(), sel);
     }
 
     /// Build lines for all committed turns (cached, not rebuilt per frame).

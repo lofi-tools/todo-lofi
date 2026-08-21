@@ -228,6 +228,44 @@ impl SidePanelTab {
     }
 }
 
+/// Which widget a mouse selection lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionTarget {
+    Input,
+    Output,
+}
+
+/// One endpoint of a mouse selection, in the coordinate space of the target
+/// widget's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionPoint {
+    /// Byte offset into `AppState::input`.
+    Input(usize),
+    /// (virtual-list row index, byte offset into that row's rendered text).
+    Output(usize, usize),
+}
+
+/// Mouse-driven text selection. `anchor` is where the drag started, `active`
+/// is the current drag endpoint; they are equal before any text is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub target: SelectionTarget,
+    pub anchor: SelectionPoint,
+    pub active: SelectionPoint,
+    /// True while the mouse button is held down.
+    pub dragging: bool,
+}
+
+/// A normalized output selection: rows `start_row..=end_row`, bytes
+/// `start_col..end_col` on the boundary rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputSelectionRange {
+    pub start_row: u16,
+    pub start_col: usize,
+    pub end_row: u16,
+    pub end_col: usize,
+}
+
 /// Full application state for the TUI.
 pub struct AppState {
     // ── Conversation ──
@@ -249,8 +287,12 @@ pub struct AppState {
     pub history_index: Option<usize>,
     /// Last drawn input box rect as (x, y, width, height) — for mouse hit-testing.
     pub input_area: Option<(u16, u16, u16, u16)>,
+    /// Last drawn messages (output) rect as (x, y, width, height) — for mouse hit-testing.
+    pub messages_area: Option<(u16, u16, u16, u16)>,
     /// Vertical scroll of the input content from the last frame — for mouse hit-testing.
     pub input_scroll: u16,
+    /// Active mouse text selection, if any.
+    pub selection: Option<Selection>,
 
     // ── Scroll + Virtual List ──
     pub scroll: ScrollState,
@@ -317,7 +359,9 @@ impl AppState {
             input_history: Vec::new(),
             history_index: None,
             input_area: None,
+            messages_area: None,
             input_scroll: 0,
+            selection: None,
             scroll: ScrollState::new(),
             virtual_list: crate::tui::virtual_list::VirtualList::new(),
             messages_dirty: true,
@@ -384,6 +428,97 @@ impl AppState {
             matches,
             selected,
         });
+    }
+
+    /// The selected byte range of the input, if the active selection targets it.
+    pub fn input_selection(&self) -> Option<(usize, usize)> {
+        let sel = self.selection.as_ref()?;
+        if sel.target != SelectionTarget::Input {
+            return None;
+        }
+        let (SelectionPoint::Input(anchor), SelectionPoint::Input(active)) = (sel.anchor, sel.active)
+        else {
+            return None;
+        };
+        Some((anchor.min(active), anchor.max(active)))
+    }
+
+    /// The normalized output selection range, if the active selection targets it.
+    pub fn output_selection(&self) -> Option<OutputSelectionRange> {
+        let sel = self.selection.as_ref()?;
+        if sel.target != SelectionTarget::Output {
+            return None;
+        }
+        let (SelectionPoint::Output(ar, ac), SelectionPoint::Output(br, bc)) = (sel.anchor, sel.active)
+        else {
+            return None;
+        };
+        let range = match ar.cmp(&br) {
+            std::cmp::Ordering::Less => OutputSelectionRange {
+                start_row: ar as u16,
+                start_col: ac,
+                end_row: br as u16,
+                end_col: bc,
+            },
+            std::cmp::Ordering::Greater => OutputSelectionRange {
+                start_row: br as u16,
+                start_col: bc,
+                end_row: ar as u16,
+                end_col: ac,
+            },
+            std::cmp::Ordering::Equal => OutputSelectionRange {
+                start_row: ar as u16,
+                start_col: ac.min(bc),
+                end_row: ar as u16,
+                end_col: ac.max(bc),
+            },
+        };
+        Some(range)
+    }
+
+    /// The selected text, if any (for copy). Output rows are joined with `\n`.
+    /// Returns None when nothing is selected or the selection is empty.
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        if sel.dragging {
+            return None;
+        }
+        match sel.target {
+            SelectionTarget::Input => {
+                let (start, end) = self.input_selection()?;
+                // The input may have shifted since the selection was made;
+                // snap to char boundaries so we never panic mid-character.
+                let start = self.input.floor_char_boundary(start.min(self.input.len()));
+                let end = self.input.floor_char_boundary(end.min(self.input.len()));
+                if start == end {
+                    return None;
+                }
+                Some(self.input[start..end].to_string())
+            }
+            SelectionTarget::Output => {
+                let range = self.output_selection()?;
+                let start_text = self.virtual_list.row_text(range.start_row as usize);
+                let start_col = start_text.floor_char_boundary(range.start_col.min(start_text.len()));
+                if range.start_row == range.end_row {
+                    let end_col =
+                        start_text.floor_char_boundary(range.end_col.min(start_text.len()));
+                    if start_col == end_col {
+                        return None;
+                    }
+                    return Some(start_text[start_col..end_col].to_string());
+                }
+                let mut parts = vec![start_text[start_col..].to_string()];
+                for row in (range.start_row + 1)..range.end_row {
+                    parts.push(self.virtual_list.row_text(row as usize));
+                }
+                let end_text = self.virtual_list.row_text(range.end_row as usize);
+                let end_col = end_text.floor_char_boundary(range.end_col.min(end_text.len()));
+                if end_col > 0 {
+                    parts.push(end_text[..end_col].to_string());
+                }
+                Some(parts.join("\n"))
+            }
+        }
     }
 
     /// Commit the current streaming text into a completed turn.
@@ -486,5 +621,74 @@ mod tests {
     #[test]
     fn non_match_returns_empty() {
         assert!(filter_commands("zzz-nope").is_empty());
+    }
+
+    #[test]
+    fn input_selection_normalizes_and_slices() {
+        let mut s = AppState::new("test-model", None);
+        s.input = "hello world".into();
+
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(2),
+            active: SelectionPoint::Input(7),
+            dragging: false,
+        });
+        assert_eq!(s.input_selection(), Some((2, 7)));
+        assert_eq!(s.selection_text().as_deref(), Some("llo w"));
+
+        // Dragging the other way normalizes to the same range.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(7),
+            active: SelectionPoint::Input(2),
+            dragging: false,
+        });
+        assert_eq!(s.input_selection(), Some((2, 7)));
+        assert_eq!(s.selection_text().as_deref(), Some("llo w"));
+
+        // A zero-width selection copies nothing.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(3),
+            active: SelectionPoint::Input(3),
+            dragging: false,
+        });
+        assert_eq!(s.selection_text(), None);
+
+        // Input selections never report an output range and vice versa.
+        assert_eq!(s.output_selection(), None);
+    }
+
+    #[test]
+    fn output_selection_joins_rows_with_newlines() {
+        let mut s = AppState::new("test-model", None);
+        s.virtual_list.set_committed(vec![
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("row one")),
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("row two")),
+        ]);
+
+        // Anchor at (1, 3), active at (0, 2) — normalizes to (0, 2)..(1, 3).
+        s.selection = Some(Selection {
+            target: SelectionTarget::Output,
+            anchor: SelectionPoint::Output(1, 3),
+            active: SelectionPoint::Output(0, 2),
+            dragging: false,
+        });
+        let range = s.output_selection().expect("range");
+        assert_eq!(
+            (range.start_row, range.start_col, range.end_row, range.end_col),
+            (0, 2, 1, 3)
+        );
+        assert_eq!(s.selection_text().as_deref(), Some("w one\nrow"));
+
+        // Same row: a simple slice.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Output,
+            anchor: SelectionPoint::Output(1, 1),
+            active: SelectionPoint::Output(1, 6),
+            dragging: false,
+        });
+        assert_eq!(s.selection_text().as_deref(), Some("ow tw"));
     }
 }
