@@ -564,20 +564,53 @@ pub mod header {
 }
 pub mod input {
     //! Input widget: multi-line textarea with wrapping and a rounded border.
+    //!
+    //! A single layout model ([`layout`]) is the source of truth for rendering,
+    //! cursor placement, and mouse hit-testing, so the cursor always lands where
+    //! the user expects no matter how the text was edited.
 
     use crate::tui::{app::AppState, theme::Theme};
     use ratatui::{
         prelude::*,
         widgets::{Block, Borders, BorderType, Paragraph},
     };
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     /// Minimum/maximum number of content lines (excluding the border).
     const MIN_CONTENT_LINES: u16 = 2;
     const MAX_CONTENT_LINES: u16 = 10;
     /// Height consumed by the rounded border (top + bottom).
     const BORDER_LINES: u16 = 2;
+    /// Prefix of the first row when editable.
+    const PROMPT: &str = "> ";
+    /// Prefix of continuation rows and all rows after the first logical line.
+    const CONTINUATION: &str = "  ";
 
-    pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
+    /// One visual row of the editor. `start..end` is the byte range of the
+    /// input string that this row renders (excluding its prefix). Rows are
+    /// contiguous in display space, skipping the `\n` bytes of the input.
+    pub(crate) struct VisualRow {
+        /// Whether this is the very first row (it gets the `> ` prompt prefix).
+        pub is_first: bool,
+        pub start: usize,
+        pub end: usize,
+    }
+
+    impl VisualRow {
+        fn prefix<'a>(&self, prompt: &'a str) -> &'a str {
+            if self.is_first {
+                prompt
+            } else {
+                CONTINUATION
+            }
+        }
+
+        fn prefix_len(&self, prompt: &str) -> usize {
+            self.prefix(prompt).len()
+        }
+    }
+
+    pub fn render(f: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
         let border_color = if state.side_panel_focused {
             theme.dim
         } else {
@@ -591,29 +624,39 @@ pub mod input {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let prompt = if state.is_streaming { "  " } else { "> " };
+        // Remember where the editable box is so mouse clicks can be mapped back
+        // to a character position (see `char_pos_at_click`).
+        state.input_area = Some((area.x, area.y, area.width, area.height));
+
+        let prompt = if state.is_streaming { CONTINUATION } else { PROMPT };
         let width = inner.width as usize;
         if width < 4 {
+            state.input_scroll = 0;
             return;
         }
-
         let usable = width.saturating_sub(prompt.len());
 
-        // Build visual lines from input (handle \n and wrapping)
-        let vis_lines = visual_lines(&state.input, prompt, usable);
+        let rows = layout(&state.input, usable);
 
-        // Find which visual line the cursor is on
-        let (cursor_row, cursor_col) =
-            cursor_visual_pos(&state.input, state.cursor_pos, prompt, usable);
-
-        // Scroll so cursor row is visible
+        // Scroll so the cursor row is visible.
+        let (cursor_row, cursor_col) = cursor_in_rows(&rows, &state.input, state.cursor_pos);
         let scroll = if cursor_row as u16 >= inner.height {
             cursor_row as u16 - inner.height + 1
         } else {
             0
         };
+        state.input_scroll = scroll;
 
-        let lines: Vec<Line> = vis_lines.iter().map(|s| Line::raw(s.as_str())).collect();
+        let lines: Vec<Line> = rows
+            .iter()
+            .map(|row| {
+                Line::raw(format!(
+                    "{}{}",
+                    row.prefix(prompt),
+                    &state.input[row.start..row.end]
+                ))
+            })
+            .collect();
         let widget = Paragraph::new(lines)
             .style(Style::default().fg(theme.fg).bg(theme.input_bg))
             .scroll((scroll, 0));
@@ -635,8 +678,137 @@ pub mod input {
             return MIN_CONTENT_LINES + BORDER_LINES;
         }
         let usable = (width as usize).saturating_sub(4);
-        let lines = visual_lines(input, "> ", usable);
+        let lines = visual_lines(input, PROMPT, usable);
         (lines.len() as u16).clamp(MIN_CONTENT_LINES, MAX_CONTENT_LINES) + BORDER_LINES
+    }
+
+    /// Build the visual rows of `input`, the single source of truth shared by
+    /// rendering, cursor placement, and click hit-testing.
+    pub(crate) fn layout(input: &str, usable: usize) -> Vec<VisualRow> {
+        let mut rows = Vec::new();
+        let mut seg_start = 0;
+        for (line_index, line) in input.split('\n').enumerate() {
+            let seg_end = seg_start + line.len();
+            for (chunk_index, (chunk_start, chunk_end)) in wrap_segment(line, usable).into_iter().enumerate()
+            {
+                rows.push(VisualRow {
+                    is_first: line_index == 0 && chunk_index == 0,
+                    start: seg_start + chunk_start,
+                    end: seg_start + chunk_end,
+                });
+            }
+            seg_start = seg_end + 1; // skip the '\n' byte
+        }
+        if rows.is_empty() {
+            rows.push(VisualRow {
+                is_first: true,
+                start: 0,
+                end: 0,
+            });
+        }
+        rows
+    }
+
+    /// Wrap one logical line (no `\n`) into `(start, end)` byte ranges of at
+    /// most `usable` display columns, breaking at spaces when possible.
+    fn wrap_segment(line: &str, usable: usize) -> Vec<(usize, usize)> {
+        if line.is_empty() {
+            return vec![(0, 0)];
+        }
+        if usable == 0 {
+            return vec![(0, line.len())];
+        }
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        while start < line.len() {
+            let mut width = 0usize;
+            let mut end = start;
+            let mut last_space_end = None;
+            for (i, ch) in line[start..].char_indices() {
+                let w = ch.width().unwrap_or(0);
+                if width + w > usable {
+                    break;
+                }
+                width += w;
+                end = start + i + ch.len_utf8();
+                if ch == ' ' {
+                    last_space_end = Some(end);
+                }
+            }
+            // Break after the last space that fit (keeping it at the end of
+            // this row) so the next row starts with a real word.
+            if let Some(space_end) = last_space_end {
+                if space_end < end && space_end > start {
+                    end = space_end;
+                }
+            }
+            if end == start {
+                // A single char wider than the whole row: emit it alone so we
+                // always make progress.
+                let ch = line[start..].chars().next().unwrap();
+                end = start + ch.len_utf8();
+            }
+            chunks.push((start, end));
+            start = end;
+        }
+        chunks
+    }
+
+    /// Map a byte position in `input` to its (row, column) in display space.
+    fn cursor_in_rows(rows: &[VisualRow], input: &str, pos: usize) -> (usize, usize) {
+        let pos = pos.min(input.len());
+        let mut result = (0usize, rows.first().map_or(0, |row| row.prefix_len(PROMPT)));
+        for (row_index, row) in rows.iter().enumerate() {
+            if pos < row.start {
+                break;
+            }
+            if pos <= row.end {
+                let content_width = input[row.start..pos].width();
+                result = (row_index, row.prefix_len(PROMPT) + content_width);
+                // Strictly inside this row, or on an empty row: no later row
+                // can also contain `pos`.
+                if pos < row.end || row.start == row.end {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
+    /// Map a click at display (row, col) back to a byte position in `input` —
+    /// the inverse of [`cursor_in_rows`]. Out-of-range clicks clamp to the
+    /// nearest valid position.
+    pub(crate) fn char_pos_at_click(
+        input: &str,
+        prompt: &str,
+        usable: usize,
+        row: usize,
+        col: usize,
+    ) -> usize {
+        let rows = layout(input, usable);
+        if rows.is_empty() {
+            return 0;
+        }
+        let row_index = row.min(rows.len() - 1);
+        let target = &rows[row_index];
+        let col_in = col.saturating_sub(target.prefix_len(prompt));
+        let mut width = 0;
+        for (i, ch) in input[target.start..target.end].char_indices() {
+            let w = ch.width().unwrap_or(0);
+            if width + w > col_in {
+                return target.start + i;
+            }
+            width += w;
+        }
+        target.end
+    }
+
+    /// Build the visual lines as they appear on screen.
+    fn visual_lines(input: &str, prompt: &str, usable: usize) -> Vec<String> {
+        layout(input, usable)
+            .into_iter()
+            .map(|row| format!("{}{}", row.prefix(prompt), &input[row.start..row.end]))
+            .collect()
     }
 
     /// Render the fuzzy `/` command selector popup anchored above the input.
@@ -706,85 +878,91 @@ pub mod input {
         f.render_stateful_widget(list, area, &mut list_state);
     }
 
-    /// Build the visual lines as they appear on screen.
-    fn visual_lines(input: &str, prompt: &str, usable_width: usize) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let logical: Vec<&str> = input.split('\n').collect();
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-        for (i, seg) in logical.iter().enumerate() {
-            let pfx = if i == 0 { prompt } else { "  " };
-
-            if seg.is_empty() {
-                out.push(pfx.to_string());
-                continue;
-            }
-
-            // Word-wrap this segment
-            let mut rem = *seg;
-            let mut first = true;
-            while !rem.is_empty() {
-                let p = if first { pfx } else { "  " };
-                let cap = usable_width;
-                if rem.len() <= cap {
-                    out.push(format!("{p}{rem}"));
-                    break;
-                }
-                let brk = rem[..cap].rfind(' ').map(|i| i + 1).unwrap_or(cap);
-                let brk = if brk == 0 { cap } else { brk };
-                out.push(format!("{p}{}", &rem[..brk]));
-                rem = &rem[brk..];
-                first = false;
-            }
+        fn rows(input: &str, usable: usize) -> Vec<(bool, usize, usize)> {
+            layout(input, usable)
+                .into_iter()
+                .map(|row| (row.is_first, row.start, row.end))
+                .collect()
         }
 
-        if out.is_empty() {
-            out.push(prompt.to_string());
-        }
-        out
-    }
-
-    /// Find which visual row and column the cursor sits on.
-    fn cursor_visual_pos(
-        input: &str,
-        cursor_pos: usize,
-        prompt: &str,
-        usable_width: usize,
-    ) -> (usize, usize) {
-        let before = &input[..cursor_pos.min(input.len())];
-        let logical: Vec<&str> = before.split('\n').collect();
-
-        let mut row: usize = 0;
-
-        for (i, seg) in logical.iter().enumerate() {
-            let is_last = i == logical.len() - 1;
-            let pfx_len = if i == 0 { prompt.len() } else { 2 };
-
-            if is_last {
-                // Cursor is somewhere in this segment
-                let len = seg.len();
-                if usable_width == 0 {
-                    return (row, pfx_len);
-                }
-                let wrapped_full_rows = len / usable_width;
-                let col_in_last = len % usable_width;
-                row += wrapped_full_rows;
-                return (row, pfx_len + col_in_last);
-            }
-
-            // Not the last — count full visual rows this segment occupies
-            let len = seg.len();
-            if len == 0 {
-                row += 1;
-            } else if let Some(rows) = len.checked_div(usable_width) {
-                row += rows + 1;
-            } else {
-                row += 1;
-            }
+        fn cursor(input: &str, pos: usize) -> (usize, usize) {
+            cursor_in_rows(&layout(input, 20), input, pos)
         }
 
-        // Cursor is right after a trailing newline
-        let pfx_len = if logical.is_empty() { prompt.len() } else { 2 };
-        (row, pfx_len)
+        #[test]
+        fn wraps_long_words_and_breaks_at_spaces() {
+            // Hard break with no space that fits.
+            assert_eq!(wrap_segment("hello world", 5), vec![(0, 5), (5, 6), (6, 11)]);
+            // The space stays at the end of the wrapped row.
+            assert_eq!(wrap_segment("hello world", 6), vec![(0, 6), (6, 11)]);
+            // Fits entirely.
+            assert_eq!(wrap_segment("hello", 5), vec![(0, 5)]);
+            assert_eq!(wrap_segment("", 5), vec![(0, 0)]);
+        }
+
+        #[test]
+        fn layout_multi_line_and_empty() {
+            assert_eq!(rows("ab\ncd", 20), vec![(true, 0, 2), (false, 3, 5)]);
+            assert_eq!(rows("", 20), vec![(true, 0, 0)]);
+            assert_eq!(rows("ab\n", 20), vec![(true, 0, 2), (false, 3, 3)]);
+            assert_eq!(rows("hello world", 6), vec![(true, 0, 6), (false, 6, 11)]);
+        }
+
+        #[test]
+        fn cursor_position_byte_boundaries() {
+            // Cursor before/after the newline.
+            assert_eq!(cursor("ab\ncd", 2), (0, 4));
+            assert_eq!(cursor("ab\ncd", 3), (1, 2));
+            // Multi-byte char: positions stay on char boundaries.
+            assert_eq!(cursor("héllo", 1), (0, 3)); // after 'h'
+            assert_eq!(cursor("héllo", 6), (0, 7)); // at end (h + é + lll + o)
+            // Trailing newline puts the cursor on the empty line.
+            assert_eq!(cursor("ab\n", 3), (1, 2));
+            assert_eq!(cursor("ab\n", 2), (0, 4));
+            // Empty input.
+            assert_eq!(cursor("", 0), (0, 2));
+        }
+
+        #[test]
+        fn cursor_position_wrapped_lines() {
+            // Cursor at the wrap point renders at the start of the continuation.
+            assert_eq!(cursor("hello world", 6), (1, 2));
+            assert_eq!(cursor("hello world", 5), (0, 7)); // after 'hello'
+            assert_eq!(cursor("hello world", 11), (1, 7)); // after 'world'
+        }
+
+        #[test]
+        fn click_maps_to_char_and_round_trips() {
+            let input = "hello world";
+            let usable = 6;
+            // Prompt column -> start of first row.
+            assert_eq!(char_pos_at_click(input, "> ", usable, 0, 0), 0);
+            assert_eq!(char_pos_at_click(input, "> ", usable, 0, 2), 0);
+            // Inside the first row.
+            assert_eq!(char_pos_at_click(input, "> ", usable, 0, 7), 5); // before 'o'
+            // End of a wrapped row -> start of the continuation.
+            assert_eq!(char_pos_at_click(input, "> ", usable, 0, 8), 6);
+            assert_eq!(char_pos_at_click(input, "> ", usable, 1, 2), 6);
+            // Beyond the text clamps to the end.
+            assert_eq!(char_pos_at_click(input, "> ", usable, 0, 30), 6);
+            assert_eq!(char_pos_at_click(input, "> ", usable, 5, 30), 11);
+            // Multi-byte chars map to byte offsets on char boundaries.
+            assert_eq!(char_pos_at_click("héllo", "> ", 20, 0, 3), 1); // after 'h'
+            assert_eq!(char_pos_at_click("héllo", "> ", 20, 0, 4), 3); // after 'é'
+            // Clicking on the prompt of a later line -> start of that line.
+            assert_eq!(char_pos_at_click("ab\ncd", "> ", 20, 1, 0), 3);
+        }
+
+        #[test]
+        fn visual_lines_match_layout() {
+            assert_eq!(visual_lines("hello world", "> ", 6), vec!["> hello ", "  world"]);
+            assert_eq!(visual_lines("ab\ncd", "> ", 20), vec!["> ab", "  cd"]);
+            assert_eq!(visual_lines("", "> ", 20), vec!["> "]);
+        }
     }
 }
 pub mod messages {

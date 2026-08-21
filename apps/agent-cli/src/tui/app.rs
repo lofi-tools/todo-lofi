@@ -236,6 +236,10 @@ pub struct AppState {
     pub cursor_pos: usize,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
+    /// Last drawn input box rect as (x, y, width, height) — for mouse hit-testing.
+    pub input_area: Option<(u16, u16, u16, u16)>,
+    /// Vertical scroll of the input content from the last frame — for mouse hit-testing.
+    pub input_scroll: u16,
 
     // ── Scroll + Virtual List ──
     pub scroll: ScrollState,
@@ -298,6 +302,8 @@ impl AppState {
             cursor_pos: 0,
             input_history: Vec::new(),
             history_index: None,
+            input_area: None,
+            input_scroll: 0,
             scroll: ScrollState::new(),
             virtual_list: crate::tui::virtual_list::VirtualList::new(),
             messages_dirty: true,

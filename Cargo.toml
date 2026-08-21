@@ -82,7 +82,7 @@ sha2 = "0.11"
 
 # # Text processing
 # similar = "2"
-# unicode-width = "0.2"
+unicode-width = "0.2"
 
 # # HTML processing
 # html2text = "0.12"

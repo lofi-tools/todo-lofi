@@ -18,7 +18,8 @@ use crate::{
 };
 use cersei::events::{AgentEvent, AgentStream};
 // use cersei::memory::manager::MemoryManager;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use ratatui::prelude::Rect;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -167,8 +168,8 @@ pub async fn run(
                             }
                             state.dirty = true;
                         }
-                        Event::Mouse(_) => {
-                            // Mouse capture disabled to allow native text selection
+                        Event::Mouse(mouse) => {
+                            handle_mouse(&mut state, mouse);
                         }
                         Event::Paste(text) if !state.is_streaming => {
                             state.input.insert_str(state.cursor_pos, &text);
@@ -211,17 +212,18 @@ async fn poll_agent_run(run: &mut Option<AgentRun>) -> Option<AgentEvent> {
 }
 
 fn draw(terminal: &mut Terminal, state: &mut AppState, theme: &Theme) -> anyhow::Result<()> {
-    // Compute input height with terminal width
-    let term_width = terminal.size()?.width;
-    let input_h = input::desired_height(&state.input, term_width);
-
     terminal.draw(|f| {
-        let layout = layout::compute(f.area(), input_h, state.side_panel_open);
+        let area = f.area();
+        // Measure the input box against its true width: with the side panel
+        // open the input area is narrower than the terminal.
+        let provisional = layout::compute(area, 1, state.side_panel_open);
+        let input_h = input::desired_height(&state.input, provisional.main.input.width);
+        let layout = layout::compute(area, input_h, state.side_panel_open);
 
         header::render(f, layout.main.header, state, theme);
         messages::render(f, layout.main.messages, state, theme);
         status::render(f, layout.main.status, state, theme);
-        input::render(f, layout.main.input, state, theme);
+        input::render(f, layout.main.input, &mut *state, theme);
         input::render_command_selector(f, layout.main.input, state, theme);
         footer::render(
             f,
@@ -417,28 +419,38 @@ fn handle_key(
             return Some(input_text);
         }
 
-        // Backspace
+        // Backspace — remove the char before the cursor
         (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
-            state.cursor_pos -= 1;
-            state.input.remove(state.cursor_pos);
+            if let Some((char_start, _)) =
+                state.input[..state.cursor_pos].char_indices().next_back()
+            {
+                state.input.remove(char_start);
+                state.cursor_pos = char_start;
+            }
             state.refresh_command_selector();
         }
 
-        // Delete
+        // Delete — remove the char at the cursor
         (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
             state.input.remove(state.cursor_pos);
             state.refresh_command_selector();
         }
 
-        // Left arrow
+        // Left arrow — move back one char
         (_, KeyCode::Left) if !state.is_streaming && state.cursor_pos > 0 => {
-            state.cursor_pos -= 1;
+            if let Some((char_start, _)) =
+                state.input[..state.cursor_pos].char_indices().next_back()
+            {
+                state.cursor_pos = char_start;
+            }
             state.refresh_command_selector();
         }
 
-        // Right arrow
+        // Right arrow — move forward one char
         (_, KeyCode::Right) if !state.is_streaming && state.cursor_pos < state.input.len() => {
-            state.cursor_pos += 1;
+            if let Some(ch) = state.input[state.cursor_pos..].chars().next() {
+                state.cursor_pos += ch.len_utf8();
+            }
             state.refresh_command_selector();
         }
 
@@ -491,7 +503,7 @@ fn handle_key(
         // Character input
         (_, KeyCode::Char(c)) if !state.is_streaming => {
             state.input.insert(state.cursor_pos, c);
-            state.cursor_pos += 1;
+            state.cursor_pos += c.len_utf8();
             state.refresh_command_selector();
         }
 
@@ -499,6 +511,45 @@ fn handle_key(
     }
 
     None
+}
+
+/// Handle mouse events: a left click inside the input box moves the cursor to
+/// the clicked character.
+fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return;
+    }
+    if state.is_streaming || state.overlay != Overlay::None {
+        return;
+    }
+    let Some((x, y, w, h)) = state.input_area else {
+        return;
+    };
+    if w < 4 || h < 2 {
+        return;
+    }
+    // The input is drawn inside a 1-cell rounded border.
+    let inner = Rect {
+        x: x + 1,
+        y: y + 1,
+        width: w.saturating_sub(2),
+        height: h.saturating_sub(2),
+    };
+    let (row, col) = (mouse.row, mouse.column);
+    if row < inner.y || row >= inner.bottom() || col < inner.x || col >= inner.right() {
+        return;
+    }
+    let prompt = if state.is_streaming { "  " } else { "> " };
+    let usable = (inner.width as usize).saturating_sub(prompt.len());
+    let content_row = (row - inner.y) as usize + state.input_scroll as usize;
+    let content_col = (col - inner.x) as usize;
+    let pos = input::char_pos_at_click(&state.input, prompt, usable, content_row, content_col);
+    if pos != state.cursor_pos {
+        state.cursor_pos = pos;
+        state.refresh_command_selector();
+        state.dirty = true;
+    }
 }
 
 /// Handle keys while the fuzzy `/` command selector is open.

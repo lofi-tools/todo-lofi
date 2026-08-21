@@ -3,8 +3,8 @@ use crate::providers::AgentRuntime;
 // use cersei::memory::manager::MemoryManager;
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -67,7 +67,8 @@ pub fn install_panic_hook() {
             stdout(),
             PopKeyboardEnhancementFlags,
             LeaveAlternateScreen,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            DisableMouseCapture
         );
         original(info);
     }));
@@ -77,7 +78,7 @@ pub fn install_panic_hook() {
 pub fn setup_terminal() -> io::Result<Terminal> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
 
     // Enable kitty keyboard protocol for Shift+Enter detection.
     // Only if the terminal actually supports it (avoids broken state on resize).
@@ -102,7 +103,8 @@ pub fn restore_terminal(terminal: &mut Terminal) -> io::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
     Ok(())
