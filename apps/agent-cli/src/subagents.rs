@@ -15,6 +15,7 @@
 use crate::providers::Resolved;
 use crate::tools::{ReadDocsTool, RgSearchTool};
 use async_trait::async_trait;
+use cersei::events::AgentEvent;
 use cersei::tools::permissions::AllowAll;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
 use cersei::tools::{web_fetch::WebFetchTool, web_search::WebSearchTool};
@@ -22,7 +23,9 @@ use cersei::{Agent, OpenAi};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use tokio::sync::broadcast;
 
 /// Shared handle to the live parent agent. `build_agent` fills this after
 /// constructing the agent; sub-agents with `include_message_history` read it
@@ -32,6 +35,56 @@ pub type ParentHandle = Arc<Mutex<Option<Weak<Agent>>>>;
 /// Shared sink where `suggest_followups` stores its suggestions. The TUI and
 /// single-shot runner drain it after a run completes.
 pub type FollowupSink = Arc<Mutex<Vec<Followup>>>;
+
+/// Optional broadcast sender for sub-agent activity. The TUI subscribes to
+/// this channel to render each spawned agent's tool calls nested under the
+/// parent `spawn_agents` call. In headless (`-p`) and ACP modes there is no
+/// receiver and the sends are dropped.
+pub type SubAgentEventSink = Option<broadcast::Sender<SubAgentActivity>>;
+
+/// A single piece of sub-agent activity, tagged with the run id of the
+/// sub-agent that produced it. The TUI uses `run_id` to attach events to the
+/// right `spawn_agents` parent call even when they arrive out of order.
+#[derive(Debug, Clone)]
+pub enum SubAgentActivity {
+    /// The sub-agent started: creates the nested header under `spawn_agents`.
+    Started {
+        run_id: u64,
+        agent_type: String,
+        display_name: String,
+        prompt: String,
+    },
+    /// A tool call inside the sub-agent started.
+    ToolStart {
+        run_id: u64,
+        name: String,
+        input_summary: String,
+    },
+    /// A tool call inside the sub-agent finished.
+    ToolEnd {
+        run_id: u64,
+        name: String,
+        is_error: bool,
+        output_preview: String,
+        duration_ms: u64,
+    },
+    /// The sub-agent finished; `text` is its final output.
+    Finished {
+        run_id: u64,
+        text: String,
+    },
+}
+
+impl SubAgentActivity {
+    pub fn run_id(&self) -> u64 {
+        match self {
+            SubAgentActivity::Started { run_id, .. }
+            | SubAgentActivity::ToolStart { run_id, .. }
+            | SubAgentActivity::ToolEnd { run_id, .. }
+            | SubAgentActivity::Finished { run_id, .. } => *run_id,
+        }
+    }
+}
 
 /// A suggested followup prompt, rendered after the agent's reply.
 #[derive(Debug, Clone)]
@@ -137,8 +190,10 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
 }
 
 /// The parent system prompt section that tells the model which sub-agents it
-/// can spawn, when to spawn them, and to end with `suggest_followups` —
-/// freebuff encodes this workflow in its base2 instructions prompt.
+/// can spawn and walks it through freebuff's phase-based workflow
+/// (explore → write_todos → implement → reviewer loop → validate →
+/// suggest_followups). freebuff encodes this in its base2/base-deep
+/// instructions prompts; the workflow is prompt-encoded, not a state machine.
 pub fn spawner_system_prompt() -> String {
     let mut agents = String::new();
     for def in sub_agent_defs() {
@@ -150,11 +205,34 @@ pub fn spawner_system_prompt() -> String {
          Call the `spawn_agents` tool with a JSON object: {{\"agents\": [{{\"agent_type\": \"<id>\", \"prompt\": \"self-contained task\", \"params\": {{...}}}}]}}. \
          Sub-agents run in parallel, so give each a fully self-contained prompt; if you need sequential work, spawn one at a time.\n\n\
          Available sub-agents:\n{agents}\n\
-         ## Follow-ups\n\
-         End every response by calling the `suggest_followups` tool with exactly 3 followups the user is likely to want next — natural next questions, deeper dives, or related directions that build on what you just said. \
+         ## Phase Workflow\n\
+         Act as a helpful assistant and freely respond to the user's request however would be most helpful to the user. \
+         Use your judgement to orchestrate the completion of the user's request using your specialized sub-agents and tools as needed. \
+         Take your time and be comprehensive. Don't surprise the user — for example, don't modify files if the user has not asked you to do so at least implicitly.\n\
+         Follow this phase workflow for implementation tasks. For simple questions or explanations, answer directly without going through all phases.\n\
+         **Phase 1 — Explore:** Before asking questions or writing any code, gather broad context about the relevant parts of the codebase and any external knowledge needed. \
+         Spawn code-searcher, researcher-web, and researcher-docs agents IN PARALLEL to find all files relevant to the user's request and research any libraries, APIs, or technologies involved. \
+         Cast a wide net — spawn multiple code-searcher queries with different angles, and researchers for any external docs or web resources that could inform the implementation. \
+         Read the relevant files returned by these agents using the Read tool. This context will help you avoid building the wrong thing.\n\
+         **Phase 2 — write_todos:** For any task requiring 3+ steps, use the TodoWrite tool to write out your step-by-step implementation plan. \
+         Include ALL of the applicable tasks in the list. You should include a step to review the changes after you have implemented them, and at least one step to validate/test your changes (be specific about whether to typecheck, run tests, run lints, etc.). \
+         Update the todo list as you complete each step during implementation. Skip write_todos for simple tasks like quick edits or answering questions.\n\
+         **Phase 3 — Implement:** Fully implement the plan using direct file editing tools. Prefer Edit/ApplyPatch for existing-file edits; use Write only for creating or replacing entire files when that is simpler. \
+         Implement ALL requirements — do not leave anything partially done. Narrate what you are doing as you go.\n\
+         **Phase 4 — Review Loop:** Iteratively review until the code is clean. \
+         Spawn the code-reviewer sub-agent to review all changes. If the reviewer finds ANY issues, fix them. \
+         After fixing, you MUST spawn code-reviewer again to re-review. Repeat until the reviewer finds no new issues. Do NOT skip the re-review — every fix must be verified.\n\
+         **Phase 5 — Validate:** Thoroughly validate the changes. \
+         Run the project's relevant validation commands (typechecks, tests, lints) via the Bash tool, in parallel when possible. \
+         Write and run additional tests for new functionality. Fix any failures and re-validate.\n\
+         **Phase 6 — Follow-ups:** End your response by calling the `suggest_followups` tool with exactly 3 followups the user is likely to want next — natural next questions, deeper dives, or related directions that build on what you just said. \
          For each followup give a short `label` (2–5 words, the card title) and a `prompt` (the message sent verbatim when the user clicks it, phrased in the user's first-person voice, e.g. \"Show me how to…\"). \
          Keep the prompt short and goal-oriented — usually one sentence naming what the user wants to know. \
-         Call it last, after your written answer (and after any tool/subagent calls). Skip it only when there is no sensible next step (e.g. the user said goodbye)."
+         Call it last, after your written answer (and after any tool/subagent calls). Skip it only when there is no sensible next step (e.g. the user said goodbye).\n\
+         Give a very short summary of what you accomplished at the end of your turn.\n\
+         ## Follow-up Requests\n\
+         If the full phase workflow has already been completed in this conversation and the user is asking for a followup change (e.g. \"also add X\" or \"tweak Y\"), you do NOT need to repeat the entire workflow. \
+         Use your judgement to run only the phases that are relevant — for example, directly make the requested changes, do a light review, and run validation. Skip the explore and todos phases if the request is a straightforward extension of the work already done."
     )
 }
 
@@ -246,11 +324,17 @@ pub struct SpawnAgentsTool {
     parent: ParentHandle,
     defs: Vec<SubAgentDef>,
     description: String,
+    /// Broadcast channel for sub-agent activity, consumed by the TUI.
+    events: SubAgentEventSink,
+    /// Unique ids handed out per spawned sub-agent, so the UI can tell the
+    /// sub-agents of one `spawn_agents` call apart (and across calls).
+    run_counter: AtomicU64,
 }
 
 impl SpawnAgentsTool {
-    pub fn new(resolved: Resolved, parent: ParentHandle) -> Self {
+    pub fn new(resolved: Resolved, parent: ParentHandle, events: SubAgentEventSink) -> Self {
         let defs = sub_agent_defs();
+        let run_counter = AtomicU64::new(0);
         let mut description = String::from(
             "Spawn specialized sub-agents to handle focused sub-tasks in parallel. \
              Input: {\"agents\": [{\"agent_type\": \"<id>\", \"prompt\": \"self-contained task\", \"params\": {...}}]}. \
@@ -267,6 +351,17 @@ impl SpawnAgentsTool {
             parent,
             defs,
             description,
+            events,
+            run_counter,
+        }
+    }
+
+    /// Forward one activity event to the TUI (if any receiver is subscribed).
+    /// Best-effort telemetry: in headless mode there is no receiver and the
+    /// send fails — that is fine and expected.
+    fn emit(&self, activity: SubAgentActivity) {
+        if let Some(sender) = &self.events {
+            let _ignored = sender.send(activity);
         }
     }
 }
@@ -357,10 +452,27 @@ impl Tool for SpawnAgentsTool {
                     def.id
                 ));
             }
+            let run_id = self.run_counter.fetch_add(1, Ordering::Relaxed);
+            let display_name = def.display_name;
             if def.id == "code-searcher" {
                 // Deterministic path: run the queries directly (freebuff's
                 // code-searcher is a handleSteps loop, not an LLM agent).
-                results[*i] = Some(run_code_searcher(agent.params.as_ref(), ctx).await);
+                self.emit(SubAgentActivity::Started {
+                    run_id,
+                    agent_type: def.id.to_string(),
+                    display_name: display_name.to_string(),
+                    prompt: prompt.clone(),
+                });
+                let result = run_code_searcher(agent.params.as_ref(), ctx).await;
+                let text = match &result {
+                    Ok(t) => t.clone(),
+                    Err(e) => e.clone(),
+                };
+                self.emit(SubAgentActivity::Finished {
+                    run_id,
+                    text: truncate_preview(&text, 400),
+                });
+                results[*i] = Some(result);
                 continue;
             }
             let i = *i;
@@ -368,8 +480,15 @@ impl Tool for SpawnAgentsTool {
             let parent = self.parent.clone();
             let def = (**def).clone();
             let working_dir = ctx.working_dir.clone();
+            let events = self.events.clone();
             set.spawn(async move {
-                (i, run_sub_agent(def, resolved, parent, &prompt, working_dir).await)
+                (
+                    i,
+                    run_sub_agent(
+                        def, resolved, parent, &prompt, working_dir, events, run_id,
+                    )
+                    .await,
+                )
             });
         }
 
@@ -437,14 +556,25 @@ async fn run_code_searcher(params: Option<&Value>, ctx: &ToolContext) -> Result<
 /// sub-agent from hanging the parent run indefinitely.
 const SUB_AGENT_TIMEOUT_SECS: u64 = 120;
 
+/// Truncate a string to at most `max` characters, char-boundary safe (the
+/// preview cap used for forwarded activity events).
+fn truncate_preview(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
 /// Build and run one LLM sub-agent with a fresh provider, the def's system
 /// prompt and tool set, and (optionally) the parent's conversation history.
+/// Every activity event is forwarded to `events` (if a receiver is
+/// subscribed) so the TUI can render the sub-agent's tool calls nested under
+/// the parent `spawn_agents` call.
 async fn run_sub_agent(
     def: SubAgentDef,
     resolved: Resolved,
     parent: ParentHandle,
     prompt: &str,
     working_dir: PathBuf,
+    events: SubAgentEventSink,
+    run_id: u64,
 ) -> Result<String, String> {
     let provider = OpenAi::builder()
         .base_url(&resolved.base_url)
@@ -453,6 +583,12 @@ async fn run_sub_agent(
         .build()
         .map_err(|e| format!("failed to build sub-agent provider: {e}"))?;
 
+    let events = events.clone();
+    // The event-forwarding closure owns its own clone; `events` stays behind
+    // for the Started/Finished bookends.
+    let forward_events = events.clone();
+    let agent_type = def.id.to_string();
+    let display_name = def.display_name.to_string();
     let mut builder = Agent::builder()
         .provider(provider)
         .model(&resolved.model)
@@ -460,7 +596,38 @@ async fn run_sub_agent(
         .system_prompt(def.system_prompt)
         .max_turns(def.max_turns)
         .working_dir(working_dir)
-        .permission_policy(AllowAll);
+        .permission_policy(AllowAll)
+        .on_event(move |event: &AgentEvent| {
+            // Forward tool lifecycle events so the TUI can render the
+            // sub-agent's activity. Text deltas are skipped; the final answer
+            // arrives with the `Finished` event.
+            let activity = match event {
+                AgentEvent::ToolStart { name, input, .. } => Some(SubAgentActivity::ToolStart {
+                    run_id,
+                    name: name.clone(),
+                    input_summary: crate::tui::event_loop::tool_input_summary(name, input),
+                }),
+                AgentEvent::ToolEnd {
+                    name,
+                    result,
+                    is_error,
+                    duration,
+                    ..
+                } => Some(SubAgentActivity::ToolEnd {
+                    run_id,
+                    name: name.clone(),
+                    is_error: *is_error,
+                    output_preview: truncate_preview(result, 200),
+                    duration_ms: duration.as_millis() as u64,
+                }),
+                _ => None,
+            };
+            if let Some(activity) = activity
+                && let Some(sender) = &forward_events
+            {
+                let _ignored = sender.send(activity);
+            }
+        });
 
     if def.include_message_history {
         let messages = parent
@@ -474,6 +641,14 @@ async fn run_sub_agent(
     }
 
     let agent = builder.build().map_err(|e| format!("failed to build sub-agent: {e}"))?;
+    if let Some(sender) = &events {
+        let _ignored = sender.send(SubAgentActivity::Started {
+            run_id,
+            agent_type: agent_type.clone(),
+            display_name: display_name.clone(),
+            prompt: prompt.to_string(),
+        });
+    }
     // Wall-clock cap so a stuck sub-agent can't hang the parent run forever.
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(SUB_AGENT_TIMEOUT_SECS),
@@ -483,6 +658,12 @@ async fn run_sub_agent(
     .map_err(|_| format!("sub-agent timed out after {SUB_AGENT_TIMEOUT_SECS}s"))?
     .map_err(|e| format!("sub-agent failed: {e}"))?;
     let text = output.text().to_string();
+    if let Some(sender) = &events {
+        let _ignored = sender.send(SubAgentActivity::Finished {
+            run_id,
+            text: truncate_preview(&text, 400),
+        });
+    }
     if text.trim().is_empty() {
         Err("sub-agent returned no output".to_string())
     } else {
@@ -533,6 +714,26 @@ mod tests {
         }
         assert!(prompt.contains("suggest_followups"));
         assert!(prompt.contains("spawn_agents"));
+        assert!(prompt.contains("TodoWrite"));
+    }
+
+    #[test]
+    fn spawner_system_prompt_has_phase_workflow() {
+        let prompt = spawner_system_prompt();
+        // The freebuff-style phase workflow: explore → todos → implement →
+        // reviewer loop → validate → followups, plus followup-request escape.
+        for phase in [
+            "Phase 1 — Explore",
+            "Phase 2 — write_todos",
+            "Phase 3 — Implement",
+            "Phase 4 — Review Loop",
+            "Phase 5 — Validate",
+            "Phase 6 — Follow-ups",
+        ] {
+            assert!(prompt.contains(phase), "workflow missing {phase}");
+        }
+        assert!(prompt.contains("re-review"), "reviewer loop must require re-review");
+        assert!(prompt.contains("Follow-up Requests"));
     }
 
     #[tokio::test]
@@ -566,7 +767,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)));
+        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(json!({ "agents": [{ "agent_type": "nope" }] }), &ctx)
@@ -589,7 +790,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)));
+        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
         let ctx = test_context(dir.clone());
         let result = tool
             .execute(
@@ -706,7 +907,8 @@ mod tests {
             api_key: "test-key".into(),
         };
         let parent: ParentHandle = Arc::new(Mutex::new(None));
-        let tool = SpawnAgentsTool::new(resolved, parent.clone());
+        let (tx, mut rx) = broadcast::channel(64);
+        let tool = SpawnAgentsTool::new(resolved, parent.clone(), Some(tx));
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -719,9 +921,25 @@ mod tests {
                 &ctx,
             )
             .await;
+        // The sub-agent run must have forwarded activity events: Started and
+        // Finished (the mock replies with plain text, so no tool calls).
+        let mut saw_started = false;
+        let mut saw_finished = false;
+        while let Ok(activity) = rx.recv().await {
+            match activity {
+                SubAgentActivity::Started { agent_type, .. } => {
+                    assert_eq!(agent_type, "researcher-web");
+                    saw_started = true;
+                }
+                SubAgentActivity::Finished { .. } => saw_finished = true,
+                _ => {}
+            }
+        }
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("[researcher-web]"), "{}", result.content);
         assert!(result.content.contains("The answer is 42"), "{}", result.content);
+        assert!(saw_started, "sub-agent never forwarded a Started event");
+        assert!(saw_finished, "sub-agent never forwarded a Finished event");
     }
 
     #[tokio::test]
@@ -732,7 +950,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)));
+        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(

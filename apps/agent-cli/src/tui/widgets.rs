@@ -1815,11 +1815,23 @@ pub mod tool_call {
     const MAX_FILE_TOOL_LINES: usize = 12;
 
     /// Render a tool call as lines: badge + optional diff or output preview.
+    /// Nested sub-agent tool calls (`spawn_agents` children) are rendered
+    /// recursively, indented one level deeper per nesting.
     pub fn render_tool_call(
         tool: &ToolCall,
         theme: &Theme,
         frame_count: u64,
     ) -> Vec<Line<'static>> {
+        render_tool_call_at(tool, theme, frame_count, 0)
+    }
+
+    fn render_tool_call_at(
+        tool: &ToolCall,
+        theme: &Theme,
+        frame_count: u64,
+        depth: usize,
+    ) -> Vec<Line<'static>> {
+        let indent = "  ".repeat(depth);
         let mut lines = Vec::new();
 
         let (icon, icon_style) = match tool.status {
@@ -1842,7 +1854,7 @@ pub mod tool_call {
             .unwrap_or_default();
 
         lines.push(Line::from(vec![
-            Span::styled(format!("  {icon} "), icon_style),
+            Span::styled(format!("{indent}{icon} "), icon_style),
             Span::styled(
                 tool.name.clone(),
                 Style::default()
@@ -1854,9 +1866,18 @@ pub mod tool_call {
             Span::styled(dur, Style::default().fg(theme.dim)),
         ]));
 
+        // Nested sub-agent activity first, then the preview: for a
+        // `spawn_agents` call the children carry the detail, so its own
+        // (combined) output preview is skipped as redundant.
+        for child in &tool.children {
+            lines.extend(render_tool_call_at(child, theme, frame_count, depth + 1));
+        }
+
+        let has_nested_children = !tool.children.is_empty();
         if let Some(ref output) = tool.output_preview
             && tool.status != ToolStatus::Running
             && !output.is_empty()
+            && !(tool.name == "spawn_agents" && has_nested_children)
         {
             // Try rendering as inline diff for file tools
             if let Some(diff_lines) = diff_inline::render_diff_output(output, &tool.name, theme) {
@@ -1879,11 +1900,14 @@ pub mod tool_call {
                 };
 
                 for pl in &preview_lines {
-                    lines.push(Line::from(Span::styled(format!("    {pl}"), style)));
+                    lines.push(Line::from(Span::styled(
+                        format!("{indent}  {pl}"),
+                        style,
+                    )));
                 }
                 if total > max_lines {
                     lines.push(Line::from(Span::styled(
-                        format!("    ... ({} more lines)", total - max_lines),
+                        format!("{indent}  ... ({} more lines)", total - max_lines),
                         Style::default().fg(Color::DarkGray),
                     )));
                 }

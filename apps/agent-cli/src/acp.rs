@@ -909,6 +909,8 @@ impl AcpServer {
                 readonly: mode == "readonly",
                 parent: Arc::new(parking_lot::Mutex::new(None)),
                 followups: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                // No TUI consumer for sub-agent activity in ACP mode.
+                subagent_events: None,
             },
         )
     }

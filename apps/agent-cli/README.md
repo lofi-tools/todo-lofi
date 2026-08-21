@@ -236,6 +236,26 @@ suggestions are rendered as a "Suggested next steps" list in the TUI and in
 since sub-agents run with full permissions. Sub-agent runs are capped at 120
 seconds so a stuck agent can't hang the parent run.
 
+### Phase workflow
+
+The parent's system prompt walks it through freebuff's phase workflow for
+implementation tasks (prompt-encoded, not a state machine):
+
+1. **Explore** — spawn `code-searcher`/`researcher-web`/`researcher-docs` in
+   parallel and read the relevant files before touching anything.
+2. **write_todos** — for 3+ step tasks, plan with the `TodoWrite` tool
+   (a review step + a validation step included; cersei's runner also nudges
+   the model about incomplete todos).
+3. **Implement** — direct file edits, preferring `Edit`/`ApplyPatch`.
+4. **Review Loop** — spawn `code-reviewer`, fix anything it finds, then
+   re-spawn it until it reports no new issues.
+5. **Validate** — run typechecks/tests/lints via `Bash`, add tests for new
+   functionality, fix failures, re-validate.
+6. **Follow-ups** — end with `suggest_followups` and a short summary.
+
+Simple questions skip the phases, and follow-up requests on already-completed
+work run only the relevant phases.
+
 ## ACP server
 
 `agent-cli --acp` implements the Agent Client Protocol v1 over stdio

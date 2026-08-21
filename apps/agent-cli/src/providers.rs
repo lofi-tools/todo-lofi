@@ -47,6 +47,7 @@ pub fn agent_tools(
     resolved: &Resolved,
     parent: crate::subagents::ParentHandle,
     followups: crate::subagents::FollowupSink,
+    events: crate::subagents::SubAgentEventSink,
     readonly: bool,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
@@ -56,6 +57,8 @@ pub fn agent_tools(
     tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
+    // write_todos tracking, used by the phase workflow in the system prompt.
+    tools.push(Box::new(cersei::tools::todo_write::TodoWriteTool));
     tools.push(Box::new(crate::subagents::SuggestFollowupsTool::new(followups)));
     // Read-only sessions (ACP readonly mode) can't spawn sub-agents: the
     // sub-agents run with AllowAll and could modify files.
@@ -63,6 +66,7 @@ pub fn agent_tools(
         tools.push(Box::new(crate::subagents::SpawnAgentsTool::new(
             resolved.clone(),
             parent,
+            events,
         )));
     }
     tools
@@ -91,6 +95,9 @@ pub struct BuildParams {
     pub parent: crate::subagents::ParentHandle,
     /// Sink where the `suggest_followups` tool stores suggestions.
     pub followups: crate::subagents::FollowupSink,
+    /// Broadcast channel that sub-agent activity is forwarded to (the TUI
+    /// subscribes to render nested tool calls). None in headless/ACP mode.
+    pub subagent_events: crate::subagents::SubAgentEventSink,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -494,7 +501,13 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         .build()
         .context("failed to build provider")?;
 
-    let tools = agent_tools(resolved, params.parent.clone(), params.followups.clone(), params.readonly);
+    let tools = agent_tools(
+        resolved,
+        params.parent.clone(),
+        params.followups.clone(),
+        params.subagent_events.clone(),
+        params.readonly,
+    );
     let mut builder = Agent::builder()
         .provider(provider)
         .model(&resolved.model)
@@ -538,6 +551,9 @@ struct AgentRuntimeInner {
     config: AppConfig,
     parent: crate::subagents::ParentHandle,
     followups: crate::subagents::FollowupSink,
+    /// Sender side of the sub-agent activity channel; rebuilt agents (fallback
+    /// / switch) keep using the same channel so TUI receivers stay valid.
+    subagent_tx: tokio::sync::broadcast::Sender<crate::subagents::SubAgentActivity>,
 }
 
 impl AgentRuntime {
@@ -546,6 +562,7 @@ impl AgentRuntime {
         let resolved = resolve(config, &provider, &model)?;
         let parent = Arc::new(Mutex::new(None));
         let followups = Arc::new(Mutex::new(Vec::new()));
+        let (subagent_tx, _) = tokio::sync::broadcast::channel(1024);
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -557,6 +574,7 @@ impl AgentRuntime {
                 readonly: false,
                 parent: parent.clone(),
                 followups: followups.clone(),
+                subagent_events: Some(subagent_tx.clone()),
             },
         )?;
         Ok(Self {
@@ -567,6 +585,7 @@ impl AgentRuntime {
                 config: config.clone(),
                 parent,
                 followups,
+                subagent_tx,
             }),
             fallback: FallbackManager::new(config),
         })
@@ -574,6 +593,14 @@ impl AgentRuntime {
 
     pub fn agent(&self) -> Arc<Agent> {
         self.inner.lock().agent.clone()
+    }
+
+    /// Subscribe to the sub-agent activity stream (rendered by the TUI as
+    /// nested tool calls under each `spawn_agents` call).
+    pub fn subscribe_subagents(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity> {
+        self.inner.lock().subagent_tx.subscribe()
     }
 
     /// Drain the followup suggestions collected by the `suggest_followups`
@@ -617,7 +644,7 @@ impl AgentRuntime {
     /// Rebuild the agent on a different provider, preserving the conversation
     /// (minus the failed run's just-pushed prompt).
     pub fn fallback_to(&self, provider: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns, parent, followups) = {
+        let (config, working_dir, max_turns, parent, followups, subagent_tx) = {
             let g = self.inner.lock();
             (
                 g.config.clone(),
@@ -625,6 +652,7 @@ impl AgentRuntime {
                 g.config.max_turns,
                 g.parent.clone(),
                 g.followups.clone(),
+                g.subagent_tx.clone(),
             )
         };
         let model = default_model(&config, provider)?;
@@ -642,6 +670,7 @@ impl AgentRuntime {
                 readonly: false,
                 parent: parent.clone(),
                 followups: followups.clone(),
+                subagent_events: Some(subagent_tx.clone()),
             },
         )?;
         let mut g = self.inner.lock();
@@ -653,7 +682,7 @@ impl AgentRuntime {
 
     /// Rebuild the agent with a new provider/model.
     pub fn switch(&self, provider: &str, model: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns, parent, followups) = {
+        let (config, working_dir, max_turns, parent, followups, subagent_tx) = {
             let g = self.inner.lock();
             (
                 g.config.clone(),
@@ -661,6 +690,7 @@ impl AgentRuntime {
                 g.config.max_turns,
                 g.parent.clone(),
                 g.followups.clone(),
+                g.subagent_tx.clone(),
             )
         };
         let resolved = resolve(&config, provider, model)?;
@@ -675,6 +705,7 @@ impl AgentRuntime {
                 readonly: false,
                 parent: parent.clone(),
                 followups: followups.clone(),
+                subagent_events: Some(subagent_tx.clone()),
             },
         )?;
         let mut g = self.inner.lock();

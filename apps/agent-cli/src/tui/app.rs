@@ -31,6 +31,12 @@ pub struct ToolCall {
     pub output_preview: Option<String>,
     pub started_at: Instant,
     pub duration_ms: Option<u64>,
+    /// Sub-agent tool calls rendered nested under this call (only set on
+    /// `spawn_agents` calls).
+    pub children: Vec<ToolCall>,
+    /// The sub-agent run this call belongs to, for associating forwarded
+    /// activity events with the right `spawn_agents` parent call.
+    pub run_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +236,11 @@ pub struct AppState {
     pub streaming_thinking: String,
     pub is_streaming: bool,
     pub active_tools: Vec<ToolCall>,
+    /// Sub-agent activity stream (forwarded from the `spawn_agents` tool).
+    pub subagent_rx: Option<tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity>>,
+    /// Sub-agent events that arrived before their `spawn_agents` parent call
+    /// was seen (drained when the parent ToolStart is processed).
+    pub pending_subagent: Vec<(u64, crate::subagents::SubAgentActivity)>,
 
     // ── Input ──
     pub input: String,
@@ -291,6 +302,7 @@ impl AppState {
         model: &str,
         // session_id: &str,
         // effort: &str,
+        subagent_rx: Option<tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity>>,
     ) -> Self {
         Self {
             turns: Vec::new(),
@@ -298,6 +310,8 @@ impl AppState {
             streaming_thinking: String::new(),
             is_streaming: false,
             active_tools: Vec::new(),
+            subagent_rx,
+            pending_subagent: Vec::new(),
             input: String::new(),
             cursor_pos: 0,
             input_history: Vec::new(),

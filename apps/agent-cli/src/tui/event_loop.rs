@@ -92,11 +92,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // let theme = Theme::from_name(&config.theme);
     let theme = Theme::enterprise();
-    let mut state = AppState::new(
-        &config.model,
-        // session_id,
-        // &config.effort
-    );
+    let mut state = AppState::new(&config.model, Some(runtime.subscribe_subagents()));
     // state.set_shared_mode(shared_mode);
     let mut agent_run: Option<AgentRun> = None;
 
@@ -142,6 +138,14 @@ pub async fn run(
                     }
                 }
                 state.dirty = true;
+            }
+
+            // ── Sub-agent activity (nested tool calls under spawn_agents) ──
+            activity = poll_subagent(&mut state.subagent_rx) => {
+                if let Some(activity) = activity {
+                    handle_subagent_event(&mut state, activity);
+                    state.dirty = true;
+                }
             }
 
             // ── Terminal events + tick ───────────────────────────────────
@@ -208,6 +212,26 @@ async fn poll_agent_run(run: &mut Option<AgentRun>) -> Option<AgentEvent> {
     match run {
         Some(r) => r.stream.next().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Next sub-agent activity event, or None once the channel is closed (the
+/// runtime was dropped — there is nothing left to poll).
+async fn poll_subagent(
+    rx: &mut Option<tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity>>,
+) -> Option<crate::subagents::SubAgentActivity> {
+    let Some(receiver) = rx else {
+        std::future::pending().await
+    };
+    match receiver.recv().await {
+        Ok(activity) => Some(activity),
+        // Lagged: events were dropped while the UI was busy — keep polling.
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            // The runtime was dropped — nothing left to poll.
+            *rx = None;
+            None
+        }
     }
 }
 
@@ -666,8 +690,24 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 output_preview: None,
                 started_at: Instant::now(),
                 duration_ms: None,
+                children: Vec::new(),
+                run_id: None,
             });
             state.tool_count += 1;
+            // A `spawn_agents` call may have started before the UI processed
+            // its ToolStart — attach any sub-agent activity that arrived in
+            // the meantime (tools run sequentially, so all buffered events
+            // belong to this call).
+            if state.active_tools.last().is_some_and(|t| t.name == "spawn_agents") {
+                let pending = std::mem::take(&mut state.pending_subagent);
+                for (run_id, activity) in pending {
+                    let parent = state.active_tools.last_mut().expect("just pushed");
+                    if parent.run_id.is_none() {
+                        parent.run_id = Some(run_id);
+                    }
+                    attach_subagent_activity(parent, run_id, activity);
+                }
+            }
         }
         AgentEvent::ToolEnd {
             name,
@@ -737,6 +777,168 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             }
         }
         _ => {}
+    }
+}
+
+/// Whether `tool` (a `spawn_agents` call) owns the given sub-agent run,
+/// directly (its own binding) or via one of its nested sub-agent headers.
+fn tool_owns_run(tool: &ToolCall, run_id: u64) -> bool {
+    tool.run_id == Some(run_id)
+        || tool.children.iter().any(|c| c.run_id == Some(run_id))
+}
+
+/// Where the `spawn_agents` call owning a sub-agent run lives.
+#[derive(Clone, Copy)]
+enum SpawnParentLoc {
+    /// In the current turn's active tool calls.
+    Active(usize),
+    /// In the last committed turn.
+    Committed(usize),
+}
+
+/// Find the `spawn_agents` call that owns `run_id`: first any call already
+/// bound to that run (active or committed — late-arriving events land here),
+/// then the currently-running spawn call to bind to. Tools run sequentially,
+/// so at most one spawn call is in flight at a time.
+fn find_spawn_parent(state: &AppState, run_id: u64) -> Option<SpawnParentLoc> {
+    if let Some(idx) = state
+        .active_tools
+        .iter()
+        .rposition(|t| t.name == "spawn_agents" && tool_owns_run(t, run_id))
+    {
+        return Some(SpawnParentLoc::Active(idx));
+    }
+    if let Some(turn) = state.turns.last() {
+        if let Some(idx) = turn
+            .tools
+            .iter()
+            .rposition(|t| t.name == "spawn_agents" && tool_owns_run(t, run_id))
+        {
+            return Some(SpawnParentLoc::Committed(idx));
+        }
+    }
+    state
+        .active_tools
+        .iter()
+        .rposition(|t| t.name == "spawn_agents" && t.status == ToolStatus::Running)
+        .map(SpawnParentLoc::Active)
+}
+
+/// Attach one forwarded sub-agent activity event to its `spawn_agents` parent
+/// call. The parent may be in the active tools or the last committed turn
+/// (events can arrive after the turn completed).
+fn handle_subagent_event(
+    state: &mut AppState,
+    activity: crate::subagents::SubAgentActivity,
+) {
+    let run_id = activity.run_id();
+    let Some(loc) = find_spawn_parent(state, run_id) else {
+        // The parent ToolStart hasn't been processed yet — buffer until it is
+        // (drained when the `spawn_agents` ToolStart is handled).
+        state.pending_subagent.push((run_id, activity));
+        return;
+    };
+    let parent = match loc {
+        SpawnParentLoc::Active(idx) => &mut state.active_tools[idx],
+        SpawnParentLoc::Committed(idx) => &mut state.turns.last_mut().expect("checked").tools[idx],
+    };
+    if parent.run_id.is_none() {
+        parent.run_id = Some(run_id);
+    }
+    attach_subagent_activity(parent, run_id, activity);
+}
+
+/// Apply one activity event to the nested children of a `spawn_agents` call.
+fn attach_subagent_activity(
+    parent: &mut ToolCall,
+    run_id: u64,
+    activity: crate::subagents::SubAgentActivity,
+) {
+    use crate::subagents::SubAgentActivity;
+    match activity {
+        // Started: the nested header for this sub-agent.
+        SubAgentActivity::Started {
+            agent_type,
+            display_name,
+            prompt,
+            ..
+        } => {
+            parent.children.push(ToolCall {
+                name: format!("[{agent_type}]"),
+                input_summary: format!("{} — {}", display_name, truncate(&prompt, 50)),
+                status: ToolStatus::Running,
+                output_preview: None,
+                started_at: Instant::now(),
+                duration_ms: None,
+                children: Vec::new(),
+                run_id: Some(run_id),
+            });
+        }
+        // ToolStart: a tool call inside this sub-agent.
+        SubAgentActivity::ToolStart {
+            name, input_summary, ..
+        } => {
+            if let Some(header) = parent
+                .children
+                .iter_mut()
+                .rev()
+                .find(|c| c.run_id == Some(run_id))
+            {
+                header.children.push(ToolCall {
+                    name,
+                    input_summary,
+                    status: ToolStatus::Running,
+                    output_preview: None,
+                    started_at: Instant::now(),
+                    duration_ms: None,
+                    children: Vec::new(),
+                    run_id: None,
+                });
+            }
+        }
+        // ToolEnd: mark that tool call done.
+        SubAgentActivity::ToolEnd {
+            name,
+            is_error,
+            output_preview,
+            duration_ms,
+            ..
+        } => {
+            if let Some(header) = parent
+                .children
+                .iter_mut()
+                .rev()
+                .find(|c| c.run_id == Some(run_id))
+            {
+                if let Some(tool) = header
+                    .children
+                    .iter_mut()
+                    .rev()
+                    .find(|t| t.name == name && t.status == ToolStatus::Running)
+                {
+                    tool.status = if is_error {
+                        ToolStatus::Error
+                    } else {
+                        ToolStatus::Done
+                    };
+                    tool.duration_ms = Some(duration_ms);
+                    tool.output_preview = Some(output_preview);
+                }
+            }
+        }
+        // Finished: the sub-agent's final output; the header is done.
+        SubAgentActivity::Finished { text, .. } => {
+            if let Some(header) = parent
+                .children
+                .iter_mut()
+                .rev()
+                .find(|c| c.run_id == Some(run_id))
+            {
+                header.status = ToolStatus::Done;
+                header.duration_ms = Some(header.started_at.elapsed().as_millis() as u64);
+                header.output_preview = Some(text);
+            }
+        }
     }
 }
 
@@ -984,7 +1186,9 @@ fn handle_slash_command(
     }
 }
 
-fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
+/// A short summary of a tool call's input for the tool badge line. Shared with
+/// the sub-agent event forwarder in `subagents.rs`.
+pub(crate) fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
     match name {
         "Bash" | "bash" => input
             .get("command")
@@ -1011,14 +1215,30 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             let file = input.get("file").and_then(|v| v.as_str()).unwrap_or("?");
             format!("{action} {file}")
         }
+        "spawn_agents" => match input.get("agents").and_then(|v| v.as_array()) {
+            Some(list) => {
+                let types: Vec<&str> = list
+                    .iter()
+                    .filter_map(|a| a.get("agent_type").and_then(|t| t.as_str()))
+                    .collect();
+                format!("[{}] ({} agent{})", types.join(", "), list.len(), if list.len() == 1 { "" } else { "s" })
+            }
+            None => truncate(&serde_json::to_string(input).unwrap_or_default(), 60),
+        },
         _ => truncate(&serde_json::to_string(input).unwrap_or_default(), 60),
     }
 }
 
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary (never
+/// panics on multi-byte input).
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    if s.len() <= end {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        format!("{}...", &s[..end])
     }
 }
