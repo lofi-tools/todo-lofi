@@ -1362,6 +1362,7 @@ pub mod overlay {
             Line::from("  /clear       Clear conversation"),
             Line::from("  /cost        Show usage and cost"),
             Line::from("  /model       Switch provider/model"),
+            Line::from("  /combos      List/switch combos"),
             Line::from("  /memory      Memory info"),
             Line::from("  /sessions    Session info"),
             Line::from("  /diff        Open git diff panel"),
@@ -2101,7 +2102,6 @@ pub mod tool_call {
             }
         }
 
-        #[test]
         #[test]
         fn renders_nested_subagent_activity() {
             let theme = Theme::enterprise();

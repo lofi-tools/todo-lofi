@@ -233,6 +233,15 @@ enum SessionUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
         cost: Option<Cost>,
     },
+    /// The model the session runs on changed (e.g. a combo fell back to a
+    /// different entry). `modelId` is the user-facing selection, which stays
+    /// the combo; `effectiveModelId` is the concrete model now in use.
+    ModelChanged {
+        #[serde(rename = "modelId")]
+        model_id: String,
+        #[serde(rename = "effectiveModelId")]
+        effective_model_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -318,6 +327,11 @@ struct AcpSession {
     cwd: PathBuf,
     provider: String,
     model: String,
+    /// The concrete (provider, model) the session currently runs on: the
+    /// combo's current fallback entry when the selection is a combo, otherwise
+    /// the selection itself. The user-facing selection stays `provider`/`model`.
+    effective_provider: String,
+    effective_model: String,
     mode: String,
     messages: Vec<Message>,
     /// Monotonic run counter, used to disambiguate pending prompts.
@@ -328,6 +342,25 @@ struct AcpSession {
     /// session runs a plain provider/model).
     fallback: providers::FallbackManager,
     _mcp_servers: Vec<cersei::mcp::McpServerConfig>,
+}
+
+impl AcpSession {
+    /// Reset the effective model to the selection's resolved entry: the first
+    /// combo entry for a combo selection, or the selection itself otherwise.
+    fn refresh_effective(&mut self, config: &AppConfig) {
+        match providers::effective_selection(config, &self.provider, &self.model) {
+            Ok((provider, model)) => {
+                self.effective_provider = provider;
+                self.effective_model = model;
+            }
+            Err(_) => {
+                // Selection is unresolvable; report it as-is rather than
+                // silently keeping stale effective state.
+                self.effective_provider = self.provider.clone();
+                self.effective_model = self.model.clone();
+            }
+        }
+    }
 }
 
 // ─── Server ─────────────────────────────────────────────────────────────────
@@ -560,9 +593,14 @@ impl AcpServer {
 
     /// Flat list of all "provider/model" ids across configured providers.
     fn models_value(&self, session: &Arc<Mutex<AcpSession>>) -> Value {
-        let (provider, model) = {
+        let (provider, model, effective_provider, effective_model) = {
             let guard = session.lock();
-            (guard.provider.clone(), guard.model.clone())
+            (
+                guard.provider.clone(),
+                guard.model.clone(),
+                guard.effective_provider.clone(),
+                guard.effective_model.clone(),
+            )
         };
         let available: Vec<Value> = providers::entries(&self.config)
             .into_iter()
@@ -571,10 +609,18 @@ impl AcpServer {
                 json!({ "modelId": id, "name": id })
             })
             .collect();
-        json!({
+        let current_id = providers::display_model_id(&provider, &model);
+        let effective_id = providers::display_model_id(&effective_provider, &effective_model);
+        // The concrete model only differs from the selection while a combo runs
+        // on a fallback entry; expose it then, mirroring the TUI header.
+        let mut models = json!({
             "availableModels": available,
-            "currentModelId": providers::display_model_id(&provider, &model),
-        })
+            "currentModelId": current_id,
+        });
+        if effective_id != current_id {
+            models["effectiveModelId"] = json!(effective_id);
+        }
+        models
     }
 
     /// Config options: provider + model (dependent) + mode.
@@ -645,11 +691,13 @@ impl AcpServer {
             })
             .collect();
 
-        let session = Arc::new(Mutex::new(AcpSession {
+        let mut session_state = AcpSession {
             id: session_id.clone(),
             cwd,
             provider: self.default_provider.clone(),
             model: self.default_model.clone(),
+            effective_provider: String::new(),
+            effective_model: String::new(),
             mode: "auto".to_string(),
             messages: Vec::new(),
             run_seq: 0,
@@ -660,7 +708,9 @@ impl AcpServer {
                 &self.default_model,
             ),
             _mcp_servers: mcp_servers,
-        }));
+        };
+        session_state.refresh_effective(&self.config);
+        let session = Arc::new(Mutex::new(session_state));
         self.sessions.lock().insert(session_id.clone(), Arc::clone(&session));
 
         let guard = session.lock();
@@ -786,6 +836,7 @@ impl AcpServer {
                 guard.provider = name.to_string();
                 guard.model = model;
                 guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.refresh_effective(&self.config);
             }
             "model" => {
                 let text = match value.as_str() {
@@ -806,6 +857,7 @@ impl AcpServer {
                 guard.provider = provider;
                 guard.model = model;
                 guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.refresh_effective(&self.config);
             }
             other => {
                 self.connection.error(id, -32602, format!("Unknown config option: {other}"));
@@ -877,6 +929,7 @@ impl AcpServer {
                 guard.provider = provider;
                 guard.model = model;
                 guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.refresh_effective(&self.config);
                 drop(guard);
                 self.connection.response(id, json!({}));
             }
@@ -1061,6 +1114,28 @@ impl AcpServer {
                                         providers::display_model_id(&next.provider, &next.model),
                                     )),
                                     message_id: None,
+                                },
+                            );
+                            // Keep the session metadata in sync: the selection
+                            // (the combo) stays, the effective model moves to
+                            // the fallback entry.
+                            let selection_id = {
+                                let guard = session.lock();
+                                providers::display_model_id(&guard.provider, &guard.model)
+                            };
+                            {
+                                let mut guard = session.lock();
+                                guard.effective_provider = next.provider.clone();
+                                guard.effective_model = next.model.clone();
+                            }
+                            self.connection.send_update(
+                                &session_id,
+                                SessionUpdate::ModelChanged {
+                                    model_id: selection_id,
+                                    effective_model_id: providers::display_model_id(
+                                        &next.provider,
+                                        &next.model,
+                                    ),
                                 },
                             );
                             stream = new_agent.run_stream(&text);
@@ -1280,5 +1355,135 @@ fn tool_title(name: &str, input: &Value) -> String {
     match field.and_then(|f| input.get(f)).and_then(Value::as_str) {
         Some(v) if !v.is_empty() => v.to_string(),
         _ => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ComboEntry, ProviderConfigEntry};
+
+    /// A config with a `test` provider and one combo referencing it; builds
+    /// offline (literal key, loopback base URL).
+    fn config_with_combo() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.provider = "test".into();
+        config.model = "test/test-model".into();
+        config.permissions_mode = "allow_all".into();
+        config.providers.insert(
+            "test".into(),
+            ProviderConfigEntry {
+                base_url: Some("http://127.0.0.1:1".into()),
+                api_key: Some("test-key".into()),
+                models: vec!["test/test-model".into(), "test/test-2".into()],
+                ..Default::default()
+            },
+        );
+        config.combos.insert(
+            "coding".into(),
+            vec![
+                ComboEntry {
+                    provider: "test".into(),
+                    model: "test/test-model".into(),
+                },
+                ComboEntry {
+                    provider: "test".into(),
+                    model: "test/test-2".into(),
+                },
+            ],
+        );
+        config
+    }
+
+    fn session_with(config: &AppConfig) -> AcpSession {
+        let (provider, model) = providers::default_selection(config).unwrap();
+        let mut session = AcpSession {
+            id: "s1".into(),
+            cwd: std::env::current_dir().unwrap(),
+            provider: provider.clone(),
+            model: model.clone(),
+            effective_provider: String::new(),
+            effective_model: String::new(),
+            mode: "auto".into(),
+            messages: Vec::new(),
+            run_seq: 0,
+            pending_cancel: None,
+            fallback: providers::fallback_for(config, &provider, &model),
+            _mcp_servers: Vec::new(),
+        };
+        session.refresh_effective(config);
+        session
+    }
+
+    #[test]
+    fn refresh_effective_tracks_combo_first_entry() {
+        let config = config_with_combo();
+        let mut session = session_with(&config);
+
+        // Plain selection: the effective model is the selection itself.
+        assert_eq!((session.provider.as_str(), session.model.as_str()), ("test", "test/test-model"));
+        assert_eq!(
+            (session.effective_provider.as_str(), session.effective_model.as_str()),
+            ("test", "test/test-model")
+        );
+
+        // Combo selection: the effective model is its first entry.
+        session.provider = "combos".into();
+        session.model = "coding".into();
+        session.refresh_effective(&config);
+        assert_eq!((session.provider.as_str(), session.model.as_str()), ("combos", "coding"));
+        assert_eq!(
+            (session.effective_provider.as_str(), session.effective_model.as_str()),
+            ("test", "test/test-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_value_exposes_effective_model_id_only_when_different() {
+        let config = config_with_combo();
+        let (connection, writer) = AcpConnection::new();
+        let server = AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config.clone(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+        };
+
+        // Plain selection: no effectiveModelId (it equals currentModelId).
+        let session = Arc::new(Mutex::new(session_with(&config)));
+        let models = server.models_value(&session);
+        assert_eq!(models["currentModelId"], "test/test-model");
+        assert!(models.get("effectiveModelId").is_none());
+
+        // Combo on a fallback entry: effectiveModelId shows the concrete model
+        // while currentModelId keeps the combo selection.
+        let mut state = session_with(&config);
+        state.provider = "combos".into();
+        state.model = "coding".into();
+        state.refresh_effective(&config);
+        // Simulate a fallback to the second entry.
+        state.effective_provider = "test".into();
+        state.effective_model = "test/test-2".into();
+        let session = Arc::new(Mutex::new(state));
+        let models = server.models_value(&session);
+        assert_eq!(models["currentModelId"], "combos/coding");
+        assert_eq!(models["effectiveModelId"], "test/test-2");
+
+        writer.abort();
+    }
+
+    #[test]
+    fn model_changed_update_serializes_selection_and_effective() {
+        let line = serde_json::to_string(&SessionUpdate::ModelChanged {
+            model_id: "combos/coding".into(),
+            effective_model_id: "test/test-2".into(),
+        })
+        .unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["sessionUpdate"], "model_changed");
+        assert_eq!(value["modelId"], "combos/coding");
+        assert_eq!(value["effectiveModelId"], "test/test-2");
     }
 }

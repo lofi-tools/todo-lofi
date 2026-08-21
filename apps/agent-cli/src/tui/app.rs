@@ -75,6 +75,7 @@ pub struct CommandSelectorState {
 /// All slash commands, in display order. Must mirror `handle_slash_command`.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "Switch provider/model"),
+    ("combos", "List/switch combos"),
     ("help", "Show help"),
     ("clear", "Clear conversation"),
     ("panel", "Toggle side panel"),

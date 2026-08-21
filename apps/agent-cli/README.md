@@ -158,7 +158,12 @@ surfaced normally instead of being retried, to avoid duplicating partial work.
 When a combo switches entries you'll see a notice in the TUI (a grayed
 `[system]` log line — your selected model stays `combos/coding`) and an
 `agent_message_chunk` notification over ACP naming which model failed and
-which it fell back to.
+which it fell back to. The concrete model in use is also exposed as
+`effectiveModelId` in the ACP `session/new` `models` metadata (only when it
+differs from `currentModelId`, i.e. while a combo runs on a fallback entry),
+and each switch emits a `model_changed` session/update notification carrying
+both the selection (`modelId`) and the new effective model
+(`effectiveModelId`).
 
 ### Providers
 
@@ -298,6 +303,9 @@ work run only the relevant phases.
 `session/set_config_option` and `session/cancel`. `session/new` advertises
 `provider` + `model` config options and `availableModels` (respecting
 `free_models_only`), so clients can switch provider/model — same registry as
-the TUI's `/model`. Prompt runs use the same combo fallback as the TUI (per
-session: each session tracks its own cooldowns), with switches logged via
-`agent_message_chunk` notifications.
+the TUI's `/model`. The `models` object also reports `effectiveModelId` (the
+concrete model the session runs on) whenever it differs from `currentModelId`
+— i.e. while a combo runs on a fallback entry. Prompt runs use the same combo
+fallback as the TUI (per session: each session tracks its own cooldowns), with
+switches logged via `agent_message_chunk` notifications and reported to
+clients with a `model_changed` session/update.

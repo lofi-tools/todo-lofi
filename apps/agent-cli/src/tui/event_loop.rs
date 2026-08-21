@@ -1925,6 +1925,60 @@ fn handle_slash_command(
                 }
             }
         }
+        "combos" => {
+            let rest = input
+                .trim_start_matches('/')
+                .strip_prefix("combos")
+                .map(str::trim)
+                .unwrap_or("");
+            if rest.is_empty() {
+                // List configured combos, marking the active one.
+                let mut combos = crate::providers::combos(config);
+                combos.sort_by(|a, b| a.name.cmp(&b.name));
+                let (cur_provider, cur_model) = runtime.current();
+                let active = (cur_provider == "combos").then_some(cur_model);
+                let content = if combos.is_empty() {
+                    "No combos configured. Add a `combos` section to .abstract/config.toml.".into()
+                } else {
+                    let mut lines = format!(
+                        "Combos ({} configured) — switch with /combos <name> or /model combos/<name>:",
+                        combos.len()
+                    );
+                    for combo in &combos {
+                        let marker =
+                            if active.as_deref() == Some(combo.name.as_str()) { "  ← active" } else { "" };
+                        lines.push_str(&format!("\n\n{}{}", combo.name, marker));
+                        for (index, entry) in combo.entries.iter().enumerate() {
+                            lines.push_str(&format!(
+                                "\n  {}. {}",
+                                index + 1,
+                                crate::providers::display_model_id(&entry.provider, &entry.model)
+                            ));
+                        }
+                    }
+                    lines
+                };
+                state.push_system(content);
+            } else {
+                match runtime.select_text(&format!("combos/{rest}")) {
+                    Ok((provider, model)) => {
+                        let label = crate::providers::display_model_id(&provider, &model);
+                        match runtime.switch(&provider, &model) {
+                            Ok(()) => {
+                                state.model = label.clone();
+                                state.effective_model = Some(crate::providers::display_model_id(
+                                    &runtime.effective().0,
+                                    &runtime.effective().1,
+                                ));
+                                state.push_system(format!("Switched to {label}"));
+                            }
+                            Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+                        }
+                    }
+                    Err(e) => state.push_system(format!("{e}")),
+                }
+            }
+        }
         // "cost" => {
         //     // Estimate cost if provider didn't report it
         //     let cost = if state.cost_usd > 0.0 {
@@ -2349,6 +2403,90 @@ mod tests {
             },
         );
         Arc::new(AgentRuntime::new(&config).unwrap())
+    }
+
+    /// A runtime with a `test` provider and two combos referencing it.
+    fn runtime_with_combos() -> (AppConfig, Arc<AgentRuntime>) {
+        use crate::config::{ComboEntry, ProviderConfigEntry};
+        let mut config = AppConfig::default();
+        config.provider = "test".into();
+        config.model = "test/test-model".into();
+        config.permissions_mode = "allow_all".into();
+        config.providers.insert(
+            "test".into(),
+            ProviderConfigEntry {
+                base_url: Some("http://127.0.0.1:1".into()),
+                api_key: Some("test-key".into()),
+                models: vec!["test/test-model".into(), "test/test-2".into()],
+                ..Default::default()
+            },
+        );
+        config.combos.insert(
+            "coding".into(),
+            vec![
+                ComboEntry {
+                    provider: "test".into(),
+                    model: "test/test-model".into(),
+                },
+                ComboEntry {
+                    provider: "test".into(),
+                    model: "test/test-2".into(),
+                },
+            ],
+        );
+        config.combos.insert(
+            "writing".into(),
+            vec![ComboEntry {
+                provider: "test".into(),
+                model: "test/test-2".into(),
+            }],
+        );
+        let runtime = Arc::new(AgentRuntime::new(&config).unwrap());
+        (config, runtime)
+    }
+
+    #[test]
+    fn combos_command_lists_configured_combos_with_active_marker() {
+        let (config, runtime) = runtime_with_combos();
+
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos", &config, &runtime);
+        let content = s.turns.last().unwrap().content.clone();
+        assert!(content.contains("coding"), "lists combo names: {content}");
+        assert!(content.contains("writing"));
+        assert!(content.contains("test/test-model"));
+        assert!(content.contains("test/test-2"));
+        // Runtime is on the plain `test` provider: no combo is active.
+        assert!(!content.contains("← active"));
+
+        // After switching to the combo, the listing marks it active.
+        runtime.switch("combos", "coding").unwrap();
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos", &config, &runtime);
+        let content = s.turns.last().unwrap().content.clone();
+        assert!(content.contains("coding  ← active"), "marks active combo: {content}");
+        assert!(!content.contains("writing  ← active"));
+    }
+
+    #[test]
+    fn combos_command_switches_to_named_combo() {
+        let (config, runtime) = runtime_with_combos();
+
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos coding", &config, &runtime);
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::System);
+        assert!(last.content.contains("Switched to combos/coding"), "{}", last.content);
+        assert_eq!(s.model, "combos/coding");
+        assert_eq!(s.effective_model.as_deref(), Some("test/test-model"));
+        let (provider, model) = runtime.current();
+        assert_eq!((provider.as_str(), model.as_str()), ("combos", "coding"));
+
+        // Unknown combo names surface the error, like /model does.
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos nope", &config, &runtime);
+        let last = s.turns.last().unwrap();
+        assert!(!last.content.contains("Switched to"), "{}", last.content);
     }
 
     fn key_for(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
