@@ -39,14 +39,26 @@ impl ScrollState {
     }
 
     /// Scroll up by n lines.
+    ///
+    /// While sticky-bottom is active, `offset` is stale (not maintained), so
+    /// materialize it from the bottom before applying the scroll. Without this,
+    /// the first scroll-up would jump to the top instead of one line up.
     pub fn scroll_up(&mut self, n: u16) {
-        self.sticky_bottom = false;
+        if self.sticky_bottom {
+            self.offset = self.max_offset();
+            self.sticky_bottom = false;
+        }
         self.offset = self.offset.saturating_sub(n);
     }
 
     /// Scroll down by n lines.
+    ///
+    /// A no-op while sticky-bottom is active: the view is already at the end,
+    /// and unsticking here would teleport it to a stale offset.
     pub fn scroll_down(&mut self, n: u16) {
-        self.sticky_bottom = false;
+        if self.sticky_bottom {
+            return;
+        }
         self.offset = (self.offset + n).min(self.max_offset());
         // Re-enable sticky bottom if we've scrolled to the end
         if self.offset >= self.max_offset() {
@@ -75,5 +87,106 @@ impl ScrollState {
         self.content_height = content_height;
         self.viewport_height = viewport_height;
         self.clamp();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default state: sticky bottom, offset 0.
+    #[test]
+    fn starts_sticky_at_bottom() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        assert!(s.sticky_bottom);
+        assert_eq!(s.effective_offset(), 90);
+    }
+
+    /// The core bug: first scroll-up from sticky-bottom must move up one line,
+    /// not snap to the top.
+    #[test]
+    fn scroll_up_from_sticky_bottom_moves_one_line() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(1);
+        assert!(!s.sticky_bottom);
+        assert_eq!(s.offset, 89);
+        assert_eq!(s.effective_offset(), 89);
+    }
+
+    #[test]
+    fn page_up_from_sticky_bottom_moves_one_page() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.page_up();
+        assert_eq!(s.effective_offset(), 82); // 90 - (10 - 2)
+    }
+
+    #[test]
+    fn home_from_sticky_bottom_jumps_to_top() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(s.content_height);
+        assert_eq!(s.effective_offset(), 0);
+    }
+
+    #[test]
+    fn scrolling_back_to_bottom_reenables_sticky() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(5);
+        assert!(!s.sticky_bottom);
+        s.scroll_down(5);
+        assert!(s.sticky_bottom, "reaching the bottom should re-enable sticky");
+        assert_eq!(s.effective_offset(), 90);
+    }
+
+    #[test]
+    fn scroll_to_bottom_reenables_sticky() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(20);
+        s.scroll_to_bottom();
+        assert!(s.sticky_bottom);
+        assert_eq!(s.effective_offset(), 90);
+    }
+
+    /// New content arriving while sticky keeps the view pinned to the bottom.
+    #[test]
+    fn sticky_follows_new_content() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.update_dimensions(120, 10);
+        assert_eq!(s.effective_offset(), 110);
+    }
+
+    /// New content while scrolled up must NOT yank the viewport — the user
+    /// stays anchored where they scrolled to.
+    #[test]
+    fn non_sticky_offset_survives_new_content() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(30); // offset = 60
+        s.update_dimensions(120, 10);
+        assert_eq!(s.effective_offset(), 60);
+    }
+
+    #[test]
+    fn offset_clamps_when_content_shrinks() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(100, 10);
+        s.scroll_up(50); // offset = 40
+        s.update_dimensions(45, 10); // max offset now 35
+        assert_eq!(s.effective_offset(), 35);
+    }
+
+    #[test]
+    fn content_shorter_than_viewport_stays_at_zero() {
+        let mut s = ScrollState::new();
+        s.update_dimensions(5, 10);
+        assert_eq!(s.effective_offset(), 0);
+        s.scroll_up(3); // no-op, already at top
+        assert_eq!(s.effective_offset(), 0);
     }
 }

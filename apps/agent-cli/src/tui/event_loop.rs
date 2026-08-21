@@ -537,10 +537,36 @@ fn handle_key(
     None
 }
 
-/// Handle mouse events: a left click inside the input box moves the cursor to
-/// the clicked character.
+/// Handle mouse events: scroll wheel scrolls the output zone; a left click
+/// inside the input box moves the cursor to the clicked character.
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     use crossterm::event::{MouseButton, MouseEventKind};
+
+    // Scroll wheel — routes to the focused scrollable area (even while streaming).
+    match mouse.kind {
+        MouseEventKind::ScrollUp if state.side_panel_focused => {
+            state.side_panel_scroll.scroll_up(3);
+            state.dirty = true;
+            return;
+        }
+        MouseEventKind::ScrollDown if state.side_panel_focused => {
+            state.side_panel_scroll.scroll_down(3);
+            state.dirty = true;
+            return;
+        }
+        MouseEventKind::ScrollUp => {
+            state.scroll.scroll_up(3);
+            state.dirty = true;
+            return;
+        }
+        MouseEventKind::ScrollDown => {
+            state.scroll.scroll_down(3);
+            state.dirty = true;
+            return;
+        }
+        _ => {}
+    }
+
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
         return;
     }
