@@ -122,6 +122,7 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
             cersei::events::AgentEvent::ToolEnd {
                 name,
                 is_error,
+                result,
                 duration,
                 ..
             } => {
@@ -131,6 +132,9 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
                     "\x1b[32m✓\x1b[0m"
                 };
                 eprintln!("{status} {name} ({}ms)", duration.as_millis());
+                if is_error {
+                    eprintln!("    {}", result.lines().next().unwrap_or(""));
+                }
             }
             cersei::events::AgentEvent::Error(msg) => {
                 if !try_fallback(&runtime, &mut run) {

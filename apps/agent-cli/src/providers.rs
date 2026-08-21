@@ -46,6 +46,10 @@ pub struct Provider {
 /// `run_terminal_command`, `web_search`/`read_docs`/`read_url`, `set_output`).
 pub fn agent_tools() -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
+    // Replace the built-in Grep with our ripgrep version (raw `rg` flag
+    // passthrough, per-file and global result caps — freebuff-style).
+    tools.retain(|t| t.name() != "Grep");
+    tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
     tools
