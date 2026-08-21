@@ -93,6 +93,48 @@ impl VirtualList {
         .unwrap_or_default()
     }
 
+    /// Byte offsets of each grapheme-cluster start in `row_text(idx)`, in
+    /// order. The end of the last grapheme is `row_text(idx).len()`. Returns
+    /// an empty vec when `idx` is out of range.
+    ///
+    /// This is the bridge between grapheme-cluster indices (what selection
+    /// columns are) and byte offsets (what `str` slicing needs). Selection
+    /// columns are grapheme indices so they can never land mid-codepoint.
+    pub fn row_grapheme_bytes(&self, idx: usize) -> Vec<usize> {
+        let text = self.row_text(idx);
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut offsets = Vec::with_capacity(text.len());
+        let mut byte = 0usize;
+        for grapheme in text.graphemes(true) {
+            offsets.push(byte);
+            byte += grapheme.len();
+        }
+        offsets
+    }
+
+    /// Number of grapheme clusters in `row_text(idx)`. Returns 0 when `idx` is
+    /// out of range.
+    pub fn row_grapheme_count(&self, idx: usize) -> usize {
+        self.row_grapheme_bytes(idx).len()
+    }
+
+    /// The substring of `row_text(idx)` covering grapheme indices
+    /// `start_g..end_g` (clamped to the row's grapheme count). Returns an
+    /// empty string when `idx` is out of range or the range is empty.
+    pub fn row_slice_by_graphemes(&self, idx: usize, start_g: usize, end_g: usize) -> String {
+        let text = self.row_text(idx);
+        if text.is_empty() {
+            return String::new();
+        }
+        let offsets = self.row_grapheme_bytes(idx);
+        // `offsets.len()` graphemes ⇒ the end boundary is `text.len()`.
+        let start_byte = offsets.get(start_g).copied().unwrap_or(text.len());
+        let end_byte = offsets.get(end_g).copied().unwrap_or(text.len());
+        // Grapheme boundaries are always valid char boundaries, so this slice
+        // can never panic mid-codepoint.
+        text[start_byte.min(end_byte)..end_byte.max(start_byte)].to_string()
+    }
+
     /// Set streaming items (rebuilt every frame).
     pub fn set_streaming(&mut self, items: Vec<VItem>) {
         self.streaming_items = items;
@@ -145,8 +187,9 @@ impl VirtualList {
     }
 
     /// Render only visible items directly to the buffer. `selection` is the
-    /// normalized output selection `(start_row, start_col, end_row, end_col)`;
-    /// the selected bytes of overlapping rows get the REVERSED modifier.
+    /// normalized output selection `(start_row, start_col, end_row, end_col)`
+    /// where the columns are grapheme-cluster indices; the selected graphemes
+    /// of overlapping rows get the REVERSED modifier.
     pub fn render(
         &self,
         area: Rect,
@@ -231,29 +274,42 @@ impl VirtualList {
     }
 }
 
-// ─── A copy of `line` with bytes `[start..end)` (in the joined span text)
-/// styled with the REVERSED modifier; everything else keeps its style.
+// ─── A copy of `line` with the grapheme range `[start_g..end_g)` (in the
+/// joined span text) styled with the REVERSED modifier; everything else
+/// keeps its style.
 ///
-/// `start`/`end` are byte offsets into the row's joined span text. They come
-/// from the selection machinery, which snaps them to char boundaries in the
-/// *joined* text — but an individual span can still receive an offset that
-/// lands mid-codepoint when a multi-byte char straddles a span boundary or
-/// when streaming wraps a span at a non-char-aligned byte. Flooring each edge
-/// to the span's own char boundary keeps slicing panic-free and matches the
-/// visual intent (the selection snaps to the nearest codepoint start).
-fn highlight_line(line: &Line<'static>, start: usize, end: usize) -> Line<'static> {
+/// `start_g`/`end_g` are grapheme-cluster indices into the row's joined
+/// span text. They are resolved to byte offsets over the joined text and
+/// each span is split at those byte offsets. Because grapheme boundaries are
+/// always valid char boundaries, the per-span byte slices can never land
+/// mid-codepoint — the selection is grapheme-aligned, so this is panic-free
+/// for any text (combining marks, multi-byte CJK, emoji ZWJ sequences).
+fn highlight_line(line: &Line<'static>, start_g: usize, end_g: usize) -> Line<'static> {
+    // Resolve grapheme indices to byte offsets over the joined span text.
+    // `end_g` may be `usize::MAX` (full remainder); clamp it to the grapheme
+    // count, whose end byte is the joined text length.
+    let joined: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut grapheme_bytes: Vec<usize> = Vec::with_capacity(joined.len());
+    let mut byte = 0usize;
+    for grapheme in joined.graphemes(true) {
+        grapheme_bytes.push(byte);
+        byte += grapheme.len();
+    }
+    let total_g = grapheme_bytes.len();
+    let start_byte = grapheme_bytes.get(start_g.min(total_g)).copied().unwrap_or(joined.len());
+    let end_byte = grapheme_bytes.get(end_g.min(total_g)).copied().unwrap_or(joined.len());
+    let (start_byte, end_byte) = (start_byte.min(end_byte), end_byte.max(start_byte));
+
     let mut spans_out = Vec::new();
     let mut pos = 0usize;
     for span in &line.spans {
         let text = span.content.to_string();
         let span_end = pos + text.len();
-        // Map the row-text byte offsets into this span's local byte range,
-        // clamped to the span bounds, then snap to char boundaries so we
-        // never slice mid-codepoint.
-        let a = start.saturating_sub(pos).min(text.len());
-        let b = end.saturating_sub(pos).min(text.len());
-        let a = text.floor_char_boundary(a);
-        let b = text.floor_char_boundary(b);
+        // Map the joined-text byte offsets into this span's local byte range,
+        // clamped to the span bounds.
+        let a = start_byte.saturating_sub(pos).min(text.len());
+        let b = end_byte.saturating_sub(pos).min(text.len());
         if a >= b {
             // Fully outside the selection (or zero-width overlap).
             spans_out.push(span.clone());
@@ -298,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn highlight_line_marks_only_selected_bytes() {
+    fn highlight_line_marks_only_selected_graphemes() {
         let line = Line::from(vec![Span::raw("hello"), Span::raw(" world")]);
         let out = highlight_line(&line, 2, 8);
         let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
@@ -329,43 +385,67 @@ mod tests {
     }
 
     #[test]
-    fn highlight_line_does_not_panic_on_mid_codepoint_selection() {
-        // Regression: a multi-byte char (▊ is 3 bytes) with a selection byte
-        // index landing inside it panicked on str slicing. Snapping to char
-        // boundaries keeps slicing panic-free.
-        //
-        // `▊ab▊` joined bytes: ▊=0..3, a=3..4, b=4..5, ▊=5..8.
-        let line = Line::from(vec![Span::raw("▊ab"), Span::raw("▊")]);
-        // start=1 is inside the first ▊ (floors to 0); end=3 is the ▊/a
-        // boundary. Selection on span 0 covers bytes [0..3) = ▊.
-        let out = highlight_line(&line, 1, 3);
-        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(texts, vec!["▊", "ab", "▊"]);
-        assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
-        assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
-        assert!(!out.spans[2].style.add_modifier.contains(Modifier::REVERSED));
-
-        // End index mid-char in a single-span line must not panic either.
-        // `a▊b`: a=0..1, ▊=1..4, b=4..5.
-        let single = Line::from(vec![Span::raw("a▊b")]);
-        let out = highlight_line(&single, 0, 3);
-        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
-        // end=3 floors to 1 (▊ start) → `a` highlighted, `▊b` not.
-        assert_eq!(texts, vec!["a", "▊b"]);
-        assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
-        assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    fn row_graphemes_and_count_handle_multibyte_and_clusters() {
+        let mut list = VirtualList::new();
+        // `é` = `e` + combining acute (U+0301): one grapheme, two codepoints.
+        // `▊` = one 3-byte codepoint. `🇯🇵` = regional-indicator ZWJ pair:
+        // one grapheme, four bytes, two codepoints.
+        list.set_committed(vec![VItem::new(Line::from(vec![
+            Span::raw("a"),
+            Span::raw("é"),
+            Span::raw("▊"),
+            Span::raw("🇯🇵"),
+        ]))]);
+        // joined = "aé▊🇯🇵" → 4 graphemes.
+        assert_eq!(list.row_text(0), "aé▊🇯🇵");
+        assert_eq!(list.row_grapheme_count(0), 4);
+        // Byte offsets of each grapheme start.
+        // a=0, é=1..3 (e+◌́), ▊=3..6, 🇯🇵=6..14.
+        assert_eq!(list.row_grapheme_bytes(0), vec![0, 1, 3, 6]);
     }
 
     #[test]
-    fn highlight_line_reproduces_original_panic_case() {
-        // The shipped panic was: `end byte index 3 is not a char boundary;
-        // it is inside '▊' (bytes 2..5 of string)`. That is a span whose text
-        // is `<2 bytes><▊>` and a selection end of 3 landing inside ▊. Without
-        // flooring, `text[0..3]` / `text[3..]` panicked. Must not panic now.
-        let line = Line::from(vec![Span::raw("ab▊cd")]); // a=0,b=1,▊=2..5,c=5,d=6
-        let out = highlight_line(&line, 0, 3);
+    fn row_slice_by_graphemes_never_splits_clusters() {
+        let mut list = VirtualList::new();
+        list.set_committed(vec![VItem::new(Line::from(vec![
+            Span::raw("a"),
+            Span::raw("é"), // e + combining acute
+            Span::raw("b"),
+        ]))]);
+        // Slicing at grapheme index 1..2 returns the whole `é` cluster,
+        // never a lone combining mark or partial codepoint.
+        assert_eq!(list.row_slice_by_graphemes(0, 1, 2), "é");
+        // 0..3 = whole row.
+        assert_eq!(list.row_slice_by_graphemes(0, 0, 3), "aéb");
+        // out-of-range end clamps to row end.
+        assert_eq!(list.row_slice_by_graphemes(0, 1, usize::MAX), "éb");
+        // empty range.
+        assert_eq!(list.row_slice_by_graphemes(0, 1, 1), "");
+    }
+
+    #[test]
+    fn highlight_line_marks_selected_graphemes_not_codepoints() {
+        // `aéb`: a, é(e+◌́), b — 3 graphemes. With the old byte-offset
+        // selection, highlighting grapheme 1 (`é`) would have to land on byte
+        // 1 (mid-cluster); grapheme indices make it exact.
+        let line = Line::from(vec![Span::raw("a"), Span::raw("éb")]);
+        let out = highlight_line(&line, 1, 2);
         let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
-        // end=3 floors to 2 (▊ start) → `ab` highlighted, `▊cd` not.
+        // span 0 `a` unchanged; span 1 splits into `é` (reversed) + `b`.
+        assert_eq!(texts, vec!["a", "é", "b"]);
+        assert!(!out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[2].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn highlight_line_reproduces_original_panic_case_via_graphemes() {
+        // The shipped panic was a multi-byte char (▊) split by a byte-offset
+        // selection. With grapheme indices the selection can never land inside
+        // a codepoint, so the analogous selection (highlight `ab`) is exact.
+        let line = Line::from(vec![Span::raw("ab▊cd")]); // graphemes: a b ▊ c d
+        let out = highlight_line(&line, 0, 2);
+        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(texts, vec!["ab", "▊cd"]);
         assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
         assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));

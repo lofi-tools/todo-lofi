@@ -17,6 +17,7 @@ crossterm = "0.28"
 ratatui = "0.29"
 termimad = "0.30"
 unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 # Serde, formats, codecs
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1183,9 +1183,10 @@ fn input_click_pos(state: &AppState, row: u16, col: u16) -> Option<usize> {
     ))
 }
 
-/// Map a click position to an output `(row, byte offset)` pair, if it lands
-/// inside the messages box. The row is clamped to the available content and
-/// the byte offset lands on a char boundary.
+/// Map a click position to an output `(row, grapheme index)` pair, if it
+/// lands inside the messages box. The row is clamped to the available
+/// content and the grapheme index is the cluster the click fell on (clamped
+/// to the row's grapheme count when past the end).
 fn output_click_pos(state: &AppState, row: u16, col: u16) -> Option<SelectionPoint> {
     let (x, y, w, h) = state.messages_area?;
     if row < y || row >= y + h || col < x || col >= x + w {
@@ -1199,16 +1200,23 @@ fn output_click_pos(state: &AppState, row: u16, col: u16) -> Option<SelectionPoi
     let idx = ((offset as u32 + (row - y) as u32).min(total as u32 - 1)) as usize;
     let text = state.virtual_list.row_text(idx);
     let col_in = (col - x) as usize;
-    // Walk chars accumulating display width to land on a char boundary.
+    // Walk grapheme clusters accumulating display width; a cluster's width is
+    // the width of its first codepoint with a width (zero-width combining
+    // marks contribute nothing). This lands the click on a grapheme boundary.
+    use unicode_segmentation::UnicodeSegmentation;
     let mut width = 0usize;
-    for (i, ch) in text.char_indices() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > col_in {
-            return Some(SelectionPoint::Output(idx, i));
+    for (grapheme_idx, grapheme) in text.graphemes(true).enumerate() {
+        let gw = grapheme
+            .chars()
+            .map(|c| c.width().unwrap_or(0))
+            .sum::<usize>();
+        if width + gw > col_in {
+            return Some(SelectionPoint::Output(idx, grapheme_idx));
         }
-        width += ch_width;
+        width += gw;
     }
-    Some(SelectionPoint::Output(idx, text.len()))
+    let count = text.graphemes(true).count();
+    Some(SelectionPoint::Output(idx, count))
 }
 
 /// The active endpoint of the current output selection, or (0, 0) when there
@@ -1238,16 +1246,15 @@ fn extend_output_selection(state: &mut AppState, active: SelectionPoint) {
     }
 }
 
-/// Move an output position one character forward, wrapping to the next row's
+/// Move an output position one grapheme forward, wrapping to the next row's
 /// start at the end of a row.
 fn output_pos_forward(state: &AppState, pos: SelectionPoint) -> SelectionPoint {
     let SelectionPoint::Output(row, col) = pos else {
         return pos;
     };
-    let text = state.virtual_list.row_text(row);
-    if col < text.len() {
-        let ch = text[col..].chars().next().unwrap();
-        SelectionPoint::Output(row, col + ch.len_utf8())
+    let count = state.virtual_list.row_grapheme_count(row);
+    if col < count {
+        SelectionPoint::Output(row, col + 1)
     } else if row + 1 < state.virtual_list.total_height() as usize {
         SelectionPoint::Output(row + 1, 0)
     } else {
@@ -1255,26 +1262,24 @@ fn output_pos_forward(state: &AppState, pos: SelectionPoint) -> SelectionPoint {
     }
 }
 
-/// Move an output position one character backward, wrapping to the previous
+/// Move an output position one grapheme backward, wrapping to the previous
 /// row's end at the start of a row.
 fn output_pos_backward(state: &AppState, pos: SelectionPoint) -> SelectionPoint {
     let SelectionPoint::Output(row, col) = pos else {
         return pos;
     };
     if col > 0 {
-        let text = state.virtual_list.row_text(row);
-        let col = text[..col].char_indices().next_back().map_or(0, |(i, _)| i);
-        SelectionPoint::Output(row, col)
+        SelectionPoint::Output(row, col - 1)
     } else if row > 0 {
-        let text = state.virtual_list.row_text(row - 1);
-        SelectionPoint::Output(row - 1, text.len())
+        let prev_count = state.virtual_list.row_grapheme_count(row - 1);
+        SelectionPoint::Output(row - 1, prev_count)
     } else {
         pos
     }
 }
 
 /// Move an output position down/up one row, keeping the column clamped to the
-/// target row's length on a char boundary.
+/// target row's grapheme count.
 fn output_pos_row(state: &AppState, pos: SelectionPoint, down: bool) -> SelectionPoint {
     let SelectionPoint::Output(row, col) = pos else {
         return pos;
@@ -1283,8 +1288,8 @@ fn output_pos_row(state: &AppState, pos: SelectionPoint, down: bool) -> Selectio
     if target == row || target >= state.virtual_list.total_height() as usize {
         return pos;
     }
-    let text = state.virtual_list.row_text(target);
-    let col = text.floor_char_boundary(col.min(text.len()));
+    let target_count = state.virtual_list.row_grapheme_count(target);
+    let col = col.min(target_count);
     SelectionPoint::Output(target, col)
 }
 
@@ -1295,11 +1300,11 @@ fn select_all_output(state: &mut AppState) {
         state.selection = None;
         return;
     }
-    let last_len = state.virtual_list.row_text(total - 1).len();
+    let last_count = state.virtual_list.row_grapheme_count(total - 1);
     state.selection = Some(Selection {
         target: SelectionTarget::Output,
         anchor: SelectionPoint::Output(0, 0),
-        active: SelectionPoint::Output(total - 1, last_len),
+        active: SelectionPoint::Output(total - 1, last_count),
         dragging: false,
     });
 }
@@ -1351,8 +1356,8 @@ fn output_selection_top(state: &mut AppState) {
 fn output_selection_bottom(state: &mut AppState) {
     let total = state.virtual_list.total_height() as usize;
     if total > 0 {
-        let last_len = state.virtual_list.row_text(total - 1).len();
-        extend_output_selection(state, SelectionPoint::Output(total - 1, last_len));
+        let last_count = state.virtual_list.row_grapheme_count(total - 1);
+        extend_output_selection(state, SelectionPoint::Output(total - 1, last_count));
     }
     state.dirty = true;
 }
@@ -1375,8 +1380,8 @@ fn output_selection_page(state: &mut AppState, down: bool) {
     } else {
         row.saturating_sub(page)
     };
-    let text = state.virtual_list.row_text(target_row);
-    let col = text.floor_char_boundary(col.min(text.len()));
+    let target_count = state.virtual_list.row_grapheme_count(target_row);
+    let col = col.min(target_count);
     extend_output_selection(state, SelectionPoint::Output(target_row, col));
     state.dirty = true;
 }

@@ -242,7 +242,10 @@ pub enum SelectionTarget {
 pub enum SelectionPoint {
     /// Byte offset into `AppState::input`.
     Input(usize),
-    /// (virtual-list row index, byte offset into that row's rendered text).
+    /// (virtual-list row index, grapheme-cluster index into that row's
+    /// rendered text). A grapheme index counts user-perceived characters
+    /// (so it never splits a codepoint or a combining-mark cluster); it is
+    /// resolved to a byte offset via `VirtualList::row_grapheme_bytes`.
     Output(usize, usize),
 }
 
@@ -257,8 +260,8 @@ pub struct Selection {
     pub dragging: bool,
 }
 
-/// A normalized output selection: rows `start_row..=end_row`, bytes
-/// `start_col..end_col` on the boundary rows.
+/// A normalized output selection: rows `start_row..=end_row`, grapheme
+/// indices `start_col..end_col` on the boundary rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputSelectionRange {
     pub start_row: u16,
@@ -508,24 +511,30 @@ impl AppState {
             }
             SelectionTarget::Output => {
                 let range = self.output_selection()?;
-                let start_text = self.virtual_list.row_text(range.start_row as usize);
-                let start_col = start_text.floor_char_boundary(range.start_col.min(start_text.len()));
+                let start_row = range.start_row as usize;
+                // Selection columns are grapheme indices; slice by grapheme
+                // so combining-mark clusters and multi-byte chars never split.
                 if range.start_row == range.end_row {
-                    let end_col =
-                        start_text.floor_char_boundary(range.end_col.min(start_text.len()));
-                    if start_col == end_col {
+                    let text = self
+                        .virtual_list
+                        .row_slice_by_graphemes(start_row, range.start_col, range.end_col);
+                    if text.is_empty() {
                         return None;
                     }
-                    return Some(start_text[start_col..end_col].to_string());
+                    return Some(text);
                 }
-                let mut parts = vec![start_text[start_col..].to_string()];
+                let mut parts = vec![self
+                    .virtual_list
+                    .row_slice_by_graphemes(start_row, range.start_col, usize::MAX)];
                 for row in (range.start_row + 1)..range.end_row {
                     parts.push(self.virtual_list.row_text(row as usize));
                 }
-                let end_text = self.virtual_list.row_text(range.end_row as usize);
-                let end_col = end_text.floor_char_boundary(range.end_col.min(end_text.len()));
-                if end_col > 0 {
-                    parts.push(end_text[..end_col].to_string());
+                let end_row = range.end_row as usize;
+                let end_text = self
+                    .virtual_list
+                    .row_slice_by_graphemes(end_row, 0, range.end_col);
+                if !end_text.is_empty() {
+                    parts.push(end_text);
                 }
                 Some(parts.join("\n"))
             }
