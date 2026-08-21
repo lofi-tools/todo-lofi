@@ -826,4 +826,205 @@ mod tests {
         let openrouter = provider(&config, "openrouter").unwrap();
         assert_eq!(openrouter.models, vec!["openrouter/auto"]);
     }
+
+    // ─── End-to-end agent run against a mock provider ────────────────────
+    //
+    // These tests drive the real agent loop (tools, permissions, streaming)
+    // against a local fake OpenAI-compatible server, so they need no network
+    // or API key: the mock answers the first request with a `Write` tool call
+    // and every later request with plain text.
+
+    /// A fake OpenAI chat-completions SSE server that walks the agent through
+    /// one tool call. Returns the base URL to point a provider at.
+    async fn mock_openai_server(file_path: &str, content: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let file_path = file_path.to_string();
+        let content = content.to_string();
+
+        tokio::spawn(async move {
+            let mut request_count = 0usize;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                request_count += 1;
+                let first_request = request_count == 1;
+                let file_path = file_path.clone();
+                let content = content.clone();
+                tokio::spawn(async move {
+                    // Read the full request (headers + body). The body is not
+                    // inspected, but must be drained so the client can read
+                    // the response.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let Some(end) = find_header_end(&buf) else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..end]);
+                        let content_length = head.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        match content_length {
+                            // Fixed-length body: wait until it has arrived.
+                            Some(len) if buf.len() >= end + 4 + len => break,
+                            // Chunked body: wait for the terminating chunk.
+                            Some(_) => continue,
+                            None if buf.windows(5).any(|w| w == b"0\r\n\r\n") => break,
+                            None => continue,
+                        }
+                    }
+
+                    let body = if first_request {
+                        // Turn 1: ask the agent to Write the file.
+                        let args = serde_json::json!({ "file_path": file_path, "content": content });
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({
+                                "id": "chatcmpl-1",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "Write",
+                                                "arguments": args.to_string(),
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": null
+                                }]
+                            }),
+                            serde_json::json!({
+                                "id": "chatcmpl-1",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "tool_calls"
+                                }]
+                            }),
+                        )
+                    } else {
+                        // Turn 2+: reply with plain text to end the run.
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({
+                                "id": "chatcmpl-2",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "content": "Done: wrote the requested file." },
+                                    "finish_reason": null
+                                }]
+                            }),
+                            serde_json::json!({
+                                "id": "chatcmpl-2",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }]
+                            }),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    // Closing the connection terminates the SSE body.
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    fn find_header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    /// Headless single-shot run: build an agent pointed at the mock provider,
+    /// ask it to write a test file into the repo root, and assert the file was
+    /// actually written by the agent's tools.
+    #[tokio::test]
+    async fn agent_writes_test_file_to_repo_root() {
+        use cersei::events::AgentEvent;
+        use std::time::Duration;
+
+        // Scratch repo: the "root of the repo" the agent operates in.
+        let dir = std::env::temp_dir().join(format!("agent-smoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("agent_test.txt");
+
+        let base_url =
+            mock_openai_server(file_path.to_str().unwrap(), "hello from the agent").await;
+
+        let mut config = AppConfig::default();
+        config.provider = "mock".into();
+        config.model = "mock/test-model".into();
+        config.working_dir = dir.clone();
+        config.permissions_mode = "allow_all".into();
+        config.providers.insert(
+            "mock".into(),
+            ProviderConfigEntry {
+                base_url: Some(base_url),
+                api_key: Some("test-key".into()),
+                models: vec!["mock/test-model".into()],
+            },
+        );
+
+        let runtime = AgentRuntime::new(&config).unwrap();
+        let mut stream = runtime.agent().run_stream(
+            "Write a test file named agent_test.txt in the root of this repo \
+             with the content 'hello from the agent'.",
+        );
+
+        let mut saw_final_text = false;
+        let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    AgentEvent::TextDelta(_) => saw_final_text = true,
+                    AgentEvent::Complete(_) => return Ok(()),
+                    AgentEvent::Error(e) => return Err(anyhow::anyhow!("agent error: {e}")),
+                    _ => {}
+                }
+            }
+            Err(anyhow::anyhow!("agent stream ended without completing"))
+        })
+        .await;
+
+        // Always clean up the scratch repo, even on assertion failure.
+        let written = std::fs::read_to_string(&file_path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        outcome.expect("agent run did not complete in time").unwrap();
+        assert!(
+            saw_final_text,
+            "agent never produced the final reply text"
+        );
+        assert_eq!(
+            written.expect("agent did not write the test file"),
+            "hello from the agent",
+            "agent wrote the wrong content"
+        );
+    }
 }
