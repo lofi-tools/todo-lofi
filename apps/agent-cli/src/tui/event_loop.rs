@@ -374,6 +374,81 @@ fn handle_key(
             }
         }
 
+        // Select all — macOS Cmd+A selects the input text when it has content
+        // (text-field convention); with an empty or read-only input it selects
+        // the output document instead.
+        (KeyModifiers::SUPER, KeyCode::Char('a')) => {
+            if !state.is_streaming && !state.input.is_empty() {
+                select_all_input(state);
+            } else {
+                select_all_output(state);
+            }
+            state.dirty = true;
+        }
+        // Ctrl+A — readline start-of-line in the input; select all output when
+        // the input is empty or read-only.
+        (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+            if !state.is_streaming && !state.input.is_empty() {
+                state.cursor_pos = line_start(&state.input, state.cursor_pos);
+                state.selection = None;
+                state.refresh_command_selector();
+            } else {
+                select_all_output(state);
+            }
+            state.dirty = true;
+        }
+        // Ctrl+E — readline end-of-line in the input
+        (KeyModifiers::CONTROL, KeyCode::Char('e')) if !state.is_streaming => {
+            state.cursor_pos = line_end(&state.input, state.cursor_pos);
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+        // Ctrl+Shift+A — always select all output (exact modifier mask).
+        (_, KeyCode::Char('a')) if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+            select_all_output(state);
+            state.dirty = true;
+        }
+
+        // readline editing
+        // Ctrl+K — delete from the cursor to the end of the line
+        (KeyModifiers::CONTROL, KeyCode::Char('k')) if !state.is_streaming => {
+            let end = line_end(&state.input, state.cursor_pos);
+            if end > state.cursor_pos {
+                state.input.replace_range(state.cursor_pos..end, "");
+            }
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+        // Ctrl+U — delete from the start of the line to the cursor
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) if !state.is_streaming => {
+            let start = line_start(&state.input, state.cursor_pos);
+            if start < state.cursor_pos {
+                state.input.replace_range(start..state.cursor_pos, "");
+                state.cursor_pos = start;
+            }
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+        // Ctrl+W / Alt+Backspace — delete the word before the cursor
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) if !state.is_streaming => {
+            let start = word_start_before(&state.input, state.cursor_pos);
+            if start < state.cursor_pos {
+                state.input.replace_range(start..state.cursor_pos, "");
+                state.cursor_pos = start;
+            }
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+        (KeyModifiers::ALT, KeyCode::Backspace) if !state.is_streaming => {
+            let start = word_start_before(&state.input, state.cursor_pos);
+            if start < state.cursor_pos {
+                state.input.replace_range(start..state.cursor_pos, "");
+                state.cursor_pos = start;
+            }
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
         // Ctrl+B — toggle side panel (and focus it)
         (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
             if state.side_panel_open && !state.side_panel_focused {
@@ -399,6 +474,19 @@ fn handle_key(
         // Tab — switch side panel tabs (when panel open but not focused)
         (_, KeyCode::Tab) if state.side_panel_open => {
             state.side_panel_tab = state.side_panel_tab.toggle();
+        }
+
+        // Shift+PageUp/PageDown/Home/End and Shift+Cmd+Up/Down — extend the
+        // output selection (the output is what these keys scroll).
+        (KeyModifiers::SHIFT, KeyCode::PageUp) => output_selection_page(state, false),
+        (KeyModifiers::SHIFT, KeyCode::PageDown) => output_selection_page(state, true),
+        (KeyModifiers::SHIFT, KeyCode::Home) => output_selection_top(state),
+        (KeyModifiers::SHIFT, KeyCode::End) => output_selection_bottom(state),
+        (_, KeyCode::Up) if key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::SUPER) => {
+            output_selection_top(state);
+        }
+        (_, KeyCode::Down) if key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::SUPER) => {
+            output_selection_bottom(state);
         }
 
         // Scroll messages
@@ -487,6 +575,88 @@ fn handle_key(
             state.refresh_command_selector();
         }
 
+        // Ctrl/Alt+Left — move back by word (readline)
+        (KeyModifiers::CONTROL, KeyCode::Left) | (KeyModifiers::ALT, KeyCode::Left)
+            if !state.is_streaming =>
+        {
+            state.cursor_pos = word_start_before(&state.input, state.cursor_pos);
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
+        // Ctrl/Alt+Right — move forward by word (readline)
+        (KeyModifiers::CONTROL, KeyCode::Right) | (KeyModifiers::ALT, KeyCode::Right)
+            if !state.is_streaming =>
+        {
+            state.cursor_pos = word_end_after(&state.input, state.cursor_pos);
+            state.selection = None;
+            state.refresh_command_selector();
+        }
+
+        // Shift+Left/Right — extend the output selection by one char when the
+        // selection already lives in the output (matches the output-first
+        // convention of the other Shift+arrow arms)
+        (_, KeyCode::Left)
+            if matches!(
+                state.selection,
+                Some(Selection { target: SelectionTarget::Output, .. })
+            ) =>
+        {
+            let pos = output_pos_backward(state, output_active_pos(state));
+            extend_output_selection(state, pos);
+            state.dirty = true;
+        }
+        (_, KeyCode::Right)
+            if matches!(
+                state.selection,
+                Some(Selection { target: SelectionTarget::Output, .. })
+            ) =>
+        {
+            let pos = output_pos_forward(state, output_active_pos(state));
+            extend_output_selection(state, pos);
+            state.dirty = true;
+        }
+
+        // Shift+Left/Right — extend the input selection by one char
+        (KeyModifiers::SHIFT, KeyCode::Left) if !state.is_streaming => {
+            let new_pos = prev_char_boundary(&state.input, state.cursor_pos);
+            apply_input_cursor_move(state, new_pos, true);
+        }
+        (KeyModifiers::SHIFT, KeyCode::Right) if !state.is_streaming => {
+            let new_pos = next_char_boundary(&state.input, state.cursor_pos);
+            apply_input_cursor_move(state, new_pos, true);
+        }
+
+        // Shift+Cmd+Left/Right — extend the input selection by line (exact masks)
+        (_, KeyCode::Left)
+            if !state.is_streaming
+                && key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::SUPER) =>
+        {
+            apply_input_cursor_move(state, line_start(&state.input, state.cursor_pos), true);
+        }
+        (_, KeyCode::Right)
+            if !state.is_streaming
+                && key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::SUPER) =>
+        {
+            apply_input_cursor_move(state, line_end(&state.input, state.cursor_pos), true);
+        }
+
+        // Shift+Alt / Shift+Ctrl+Left/Right — extend the input selection by word
+        (_, KeyCode::Left)
+            if !state.is_streaming
+                && (key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    || key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::CONTROL)) =>
+        {
+            apply_input_cursor_move(state, word_start_before(&state.input, state.cursor_pos), true);
+        }
+        (_, KeyCode::Right)
+            if !state.is_streaming
+                && (key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    || key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::CONTROL)) =>
+        {
+            apply_input_cursor_move(state, word_end_after(&state.input, state.cursor_pos), true);
+        }
+
         // Cmd+Left — jump to the start of the line
         (KeyModifiers::SUPER, KeyCode::Left) if !state.is_streaming => {
             state.cursor_pos = line_start(&state.input, state.cursor_pos);
@@ -519,6 +689,18 @@ fn handle_key(
             }
             state.selection = None;
             state.refresh_command_selector();
+        }
+
+        // Shift+Up/Down — extend the output selection one row
+        (KeyModifiers::SHIFT, KeyCode::Up) => {
+            let pos = output_pos_row(state, output_active_pos(state), false);
+            extend_output_selection(state, pos);
+            state.dirty = true;
+        }
+        (KeyModifiers::SHIFT, KeyCode::Down) => {
+            let pos = output_pos_row(state, output_active_pos(state), true);
+            extend_output_selection(state, pos);
+            state.dirty = true;
         }
 
         // Up arrow — scroll if input empty, else history
@@ -567,6 +749,13 @@ fn handle_key(
         // Esc
         (_, KeyCode::Esc) if state.overlay != Overlay::None => {
             state.overlay = Overlay::None;
+        }
+        (_, KeyCode::Esc) => {
+            // Clear any active selection.
+            if state.selection.is_some() {
+                state.selection = None;
+                state.dirty = true;
+            }
         }
 
         // Character input
@@ -796,6 +985,100 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     }
 }
 
+/// Whether `c` starts a word (readline-style: alphanumeric runs).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
+/// The char boundary immediately before `pos` (the previous character's start).
+fn prev_char_boundary(input: &str, pos: usize) -> usize {
+    input[..pos.min(input.len())]
+        .char_indices()
+        .next_back()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// The char boundary immediately after `pos` (the next character's end).
+fn next_char_boundary(input: &str, pos: usize) -> usize {
+    match input[pos.min(input.len())..].chars().next() {
+        Some(ch) => pos.min(input.len()) + ch.len_utf8(),
+        None => input.len(),
+    }
+}
+
+/// The start of the word at or immediately before `pos` (readline `Alt+B`).
+/// From the middle of a word this lands on that word's start.
+fn word_start_before(input: &str, pos: usize) -> usize {
+    let pos = input.floor_char_boundary(pos.min(input.len()));
+    let before = &input[..pos];
+    let mut i = before.len();
+    if let Some((_, ch)) = before[..i].char_indices().next_back()
+        && is_word_char(ch)
+    {
+        while i > 0 {
+            let (idx, ch) = before[..i].char_indices().next_back().unwrap();
+            if !is_word_char(ch) {
+                break;
+            }
+            i = idx;
+        }
+        return i;
+    }
+    // Skip the gap, then the previous word.
+    while i > 0 {
+        let (idx, ch) = before[..i].char_indices().next_back().unwrap();
+        if is_word_char(ch) {
+            break;
+        }
+        i = idx;
+    }
+    while i > 0 {
+        let (idx, ch) = before[..i].char_indices().next_back().unwrap();
+        if !is_word_char(ch) {
+            break;
+        }
+        i = idx;
+    }
+    i
+}
+
+/// The end of the word at or immediately after `pos` (readline `Alt+F`). From
+/// the middle of a word this lands on that word's end.
+fn word_end_after(input: &str, pos: usize) -> usize {
+    let pos = input.floor_char_boundary(pos.min(input.len()));
+    let after = &input[pos..];
+    let mut i = 0;
+    if let Some(ch) = after[i..].chars().next()
+        && is_word_char(ch)
+    {
+        while i < after.len() {
+            let (idx, ch) = after[i..].char_indices().next().unwrap();
+            if !is_word_char(ch) {
+                break;
+            }
+            i += idx + ch.len_utf8();
+        }
+        return pos + i;
+    }
+    // Skip the gap, then the next word.
+    while i < after.len() {
+        let (idx, ch) = after[i..].char_indices().next().unwrap();
+        if is_word_char(ch) {
+            break;
+        }
+        i += idx + ch.len_utf8();
+    }
+    while i < after.len() {
+        let (idx, ch) = after[i..].char_indices().next().unwrap();
+        if !is_word_char(ch) {
+            break;
+        }
+        i += idx + ch.len_utf8();
+    }
+    pos + i
+}
+
 /// Byte offset of the start of the logical line containing `pos` (the byte
 /// right after the previous `\n`, or 0).
 fn line_start(input: &str, pos: usize) -> usize {
@@ -871,6 +1154,176 @@ fn output_click_pos(state: &AppState, row: u16, col: u16) -> Option<SelectionPoi
         width += ch_width;
     }
     Some(SelectionPoint::Output(idx, text.len()))
+}
+
+/// The active endpoint of the current output selection, or (0, 0) when there
+/// is none (keyboard selection starts from the top).
+fn output_active_pos(state: &AppState) -> SelectionPoint {
+    match state.selection.as_ref() {
+        Some(sel) if sel.target == SelectionTarget::Output => sel.active,
+        _ => SelectionPoint::Output(0, 0),
+    }
+}
+
+/// Set the active endpoint of an output selection, starting a new selection
+/// anchored at (0, 0) when none exists yet.
+fn extend_output_selection(state: &mut AppState, active: SelectionPoint) {
+    match state.selection.as_mut() {
+        Some(sel) if sel.target == SelectionTarget::Output => {
+            sel.active = active;
+        }
+        _ => {
+            state.selection = Some(Selection {
+                target: SelectionTarget::Output,
+                anchor: SelectionPoint::Output(0, 0),
+                active,
+                dragging: false,
+            });
+        }
+    }
+}
+
+/// Move an output position one character forward, wrapping to the next row's
+/// start at the end of a row.
+fn output_pos_forward(state: &AppState, pos: SelectionPoint) -> SelectionPoint {
+    let SelectionPoint::Output(row, col) = pos else {
+        return pos;
+    };
+    let text = state.virtual_list.row_text(row);
+    if col < text.len() {
+        let ch = text[col..].chars().next().unwrap();
+        SelectionPoint::Output(row, col + ch.len_utf8())
+    } else if row + 1 < state.virtual_list.total_height() as usize {
+        SelectionPoint::Output(row + 1, 0)
+    } else {
+        pos
+    }
+}
+
+/// Move an output position one character backward, wrapping to the previous
+/// row's end at the start of a row.
+fn output_pos_backward(state: &AppState, pos: SelectionPoint) -> SelectionPoint {
+    let SelectionPoint::Output(row, col) = pos else {
+        return pos;
+    };
+    if col > 0 {
+        let text = state.virtual_list.row_text(row);
+        let col = text[..col].char_indices().next_back().map_or(0, |(i, _)| i);
+        SelectionPoint::Output(row, col)
+    } else if row > 0 {
+        let text = state.virtual_list.row_text(row - 1);
+        SelectionPoint::Output(row - 1, text.len())
+    } else {
+        pos
+    }
+}
+
+/// Move an output position down/up one row, keeping the column clamped to the
+/// target row's length on a char boundary.
+fn output_pos_row(state: &AppState, pos: SelectionPoint, down: bool) -> SelectionPoint {
+    let SelectionPoint::Output(row, col) = pos else {
+        return pos;
+    };
+    let target = if down { row + 1 } else { row.saturating_sub(1) };
+    if target == row || target >= state.virtual_list.total_height() as usize {
+        return pos;
+    }
+    let text = state.virtual_list.row_text(target);
+    let col = text.floor_char_boundary(col.min(text.len()));
+    SelectionPoint::Output(target, col)
+}
+
+/// Select all output content (rows 0..total, full row lengths).
+fn select_all_output(state: &mut AppState) {
+    let total = state.virtual_list.total_height() as usize;
+    if total == 0 {
+        state.selection = None;
+        return;
+    }
+    let last_len = state.virtual_list.row_text(total - 1).len();
+    state.selection = Some(Selection {
+        target: SelectionTarget::Output,
+        anchor: SelectionPoint::Output(0, 0),
+        active: SelectionPoint::Output(total - 1, last_len),
+        dragging: false,
+    });
+}
+
+/// Select all input text (for copying the whole message).
+fn select_all_input(state: &mut AppState) {
+    let len = state.input.len();
+    state.selection = Some(Selection {
+        target: SelectionTarget::Input,
+        anchor: SelectionPoint::Input(0),
+        active: SelectionPoint::Input(len),
+        dragging: false,
+    });
+}
+
+/// Move the input cursor and extend/replace the input selection: with `extend`
+/// (Shift held) the selection grows from its existing anchor; otherwise any
+/// selection is cleared.
+fn apply_input_cursor_move(state: &mut AppState, new_pos: usize, extend: bool) {
+    let old_pos = state.cursor_pos;
+    state.cursor_pos = new_pos;
+    if extend {
+        match state.selection.as_mut() {
+            Some(sel) if sel.target == SelectionTarget::Input => {
+                sel.active = SelectionPoint::Input(new_pos);
+            }
+            _ => {
+                state.selection = Some(Selection {
+                    target: SelectionTarget::Input,
+                    anchor: SelectionPoint::Input(old_pos),
+                    active: SelectionPoint::Input(new_pos),
+                    dragging: false,
+                });
+            }
+        }
+    } else {
+        state.selection = None;
+    }
+    state.refresh_command_selector();
+}
+
+/// Extend the output selection to the top of the content.
+fn output_selection_top(state: &mut AppState) {
+    extend_output_selection(state, SelectionPoint::Output(0, 0));
+    state.dirty = true;
+}
+
+/// Extend the output selection to the bottom of the content.
+fn output_selection_bottom(state: &mut AppState) {
+    let total = state.virtual_list.total_height() as usize;
+    if total > 0 {
+        let last_len = state.virtual_list.row_text(total - 1).len();
+        extend_output_selection(state, SelectionPoint::Output(total - 1, last_len));
+    }
+    state.dirty = true;
+}
+
+/// Extend the output selection by roughly one page up or down.
+fn output_selection_page(state: &mut AppState, down: bool) {
+    let total = state.virtual_list.total_height() as usize;
+    if total == 0 {
+        return;
+    }
+    let page = state
+        .messages_area
+        .map(|(_, _, _, h)| (h.saturating_sub(2) as usize).max(1))
+        .unwrap_or(5);
+    let SelectionPoint::Output(row, col) = output_active_pos(state) else {
+        return;
+    };
+    let target_row = if down {
+        (row + page).min(total - 1)
+    } else {
+        row.saturating_sub(page)
+    };
+    let text = state.virtual_list.row_text(target_row);
+    let col = text.floor_char_boundary(col.min(text.len()));
+    extend_output_selection(state, SelectionPoint::Output(target_row, col));
+    state.dirty = true;
 }
 
 /// Handle keys while the fuzzy `/` command selector is open.
@@ -1816,6 +2269,36 @@ mod tests {
         assert!(!is_copy_shortcut(KeyModifiers::NONE, KeyCode::Char('c')));
     }
 
+    /// A runtime that builds offline (dummy provider, literal key).
+    fn runtime() -> Arc<AgentRuntime> {
+        use crate::config::{AppConfig, ProviderConfigEntry};
+        let mut config = AppConfig::default();
+        config.provider = "test".into();
+        config.model = "test/test-model".into();
+        config.permissions_mode = "allow_all".into();
+        config.providers.insert(
+            "test".into(),
+            ProviderConfigEntry {
+                base_url: Some("http://127.0.0.1:1".into()),
+                api_key: Some("test-key".into()),
+                models: vec!["test/test-model".into()],
+                ..Default::default()
+            },
+        );
+        Arc::new(AgentRuntime::new(&config).unwrap())
+    }
+
+    fn key_for(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn handle_editing_key(state: &mut AppState, key: KeyEvent) {
+        let config = AppConfig::default();
+        let cancel = CancellationToken::new();
+        let rt = runtime();
+        handle_key(state, key, &config, &cancel, &rt);
+    }
+
     fn left_down(row: u16, col: u16) -> MouseEvent {
         use crossterm::event::{MouseButton, MouseEventKind};
         MouseEvent {
@@ -1897,5 +2380,165 @@ mod tests {
         // A click outside both boxes clears the selection.
         handle_mouse(&mut s, left_down(5, 30));
         assert!(s.selection.is_none());
+    }
+
+    #[test]
+    fn word_navigation_boundaries() {
+        // "one two three  four": words at bytes 0..3, 4..7, 8..13, 15..19.
+        let input = "one two three  four";
+        // From the end, word_start_before lands at the start of "four" (15).
+        assert_eq!(word_start_before(input, 17), 15);
+        // From the middle of a word, it lands at that word's start.
+        assert_eq!(word_start_before(input, 5), 4);
+        // From the start of a word, it lands at the previous word's start.
+        assert_eq!(word_start_before(input, 4), 0);
+        // From a gap, it lands at the previous word's start.
+        assert_eq!(word_start_before(input, 13), 8);
+        // word_end_after from a word start lands at that word's end.
+        assert_eq!(word_end_after(input, 0), 3);
+        assert_eq!(word_end_after(input, 4), 7);
+        assert_eq!(word_end_after(input, 8), 13);
+        // From inside a word, lands at that word's end.
+        assert_eq!(word_end_after(input, 5), 7);
+        // At the very end there is no next word.
+        assert_eq!(word_end_after(input, 19), 19);
+        // Empty input is stable.
+        assert_eq!(word_start_before("", 0), 0);
+        assert_eq!(word_end_after("", 0), 0);
+    }
+
+    #[test]
+    fn output_position_movement_wraps_rows() {
+        use crate::tui::virtual_list::VItem;
+        use ratatui::prelude::*;
+
+        let mut s = state();
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("ab")),
+            VItem::new(Line::from("cd")),
+        ]);
+
+        // Forward across a row boundary wraps to the next row's start.
+        let p = output_pos_forward(&s, SelectionPoint::Output(0, 1));
+        assert_eq!(p, SelectionPoint::Output(0, 2));
+        let p = output_pos_forward(&s, SelectionPoint::Output(0, 2));
+        assert_eq!(p, SelectionPoint::Output(1, 0));
+        // Backward wraps to the previous row's end.
+        let p = output_pos_backward(&s, SelectionPoint::Output(1, 0));
+        assert_eq!(p, SelectionPoint::Output(0, 2));
+        let p = output_pos_backward(&s, SelectionPoint::Output(0, 1));
+        assert_eq!(p, SelectionPoint::Output(0, 0));
+        // Clamping at the document edges.
+        assert_eq!(
+            output_pos_forward(&s, SelectionPoint::Output(1, 2)),
+            SelectionPoint::Output(1, 2)
+        );
+        assert_eq!(
+            output_pos_backward(&s, SelectionPoint::Output(0, 0)),
+            SelectionPoint::Output(0, 0)
+        );
+        // Row movement keeps the column, clamped to the target row's length.
+        assert_eq!(
+            output_pos_row(&s, SelectionPoint::Output(0, 1), true),
+            SelectionPoint::Output(1, 1)
+        );
+        assert_eq!(
+            output_pos_row(&s, SelectionPoint::Output(1, 0), false),
+            SelectionPoint::Output(0, 0)
+        );
+    }
+
+    #[test]
+    fn select_all_covers_whole_document() {
+        use crate::tui::virtual_list::VItem;
+        use ratatui::prelude::*;
+
+        let mut s = state();
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("hello")),
+            VItem::new(Line::from("world")),
+        ]);
+        select_all_output(&mut s);
+        assert_eq!(s.selection_text().as_deref(), Some("hello\nworld"));
+
+        // Empty document clears rather than building an empty selection.
+        let mut s = state();
+        select_all_output(&mut s);
+        assert!(s.selection.is_none());
+
+        // Input select-all covers the whole input.
+        let mut s = state();
+        s.input = "hi there".into();
+        select_all_input(&mut s);
+        assert_eq!(s.selection_text().as_deref(), Some("hi there"));
+    }
+
+    #[test]
+    fn shift_arrows_extend_the_right_target() {
+        use crate::tui::virtual_list::VItem;
+        use ratatui::prelude::*;
+        use crossterm::event::KeyModifiers as M;
+
+        let mut s = state();
+        s.input = "hello".into();
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("world")),
+        ]);
+
+        // Shift+Right with no selection extends the *input* selection.
+        handle_editing_key(&mut s, key_for(KeyCode::Right, M::SHIFT));
+        assert_eq!(s.selection_text().as_deref(), Some("h"));
+        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+
+        // Once a selection lives in the output, Shift+Right extends it there.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Output,
+            anchor: SelectionPoint::Output(0, 0),
+            active: SelectionPoint::Output(0, 1),
+            dragging: false,
+        });
+        handle_editing_key(&mut s, key_for(KeyCode::Right, M::SHIFT));
+        assert_eq!(s.selection_text().as_deref(), Some("wo")); // bytes 0..2
+        handle_editing_key(&mut s, key_for(KeyCode::Left, M::SHIFT));
+        assert_eq!(s.selection_text().as_deref(), Some("w")); // bytes 0..1
+    }
+
+    #[test]
+    fn ctrl_a_e_k_u_w_are_readline() {
+        use crossterm::event::KeyModifiers as M;
+
+        // Ctrl+A jumps to the start of the current line.
+        let mut s = state();
+        s.input = "hello\nworld".into();
+        s.cursor_pos = 9;
+        handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::CONTROL));
+        assert_eq!(s.cursor_pos, 6);
+
+        // Ctrl+E jumps to the end of the current line.
+        handle_editing_key(&mut s, key_for(KeyCode::Char('e'), M::CONTROL));
+        assert_eq!(s.cursor_pos, 11);
+
+        // Ctrl+U deletes back to the start of the line (byte 6 here, the
+        // char after the newline), leaving the rest of the line intact.
+        s.cursor_pos = 9;
+        handle_editing_key(&mut s, key_for(KeyCode::Char('u'), M::CONTROL));
+        assert_eq!(s.input, "hello\nld");
+        assert_eq!(s.cursor_pos, 6);
+
+        // Ctrl+W deletes the word before the cursor.
+        let mut s = state();
+        s.input = "foo bar baz".into();
+        s.cursor_pos = 11;
+        handle_editing_key(&mut s, key_for(KeyCode::Char('w'), M::CONTROL));
+        assert_eq!(s.input, "foo bar ");
+        assert_eq!(s.cursor_pos, 8);
+
+        // Ctrl+K deletes to the end of the line.
+        let mut s = state();
+        s.input = "foo bar baz".into();
+        s.cursor_pos = 4;
+        handle_editing_key(&mut s, key_for(KeyCode::Char('k'), M::CONTROL));
+        assert_eq!(s.input, "foo ");
+        assert_eq!(s.cursor_pos, 4);
     }
 }

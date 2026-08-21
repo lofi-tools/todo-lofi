@@ -13,28 +13,23 @@ members = ["apps/*", "libs/*"]
 
 # Async, web
 tokio = { version = "1.52.3", features = ["full"] }
-tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
-futures = "0.3"
 async-trait = "0.1"
 reqwest = { version = "0.13.4", features = ["json"] }        # "tcp-tls"
 # iroh = { version = "0.15.0" } # Removed unused iroh
 
 # Logs, errors
 log = "0.4"
-env_logger = "0.11.10"
 thiserror = "^1.0"
 anyhow = "^1.0"
 snafu = { version = "0.9.1", features = ["backtrace"] }
 tracing = { version = "0.1", features = ["attributes", "log"] }
 tracing-subscriber = "0.3"
-jiff = { version = "0.2", features = ["serde"] }
 
 # Formats, codecs
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 uuid = { version = "1", features = ["v4"] }
-ax-id = "0.1"
 regex = "1.12.4"
 url = "2.5.8"
 chrono = { version = "0.4", features = ["serde"] }
