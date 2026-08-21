@@ -46,14 +46,102 @@ async fn main() -> anyhow::Result<()> {
 
     let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
     if let Some(prompt_text) = prompt {
-        let stream = runtime.agent().run_stream(prompt_text);
-        let text = stream.collect_text().await?;
-        dbg!(&text);
+        run_single_shot(runtime, prompt_text).await?;
     } else {
         run_tui_app(cli, config, runtime).await?;
     }
 
     // fastrace::flush();
+    Ok(())
+}
+
+/// One agent run in single-shot (`-p`) mode, with enough state to transparently
+/// retry on another provider when the current one errors before producing any
+/// output (mirrors the TUI's fallback logic).
+struct SingleShotRun {
+    stream: cersei::events::AgentStream,
+    /// The prompt being run (re-sent to the retry agent).
+    prompt: String,
+    /// Provider the current stream is running on.
+    provider: String,
+    /// Whether any output event has been emitted yet.
+    produced_output: bool,
+}
+
+/// Retry `run` on the next provider if it errored before producing any output.
+/// Returns true when the error was handled by a fallback (and should be
+/// swallowed by the caller).
+fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
+    if run.produced_output || !runtime.fallback_enabled() {
+        return false;
+    }
+    let Some(next) = runtime.next_fallback_provider(&run.provider) else {
+        return false;
+    };
+    runtime.record_failure(&run.provider);
+    match runtime.fallback_to(&next) {
+        Ok(()) => {
+            eprintln!("\x1b[36m{} failed — falling back to {next}\x1b[0m", run.provider);
+            run.provider = next;
+            run.stream = runtime.agent().run_stream(&run.prompt);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Single-shot mode: run one prompt with the agent's tools, streaming the
+/// reply to stdout and tool activity to stderr. Errors propagate to the caller
+/// so a failed run exits non-zero.
+async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let mut run = SingleShotRun {
+        stream: runtime.agent().run_stream(prompt),
+        prompt: prompt.to_string(),
+        provider: runtime.current().0,
+        produced_output: false,
+    };
+
+    while let Some(event) = run.stream.next().await {
+        match event {
+            cersei::events::AgentEvent::TextDelta(delta) => {
+                run.produced_output = true;
+                print!("{delta}");
+                std::io::stdout().flush()?;
+            }
+            cersei::events::AgentEvent::ThinkingDelta(delta) => {
+                run.produced_output = true;
+                eprint!("\x1b[2m{delta}\x1b[0m");
+            }
+            cersei::events::AgentEvent::ToolStart { name, .. } => {
+                run.produced_output = true;
+                eprint!("\x1b[33m⚙ {name}...\x1b[0m ");
+            }
+            cersei::events::AgentEvent::ToolEnd {
+                name,
+                is_error,
+                duration,
+                ..
+            } => {
+                let status = if is_error {
+                    "\x1b[31m✗\x1b[0m"
+                } else {
+                    "\x1b[32m✓\x1b[0m"
+                };
+                eprintln!("{status} {name} ({}ms)", duration.as_millis());
+            }
+            cersei::events::AgentEvent::Error(msg) => {
+                if !try_fallback(&runtime, &mut run) {
+                    eprintln!("\x1b[31mError: {msg}\x1b[0m");
+                    anyhow::bail!("{msg}");
+                }
+            }
+            cersei::events::AgentEvent::Complete(_) => break,
+            _ => {}
+        }
+    }
+    println!();
     Ok(())
 }
 

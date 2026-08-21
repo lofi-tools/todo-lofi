@@ -508,7 +508,9 @@ impl AgentRuntime {
                 max_turns: config.max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                tools: Vec::new(),
+                // Same basic tools as the ACP server and pi.dev: file
+                // read/write/edit, glob/grep, bash, and web fetch/search.
+                tools: cersei::tools::coding(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },
@@ -578,7 +580,7 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages,
-                tools: Vec::new(),
+                tools: cersei::tools::coding(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },
@@ -604,7 +606,7 @@ impl AgentRuntime {
                 max_turns,
                 session_id: None,
                 messages: Vec::new(),
-                tools: Vec::new(),
+                tools: cersei::tools::coding(),
                 cancel_token: CancellationToken::new(),
                 readonly: false,
             },

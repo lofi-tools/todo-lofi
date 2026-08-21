@@ -7,6 +7,7 @@ provider/model picker, and an Agent Client Protocol (ACP) server. Built on the
 ```
 cargo run -p agent-cli          # interactive TUI
 cargo run -p agent-cli -- --acp  # ACP server over stdio (JSON-RPC 2.0 NDJSON)
+cargo run -p agent-cli -- -p "fix the tests"  # single-shot prompt, runs with tools
 ```
 
 The dev shell also aliases it as `ag` (see `part.p.nix`).
@@ -207,7 +208,10 @@ zero-priced `:free` variants of coding models. To see paid models too, set
 
 `cargo run -p agent-cli -- --help` lists everything. The most useful ones:
 `--model`, `--provider`, `--fast`, `--max`, `--headless`, `--resume`,
-`--no-permissions`, `--acp`, `--proxy`, `-C <dir>`.
+`--no-permissions`, `--acp`, `--proxy`, `-C <dir>`. `-p "<prompt>"` runs a
+single prompt non-interactively with the agent's tools (file read/write/edit,
+glob/grep, bash, web) and streams the reply to stdout — the same basic tool
+set pi.dev gives its agent, and handy for scripting tests.
 
 ## ACP server
 
