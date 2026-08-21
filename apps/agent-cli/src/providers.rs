@@ -206,13 +206,126 @@ fn builtin_providers() -> Vec<Provider> {
     ]
 }
 
-/// All providers in deterministic order: built-ins first, then config-file
-/// additions (sorted). Config entries override built-in fields by name.
+/// A configured combo: a named fallback list of (provider, model) pairs,
+/// selectable as the virtual provider `combos` / model `<name>`.
+#[derive(Debug, Clone)]
+pub struct Combo {
+    pub name: String,
+    pub entries: Vec<crate::config::ComboEntry>,
+}
+
+/// Whether `name` names a real provider: a built-in or a config-file entry
+/// (the virtual `combos` provider itself doesn't count — combo entries must
+/// name concrete providers). Used by `combos` for validation — it must not go
+/// through `provider`/`providers`, which call back into `combos`.
+fn is_known_provider(config: &AppConfig, name: &str) -> bool {
+    (builtin_names().iter().any(|n| n == name) || config.providers.contains_key(name))
+        && name != "combos"
+}
+
+/// All combos defined in config, in config order. Entries naming an unknown
+/// provider are skipped with a warning; a combo with no valid entries is
+/// dropped entirely.
+pub fn combos(config: &AppConfig) -> Vec<Combo> {
+    let mut out = Vec::new();
+    for (name, entries) in &config.combos {
+        let mut valid = Vec::new();
+        for entry in entries {
+            if is_known_provider(config, &entry.provider) {
+                valid.push(entry.clone());
+            } else {
+                eprintln!(
+                    "warning: combo '{name}' references unknown provider '{}' — entry skipped",
+                    entry.provider
+                );
+            }
+        }
+        if !valid.is_empty() {
+            out.push(Combo {
+                name: name.clone(),
+                entries: valid,
+            });
+        } else {
+            eprintln!("warning: combo '{name}' has no valid entries — dropped");
+        }
+    }
+    out
+}
+
+/// The named combo, or None if no such combo is configured.
+pub fn combo(config: &AppConfig, name: &str) -> Option<Combo> {
+    combos(config).into_iter().find(|c| c.name == name)
+}
+
+/// The first entry of a combo — the (provider, model) a `combos/<name>`
+/// selection actually starts on.
+pub fn combo_first_entry(config: &AppConfig, name: &str) -> Option<crate::config::ComboEntry> {
+    combo(config, name).and_then(|c| c.entries.into_iter().next())
+}
+
+/// The concrete (provider, model) an agent built for a selection runs on: for
+/// the virtual `combos` provider this is the first entry of the named combo;
+/// otherwise it's the selection itself.
+pub fn effective_selection(
+    config: &AppConfig,
+    provider: &str,
+    model: &str,
+) -> anyhow::Result<(String, String)> {
+    if provider == "combos" {
+        let entry = combo_first_entry(config, model)
+            .ok_or_else(|| anyhow::anyhow!("unknown combo '{model}'"))?;
+        Ok((entry.provider, entry.model))
+    } else {
+        Ok((provider.to_string(), model.to_string()))
+    }
+}
+
+/// The fallback manager for a selection: combo selections get the combo's
+/// entries in order; any other selection gets no fallback at all (automatic
+/// cross-provider fallback was removed).
+pub fn fallback_for(config: &AppConfig, provider: &str, model: &str) -> FallbackManager {
+    let entries: Vec<FallbackEntry> = if provider == "combos" {
+        combo(config, model)
+            .map(|c| {
+                c.entries
+                    .into_iter()
+                    .map(|e| FallbackEntry {
+                        provider: e.provider,
+                        model: e.model,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    FallbackManager::new(config, entries)
+}
+
+/// All providers in deterministic order: built-ins first, then the virtual
+/// `combos` provider, then config-file additions (sorted). Config entries
+/// override built-in fields by name.
 pub fn providers(config: &AppConfig) -> Vec<Provider> {
     let mut by_name: HashMap<String, Provider> = builtin_providers()
         .into_iter()
         .map(|p| (p.name.clone(), p))
         .collect();
+
+    // Virtual "combos" provider: one model per configured combo. It is never
+    // resolved directly — `resolve` maps it to the combo's first entry.
+    let combo_names = combos(config);
+    if !combo_names.is_empty() {
+        by_name.insert(
+            "combos".into(),
+            Provider {
+                name: "combos".into(),
+                base_url: String::new(),
+                api_key: String::new(),
+                free_models: Vec::new(),
+                models: combo_names.into_iter().map(|c| c.name).collect(),
+            },
+        );
+    }
 
     for (name, entry) in &config.providers {
         let provider = by_name.entry(name.clone()).or_insert_with(|| Provider {
@@ -238,7 +351,13 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
 
     let mut all: Vec<Provider> = by_name.into_values().collect();
     all.sort_by_key(|p| {
-        let builtin_rank = builtin_names().iter().position(|n| n == &p.name).unwrap_or(usize::MAX);
+        // Built-ins first, then the virtual combos provider, then config-file
+        // additions (alphabetical).
+        let builtin_rank = builtin_names()
+            .iter()
+            .position(|n| n == &p.name)
+            .or_else(|| (p.name == "combos").then(|| builtin_names().len()))
+            .unwrap_or(usize::MAX);
         (builtin_rank, p.name.clone())
     });
 
@@ -352,8 +471,14 @@ pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
     }
 }
 
-/// Resolve a provider + model into concrete base URL and API key.
+/// Resolve a provider + model into concrete base URL and API key. The virtual
+/// `combos` provider resolves to the first entry of the named combo.
 pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::Result<Resolved> {
+    if provider_name == "combos" {
+        let entry = combo_first_entry(config, model)
+            .ok_or_else(|| anyhow::anyhow!("unknown combo '{model}'"))?;
+        return resolve(config, &entry.provider, &entry.model);
+    }
     let p = provider(config, provider_name).ok_or_else(|| {
         let known = providers(config)
             .into_iter()
@@ -383,32 +508,35 @@ pub fn drop_trailing_user_message(messages: &mut Vec<Message>) {
     }
 }
 
-/// Tracks which providers are in a failure cooldown and the order in which
-/// fallback should try them.
+/// One concrete (provider, model) target a combo can fall back to.
+#[derive(Debug, Clone)]
+pub struct FallbackEntry {
+    pub provider: String,
+    pub model: String,
+}
+
+/// Tracks which combo entries are in a failure cooldown and the order in
+/// which a combo should try them. Cloning shares the cooldown state, so
+/// per-run clones keep failures recorded by earlier runs of the same combo.
+#[derive(Clone)]
 pub struct FallbackManager {
     enabled: bool,
-    /// Provider names in priority order (most preferred first).
-    priority: Vec<String>,
+    /// Entries in priority order (most preferred first).
+    priority: Vec<FallbackEntry>,
     cooldown: Duration,
-    /// provider name → cooldown expiry.
-    failures: Mutex<HashMap<String, Instant>>,
+    /// "provider\0model" → cooldown expiry.
+    failures: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl FallbackManager {
-    pub fn new(config: &AppConfig) -> Self {
-        let mut priority = config.fallback.priority.clone();
-        // Drop priority entries that don't name a configured provider, and
-        // default to the registry order (built-ins first).
-        let known: Vec<String> = providers(config).into_iter().map(|p| p.name).collect();
-        priority.retain(|name| known.contains(name));
-        if priority.is_empty() {
-            priority = known;
-        }
+    /// `entries` is the combo's fallback list in order. An empty list (a
+    /// non-combo selection) means fallback is disabled.
+    pub fn new(config: &AppConfig, entries: Vec<FallbackEntry>) -> Self {
         Self {
-            enabled: config.fallback.enabled,
-            priority,
+            enabled: config.fallback.enabled && !entries.is_empty(),
+            priority: entries,
             cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
-            failures: Mutex::new(HashMap::new()),
+            failures: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -416,24 +544,30 @@ impl FallbackManager {
         self.enabled
     }
 
-    /// Mark `provider` as failed; it won't be selected for fallback again
-    /// until the cooldown expires.
-    pub fn record_failure(&self, provider: &str) {
-        self.failures
-            .lock()
-            .insert(provider.to_string(), Instant::now() + self.cooldown);
+    fn key(provider: &str, model: &str) -> String {
+        format!("{provider}\0{model}")
     }
 
-    /// The most preferred provider to fall back to after `current` failed,
-    /// skipping the current provider and any still cooling down.
-    pub fn next_provider(&self, current: &str) -> Option<String> {
+    /// Mark an entry as failed; it won't be selected for fallback again until
+    /// the cooldown expires.
+    pub fn record_failure(&self, provider: &str, model: &str) {
+        self.failures.lock().insert(
+            Self::key(provider, model),
+            Instant::now() + self.cooldown,
+        );
+    }
+
+    /// The most preferred entry to fall back to after `(provider, model)`
+    /// failed, skipping the current entry and any still cooling down.
+    pub fn next_entry(&self, provider: &str, model: &str) -> Option<FallbackEntry> {
         let now = Instant::now();
         let mut failures = self.failures.lock();
         failures.retain(|_, until| *until > now);
-        self.priority
-            .iter()
-            .find(|name| name.as_str() != current && !failures.contains_key(name.as_str()))
-            .cloned()
+        self.priority.iter().find(|e| {
+            (e.provider != provider || e.model != model)
+                && !failures.contains_key(&Self::key(&e.provider, &e.model))
+        })
+        .cloned()
     }
 }
 
@@ -541,25 +675,32 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
 /// Holds the live agent and lets the TUI switch provider/model at runtime.
 pub struct AgentRuntime {
     inner: Mutex<AgentRuntimeInner>,
-    fallback: FallbackManager,
 }
 
 struct AgentRuntimeInner {
     agent: Arc<Agent>,
+    /// User-facing selection (provider, model). For the `combos` provider the
+    /// model is the combo name; the agent underneath runs on `effective_*`.
     provider: String,
     model: String,
+    /// The concrete (provider, model) the current agent actually runs on.
+    effective_provider: String,
+    effective_model: String,
     config: AppConfig,
     parent: crate::subagents::ParentHandle,
     followups: crate::subagents::FollowupSink,
     /// Sender side of the sub-agent activity channel; rebuilt agents (fallback
     /// / switch) keep using the same channel so TUI receivers stay valid.
     subagent_tx: tokio::sync::broadcast::Sender<crate::subagents::SubAgentActivity>,
+    /// Fallback state for the current selection (a combo, or empty = disabled).
+    fallback: FallbackManager,
 }
 
 impl AgentRuntime {
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let (provider, model) = default_selection(config)?;
-        let resolved = resolve(config, &provider, &model)?;
+        let (effective_provider, effective_model) = effective_selection(config, &provider, &model)?;
+        let resolved = resolve(config, &effective_provider, &effective_model)?;
         let parent = Arc::new(Mutex::new(None));
         let followups = Arc::new(Mutex::new(Vec::new()));
         let (subagent_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -577,17 +718,20 @@ impl AgentRuntime {
                 subagent_events: Some(subagent_tx.clone()),
             },
         )?;
+        let fallback = fallback_for(config, &provider, &model);
         Ok(Self {
             inner: Mutex::new(AgentRuntimeInner {
                 agent,
                 provider,
                 model,
+                effective_provider,
+                effective_model,
                 config: config.clone(),
                 parent,
                 followups,
                 subagent_tx,
+                fallback,
             }),
-            fallback: FallbackManager::new(config),
         })
     }
 
@@ -614,6 +758,13 @@ impl AgentRuntime {
         (g.provider.clone(), g.model.clone())
     }
 
+    /// The concrete (provider, model) the current agent runs on — the combo's
+    /// current fallback entry when the selection is a combo.
+    pub fn effective(&self) -> (String, String) {
+        let g = self.inner.lock();
+        (g.effective_provider.clone(), g.effective_model.clone())
+    }
+
     /// All (provider, model) entries for the picker.
     pub fn entries(&self) -> Vec<(String, String)> {
         entries(&self.inner.lock().config)
@@ -625,25 +776,28 @@ impl AgentRuntime {
         resolve_selection(config, "", text)
     }
 
-    // ── Provider fallback ───────────────────────────────────────────────
+    // ── Combo fallback ──────────────────────────────────────────────────
 
+    /// Whether the current selection falls back across combo entries (only
+    /// true while a combo is selected and `fallback.enabled` is on).
     pub fn fallback_enabled(&self) -> bool {
-        self.fallback.enabled()
+        self.inner.lock().fallback.enabled()
     }
 
-    /// The next provider to fall back to after `current` failed, or None if
-    /// every other provider is cooling down.
-    pub fn next_fallback_provider(&self, current: &str) -> Option<String> {
-        self.fallback.next_provider(current)
+    /// The next combo entry to fall back to after `(provider, model)` failed,
+    /// or None if every other entry is cooling down.
+    pub fn next_fallback_entry(&self, provider: &str, model: &str) -> Option<FallbackEntry> {
+        self.inner.lock().fallback.next_entry(provider, model)
     }
 
-    pub fn record_failure(&self, provider: &str) {
-        self.fallback.record_failure(provider);
+    pub fn record_failure(&self, provider: &str, model: &str) {
+        self.inner.lock().fallback.record_failure(provider, model);
     }
 
-    /// Rebuild the agent on a different provider, preserving the conversation
-    /// (minus the failed run's just-pushed prompt).
-    pub fn fallback_to(&self, provider: &str) -> anyhow::Result<()> {
+    /// Rebuild the agent on a different (provider, model) combo entry,
+    /// preserving the conversation (minus the failed run's just-pushed prompt)
+    /// and the user-facing selection (the combo stays selected).
+    pub fn fallback_to(&self, provider: &str, model: &str) -> anyhow::Result<()> {
         let (config, working_dir, max_turns, parent, followups, subagent_tx) = {
             let g = self.inner.lock();
             (
@@ -655,8 +809,7 @@ impl AgentRuntime {
                 g.subagent_tx.clone(),
             )
         };
-        let model = default_model(&config, provider)?;
-        let resolved = resolve(&config, provider, &model)?;
+        let resolved = resolve(&config, provider, model)?;
         let mut messages = self.inner.lock().agent.messages();
         drop_trailing_user_message(&mut messages);
         let agent = build_agent(
@@ -675,8 +828,8 @@ impl AgentRuntime {
         )?;
         let mut g = self.inner.lock();
         g.agent = agent;
-        g.provider = provider.to_string();
-        g.model = model;
+        g.effective_provider = provider.to_string();
+        g.effective_model = model.to_string();
         Ok(())
     }
 
@@ -693,7 +846,9 @@ impl AgentRuntime {
                 g.subagent_tx.clone(),
             )
         };
-        let resolved = resolve(&config, provider, model)?;
+        let (effective_provider, effective_model) =
+            effective_selection(&config, provider, model)?;
+        let resolved = resolve(&config, &effective_provider, &effective_model)?;
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -708,10 +863,14 @@ impl AgentRuntime {
                 subagent_events: Some(subagent_tx.clone()),
             },
         )?;
+        let fallback = fallback_for(&config, provider, model);
         let mut g = self.inner.lock();
         g.agent = agent;
         g.provider = provider.to_string();
         g.model = model.to_string();
+        g.effective_provider = effective_provider;
+        g.effective_model = effective_model;
+        g.fallback = fallback;
         Ok(())
     }
 }
@@ -861,34 +1020,162 @@ mod tests {
     #[test]
     fn fallback_priority_and_cooldown() {
         let config = AppConfig::default();
-        let fb = FallbackManager::new(&config);
+        let entries = vec![
+            FallbackEntry {
+                provider: "poolside".into(),
+                model: "poolside/laguna-xs-2.1".into(),
+            },
+            FallbackEntry {
+                provider: "openrouter".into(),
+                model: "openrouter/free".into(),
+            },
+            FallbackEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            },
+        ];
+        let fb = FallbackManager::new(&config, entries);
         assert!(fb.enabled());
-        // Default priority is the registry order, current provider excluded.
-        assert_eq!(fb.next_provider("poolside").unwrap(), "openrouter");
-        fb.record_failure("openrouter");
-        assert_eq!(fb.next_provider("poolside").unwrap(), "groq");
-        fb.record_failure("groq");
-        fb.record_failure("nvidia");
-        fb.record_failure("tokenrouter");
+        // Priority is the entry list order, current entry excluded.
+        let next = fb.next_entry("poolside", "poolside/laguna-xs-2.1").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("openrouter", "openrouter/free"));
+        fb.record_failure("openrouter", "openrouter/free");
+        let next = fb.next_entry("poolside", "poolside/laguna-xs-2.1").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+        fb.record_failure("groq", "groq/compound");
         // All alternates cooling down → nothing left to fall back to.
-        assert_eq!(fb.next_provider("poolside"), None);
-    }
-
-    #[test]
-    fn fallback_custom_priority() {
-        let mut config = AppConfig::default();
-        config.fallback.priority = vec!["groq".into(), "nvidia".into()];
-        let fb = FallbackManager::new(&config);
-        assert_eq!(fb.next_provider("poolside").unwrap(), "groq");
-        assert_eq!(fb.next_provider("groq").unwrap(), "nvidia");
+        assert!(fb.next_entry("poolside", "poolside/laguna-xs-2.1").is_none());
     }
 
     #[test]
     fn fallback_can_be_disabled() {
         let mut config = AppConfig::default();
         config.fallback.enabled = false;
-        let fb = FallbackManager::new(&config);
+        let entries = vec![FallbackEntry {
+            provider: "groq".into(),
+            model: "groq/compound".into(),
+        }];
+        let fb = FallbackManager::new(&config, entries);
         assert!(!fb.enabled());
+    }
+
+    #[test]
+    fn fallback_skips_current_entry() {
+        let config = AppConfig::default();
+        let entries = vec![
+            FallbackEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            },
+            FallbackEntry {
+                provider: "nvidia".into(),
+                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
+            },
+        ];
+        let fb = FallbackManager::new(&config, entries);
+        // The current entry itself is never re-selected, even if preferred.
+        let next = fb.next_entry("groq", "groq/compound").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"));
+        // After nvidia fails too, groq is tried again (it never cooled down).
+        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
+        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+        // With groq cooling down and nvidia current, nothing is left.
+        fb.record_failure("groq", "groq/compound");
+        assert!(fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").is_none());
+    }
+
+    #[test]
+    fn plain_selection_has_no_fallback() {
+        let config = AppConfig::default();
+        let fb = fallback_for(&config, "groq", "groq/compound");
+        assert!(!fb.enabled());
+        assert!(fb.next_entry("groq", "groq/compound").is_none());
+    }
+
+    #[test]
+    fn combos_expose_virtual_provider_and_resolve() {
+        use crate::config::ComboEntry;
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("GROQ_API_KEY", "combo-test-key") };
+        let mut config = AppConfig::default();
+        config.combos.insert(
+            "coding".into(),
+            vec![
+                ComboEntry {
+                    provider: "groq".into(),
+                    model: "groq/compound".into(),
+                },
+                ComboEntry {
+                    provider: "nvidia".into(),
+                    model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
+                },
+            ],
+        );
+        // The virtual provider shows up with one model per combo.
+        let combos_provider = provider(&config, "combos").unwrap();
+        assert_eq!(combos_provider.models, vec!["coding"]);
+        // Resolution maps the combo to its first entry.
+        let resolved = resolve(&config, "combos", "coding").unwrap();
+        assert_eq!(resolved.provider, "groq");
+        assert_eq!(resolved.model, "groq/compound");
+        // effective_selection agrees; fallback_for is enabled for the combo.
+        assert_eq!(
+            effective_selection(&config, "combos", "coding").unwrap(),
+            ("groq".to_string(), "groq/compound".to_string())
+        );
+        let fb = fallback_for(&config, "combos", "coding");
+        assert!(fb.enabled());
+        let next = fb.next_entry("groq", "groq/compound").unwrap();
+        assert_eq!(next.provider, "nvidia");
+    }
+
+    #[test]
+    fn combo_entries_validate_providers() {
+        use crate::config::ComboEntry;
+        let mut config = AppConfig::default();
+        config.combos.insert(
+            "mixed".into(),
+            vec![
+                ComboEntry {
+                    provider: "groq".into(),
+                    model: "groq/compound".into(),
+                },
+                ComboEntry {
+                    provider: "no-such-provider".into(),
+                    model: "x/y".into(),
+                },
+            ],
+        );
+        let combos = combos(&config);
+        assert_eq!(combos.len(), 1);
+        assert_eq!(combos[0].entries.len(), 1);
+        assert_eq!(combos[0].entries[0].provider, "groq");
+    }
+
+    #[test]
+    fn combo_default_selection_resolves() {
+        use crate::config::ComboEntry;
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("GROQ_API_KEY", "combo-test-key") };
+        let mut config = AppConfig::default();
+        config.combos.insert(
+            "coding".into(),
+            vec![ComboEntry {
+                provider: "groq".into(),
+                model: "groq/compound".into(),
+            }],
+        );
+        config.provider = "combos".into();
+        config.model = "coding".into();
+        let (provider, model) = default_selection(&config).unwrap();
+        assert_eq!((provider.as_str(), model.as_str()), ("combos", "coding"));
+        let resolved = resolve(&config, &provider, &model).unwrap();
+        assert_eq!(resolved.model, "groq/compound");
+        // /model-style resolution of "combos/coding" works too.
+        assert_eq!(
+            resolve_selection(&config, "", "combos/coding").unwrap(),
+            ("combos".to_string(), "coding".to_string())
+        );
     }
 
     #[test]

@@ -47,6 +47,12 @@ pub struct AppConfig {
     /// tokenrouter).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
+    /// Named fallback "combos": exposed as the virtual provider `combos` with
+    /// one virtual model per entry (e.g. `combos/coding`). Selecting one runs
+    /// on the first listed (provider, model) and transparently retries across
+    /// the rest on errors / rate limits.
+    #[serde(default)]
+    pub combos: std::collections::HashMap<String, Vec<ComboEntry>>,
     /// Only show free coding models by default (TUI picker and ACP
     /// `availableModels`). Set to `false` to show every configured model.
     #[serde(default = "default_true")]
@@ -88,6 +94,7 @@ impl Default for AppConfig {
             proxy: ProxyConfig::default(),
             fallback: FallbackConfig::default(),
             providers: std::collections::HashMap::new(),
+            combos: std::collections::HashMap::new(),
             free_models_only: true,
             benchmark_mode: false,
             embedding_api: false,
@@ -134,20 +141,16 @@ impl Default for ProxyConfig {
     }
 }
 
-/// Provider fallback: on an error or rate limit, retry the run on the next
-/// provider in `priority` order. Failed providers cool down for
-/// `cooldown_seconds` before they can be tried again.
+/// Combo fallback tuning. Automatic fallback for individually picked models
+/// was removed: fallback only happens inside a `combos` selection, where the
+/// combo's own entry list defines the priority order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FallbackConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// How long a provider stays excluded after a failure, in seconds.
+    /// How long a combo entry stays excluded after a failure, in seconds.
     #[serde(default = "default_fallback_cooldown")]
     pub cooldown_seconds: u64,
-    /// Provider names in priority order. Empty = registry order (built-ins
-    /// first, then config-file providers).
-    #[serde(default)]
-    pub priority: Vec<String>,
 }
 
 impl Default for FallbackConfig {
@@ -155,7 +158,31 @@ impl Default for FallbackConfig {
         Self {
             enabled: true,
             cooldown_seconds: default_fallback_cooldown(),
-            priority: Vec::new(),
+        }
+    }
+}
+
+/// One (provider, model) entry inside a `combos` list. In JSON it can be
+/// written either as a two-element array `["provider", "model"]` or as an
+/// object `{ "provider": ..., "model": ... }`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ComboEntry {
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ComboEntryRepr {
+    Tuple(String, String),
+    Object { provider: String, model: String },
+}
+
+impl<'de> serde::Deserialize<'de> for ComboEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match ComboEntryRepr::deserialize(deserializer)? {
+            ComboEntryRepr::Tuple(provider, model) => Ok(Self { provider, model }),
+            ComboEntryRepr::Object { provider, model } => Ok(Self { provider, model }),
         }
     }
 }
@@ -307,6 +334,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     if !overlay.providers.is_empty() {
         base.providers = overlay.providers;
     }
+    if !overlay.combos.is_empty() {
+        base.combos = overlay.combos;
+    }
 }
 
 fn apply_env(config: &mut AppConfig) {
@@ -422,3 +452,46 @@ fn resolve_model_alias(alias: &str) -> String {
 //     std::fs::write(path, content)?;
 //     Ok(())
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combos_parse_tuple_and_object_forms() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "combos": {
+                    "coding": [
+                        ["poolside", "poolside/laguna-xs-2.1"],
+                        { "provider": "openrouter", "model": "openrouter/free" }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let coding = config.combos.get("coding").unwrap();
+        assert_eq!(coding.len(), 2);
+        assert_eq!(coding[0].provider, "poolside");
+        assert_eq!(coding[0].model, "poolside/laguna-xs-2.1");
+        assert_eq!(coding[1].provider, "openrouter");
+        assert_eq!(coding[1].model, "openrouter/free");
+    }
+
+    #[test]
+    fn legacy_fallback_priority_is_ignored() {
+        // Old configs with `fallback.priority` still load; the key is dropped
+        // and the default cooldown applies.
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "fallback": {
+                    "enabled": false,
+                    "priority": ["poolside", "openrouter"]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(!config.fallback.enabled);
+        assert_eq!(config.fallback.cooldown_seconds, default_fallback_cooldown());
+    }
+}

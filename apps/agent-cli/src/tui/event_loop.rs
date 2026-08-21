@@ -28,19 +28,20 @@ use unicode_width::UnicodeWidthChar;
 const TICK_RATE: Duration = Duration::from_millis(16); // ~62 FPS
 
 /// A single agent run, with enough state to transparently retry on another
-/// provider when the current one errors before producing any output.
+/// combo entry when the current one errors before producing any output.
 struct AgentRun {
     stream: AgentStream,
     /// The prompt being run (re-sent to the retry agent).
     prompt: String,
-    /// Provider the current stream is running on.
+    /// Concrete (provider, model) the current stream is running on.
     provider: String,
+    model: String,
     /// Whether any output event has been emitted yet.
     produced_output: bool,
 }
 
 /// If `event` is a provider error from a run that hasn't produced output yet,
-/// retry the run on the next provider in priority order. Returns true when the
+/// retry the run on the next combo entry in the list. Returns true when the
 /// error was handled by a fallback (and the event should be swallowed).
 fn try_fallback(
     state: &mut AppState,
@@ -63,17 +64,20 @@ fn try_fallback(
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime.next_fallback_provider(&run.provider) else {
+    let Some(next) = runtime.next_fallback_entry(&run.provider, &run.model) else {
         return false;
     };
-    runtime.record_failure(&run.provider);
-    match runtime.fallback_to(&next) {
+    runtime.record_failure(&run.provider, &run.model);
+    match runtime.fallback_to(&next.provider, &next.model) {
         Ok(()) => {
             state.push_system(format!(
-                "{} failed ({}) — falling back to {next}",
-                run.provider, msg
+                "{} failed ({}) — falling back to {}",
+                crate::providers::display_model_id(&run.provider, &run.model),
+                msg,
+                crate::providers::display_model_id(&next.provider, &next.model),
             ));
-            run.provider = next;
+            run.provider = next.provider;
+            run.model = next.model;
             run.stream = runtime.agent().run_stream(&run.prompt);
             true
         }
@@ -164,10 +168,12 @@ pub async fn run(
                                 state.is_streaming = true;
                                 state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
+                                let (effective_provider, effective_model) = runtime.effective();
                                 agent_run = Some(AgentRun {
                                     stream: runtime.agent().run_stream(&prompt),
                                     prompt: prompt.clone(),
-                                    provider: runtime.current().0,
+                                    provider: effective_provider,
+                                    model: effective_model,
                                     produced_output: false,
                                 });
                             }

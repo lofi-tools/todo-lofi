@@ -324,6 +324,9 @@ struct AcpSession {
     run_seq: u64,
     /// (run id, cancellation token) for the prompt currently streaming, if any.
     pending_cancel: Option<(u64, CancellationToken)>,
+    /// Combo fallback state for this session's selection (disabled when the
+    /// session runs a plain provider/model).
+    fallback: providers::FallbackManager,
     _mcp_servers: Vec<cersei::mcp::McpServerConfig>,
 }
 
@@ -336,8 +339,6 @@ struct AcpServer {
     default_provider: String,
     default_model: String,
     max_turns: u32,
-    /// Provider fallback on errors / rate limits, shared across sessions.
-    fallback: providers::FallbackManager,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
@@ -345,10 +346,12 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
     // (missing api_key etc.), before the protocol starts.
     let (default_provider, default_model) =
         providers::default_selection(&config).context("no usable provider/model configured")?;
-    providers::resolve(&config, &default_provider, &default_model)
+    let (effective_provider, effective_model) =
+        providers::effective_selection(&config, &default_provider, &default_model)
+            .context("failed to resolve default provider/model")?;
+    providers::resolve(&config, &effective_provider, &effective_model)
         .context("failed to resolve default provider/model (check api_key settings)")?;
     let max_turns = config.max_turns;
-    let fallback = providers::FallbackManager::new(&config);
 
     let (connection, writer_task) = AcpConnection::new();
     let server = Arc::new(AcpServer {
@@ -358,7 +361,6 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         default_provider,
         default_model,
         max_turns,
-        fallback,
     });
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -652,6 +654,11 @@ impl AcpServer {
             messages: Vec::new(),
             run_seq: 0,
             pending_cancel: None,
+            fallback: providers::fallback_for(
+                &self.config,
+                &self.default_provider,
+                &self.default_model,
+            ),
             _mcp_servers: mcp_servers,
         }));
         self.sessions.lock().insert(session_id.clone(), Arc::clone(&session));
@@ -778,6 +785,7 @@ impl AcpServer {
                 };
                 guard.provider = name.to_string();
                 guard.model = model;
+                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
             }
             "model" => {
                 let text = match value.as_str() {
@@ -797,6 +805,7 @@ impl AcpServer {
                 };
                 guard.provider = provider;
                 guard.model = model;
+                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
             }
             other => {
                 self.connection.error(id, -32602, format!("Unknown config option: {other}"));
@@ -864,8 +873,11 @@ impl AcpServer {
         let current_provider = session.lock().provider.clone();
         match providers::resolve_selection(&self.config, &current_provider, &model_id) {
             Ok((provider, model)) => {
-                session.lock().provider = provider;
-                session.lock().model = model;
+                let mut guard = session.lock();
+                guard.provider = provider;
+                guard.model = model;
+                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                drop(guard);
                 self.connection.response(id, json!({}));
             }
             Err(e) => {
@@ -877,23 +889,25 @@ impl AcpServer {
     /// Build a fresh agent for one prompt run. A fresh agent per run lets each
     /// run carry its own cancellation token (cersei's cancel token is
     /// single-use), while conversation history is re-seeded via `with_messages`.
+    /// `provider`/`model` are the concrete selection to run on — normally the
+    /// session's, or a combo fallback entry during a transparent retry.
     fn build_agent(
         &self,
         session: &Arc<Mutex<AcpSession>>,
         cancel_token: CancellationToken,
+        provider: &str,
+        model: &str,
     ) -> anyhow::Result<Arc<Agent>> {
-        let (provider, model, cwd, mode, messages, session_id) = {
+        let (cwd, mode, messages, session_id) = {
             let guard = session.lock();
             (
-                guard.provider.clone(),
-                guard.model.clone(),
                 guard.cwd.clone(),
                 guard.mode.clone(),
                 guard.messages.clone(),
                 guard.id.clone(),
             )
         };
-        let resolved = providers::resolve(&self.config, &provider, &model)
+        let resolved = providers::resolve(&self.config, provider, model)
             .with_context(|| format!("failed to resolve provider '{provider}'"))?;
         // The ACP permission flow is not wired to cersei's InteractivePolicy
         // (permission responses never reach the runner), so only policies that
@@ -948,20 +962,39 @@ impl AcpServer {
             guard.run_seq
         };
 
-        let mut agent = match self.build_agent(&session, cancel_token.clone()) {
-            Ok(a) => a,
-            Err(e) => {
-                self.clear_pending(&session, run_id);
-                self.connection.error(id, -32000, format!("Failed to start agent: {e}"));
-                return;
+        // The concrete (provider, model) the run starts on: for a combo
+        // selection that's the combo's first entry.
+        let (start_provider, start_model) = {
+            let guard = session.lock();
+            match providers::effective_selection(&self.config, &guard.provider, &guard.model) {
+                Ok(sel) => sel,
+                Err(e) => {
+                    self.clear_pending(&session, run_id);
+                    self.connection.error(id, -32000, format!("Failed to start agent: {e}"));
+                    return;
+                }
             }
         };
+        let mut agent =
+            match self.build_agent(&session, cancel_token.clone(), &start_provider, &start_model) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.clear_pending(&session, run_id);
+                    self.connection
+                        .error(id, -32000, format!("Failed to start agent: {e}"));
+                    return;
+                }
+            };
 
         let mut stream = agent.run_stream(&text);
 
         let mut cancelled = false;
         let mut terminal: Option<TerminalOutcome> = None;
-        let mut current_provider = session.lock().provider.clone();
+        let mut current_provider = start_provider;
+        let mut current_model = start_model;
+        // Fallback state is shared across runs of this session (clones share
+        // the cooldown map), so a failed entry stays cooled down on retries.
+        let fallback = session.lock().fallback.clone();
         // Once the run has produced any output, a retry can't be transparent
         // (partial text/tool results would be duplicated), so fallback only
         // happens on failures before the first event.
@@ -992,42 +1025,48 @@ impl AcpServer {
                 }
                 Some(AgentEvent::Error(e)) => {
                     // Provider errors / rate limits usually hit on the first
-                    // request, before any output — fall back to the next
-                    // provider in priority order.
+                    // request, before any output — fall back to the next combo
+                    // entry in the list (only combos fall back; a plain
+                    // selection has a disabled FallbackManager).
                     let next = if produced_output || cancelled {
                         None
                     } else {
-                        self.fallback.next_provider(&current_provider)
+                        fallback.next_entry(&current_provider, &current_model)
                     };
                     if let Some(next) = next {
-                        self.fallback.record_failure(&current_provider);
-                        let rebuilt = (|| -> anyhow::Result<Arc<Agent>> {
-                            // Drop the failed run's pushed prompt so the retry
-                            // re-pushes it exactly once.
-                            let mut messages = agent.messages();
-                            providers::drop_trailing_user_message(&mut messages);
-                            let model = providers::default_model(&self.config, &next)?;
-                            {
-                                let mut guard = session.lock();
-                                guard.messages = messages;
-                                guard.provider = next.clone();
-                                guard.model = model;
-                            }
-                            self.build_agent(&session, cancel_token.clone())
-                        })();
+                        fallback.record_failure(&current_provider, &current_model);
+                        // Drop the failed run's pushed prompt so the retry
+                        // re-pushes it exactly once. The session's selection
+                        // (the combo) stays untouched — only the conversation
+                        // history is updated.
+                        let mut messages = agent.messages();
+                        providers::drop_trailing_user_message(&mut messages);
+                        session.lock().messages = messages;
+                        let rebuilt = self.build_agent(
+                            &session,
+                            cancel_token.clone(),
+                            &next.provider,
+                            &next.model,
+                        );
                         if let Ok(new_agent) = rebuilt {
                             self.connection.send_update(
                                 &session_id,
                                 SessionUpdate::AgentMessageChunk {
                                     content: TextContent::new(format!(
-                                        "⚠ {current_provider} failed ({e}) — retrying on {next}"
+                                        "⚠ {} failed ({e}) — retrying on {}",
+                                        providers::display_model_id(
+                                            &current_provider,
+                                            &current_model,
+                                        ),
+                                        providers::display_model_id(&next.provider, &next.model),
                                     )),
                                     message_id: None,
                                 },
                             );
                             stream = new_agent.run_stream(&text);
                             agent = new_agent;
-                            current_provider = next;
+                            current_provider = next.provider;
+                            current_model = next.model;
                             continue;
                         }
                     }

@@ -71,8 +71,15 @@ mkdir -p .abstract
 
   "fallback": {
     "enabled": true,
-    "cooldown_seconds": 300,
-    "priority": ["poolside", "openrouter", "groq", "nvidia", "tokenrouter"]
+    "cooldown_seconds": 300
+  },
+
+  "combos": {
+    "coding": [
+      ["poolside", "poolside/laguna-xs-2.1"],
+      ["openrouter", "openrouter/free"],
+      ["groq", "groq/compound"]
+    ]
   },
 
   "fallback_models": ["poolside/laguna-xs-2.1"],
@@ -105,34 +112,50 @@ Notes:
   the ACP `availableModels`. Set to `false` to show every configured model.
 - `working_dir`: project directory (defaults to the launch directory).
 
-### Provider fallback
+### Combos (model fallback)
 
-On a provider error or rate limit during a run, the agent automatically retries
-the run on the next provider — in both the TUI and the ACP server.
+When you pick a specific provider/model, the agent sticks to it — there is no
+automatic fallback between models. To get transparent failover, define a
+**combo**: a named list of `[provider, model]` tuples that appears in the
+`/model` picker (and ACP `availableModels`) as the virtual provider `combos`
+with one virtual model per combo. Selecting `combos/coding` runs on the first
+entry and, on a provider error or rate limit **before any output is produced**,
+retries the run on the next entry — in both the TUI and the ACP server.
 
 ```json
-"fallback": {
-  "enabled": true,
-  "cooldown_seconds": 300,
-  "priority": ["poolside", "openrouter", "groq", "nvidia"]
+"combos": {
+  "coding": [
+    ["poolside", "poolside/laguna-xs-2.1"],
+    ["openrouter", "openrouter/free"],
+    ["groq", "groq/compound"]
+  ]
 }
 ```
 
-- `priority` lists providers in preference order. The failed provider is
-  skipped and the most-preferred available one is tried next. Empty priority
-  (or entries that don't name a configured provider) fall back to registry
-  order: built-ins first, then config-file providers.
-- `cooldown_seconds` is the "long cooldown": once a provider fails it is
-  excluded from fallback for this long (default 300s = 5 minutes), so it isn't
-  hammered again immediately.
-- `enabled: false` disables fallback entirely.
+Then pick it like any other model: `/model combos/coding` in the TUI, or set
+`provider: "combos"` / `model: "coding"` in the config.
+
+- Entries are tried in the order listed; the failed entry is skipped and the
+  most-preferred available one is tried next. Entries must name providers
+  defined under `providers` (built-in or config-file); unknown ones are
+  skipped with a warning.
+- `fallback.cooldown_seconds` is the "long cooldown" (default 300s = 5
+  minutes): once an entry fails it is excluded from fallback for this long, so
+  a rate-limited provider isn't hammered again immediately. Cooldowns are
+  tracked in memory for the lifetime of the process — a full database isn't
+  needed for a few minutes of rate-limit state.
+- `fallback.enabled: false` turns combo fallback off (combos then just run on
+  their first entry).
+- `combos` entries can also be written as objects:
+  `{ "provider": "poolside", "model": "poolside/laguna-xs-2.1" }`.
 
 Fallback only triggers when the run fails **before producing any output**
 (which is where provider errors and rate limits hit — on the first request).
 Once the agent has started streaming a response or made tool calls, an error is
 surfaced normally instead of being retried, to avoid duplicating partial work.
-When a fallback happens you'll see a notice in the TUI (or an
-`agent_message_chunk` notification over ACP) saying which provider failed and
+When a combo switches entries you'll see a notice in the TUI (a grayed
+`[system]` log line — your selected model stays `combos/coding`) and an
+`agent_message_chunk` notification over ACP naming which model failed and
 which it fell back to.
 
 ### Providers
@@ -273,4 +296,6 @@ work run only the relevant phases.
 `session/set_config_option` and `session/cancel`. `session/new` advertises
 `provider` + `model` config options and `availableModels` (respecting
 `free_models_only`), so clients can switch provider/model — same registry as
-the TUI's `/model`. Prompt runs use the same provider fallback as the TUI.
+the TUI's `/model`. Prompt runs use the same combo fallback as the TUI (per
+session: each session tracks its own cooldowns), with switches logged via
+`agent_message_chunk` notifications.

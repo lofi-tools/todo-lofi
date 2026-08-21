@@ -58,33 +58,39 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// One agent run in single-shot (`-p`) mode, with enough state to transparently
-/// retry on another provider when the current one errors before producing any
-/// output (mirrors the TUI's fallback logic).
+/// retry on another combo entry when the current one errors before producing
+/// any output (mirrors the TUI's fallback logic).
 struct SingleShotRun {
     stream: cersei::events::AgentStream,
     /// The prompt being run (re-sent to the retry agent).
     prompt: String,
-    /// Provider the current stream is running on.
+    /// Concrete (provider, model) the current stream is running on.
     provider: String,
+    model: String,
     /// Whether any output event has been emitted yet.
     produced_output: bool,
 }
 
-/// Retry `run` on the next provider if it errored before producing any output.
-/// Returns true when the error was handled by a fallback (and should be
-/// swallowed by the caller).
+/// Retry `run` on the next combo entry if it errored before producing any
+/// output. Returns true when the error was handled by a fallback (and should
+/// be swallowed by the caller).
 fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime.next_fallback_provider(&run.provider) else {
+    let Some(next) = runtime.next_fallback_entry(&run.provider, &run.model) else {
         return false;
     };
-    runtime.record_failure(&run.provider);
-    match runtime.fallback_to(&next) {
+    runtime.record_failure(&run.provider, &run.model);
+    match runtime.fallback_to(&next.provider, &next.model) {
         Ok(()) => {
-            eprintln!("\x1b[36m{} failed — falling back to {next}\x1b[0m", run.provider);
-            run.provider = next;
+            eprintln!(
+                "\x1b[36m{} failed — falling back to {}\x1b[0m",
+                crate::providers::display_model_id(&run.provider, &run.model),
+                crate::providers::display_model_id(&next.provider, &next.model),
+            );
+            run.provider = next.provider;
+            run.model = next.model;
             run.stream = runtime.agent().run_stream(&run.prompt);
             true
         }
@@ -98,10 +104,12 @@ fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
 async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Result<()> {
     use std::io::Write;
 
+    let (effective_provider, effective_model) = runtime.effective();
     let mut run = SingleShotRun {
         stream: runtime.agent().run_stream(prompt),
         prompt: prompt.to_string(),
-        provider: runtime.current().0,
+        provider: effective_provider,
+        model: effective_model,
         produced_output: false,
     };
 
