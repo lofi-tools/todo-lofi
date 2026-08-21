@@ -231,16 +231,29 @@ impl VirtualList {
     }
 }
 
-/// A copy of `line` with bytes `[start..end)` (in the joined span text)
+// ─── A copy of `line` with bytes `[start..end)` (in the joined span text)
 /// styled with the REVERSED modifier; everything else keeps its style.
+///
+/// `start`/`end` are byte offsets into the row's joined span text. They come
+/// from the selection machinery, which snaps them to char boundaries in the
+/// *joined* text — but an individual span can still receive an offset that
+/// lands mid-codepoint when a multi-byte char straddles a span boundary or
+/// when streaming wraps a span at a non-char-aligned byte. Flooring each edge
+/// to the span's own char boundary keeps slicing panic-free and matches the
+/// visual intent (the selection snaps to the nearest codepoint start).
 fn highlight_line(line: &Line<'static>, start: usize, end: usize) -> Line<'static> {
     let mut spans_out = Vec::new();
     let mut pos = 0usize;
     for span in &line.spans {
         let text = span.content.to_string();
         let span_end = pos + text.len();
+        // Map the row-text byte offsets into this span's local byte range,
+        // clamped to the span bounds, then snap to char boundaries so we
+        // never slice mid-codepoint.
         let a = start.saturating_sub(pos).min(text.len());
         let b = end.saturating_sub(pos).min(text.len());
+        let a = text.floor_char_boundary(a);
+        let b = text.floor_char_boundary(b);
         if a >= b {
             // Fully outside the selection (or zero-width overlap).
             spans_out.push(span.clone());
@@ -313,5 +326,48 @@ mod tests {
             .spans
             .iter()
             .all(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+    }
+
+    #[test]
+    fn highlight_line_does_not_panic_on_mid_codepoint_selection() {
+        // Regression: a multi-byte char (▊ is 3 bytes) with a selection byte
+        // index landing inside it panicked on str slicing. Snapping to char
+        // boundaries keeps slicing panic-free.
+        //
+        // `▊ab▊` joined bytes: ▊=0..3, a=3..4, b=4..5, ▊=5..8.
+        let line = Line::from(vec![Span::raw("▊ab"), Span::raw("▊")]);
+        // start=1 is inside the first ▊ (floors to 0); end=3 is the ▊/a
+        // boundary. Selection on span 0 covers bytes [0..3) = ▊.
+        let out = highlight_line(&line, 1, 3);
+        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(texts, vec!["▊", "ab", "▊"]);
+        assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[2].style.add_modifier.contains(Modifier::REVERSED));
+
+        // End index mid-char in a single-span line must not panic either.
+        // `a▊b`: a=0..1, ▊=1..4, b=4..5.
+        let single = Line::from(vec![Span::raw("a▊b")]);
+        let out = highlight_line(&single, 0, 3);
+        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
+        // end=3 floors to 1 (▊ start) → `a` highlighted, `▊b` not.
+        assert_eq!(texts, vec!["a", "▊b"]);
+        assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn highlight_line_reproduces_original_panic_case() {
+        // The shipped panic was: `end byte index 3 is not a char boundary;
+        // it is inside '▊' (bytes 2..5 of string)`. That is a span whose text
+        // is `<2 bytes><▊>` and a selection end of 3 landing inside ▊. Without
+        // flooring, `text[0..3]` / `text[3..]` panicked. Must not panic now.
+        let line = Line::from(vec![Span::raw("ab▊cd")]); // a=0,b=1,▊=2..5,c=5,d=6
+        let out = highlight_line(&line, 0, 3);
+        let texts: Vec<String> = out.spans.iter().map(|s| s.content.to_string()).collect();
+        // end=3 floors to 2 (▊ start) → `ab` highlighted, `▊cd` not.
+        assert_eq!(texts, vec!["ab", "▊cd"]);
+        assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
     }
 }
