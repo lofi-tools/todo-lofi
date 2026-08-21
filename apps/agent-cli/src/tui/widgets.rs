@@ -1123,8 +1123,18 @@ pub mod messages {
             } else {
                 let mut remaining = line;
                 while remaining.len() > max_width {
-                    let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
-                    let break_at = if break_at == 0 { max_width } else { break_at };
+                    // Snap to a char boundary so multi-byte chars are never cut
+                    // in half (slicing mid-char would panic).
+                    let search_end = remaining.floor_char_boundary(max_width);
+                    let mut break_at = remaining[..search_end].rfind(' ').unwrap_or(search_end);
+                    if break_at == 0 {
+                        break_at = search_end;
+                    }
+                    if break_at == 0 {
+                        // The first char is wider than the whole row: emit it
+                        // alone so the loop always makes progress.
+                        break_at = remaining.chars().next().map_or(0, |ch| ch.len_utf8());
+                    }
                     result.push(remaining[..break_at].to_string());
                     remaining = remaining[break_at..].trim_start();
                 }
@@ -1137,6 +1147,29 @@ pub mod messages {
             result.push(String::new());
         }
         result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::wrap_text;
+
+        #[test]
+        fn wraps_without_splitting_multibyte_chars() {
+            // Byte slicing used to cut through the em-dash and panic.
+            assert_eq!(wrap_text("aaaaaa—bbbbbb", 7), vec!["aaaaaa", "—bbbb", "bb"]);
+        }
+
+        #[test]
+        fn wraps_when_first_char_is_wider_than_width() {
+            // Must terminate and never lose characters.
+            assert_eq!(wrap_text("—a", 1), vec!["—", "a"]);
+            assert_eq!(wrap_text("—abc", 2), vec!["—", "ab", "c"]);
+        }
+
+        #[test]
+        fn wraps_ascii_at_word_boundaries() {
+            assert_eq!(wrap_text("hello world", 5), vec!["hello", "world"]);
+        }
     }
 }
 pub mod overlay {

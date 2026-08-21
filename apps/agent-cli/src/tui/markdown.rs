@@ -177,11 +177,13 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                         current_width += span_len;
                         current_spans.push(span);
                     } else {
-                        // Need to split this span
+                        // Need to split this span. The byte index may land inside
+                        // a multi-byte char, so snap it to a char boundary first
+                        // (split_at would panic otherwise).
                         let remaining = max_width.saturating_sub(current_width);
                         if remaining > 0 {
                             let text = span.content.to_string();
-                            let (first, rest) = text.split_at(remaining.min(text.len()));
+                            let (first, rest) = text.split_at(text.floor_char_boundary(remaining.min(text.len())));
                             if !first.is_empty() {
                                 current_spans.push(Span::styled(first.to_string(), span.style));
                             }
@@ -189,7 +191,16 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                             // Continue with rest of span
                             let mut leftover = rest.to_string();
                             while leftover.len() > max_width {
-                                let (chunk, rem) = leftover.split_at(max_width);
+                                let mut boundary = leftover.floor_char_boundary(max_width);
+                                if boundary == 0 {
+                                    // The first char is wider than the budget:
+                                    // emit it alone so the loop makes progress.
+                                    boundary = leftover
+                                        .chars()
+                                        .next()
+                                        .map_or(0, |ch| ch.len_utf8());
+                                }
+                                let (chunk, rem) = leftover.split_at(boundary);
                                 wrapped
                                     .push(Line::from(Span::styled(chunk.to_string(), span.style)));
                                 leftover = rem.to_string();
@@ -247,4 +258,54 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rendered text of a line, its spans joined in order.
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans.iter().map(|s| s.content.to_string()).collect()
+    }
+
+    /// Non-empty rendered lines plus the concatenation of everything, which
+    /// must always reconstruct the original text exactly.
+    fn render_chunks(text: &str, width: u16) -> (Vec<String>, String) {
+        let lines = render_markdown(text, width);
+        let all: Vec<String> = lines.iter().map(line_text).collect();
+        let non_empty: Vec<String> = all.iter().filter(|s| !s.is_empty()).cloned().collect();
+        let joined = all.concat();
+        (non_empty, joined)
+    }
+
+    #[test]
+    fn wraps_without_splitting_multibyte_chars() {
+        // The em-dash straddles the byte cutoff; this used to panic in split_at.
+        let (chunks, joined) = render_chunks("aaaaaa—bbbbbb", 7);
+        assert_eq!(chunks, vec!["aaaaaa", "—bbbb", "bb"]);
+        assert_eq!(joined, "aaaaaa—bbbbbb");
+        for chunk in &chunks {
+            assert!(chunk.len() <= 7);
+        }
+    }
+
+    #[test]
+    fn wraps_when_first_char_is_wider_than_width() {
+        // Must terminate and never lose characters, even when the first char
+        // alone is wider than the whole row.
+        let (chunks, joined) = render_chunks("—a", 1);
+        assert_eq!(chunks, vec!["—", "a"]);
+        assert_eq!(joined, "—a");
+    }
+
+    #[test]
+    fn wraps_ascii_normally() {
+        let (chunks, joined) = render_chunks("hello world", 5);
+        assert_eq!(chunks, vec!["hello", " worl", "d"]);
+        assert_eq!(joined, "hello world");
+        for chunk in &chunks {
+            assert!(chunk.len() <= 5);
+        }
+    }
 }
