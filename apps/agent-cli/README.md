@@ -229,12 +229,19 @@ same model. The catalog (`src/subagents.rs`):
 | `researcher-docs`| `ReadDocs` (Context7)                      | Library/framework API questions   |
 | `code-searcher`  | (mechanical — runs `searchQueries` in `params` directly, no LLM) | Find where a symbol/pattern appears |
 | `code-reviewer`  | none (reviews the recent changes in the parent conversation) | After significant file changes |
+| `thinker`        | none (sees the entire conversation; strips `<think>` blocks) | Hard reasoning questions, tricky bugs, complex design decisions |
 
 Each agent also ends its response with a `suggest_followups` tool call; the
 suggestions are rendered as a "Suggested next steps" list in the TUI and in
 `-p` mode. Read-only sessions (ACP `readonly` mode) don't get `spawn_agents`
 since sub-agents run with full permissions. Sub-agent runs are capped at 120
 seconds so a stuck agent can't hang the parent run.
+
+In the TUI, each `spawn_agents` call renders as a **nested tool-call tree**: a
+header per spawned agent (`[researcher-web] Web Researcher — <prompt>`) with
+its tool calls (`WebSearch`, `ReadDocs`, …) and final text indented
+underneath, so you can watch what each sub-agent is doing live as the batch
+runs.
 
 ### Phase workflow
 
@@ -245,7 +252,9 @@ implementation tasks (prompt-encoded, not a state machine):
    parallel and read the relevant files before touching anything.
 2. **write_todos** — for 3+ step tasks, plan with the `TodoWrite` tool
    (a review step + a validation step included; cersei's runner also nudges
-   the model about incomplete todos).
+   the model about incomplete todos). For hard reasoning questions, spawn the
+   `thinker` sub-agent (no tools, sees the conversation) to reason about the
+   approach before implementing.
 3. **Implement** — direct file edits, preferring `Edit`/`ApplyPatch`.
 4. **Review Loop** — spawn `code-reviewer`, fix anything it finds, then
    re-spawn it until it reports no new issues.

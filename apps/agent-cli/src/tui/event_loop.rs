@@ -696,17 +696,9 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             state.tool_count += 1;
             // A `spawn_agents` call may have started before the UI processed
             // its ToolStart — attach any sub-agent activity that arrived in
-            // the meantime (tools run sequentially, so all buffered events
-            // belong to this call).
+            // the meantime.
             if state.active_tools.last().is_some_and(|t| t.name == "spawn_agents") {
-                let pending = std::mem::take(&mut state.pending_subagent);
-                for (run_id, activity) in pending {
-                    let parent = state.active_tools.last_mut().expect("just pushed");
-                    if parent.run_id.is_none() {
-                        parent.run_id = Some(run_id);
-                    }
-                    attach_subagent_activity(parent, run_id, activity);
-                }
+                drain_pending_subagents(state);
             }
         }
         AgentEvent::ToolEnd {
@@ -846,6 +838,20 @@ fn handle_subagent_event(
         parent.run_id = Some(run_id);
     }
     attach_subagent_activity(parent, run_id, activity);
+}
+
+/// Attach sub-agent activity that arrived before its `spawn_agents` call was
+/// created to the just-pushed call. Tools run sequentially, so all buffered
+/// events belong to it.
+fn drain_pending_subagents(state: &mut AppState) {
+    let pending = std::mem::take(&mut state.pending_subagent);
+    for (run_id, activity) in pending {
+        let parent = state.active_tools.last_mut().expect("call was just pushed");
+        if parent.run_id.is_none() {
+            parent.run_id = Some(run_id);
+        }
+        attach_subagent_activity(parent, run_id, activity);
+    }
 }
 
 /// Apply one activity event to the nested children of a `spawn_agents` call.
@@ -1240,5 +1246,214 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subagents::SubAgentActivity;
+
+    fn state() -> AppState {
+        AppState::new("test-model", None)
+    }
+
+    fn spawn_call(status: ToolStatus, run_id: Option<u64>) -> ToolCall {
+        ToolCall {
+            name: "spawn_agents".into(),
+            input_summary: "[researcher-web] (1 agent)".into(),
+            status,
+            output_preview: None,
+            started_at: Instant::now(),
+            duration_ms: None,
+            children: Vec::new(),
+            run_id,
+        }
+    }
+
+    #[test]
+    fn subagent_events_buffer_until_parent_tool_start() {
+        let mut s = state();
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::Started {
+                run_id: 1,
+                agent_type: "code-reviewer".into(),
+                display_name: "Nit Pick Nick".into(),
+                prompt: "review the changes".into(),
+            },
+        );
+        // No spawn_agents call yet: the event is buffered, not dropped.
+        assert_eq!(s.pending_subagent.len(), 1);
+        assert!(s.active_tools.is_empty());
+
+        // The parent ToolStart arrives (as handle_agent_event pushes it) and
+        // drains the buffer.
+        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        drain_pending_subagents(&mut s);
+        assert!(s.pending_subagent.is_empty());
+
+        let parent = &s.active_tools[0];
+        assert_eq!(parent.run_id, Some(1));
+        assert_eq!(parent.children.len(), 1);
+        assert_eq!(parent.children[0].name, "[code-reviewer]");
+        assert_eq!(parent.children[0].status, ToolStatus::Running);
+    }
+
+    #[test]
+    fn subagent_events_nest_under_running_parent() {
+        let mut s = state();
+        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+
+        let run_id = 7;
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::Started {
+                run_id,
+                agent_type: "researcher-web".into(),
+                display_name: "Web Researcher".into(),
+                prompt: "find current info".into(),
+            },
+        );
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::ToolStart {
+                run_id,
+                name: "WebSearch".into(),
+                input_summary: "\"rust async\"".into(),
+            },
+        );
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::ToolEnd {
+                run_id,
+                name: "WebSearch".into(),
+                is_error: false,
+                output_preview: "3 results".into(),
+                duration_ms: 210,
+            },
+        );
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::Finished {
+                run_id,
+                text: "found it".into(),
+            },
+        );
+
+        let parent = &s.active_tools[0];
+        assert_eq!(parent.run_id, Some(run_id));
+        assert_eq!(parent.children.len(), 1);
+        let header = &parent.children[0];
+        assert_eq!(header.name, "[researcher-web]");
+        assert_eq!(header.status, ToolStatus::Done);
+        assert_eq!(header.output_preview.as_deref(), Some("found it"));
+        assert_eq!(header.children.len(), 1);
+        assert_eq!(header.children[0].name, "WebSearch");
+        assert_eq!(header.children[0].status, ToolStatus::Done);
+        assert_eq!(header.children[0].duration_ms, Some(210));
+        assert_eq!(header.children[0].output_preview.as_deref(), Some("3 results"));
+    }
+
+    #[test]
+    fn multiple_subagents_in_one_spawn_call() {
+        let mut s = state();
+        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+
+        for (run_id, agent_type) in [(1u64, "researcher-web"), (2, "code-searcher")] {
+            handle_subagent_event(
+                &mut s,
+                SubAgentActivity::Started {
+                    run_id,
+                    agent_type: agent_type.into(),
+                    display_name: agent_type.into(),
+                    prompt: "go".into(),
+                },
+            );
+            handle_subagent_event(
+                &mut s,
+                SubAgentActivity::Finished {
+                    run_id,
+                    text: format!("{agent_type} done"),
+                },
+            );
+        }
+
+        let parent = &s.active_tools[0];
+        assert_eq!(parent.children.len(), 2);
+        assert_eq!(parent.children[0].name, "[researcher-web]");
+        assert_eq!(parent.children[1].name, "[code-searcher]");
+        // Each header got its own run id, so both are Done.
+        assert!(parent.children.iter().all(|c| c.status == ToolStatus::Done));
+    }
+
+    #[test]
+    fn late_events_attach_to_committed_turn() {
+        let mut s = state();
+        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        let run_id = 3;
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::Started {
+                run_id,
+                agent_type: "researcher-web".into(),
+                display_name: "Web Researcher".into(),
+                prompt: "go".into(),
+            },
+        );
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::ToolStart {
+                run_id,
+                name: "WebSearch".into(),
+                input_summary: "x".into(),
+            },
+        );
+        // The whole turn completes and commits before the ToolEnd arrives
+        // (the UI processed the parent stream ahead of the activity channel).
+        s.commit_turn();
+        handle_subagent_event(
+            &mut s,
+            SubAgentActivity::ToolEnd {
+                run_id,
+                name: "WebSearch".into(),
+                is_error: false,
+                output_preview: "done".into(),
+                duration_ms: 50,
+            },
+        );
+
+        assert!(s.active_tools.is_empty());
+        assert!(s.pending_subagent.is_empty());
+        let turn = s.turns.last().expect("committed");
+        let parent = &turn.tools[0];
+        assert_eq!(parent.children[0].name, "[researcher-web]");
+        assert_eq!(parent.children[0].children[0].status, ToolStatus::Done);
+    }
+
+    #[test]
+    fn spawn_agents_input_summary_lists_agents() {
+        let input = serde_json::json!({
+            "agents": [
+                { "agent_type": "researcher-web", "prompt": "a" },
+                { "agent_type": "code-reviewer", "prompt": "b" }
+            ]
+        });
+        assert_eq!(
+            tool_input_summary("spawn_agents", &input),
+            "[researcher-web, code-reviewer] (2 agents)"
+        );
+        let single = serde_json::json!({"agents": [{ "agent_type": "code-searcher" }]});
+        assert_eq!(tool_input_summary("spawn_agents", &single), "[code-searcher] (1 agent)");
+    }
+
+    #[test]
+    fn truncate_never_panics_on_multibyte() {
+        // Multi-byte chars: the cut lands on a char boundary.
+        assert_eq!(truncate("héllo", 2), "h..."); // byte 2 is inside 'é'
+        assert_eq!(truncate("héllo", 3), "hé..."); // 3 bytes = h + é
+        assert_eq!(truncate("héllo", 4), "hél...");
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("", 5), "");
     }
 }

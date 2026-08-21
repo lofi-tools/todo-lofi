@@ -1055,6 +1055,125 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// A fake OpenAI-compatible SSE server that answers the first request with
+    /// a `spawn_agents` tool call (one researcher-web sub-agent) and every
+    /// later request with plain text — drives both the parent's tool loop and
+    /// the spawned sub-agent (which uses the same resolved provider).
+    async fn spawn_mock_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut request_count = 0usize;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                request_count += 1;
+                let first_request = request_count == 1;
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let Some(end) = find_header_end(&buf) else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..end]);
+                        let content_length = head.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        match content_length {
+                            Some(len) if buf.len() >= end + 4 + len => break,
+                            Some(_) => continue,
+                            None if buf.windows(5).any(|w| w == b"0\r\n\r\n") => break,
+                            None => continue,
+                        }
+                    }
+
+                    let body = if first_request {
+                        let args = serde_json::json!({
+                            "agents": [{
+                                "agent_type": "researcher-web",
+                                "prompt": "What is the answer?"
+                            }]
+                        });
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({
+                                "id": "chatcmpl-spawn",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_spawn",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "spawn_agents",
+                                                "arguments": args.to_string(),
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": null
+                                }]
+                            }),
+                            serde_json::json!({
+                                "id": "chatcmpl-spawn",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "tool_calls"
+                                }]
+                            }),
+                        )
+                    } else {
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({
+                                "id": "chatcmpl-sub",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "content": "The answer is 42." },
+                                    "finish_reason": null
+                                }]
+                            }),
+                            serde_json::json!({
+                                "id": "chatcmpl-sub",
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop"
+                                }]
+                            }),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
     fn find_header_end(buf: &[u8]) -> Option<usize> {
         buf.windows(4).position(|w| w == b"\r\n\r\n")
     }
@@ -1123,5 +1242,68 @@ mod tests {
             "hello from the agent",
             "agent wrote the wrong content"
         );
+    }
+
+    /// End-to-end: the parent spawns a researcher-web sub-agent and the
+    /// sub-agent's activity (Started/Finished) is forwarded to broadcast
+    /// subscribers — the exact path the TUI uses to render nested tool calls.
+    #[tokio::test]
+    async fn subagent_activity_flows_to_subscribers() {
+        use cersei::events::AgentEvent;
+        use std::time::Duration;
+
+        let base_url = spawn_mock_server().await;
+        let mut config = AppConfig::default();
+        config.provider = "mock".into();
+        config.model = "mock/test-model".into();
+        config.working_dir = std::env::temp_dir();
+        config.permissions_mode = "allow_all".into();
+        config.providers.insert(
+            "mock".into(),
+            ProviderConfigEntry {
+                base_url: Some(base_url),
+                api_key: Some("test-key".into()),
+                models: vec!["mock/test-model".into()],
+            },
+        );
+
+        let runtime = AgentRuntime::new(&config).unwrap();
+        let mut sub_rx = runtime.subscribe_subagents();
+        let mut stream = runtime.agent().run_stream("Research the answer.");
+
+        // Drive the parent run to completion.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    AgentEvent::Complete(_) => return,
+                    AgentEvent::Error(e) => panic!("agent error: {e}"),
+                    _ => {}
+                }
+            }
+            panic!("agent stream ended without completing");
+        })
+        .await
+        .expect("parent run did not finish in time");
+
+        // Drain the activity channel: the sub-agent's Started/Finished must
+        // have been forwarded (the mock replies with plain text, so no tool
+        // events beyond those).
+        let mut saw_started = false;
+        let mut saw_finished = false;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(500), sub_rx.recv()).await {
+                Ok(Ok(activity)) => match activity {
+                    crate::subagents::SubAgentActivity::Started { agent_type, .. } => {
+                        assert_eq!(agent_type, "researcher-web");
+                        saw_started = true;
+                    }
+                    crate::subagents::SubAgentActivity::Finished { .. } => saw_finished = true,
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+        assert!(saw_started, "no Started event forwarded to subscribers");
+        assert!(saw_finished, "no Finished event forwarded to subscribers");
     }
 }

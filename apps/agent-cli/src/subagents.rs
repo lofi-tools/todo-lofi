@@ -111,6 +111,10 @@ pub struct SubAgentDef {
     /// Seed the sub-agent with the parent's conversation (including tool
     /// results) instead of starting fresh.
     pub include_message_history: bool,
+    /// Strip `<think>...</think>` blocks from the sub-agent's output before
+    /// returning it (freebuff's thinker hides its raw thinking from the
+    /// parent).
+    pub strip_think_tags: bool,
 }
 
 /// The catalog of spawnable sub-agents.
@@ -137,6 +141,7 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
             },
             max_turns: 12,
             include_message_history: false,
+            strip_think_tags: false,
         },
         SubAgentDef {
             id: "researcher-docs",
@@ -149,6 +154,7 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
             tools: || vec![Box::new(ReadDocsTool) as Box<dyn Tool>],
             max_turns: 6,
             include_message_history: false,
+            strip_think_tags: false,
         },
         SubAgentDef {
             id: "code-searcher",
@@ -161,6 +167,7 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
             tools: || vec![],
             max_turns: 1,
             include_message_history: false,
+            strip_think_tags: false,
         },
         SubAgentDef {
             id: "code-reviewer",
@@ -185,6 +192,17 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
             tools: || vec![],
             max_turns: 4,
             include_message_history: true,
+            strip_think_tags: false,
+        },
+        SubAgentDef {
+            id: "thinker",
+            display_name: "Thinker",
+            spawner_prompt: "Does deep thinking given the current conversation history and a specific prompt to focus on. Use this to help you solve a specific problem, especially hard reasoning questions. You must gather any relevant context before spawning this agent because the thinker agent has no access to tools. You can keep the prompt very short, because the thinker agent can see the entire conversation history for context.",
+            system_prompt: "You are the thinker agent. Use the <think> tag to think deeply about the user request. When satisfied, write out a very concise response that captures the most important points. DO NOT be verbose — say the absolute minimum needed to answer the user's question correctly. The parent agent will see your response. DO NOT call any tools. Just do the thinking work now.",
+            tools: || vec![],
+            max_turns: 1,
+            include_message_history: true,
+            strip_think_tags: true,
         },
     ]
 }
@@ -217,6 +235,7 @@ pub fn spawner_system_prompt() -> String {
          **Phase 2 — write_todos:** For any task requiring 3+ steps, use the TodoWrite tool to write out your step-by-step implementation plan. \
          Include ALL of the applicable tasks in the list. You should include a step to review the changes after you have implemented them, and at least one step to validate/test your changes (be specific about whether to typecheck, run tests, run lints, etc.). \
          Update the todo list as you complete each step during implementation. Skip write_todos for simple tasks like quick edits or answering questions.\n\
+         For hard reasoning questions — a tricky algorithm, a subtle bug, or a complex design decision — spawn the thinker sub-agent before implementing: it has no tools but sees the entire conversation, so give it a short prompt describing the specific problem and let its answer inform your plan.\n\
          **Phase 3 — Implement:** Fully implement the plan using direct file editing tools. Prefer Edit/ApplyPatch for existing-file edits; use Write only for creating or replacing entire files when that is simpler. \
          Implement ALL requirements — do not leave anything partially done. Narrate what you are doing as you go.\n\
          **Phase 4 — Review Loop:** Iteratively review until the code is clean. \
@@ -562,6 +581,29 @@ fn truncate_preview(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Remove `<think>...</think>` blocks from a sub-agent's output. freebuff's
+/// thinker agent thinks inside `<think>` tags and its handleSteps strips them
+/// before handing the answer to the parent — ported here as a post-processing
+/// step on the sub-agent's final text.
+fn strip_think_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + "<think>".len()..];
+        match after.find("</think>") {
+            Some(end) => rest = &after[end + "</think>".len()..],
+            // Unclosed tag: drop the remainder of the output.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    result.push_str(rest);
+    result.trim().to_string()
+}
+
 /// Build and run one LLM sub-agent with a fresh provider, the def's system
 /// prompt and tool set, and (optionally) the parent's conversation history.
 /// Every activity event is forwarded to `events` (if a receiver is
@@ -650,14 +692,42 @@ async fn run_sub_agent(
         });
     }
     // Wall-clock cap so a stuck sub-agent can't hang the parent run forever.
-    let output = tokio::time::timeout(
+    let output = match tokio::time::timeout(
         std::time::Duration::from_secs(SUB_AGENT_TIMEOUT_SECS),
         agent.run(prompt),
     )
     .await
-    .map_err(|_| format!("sub-agent timed out after {SUB_AGENT_TIMEOUT_SECS}s"))?
-    .map_err(|e| format!("sub-agent failed: {e}"))?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            let msg = format!("sub-agent failed: {e}");
+            if let Some(sender) = &events {
+                let _ignored = sender.send(SubAgentActivity::Finished {
+                    run_id,
+                    text: truncate_preview(&msg, 400),
+                });
+            }
+            return Err(msg);
+        }
+        Err(_) => {
+            let msg = format!("sub-agent timed out after {SUB_AGENT_TIMEOUT_SECS}s");
+            if let Some(sender) = &events {
+                let _ignored = sender.send(SubAgentActivity::Finished {
+                    run_id,
+                    text: truncate_preview(&msg, 400),
+                });
+            }
+            return Err(msg);
+        }
+    };
     let text = output.text().to_string();
+    // The thinker's raw `<think>` blocks are stripped before the answer is
+    // shown to the parent (and to the user via the TUI preview).
+    let text = if def.strip_think_tags {
+        strip_think_tags(&text)
+    } else {
+        text
+    };
     if let Some(sender) = &events {
         let _ignored = sender.send(SubAgentActivity::Finished {
             run_id,
@@ -696,10 +766,23 @@ mod tests {
         let ids: Vec<&str> = defs.iter().map(|d| d.id).collect();
         assert_eq!(
             ids,
-            vec!["researcher-web", "researcher-docs", "code-searcher", "code-reviewer"]
+            vec![
+                "researcher-web",
+                "researcher-docs",
+                "code-searcher",
+                "code-reviewer",
+                "thinker"
+            ]
         );
-        // code-reviewer must inherit the parent's history; the others start fresh.
+        // History-inheriting agents: code-reviewer (reviews the changes) and
+        // thinker (reasons about the conversation); the others start fresh.
         assert!(defs.iter().any(|d| d.id == "code-reviewer" && d.include_message_history));
+        assert!(defs.iter().any(|d| d.id == "thinker" && d.include_message_history));
+        // The thinker is tool-free and strips its <think> blocks from the
+        // answer the parent sees.
+        let thinker = defs.iter().find(|d| d.id == "thinker").unwrap();
+        assert_eq!((thinker.tools)().len(), 0);
+        assert!(thinker.strip_think_tags);
         // Every def has a spawner prompt so the parent knows when to spawn it.
         for def in &defs {
             assert!(!def.spawner_prompt.trim().is_empty(), "{}", def.id);
@@ -707,9 +790,32 @@ mod tests {
     }
 
     #[test]
+    fn strip_think_tags_removes_blocks() {
+        assert_eq!(
+            strip_think_tags("<think>let me reason</think>The answer is 42."),
+            "The answer is 42."
+        );
+        // Multiple blocks, including one mid-answer.
+        assert_eq!(
+            strip_think_tags("Start. <think>a</think>middle<think>b</think> end."),
+            "Start. middle end."
+        );
+        // Unclosed tag drops the remainder.
+        assert_eq!(strip_think_tags("kept <think>never closed"), "kept");
+        // No tags: unchanged.
+        assert_eq!(strip_think_tags("plain answer"), "plain answer");
+    }
+
+    #[test]
     fn spawner_system_prompt_lists_agents() {
         let prompt = spawner_system_prompt();
-        for id in ["researcher-web", "researcher-docs", "code-searcher", "code-reviewer"] {
+        for id in [
+            "researcher-web",
+            "researcher-docs",
+            "code-searcher",
+            "code-reviewer",
+            "thinker",
+        ] {
             assert!(prompt.contains(id), "spawner prompt missing {id}");
         }
         assert!(prompt.contains("suggest_followups"));
@@ -921,6 +1027,9 @@ mod tests {
                 &ctx,
             )
             .await;
+        // Drop the tool so its broadcast sender is gone and the channel
+        // closes once the sub-agent task is done.
+        drop(tool);
         // The sub-agent run must have forwarded activity events: Started and
         // Finished (the mock replies with plain text, so no tool calls).
         let mut saw_started = false;
@@ -940,6 +1049,54 @@ mod tests {
         assert!(result.content.contains("The answer is 42"), "{}", result.content);
         assert!(saw_started, "sub-agent never forwarded a Started event");
         assert!(saw_finished, "sub-agent never forwarded a Finished event");
+    }
+
+    #[tokio::test]
+    async fn spawn_thinker_strips_think_tags() {
+        // The thinker replies with <think> reasoning then a concise answer;
+        // the tags must be stripped from what the parent sees (and from the
+        // forwarded Finished preview).
+        let base_url =
+            text_mock_server("<think>let me reason carefully</think>The answer is 42.").await;
+        let resolved = Resolved {
+            provider: "mock".into(),
+            model: "mock/model".into(),
+            base_url: base_url.clone(),
+            api_key: "test-key".into(),
+        };
+        let parent: ParentHandle = Arc::new(Mutex::new(None));
+        let (tx, mut rx) = broadcast::channel(64);
+        let tool = SpawnAgentsTool::new(resolved, parent.clone(), Some(tx));
+        let ctx = test_context(std::env::temp_dir());
+        let result = tool
+            .execute(
+                json!({
+                    "agents": [{
+                        "agent_type": "thinker",
+                        "prompt": "Why does this code deadlock?"
+                    }]
+                }),
+                &ctx,
+            )
+            .await;
+        drop(tool);
+
+        // The parent sees the stripped answer, never the raw thinking.
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("[thinker]"), "{}", result.content);
+        assert!(result.content.contains("The answer is 42"), "{}", result.content);
+        assert!(
+            !result.content.contains("<think>"),
+            "think tags leaked into the parent: {}",
+            result.content
+        );
+        // The TUI preview also gets the clean text.
+        while let Ok(activity) = rx.recv().await {
+            if let SubAgentActivity::Finished { text, .. } = activity {
+                assert!(!text.contains("<think>"), "think tags leaked into preview: {text}");
+                assert!(text.contains("The answer is 42"), "preview: {text}");
+            }
+        }
     }
 
     #[tokio::test]

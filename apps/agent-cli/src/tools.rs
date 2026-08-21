@@ -414,7 +414,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rg-tool-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         for (name, content) in files {
-            std::fs::write(dir.join(name), content).unwrap();
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, content).unwrap();
         }
         dir
     }

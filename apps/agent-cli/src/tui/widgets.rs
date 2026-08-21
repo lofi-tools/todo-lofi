@@ -1916,4 +1916,76 @@ pub mod tool_call {
 
         lines
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::tui::theme::Theme;
+        use std::time::Instant;
+
+        fn tool(name: &str, status: ToolStatus) -> ToolCall {
+            ToolCall {
+                name: name.into(),
+                input_summary: String::new(),
+                status,
+                output_preview: None,
+                started_at: Instant::now(),
+                duration_ms: None,
+                children: Vec::new(),
+                run_id: None,
+            }
+        }
+
+        #[test]
+        fn renders_nested_subagent_activity() {
+            let theme = Theme::enterprise();
+
+            let mut web_search = tool("WebSearch", ToolStatus::Done);
+            web_search.input_summary = "\"rust async\"".into();
+            web_search.duration_ms = Some(120);
+            let mut header = tool("[researcher-web]", ToolStatus::Done);
+            header.input_summary = "Web Researcher — find current info".into();
+            header.run_id = Some(1);
+            header.output_preview = Some("the answer".into());
+            header.duration_ms = Some(3200);
+            header.children.push(web_search);
+
+            let mut parent = tool("spawn_agents", ToolStatus::Done);
+            parent.input_summary = "[researcher-web] (1 agent)".into();
+            parent.run_id = Some(1);
+            parent.children.push(header);
+
+            let lines = render_tool_call(&parent, &theme, 0);
+            let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+            // Parent badge at depth 0, child at depth 1, grandchild at depth 2.
+            assert!(rendered.iter().any(|l| l.contains("spawn_agents")));
+            assert!(rendered.iter().any(|l| l.starts_with("  ✓ [researcher-web]")));
+            assert!(rendered.iter().any(|l| l.starts_with("    ✓ WebSearch")));
+            // The sub-agent's final text preview renders under its header.
+            assert!(rendered.iter().any(|l| l.contains("the answer")));
+            // A done nested header shows its duration.
+            assert!(rendered.iter().any(|l| l.contains("[researcher-web]") && l.contains("ms")));
+        }
+
+        #[test]
+        fn spawn_agents_preview_is_skipped_when_children_exist() {
+            let theme = Theme::enterprise();
+
+            let mut header = tool("[code-searcher]", ToolStatus::Done);
+            header.run_id = Some(1);
+            let mut parent = tool("spawn_agents", ToolStatus::Done);
+            // The raw combined output would duplicate the nested detail.
+            parent.output_preview = Some("[code-searcher]\nresults here".into());
+            parent.children.push(header);
+
+            let lines = render_tool_call(&parent, &theme, 0);
+            let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+            assert!(rendered.iter().any(|l| l.contains("spawn_agents")));
+            assert!(
+                !rendered.iter().any(|l| l.contains("results here")),
+                "parent preview should be hidden when nested children render the detail"
+            );
+        }
+    }
 }
