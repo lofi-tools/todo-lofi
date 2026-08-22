@@ -10,7 +10,7 @@ use crate::{
     providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, ModelPickerState, Overlay, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
+        app::{AppState, ComboPickerState, ModelPickerState, Overlay, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
@@ -307,6 +307,10 @@ fn handle_key(
     // Model picker gets full key handling while open.
     if matches!(state.overlay, Overlay::ModelPicker(_)) {
         return handle_model_picker_key(state, key, runtime);
+    }
+    // Combo picker gets full key handling while open.
+    if matches!(state.overlay, Overlay::ComboPicker(_)) {
+        return handle_combo_picker_key(state, key, runtime);
     }
     if matches!(state.overlay, Overlay::ProviderExplorer(_)) {
         return handle_provider_explorer_key(state, key, runtime);
@@ -1518,6 +1522,70 @@ fn handle_model_picker_key(
     None
 }
 
+/// Handle keys while the `/combos` fuzzy picker is open: typing filters the
+/// list live, Enter switches the runtime to the selected combo, Esc closes.
+fn handle_combo_picker_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    runtime: &Arc<AgentRuntime>,
+) -> Option<String> {
+    let Overlay::ComboPicker(picker) = &mut state.overlay else {
+        return None;
+    };
+    match key.code {
+        // Typing filters the list (live fuzzy).
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            picker.query.push(c);
+            picker.selected = 0;
+            state.dirty = true;
+        }
+        KeyCode::Backspace => {
+            picker.query.pop();
+            picker.selected = 0;
+            state.dirty = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            picker.selected = picker.selected.saturating_sub(1);
+            state.dirty = true;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = picker.filtered().len();
+            if picker.selected + 1 < len {
+                picker.selected += 1;
+            }
+            state.dirty = true;
+        }
+        KeyCode::Enter => {
+            let filtered = picker.filtered();
+            if filtered.is_empty() {
+                return None;
+            }
+            let idx = picker.selected.min(filtered.len() - 1);
+            let combo = filtered[idx].name.clone();
+            state.overlay = Overlay::None;
+            let label = crate::providers::display_model_id("combos", &combo);
+            match runtime.switch("combos", &combo) {
+                Ok(()) => {
+                    state.model = label.clone();
+                    state.effective_model = Some(crate::providers::display_model_id(
+                        &runtime.effective().0,
+                        &runtime.effective().1,
+                    ));
+                    state.push_system(format!("Switched to {label}"));
+                }
+                Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+            }
+            state.dirty = true;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.overlay = Overlay::None;
+            state.dirty = true;
+        }
+        _ => {}
+    }
+    None
+}
+
 /// Open the `/provider` model explorer overlay and kick off the fetch of the
 /// current provider's full model list.
 fn open_provider_explorer(state: &mut AppState, runtime: &Arc<AgentRuntime>) {
@@ -2186,33 +2254,16 @@ fn handle_slash_command(
                 .map(str::trim)
                 .unwrap_or("");
             if rest.is_empty() {
-                // List configured combos, marking the active one.
-                let mut combos = crate::providers::combos(config);
-                combos.sort_by(|a, b| a.name.cmp(&b.name));
+                // Open the fuzzy picker so a combo can be selected interactively.
                 let (cur_provider, cur_model) = runtime.current();
-                let active = (cur_provider == "combos").then_some(cur_model);
-                let content = if combos.is_empty() {
-                    "No combos configured. Add a `combos` section to .abstract/config.toml.".into()
-                } else {
-                    let mut lines = format!(
-                        "Combos ({} configured) — switch with /combos <name> or /model combos/<name>:",
-                        combos.len()
-                    );
-                    for combo in &combos {
-                        let marker =
-                            if active.as_deref() == Some(combo.name.as_str()) { "  ← active" } else { "" };
-                        lines.push_str(&format!("\n\n{}{}", combo.name, marker));
-                        for (index, entry) in combo.entries.iter().enumerate() {
-                            lines.push_str(&format!(
-                                "\n  {}. {}",
-                                index + 1,
-                                crate::providers::display_model_id(&entry.provider, &entry.model)
-                            ));
-                        }
-                    }
-                    lines
-                };
-                state.push_system(content);
+                let current = (cur_provider == "combos").then_some(cur_model);
+                state.overlay = Overlay::ComboPicker(ComboPickerState {
+                    combos: crate::providers::combos(config),
+                    query: String::new(),
+                    selected: 0,
+                    current,
+                });
+                state.dirty = true;
             } else {
                 match runtime.select_text(&format!("combos/{rest}")) {
                     Ok((provider, model)) => {
@@ -2718,26 +2769,63 @@ mod tests {
     }
 
     #[test]
-    fn combos_command_lists_configured_combos_with_active_marker() {
+    fn combos_command_opens_fuzzy_picker() {
         let (config, runtime) = runtime_with_combos();
 
         let mut s = state();
         handle_slash_command(&mut s, "/combos", &config, &runtime);
-        let content = s.turns.last().unwrap().content.clone();
-        assert!(content.contains("coding"), "lists combo names: {content}");
-        assert!(content.contains("writing"));
-        assert!(content.contains("test/test-model"));
-        assert!(content.contains("test/test-2"));
+        let Overlay::ComboPicker(picker) = &s.overlay else {
+            panic!("expected ComboPicker overlay, got {:?}", s.overlay);
+        };
+        assert_eq!(picker.combos.len(), 2);
         // Runtime is on the plain `test` provider: no combo is active.
-        assert!(!content.contains("← active"));
+        assert_eq!(picker.current, None);
 
-        // After switching to the combo, the listing marks it active.
+        // After switching to a combo, the picker marks it active.
         runtime.switch("combos", "coding").unwrap();
         let mut s = state();
         handle_slash_command(&mut s, "/combos", &config, &runtime);
-        let content = s.turns.last().unwrap().content.clone();
-        assert!(content.contains("coding  ← active"), "marks active combo: {content}");
-        assert!(!content.contains("writing  ← active"));
+        let Overlay::ComboPicker(picker) = &s.overlay else {
+            panic!("expected ComboPicker overlay, got {:?}", s.overlay);
+        };
+        assert_eq!(picker.current.as_deref(), Some("coding"));
+    }
+
+    #[test]
+    fn combo_picker_filters_and_switches_on_enter() {
+        let (config, runtime) = runtime_with_combos();
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos", &config, &runtime);
+
+        // Typing narrows the list; Enter switches to the highlighted combo.
+        handle_combo_picker_key(
+            &mut s,
+            key_for(KeyCode::Char('w'), KeyModifiers::NONE),
+            &runtime,
+        );
+        let Overlay::ComboPicker(picker) = &s.overlay else {
+            panic!("expected ComboPicker overlay, got {:?}", s.overlay);
+        };
+        assert_eq!(picker.filtered().len(), 1);
+        assert_eq!(picker.filtered()[0].name, "writing");
+
+        handle_combo_picker_key(&mut s, key_for(KeyCode::Enter, KeyModifiers::NONE), &runtime);
+        assert!(matches!(s.overlay, Overlay::None));
+        let (provider, model) = runtime.current();
+        assert_eq!((provider.as_str(), model.as_str()), ("combos", "writing"));
+        assert_eq!(s.model, "combos/writing");
+        let last = s.turns.last().unwrap();
+        assert!(
+            last.content.contains("Switched to combos/writing"),
+            "{}",
+            last.content
+        );
+
+        // Esc closes without switching.
+        let mut s = state();
+        handle_slash_command(&mut s, "/combos", &config, &runtime);
+        handle_combo_picker_key(&mut s, key_for(KeyCode::Esc, KeyModifiers::NONE), &runtime);
+        assert!(matches!(s.overlay, Overlay::None));
     }
 
     #[test]

@@ -90,6 +90,34 @@ pub struct ModelPickerState {
     pub current: String,
 }
 
+/// Fuzzy combo picker shown by `/combos`: one row per configured combo
+/// (virtual provider/model, routed across its fallback entries). Typing
+/// filters the list; Enter switches the runtime to the selected combo.
+#[derive(Debug, Clone)]
+pub struct ComboPickerState {
+    /// Configured combos, in config order.
+    pub combos: Vec<crate::providers::Combo>,
+    /// Fuzzy query typed in the filter box.
+    pub query: String,
+    pub selected: usize,
+    /// Name of the active combo, if the current selection is a combo (for
+    /// the marker).
+    pub current: Option<String>,
+}
+
+impl ComboPickerState {
+    /// Combos matching the query, best matches first.
+    pub fn filtered(&self) -> Vec<&crate::providers::Combo> {
+        let mut scored: Vec<(u32, &crate::providers::Combo)> = self
+            .combos
+            .iter()
+            .filter_map(|c| fuzzy_score(&self.query, &c.name).map(|s| (s, c)))
+            .collect();
+        scored.sort_by_key(|(s, c)| (*s, c.name.clone()));
+        scored.into_iter().map(|(_, c)| c).collect()
+    }
+}
+
 /// A single command shown in the fuzzy `/` selector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandMatch {
@@ -174,6 +202,7 @@ pub enum Overlay {
     Permission(PermissionOverlay),
     Recovery(RecoveryOverlay),
     ModelPicker(ModelPickerState),
+    ComboPicker(ComboPickerState),
     ProviderExplorer(ProviderExplorerState),
     Graph(crate::tui::widgets::graph::GraphOverlayState),
 }
@@ -187,6 +216,7 @@ impl PartialEq for Overlay {
                 | (Self::Permission(_), Self::Permission(_))
                 | (Self::Recovery(_), Self::Recovery(_))
                 |            (Self::ModelPicker(_), Self::ModelPicker(_))
+                | (Self::ComboPicker(_), Self::ComboPicker(_))
                 | (Self::ProviderExplorer(_), Self::ProviderExplorer(_))
                 | (Self::Graph(_), Self::Graph(_))
         )
@@ -876,6 +906,36 @@ mod tests {
             dragging: false,
         });
         assert_eq!(s.selection_text().as_deref(), Some("ow tw"));
+    }
+
+    #[test]
+    fn combo_picker_filter_narrows_by_subsequence() {
+        let combo = |name: &str| crate::providers::Combo {
+            name: name.into(),
+            entries: Vec::new(),
+        };
+        let p = ComboPickerState {
+            combos: vec![combo("coding"), combo("writing"), combo("docs")],
+            query: "cod".into(),
+            selected: 0,
+            current: None,
+        };
+        let names: Vec<&str> = p.filtered().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["coding"]);
+
+        // Empty query matches everything.
+        let all = ComboPickerState {
+            query: String::new(),
+            ..p.clone()
+        };
+        assert_eq!(all.filtered().len(), 3);
+
+        // No match returns nothing.
+        let none = ComboPickerState {
+            query: "zzz".into(),
+            ..p
+        };
+        assert!(none.filtered().is_empty());
     }
 
     #[test]

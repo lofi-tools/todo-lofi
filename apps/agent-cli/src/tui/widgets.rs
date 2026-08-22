@@ -1462,7 +1462,7 @@ pub mod overlay {
     //! Modal overlays: help, permission, recovery.
 
     use crate::tui::{
-        app::{AppState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerState, RecoveryOverlay},
+        app::{AppState, ComboPickerState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerState, RecoveryOverlay},
         theme::Theme,
     };
     use ratatui::{
@@ -1477,6 +1477,7 @@ pub mod overlay {
             Overlay::Permission(p) => render_permission(f, p, theme),
             Overlay::Recovery(r) => render_recovery(f, r, theme),
             Overlay::ModelPicker(p) => render_model_picker(f, p, theme),
+            Overlay::ComboPicker(p) => render_combo_picker(f, p, theme),
             Overlay::ProviderExplorer(p) => render_provider_explorer(f, p, theme),
             Overlay::Graph(g) => super::graph::render(f, g, theme),
         }
@@ -1658,6 +1659,112 @@ pub mod overlay {
             .highlight_symbol(">");
 
         f.render_stateful_widget(list, area, &mut list_state);
+    }
+
+    /// Render the `/combos` fuzzy picker: a query box at the top and the
+    /// matching combos below. Each row shows the combo's fallback chain so
+    /// the routing (which concrete provider/model it starts on and can fall
+    /// back to) is visible before picking; the active combo is marked.
+    fn render_combo_picker(f: &mut Frame, p: &ComboPickerState, theme: &Theme) {
+        let area = centered_rect(f.area(), 60, 70);
+        f.render_widget(Clear, area);
+
+        // ── Query box (top row) ──
+        let query_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 3,
+        };
+        let query_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style())
+            .style(Style::default().bg(theme.bg));
+        f.render_widget(
+            Paragraph::new(format!("filter: {}▌", p.query))
+                .style(Style::default().fg(theme.fg))
+                .block(query_block),
+            query_area,
+        );
+
+        // ── List area (below the query box) ──
+        let list_area = Rect {
+            x: area.x,
+            y: area.y + 3,
+            width: area.width,
+            height: area.height.saturating_sub(3),
+        };
+
+        let filtered = p.filtered();
+        let title = format!(
+            " Combos ({} configured, {} shown) — ↑↓ select, Enter switch, Esc close ",
+            p.combos.len(),
+            filtered.len(),
+        );
+
+        if filtered.is_empty() {
+            let msg = if p.combos.is_empty() {
+                "No combos configured. Add a `combos` section to .abstract/config.toml."
+            } else {
+                "No combo matches the filter."
+            };
+            f.render_widget(
+                Paragraph::new(msg)
+                    .style(theme.dimmed())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(theme.border_style())
+                            .style(Style::default().bg(theme.bg)),
+                    ),
+                list_area,
+            );
+            return;
+        }
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(p.selected.min(filtered.len() - 1)));
+
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .map(|combo| {
+                let marker =
+                    if p.current.as_deref() == Some(combo.name.as_str()) { " ● " } else { "   " };
+                let chain = combo
+                    .entries
+                    .iter()
+                    .map(|e| crate::providers::display_model_id(&e.provider, &e.model))
+                    .collect::<Vec<_>>()
+                    .join(" → ");
+                ListItem::new(vec![
+                    Line::from(Span::styled(
+                        format!("{marker}{}", combo.name),
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(format!("      {chain}"), theme.dimmed())),
+                ])
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(theme.border_style())
+                    .style(Style::default().bg(theme.bg)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">");
+
+        f.render_stateful_widget(list, list_area, &mut list_state);
     }
 
     /// Render the `/provider` model explorer: a query box at the top and a
