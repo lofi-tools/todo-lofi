@@ -10,7 +10,7 @@ use crate::{
     providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, ComboPickerState, ModelPickerState, Overlay, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
+        app::{AppState, ComboPickerState, ModelPickerState, Overlay, ProviderExplorerPhase, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
@@ -1589,42 +1589,45 @@ fn handle_combo_picker_key(
 /// Open the `/provider` model explorer overlay and kick off the fetch of the
 /// current provider's full model list.
 fn open_provider_explorer(state: &mut AppState, runtime: &Arc<AgentRuntime>) {
-    let (provider, _model) = runtime.current();
-    let (base_url, api_key) = match runtime.resolve_provider_endpoint(&provider) {
-        Ok(v) => v,
-        Err(e) => {
-            state.push_system(format!("Cannot explore {provider}: {e}"));
-            return;
-        }
-    };
+    let providers = runtime.explorer_providers();
+    if providers.is_empty() {
+        state.push_system("No providers configured.");
+        return;
+    }
+    let (current_provider, _model) = runtime.current();
+    state.overlay = Overlay::ProviderExplorer(ProviderExplorerState {
+        phase: ProviderExplorerPhase::Providers,
+        query: String::new(),
+        selected: 0,
+        providers,
+        provider: None,
+        current_provider: Some(current_provider),
+        all_models: Vec::new(),
+        loading: false,
+        error: String::new(),
+        free_only: false,
+    });
+    state.dirty = true;
+}
+
+/// Kick off a `/models` fetch for `provider` (served from the runtime's
+/// in-memory cache when it was already fetched this run) and update the
+/// explorer when it lands.
+fn start_model_fetch(state: &mut AppState, runtime: &Arc<AgentRuntime>, provider: &str) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.provider_fetch_rx = Some(rx);
-    // Cancel any prior in-flight fetch (closing and reopening the overlay).
+    // Cancel any prior in-flight fetch (browsing another provider).
     if let Some(prev) = state._provider_fetch_task.take()
         && !prev.is_finished()
     {
         prev.abort();
     }
-    let provider_name = provider.clone();
-    state._provider_fetch_task = Some(tokio::spawn({
-        let base_url = base_url.clone();
-        async move {
-            let result = crate::providers::fetch_models(&base_url, &api_key)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send((provider_name, result));
-        }
+    let provider_name = provider.to_string();
+    let runtime = Arc::clone(runtime);
+    state._provider_fetch_task = Some(tokio::spawn(async move {
+        let result = runtime.fetch_models_cached(&provider_name).await;
+        let _ = tx.send((provider_name, result));
     }));
-    state.overlay = Overlay::ProviderExplorer(ProviderExplorerState {
-        provider,
-        base_url,
-        all_models: Vec::new(),
-        query: String::new(),
-        selected: 0,
-        loading: true,
-        error: String::new(),
-    });
-    state.dirty = true;
 }
 
 /// Drain the `/provider` fetch result, if one arrived, and update the overlay.
@@ -1645,8 +1648,11 @@ fn poll_provider_fetch(state: &mut AppState) {
     let Overlay::ProviderExplorer(p) = &mut state.overlay else {
         return;
     };
-    if p.provider != provider {
-        // Stale result from a prior provider; ignore.
+    // Only the Models phase consumes fetch results, and only for the provider
+    // it is browsing (a stale result from a provider left via Esc is ignored).
+    if p.phase != ProviderExplorerPhase::Models
+        || p.provider.as_ref().map(|pp| pp.name.as_str()) != Some(provider.as_str())
+    {
         return;
     }
     p.loading = false;
@@ -1662,7 +1668,12 @@ fn poll_provider_fetch(state: &mut AppState) {
     state.dirty = true;
 }
 
-/// Handle keys while the `/provider` model explorer is open.
+/// Handle keys while the `/provider` explorer is open. In the Providers
+/// phase, typing filters the provider list, Enter browses the selected
+/// provider's models, Esc closes. In the Models phase, typing filters the
+/// model list (free models highlighted), `f` toggles the free-models-only
+/// filter, Enter switches the runtime to the selected model, Esc goes back
+/// to the provider list. All of it is keyboard-only.
 fn handle_provider_explorer_key(
     state: &mut AppState,
     key: KeyEvent,
@@ -1671,115 +1682,145 @@ fn handle_provider_explorer_key(
     let Overlay::ProviderExplorer(p) = &mut state.overlay else {
         return None;
     };
-    match key.code {
-        // Typing filters the list (live fuzzy).
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            p.query.push(c);
-            p.selected = 0;
-            state.dirty = true;
-        }
-        KeyCode::Backspace => {
-            p.query.pop();
-            p.selected = 0;
-            state.dirty = true;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            p.selected = p.selected.saturating_sub(1);
-            state.dirty = true;
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let len = p.filtered().len();
-            if p.selected + 1 < len {
-                p.selected += 1;
+    match p.phase {
+        ProviderExplorerPhase::Providers => match key.code {
+            // Typing filters the provider list (live fuzzy).
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                p.query.push(c);
+                p.selected = 0;
+                state.dirty = true;
             }
-            state.dirty = true;
-        }
-        // Tab cycles to the next configured provider and re-fetches.
-        KeyCode::Tab => {
-            let names = runtime.provider_names();
-            if names.len() > 1 {
-                let idx = names.iter().position(|n| n == &p.provider).unwrap_or(0);
-                let next_name = names[(idx + 1) % names.len()].clone();
-                // Re-open for the next provider.
-                match runtime.resolve_provider_endpoint(&next_name) {
-                    Ok((base_url, api_key)) => {
-                        let (tx, rx) = tokio::sync::oneshot::channel();
-                        state.provider_fetch_rx = Some(rx);
-                        if let Some(prev) = state._provider_fetch_task.take()
-                            && !prev.is_finished()
-                        {
-                            prev.abort();
-                        }
-                        let provider_name = next_name.clone();
-                        state._provider_fetch_task = Some(tokio::spawn({
-                            let base_url = base_url.clone();
-                            async move {
-                                let result =
-                                    crate::providers::fetch_models(&base_url, &api_key)
-                                        .await
-                                        .map_err(|e| e.to_string());
-                                let _ = tx.send((provider_name, result));
-                            }
-                        }));
-                        state.overlay = Overlay::ProviderExplorer(ProviderExplorerState {
-                            provider: next_name,
-                            base_url,
-                            all_models: Vec::new(),
-                            query: String::new(),
-                            selected: 0,
-                            loading: true,
-                            error: String::new(),
-                        });
-                        state.dirty = true;
+            KeyCode::Backspace => {
+                p.query.pop();
+                p.selected = 0;
+                state.dirty = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                p.selected = p.selected.saturating_sub(1);
+                state.dirty = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = p.filtered_providers().len();
+                if p.selected + 1 < len {
+                    p.selected += 1;
+                }
+                state.dirty = true;
+            }
+            // Enter: move to the Models phase for the selected provider.
+            KeyCode::Enter => {
+                let filtered = p.filtered_providers();
+                if filtered.is_empty() {
+                    return None;
+                }
+                let idx = p.selected.min(filtered.len() - 1);
+                let provider = filtered[idx].clone();
+                p.phase = ProviderExplorerPhase::Models;
+                p.query.clear();
+                p.selected = 0;
+                p.provider = Some(provider.clone());
+                p.all_models.clear();
+                p.loading = false;
+                p.error = String::new();
+                p.free_only = false;
+                state.dirty = true;
+                // Show the cached model list if already fetched this run;
+                // otherwise kick off the (cached) fetch.
+                match runtime.cached_models(&provider.name) {
+                    Some(Ok(models)) => p.all_models = models,
+                    Some(Err(e)) => p.error = e,
+                    None => {
+                        p.loading = true;
+                        start_model_fetch(state, runtime, &provider.name);
                     }
-                    Err(e) => state.push_system(format!("Cannot switch provider: {e}")),
                 }
             }
-        }
-        KeyCode::Enter => {
-            let filtered = p.filtered();
-            if filtered.is_empty() {
-                return None;
+            KeyCode::Esc => {
+                state.overlay = Overlay::None;
+                state.dirty = true;
             }
-            let idx = p.selected.min(filtered.len() - 1);
-            let model = filtered[idx].0.clone();
-            let provider = p.provider.clone();
-            state.overlay = Overlay::None;
-            // Abort the in-flight fetch (if any) since we're closing.
-            if let Some(task) = state._provider_fetch_task.take()
-                && !task.is_finished()
-            {
-                task.abort();
+            _ => {}
+        },
+        ProviderExplorerPhase::Models => match key.code {
+            // `f` toggles the free-models-only filter (typed into the query
+            // everywhere else).
+            KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                p.free_only = !p.free_only;
+                p.selected = 0;
+                state.dirty = true;
             }
-            state.provider_fetch_rx = None;
-            match runtime.switch(&provider, &model) {
-                Ok(()) => {
-                    let label =
-                        crate::providers::display_model_id(&provider, &model);
-                    state.model = label.clone();
-                    state.effective_model = Some(crate::providers::display_model_id(
-                        &runtime.effective().0,
-                        &runtime.effective().1,
-                    ));
-                    state.push_system(format!("Switched to {label}"));
+            // Typing filters the model list (live fuzzy).
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                p.query.push(c);
+                p.selected = 0;
+                state.dirty = true;
+            }
+            KeyCode::Backspace => {
+                p.query.pop();
+                p.selected = 0;
+                state.dirty = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                p.selected = p.selected.saturating_sub(1);
+                state.dirty = true;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = p.filtered_models().len();
+                if p.selected + 1 < len {
+                    p.selected += 1;
                 }
-                Err(e) => {
-                    state.push_system(format!("Failed to switch to {provider}/{model}: {e}"))
+                state.dirty = true;
+            }
+            KeyCode::Enter => {
+                let filtered = p.filtered_models();
+                if filtered.is_empty() {
+                    return None;
                 }
+                let idx = p.selected.min(filtered.len() - 1);
+                let model = filtered[idx].to_string();
+                let provider = p
+                    .provider
+                    .as_ref()
+                    .map(|pp| pp.name.clone())
+                    .unwrap_or_default();
+                state.overlay = Overlay::None;
+                // Abort the in-flight fetch (if any) since we're closing.
+                if let Some(task) = state._provider_fetch_task.take()
+                    && !task.is_finished()
+                {
+                    task.abort();
+                }
+                state.provider_fetch_rx = None;
+                match runtime.switch(&provider, &model) {
+                    Ok(()) => {
+                        let label = crate::providers::display_model_id(&provider, &model);
+                        state.model = label.clone();
+                        state.effective_model = Some(crate::providers::display_model_id(
+                            &runtime.effective().0,
+                            &runtime.effective().1,
+                        ));
+                        state.push_system(format!("Switched to {label}"));
+                    }
+                    Err(e) => {
+                        state.push_system(format!("Failed to switch to {provider}/{model}: {e}"))
+                    }
+                }
+                state.dirty = true;
             }
-            state.dirty = true;
-        }
-        KeyCode::Esc | KeyCode::Char('q') => {
-            state.overlay = Overlay::None;
-            if let Some(task) = state._provider_fetch_task.take()
-                && !task.is_finished()
-            {
-                task.abort();
+            // Esc goes back to the provider list; the fetch task stays alive
+            // so re-entering this provider shows the (cached) result at once.
+            KeyCode::Esc => {
+                p.phase = ProviderExplorerPhase::Providers;
+                p.query.clear();
+                p.selected = 0;
+                p.provider = None;
+                p.all_models.clear();
+                p.loading = false;
+                p.error = String::new();
+                p.free_only = false;
+                state.dirty = true;
             }
-            state.provider_fetch_rx = None;
-            state.dirty = true;
-        }
-        _ => {}
+            _ => {}
+        },
     }
     None
 }

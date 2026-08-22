@@ -138,6 +138,7 @@ pub struct CommandSelectorState {
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "Switch provider/model"),
     ("combos", "List/switch combos"),
+    ("provider", "Browse provider models"),
     ("help", "Show help"),
     ("clear", "Clear conversation"),
     ("panel", "Toggle side panel"),
@@ -228,40 +229,75 @@ impl PartialEq for Overlay {
 pub type ProviderFetchRx =
     tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>;
 
-/// Provider model explorer shown by `/provider`: fetches the full model list
-/// from the provider's OpenAI-compatible `/models` endpoint and offers a
-/// fuzzy-filterable, provider-grouped list. Selecting an entry switches the
-/// runtime to it live (the model is used immediately, not persisted).
+/// Which list the `/provider` explorer is currently fuzzy-picking from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderExplorerPhase {
+    /// Picking a provider from the configured list.
+    Providers,
+    /// Picking a model from the selected provider's `/models` list.
+    Models,
+}
+
+/// Provider/model explorer shown by `/provider`: first fuzzy-pick a provider
+/// from the configured list, then fuzzy-pick one of its models (fetched from
+/// the provider's OpenAI-compatible `/models` endpoint and cached in memory
+/// for the whole run). Free models are highlighted and can be filtered with
+/// `f`. Selecting a model switches the runtime to it live.
 #[derive(Debug, Clone)]
 pub struct ProviderExplorerState {
-    /// Provider name whose models are shown.
-    pub provider: String,
-    /// Base URL + resolved API key for the fetch (stored so a re-fetch via
-    /// `Tab` to another provider can re-issue the request).
-    pub base_url: String,
-    /// Full unfiltered model list as returned by the API (one entry per
-    /// model id). Empty while loading or on error.
-    pub all_models: Vec<String>,
-    /// Current fuzzy query typed in the filter box.
+    pub phase: ProviderExplorerPhase,
+    /// Fuzzy query for the current phase's list.
     pub query: String,
-    /// Index into the filtered list of the highlighted entry.
+    /// Index into the current phase's filtered list.
     pub selected: usize,
+    /// Providers to pick from (the virtual `combos` provider excluded).
+    pub providers: Vec<crate::providers::Provider>,
+    /// The provider being browsed in the Models phase.
+    pub provider: Option<crate::providers::Provider>,
+    /// Name of the runtime's current provider, for the marker in the list.
+    pub current_provider: Option<String>,
+    /// Full unfiltered model list from the provider's `/models` endpoint
+    /// (empty while loading or on error).
+    pub all_models: Vec<String>,
     /// `true` while the `/models` fetch is in flight.
     pub loading: bool,
     /// Error message when the fetch failed (empty otherwise).
     pub error: String,
+    /// Only show free models (Models phase; toggle with `f`).
+    pub free_only: bool,
 }
 
 impl ProviderExplorerState {
-    /// The filtered, score-sorted model list for the current query.
-    pub fn filtered(&self) -> Vec<(String, u32)> {
-        let mut scored: Vec<(u32, String)> = self
+    /// The filtered providers for the current query, best matches first.
+    pub fn filtered_providers(&self) -> Vec<&crate::providers::Provider> {
+        let mut scored: Vec<(u32, &crate::providers::Provider)> = self
+            .providers
+            .iter()
+            .filter_map(|p| fuzzy_score(&self.query, &p.name).map(|s| (s, p)))
+            .collect();
+        scored.sort_by_key(|(s, p)| (*s, p.name.clone()));
+        scored.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// The filtered model list for the current query, best matches first.
+    /// When `free_only` is on, only the provider's free models are kept.
+    pub fn filtered_models(&self) -> Vec<&str> {
+        let mut scored: Vec<(u32, &String)> = self
             .all_models
             .iter()
-            .filter_map(|m| fuzzy_score(&self.query, m).map(|s| (s, m.clone())))
+            .filter(|m| !self.free_only || self.is_free(m))
+            .filter_map(|m| fuzzy_score(&self.query, m).map(|s| (s, m)))
             .collect();
-        scored.sort_by_key(|(s, m)| (*s, m.clone()));
-        scored.into_iter().map(|(s, m)| (m, s)).collect()
+        scored.sort_by_key(|(s, m)| (*s, (*m).clone()));
+        scored.into_iter().map(|(_, m)| m.as_str()).collect()
+    }
+
+    /// Whether `model` is a free model of the browsed provider, per the
+    /// provider's configured `free_models` list.
+    pub fn is_free(&self, model: &str) -> bool {
+        self.provider
+            .as_ref()
+            .is_some_and(|p| p.free_models.iter().any(|f| f == model))
     }
 }
 
@@ -938,55 +974,108 @@ mod tests {
         assert!(none.filtered().is_empty());
     }
 
-    #[test]
-    fn provider_explorer_filter_narrows_by_subsequence() {
-        let p = ProviderExplorerState {
-            provider: "groq".into(),
+    /// A Models-phase explorer for a provider with `free_models`.
+    fn model_explorer(
+        provider_name: &str,
+        free_models: Vec<&str>,
+        all_models: Vec<&str>,
+    ) -> ProviderExplorerState {
+        let provider = crate::providers::Provider {
+            name: provider_name.into(),
             base_url: "http://x".into(),
-            all_models: vec![
-                "llama-3.3-70b".into(),
-                "llama-3.1-8b-instant".into(),
-                "compound".into(),
-                "gpt-oss-20b".into(),
-            ],
-            query: "ll".into(),
+            api_key: "k".into(),
+            free_models: free_models.into_iter().map(String::from).collect(),
+            models: Vec::new(),
+        };
+        ProviderExplorerState {
+            phase: ProviderExplorerPhase::Models,
+            query: String::new(),
             selected: 0,
+            providers: vec![provider.clone()],
+            provider: Some(provider),
+            current_provider: None,
+            all_models: all_models.into_iter().map(String::from).collect(),
             loading: false,
             error: String::new(),
+            free_only: false,
+        }
+    }
+
+    #[test]
+    fn provider_explorer_filter_narrows_by_subsequence() {
+        let p = model_explorer(
+            "groq",
+            vec![],
+            vec!["llama-3.3-70b", "llama-3.1-8b-instant", "compound", "gpt-oss-20b"],
+        );
+        let p = ProviderExplorerState {
+            query: "ll".into(),
+            ..p
         };
-        let filtered = p.filtered();
         // Both llama models match the "ll" subsequence; compound and gpt-oss don't.
-        let names: Vec<String> = filtered.iter().map(|(m, _)| m.clone()).collect();
+        let names: Vec<&str> = p.filtered_models();
         assert_eq!(names, vec!["llama-3.1-8b-instant", "llama-3.3-70b"]);
     }
 
     #[test]
     fn provider_explorer_empty_query_returns_all() {
-        let p = ProviderExplorerState {
-            provider: "groq".into(),
-            base_url: "http://x".into(),
-            all_models: vec!["b".into(), "a".into(), "c".into()],
-            query: String::new(),
-            selected: 0,
-            loading: false,
-            error: String::new(),
-        };
+        let p = model_explorer("groq", vec![], vec!["b", "a", "c"]);
         // Empty query matches everything, sorted by score then name.
-        let names: Vec<String> = p.filtered().iter().map(|(m, _)| m.clone()).collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(p.filtered_models(), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn provider_explorer_no_match_returns_empty() {
+        let p = model_explorer("groq", vec![], vec!["llama"]);
         let p = ProviderExplorerState {
-            provider: "groq".into(),
-            base_url: "http://x".into(),
-            all_models: vec!["llama".into()],
             query: "xyz".into(),
+            ..p
+        };
+        assert!(p.filtered_models().is_empty());
+    }
+
+    #[test]
+    fn provider_explorer_free_only_filter_and_highlight() {
+        let p = model_explorer(
+            "openrouter",
+            vec!["openai/gpt-oss-20b:free", "openrouter/free"],
+            vec!["openai/gpt-oss-20b:free", "openrouter/free", "openrouter/auto"],
+        );
+        // Free models are identified and highlighted by config's free list.
+        assert!(p.is_free("openai/gpt-oss-20b:free"));
+        assert!(p.is_free("openrouter/free"));
+        assert!(!p.is_free("openrouter/auto"));
+
+        // With the free-only filter on, only free models remain.
+        let p = ProviderExplorerState {
+            free_only: true,
+            ..p
+        };
+        assert_eq!(p.filtered_models(), vec!["openai/gpt-oss-20b:free", "openrouter/free"]);
+    }
+
+    #[test]
+    fn provider_explorer_filters_providers_by_name() {
+        let provider = |name: &str| crate::providers::Provider {
+            name: name.into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            free_models: Vec::new(),
+            models: Vec::new(),
+        };
+        let p = ProviderExplorerState {
+            phase: ProviderExplorerPhase::Providers,
+            query: "gro".into(),
             selected: 0,
+            providers: vec![provider("groq"), provider("poolside"), provider("openrouter")],
+            provider: None,
+            current_provider: Some("poolside".into()),
+            all_models: Vec::new(),
             loading: false,
             error: String::new(),
+            free_only: false,
         };
-        assert!(p.filtered().is_empty());
+        let names: Vec<&str> = p.filtered_providers().iter().map(|pp| pp.name.as_str()).collect();
+        assert_eq!(names, vec!["groq"]);
     }
 }

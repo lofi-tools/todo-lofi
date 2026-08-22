@@ -847,6 +847,10 @@ struct AgentRuntimeInner {
     subagent_tx: tokio::sync::broadcast::Sender<crate::subagents::SubAgentActivity>,
     /// Fallback state for the current selection (a combo, or empty = disabled).
     fallback: FallbackManager,
+    /// In-memory cache of each provider's `/models` response, kept for the
+    /// whole run so the `/provider` explorer never re-fetches a provider it
+    /// already browsed. Successes are cached; failures are retried.
+    model_cache: Mutex<HashMap<String, Result<Vec<String>, String>>>,
 }
 
 impl AgentRuntime {
@@ -872,21 +876,21 @@ impl AgentRuntime {
                 fs_reader: None,
             },
         )?;
-        let fallback = fallback_for(config, &provider, &model);
-        Ok(Self {
-            inner: Mutex::new(AgentRuntimeInner {
-                agent,
-                provider,
-                model,
-                effective_provider,
-                effective_model,
-                config: config.clone(),
-                parent,
-                followups,
-                subagent_tx,
-                fallback,
-            }),
-        })
+        let fallback = fallback_for(config, &provider, &model);            Ok(Self {
+                inner: Mutex::new(AgentRuntimeInner {
+                    agent,
+                    provider,
+                    model,
+                    effective_provider,
+                    effective_model,
+                    config: config.clone(),
+                    parent,
+                    followups,
+                    subagent_tx,
+                    fallback,
+                    model_cache: Mutex::new(HashMap::new()),
+                }),
+            })
     }
 
     pub fn agent(&self) -> Arc<Agent> {
@@ -934,6 +938,46 @@ impl AgentRuntime {
             .into_iter()
             .map(|p| p.name)
             .collect()
+    }
+
+    /// All concrete providers for the `/provider` explorer (built-ins +
+    /// config additions, in display order). The virtual `combos` provider is
+    /// excluded — it has no `/models` endpoint of its own.
+    pub fn explorer_providers(&self) -> Vec<Provider> {
+        providers(&self.inner.lock().config)
+            .into_iter()
+            .filter(|p| p.name != "combos")
+            .collect()
+    }
+
+    /// The cached `/models` response for `provider`, if it was already
+    /// fetched this run (None when not fetched yet or the fetch failed).
+    pub fn cached_models(&self, provider: &str) -> Option<Result<Vec<String>, String>> {
+        self.inner.lock().model_cache.lock().get(provider).cloned()
+    }
+
+    /// Fetch a provider's full model list, caching the response in memory
+    /// for the whole process run — navigating between providers in the
+    /// `/provider` explorer never re-calls `/models` for a provider already
+    /// browsed. Only successes are cached, so a transient failure is retried.
+    pub async fn fetch_models_cached(&self, provider: &str) -> Result<Vec<String>, String> {
+        if let Some(cached) = self.cached_models(provider) {
+            return cached;
+        }
+        let (base_url, api_key) = self
+            .resolve_provider_endpoint(provider)
+            .map_err(|e| e.to_string())?;
+        let result = crate::providers::fetch_models(&base_url, &api_key)
+            .await
+            .map_err(|e| e.to_string());
+        if let Ok(models) = &result {
+            self.inner
+                .lock()
+                .model_cache
+                .lock()
+                .insert(provider.to_string(), Ok(models.clone()));
+        }
+        result
     }
 
     /// Drain the followup suggestions collected by the `suggest_followups`

@@ -1462,7 +1462,7 @@ pub mod overlay {
     //! Modal overlays: help, permission, recovery.
 
     use crate::tui::{
-        app::{AppState, ComboPickerState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerState, RecoveryOverlay},
+        app::{AppState, ComboPickerState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerPhase, ProviderExplorerState, RecoveryOverlay},
         theme::Theme,
     };
     use ratatui::{
@@ -1519,6 +1519,7 @@ pub mod overlay {
             Line::from("  /cost        Show usage and cost"),
             Line::from("  /model       Switch provider/model"),
             Line::from("  /combos      List/switch combos"),
+            Line::from("  /provider    Browse provider models (f: free-only)"),
             Line::from("  /memory      Memory info"),
             Line::from("  /sessions    Session info"),
             Line::from("  /diff        Open git diff panel"),
@@ -1767,9 +1768,12 @@ pub mod overlay {
         f.render_stateful_widget(list, list_area, &mut list_state);
     }
 
-    /// Render the `/provider` model explorer: a query box at the top and a
-    /// fuzzy-filtered, provider-grouped list below. Shows a loading hint
-    /// while the fetch is in flight and an error message on failure.
+    /// Render the `/provider` explorer: a query box at the top and, below it,
+    /// either the fuzzy provider list (Providers phase) or the selected
+    /// provider's fuzzy model list (Models phase), where free models are
+    /// highlighted and a free-models-only filter can be active. Shows a
+    /// loading hint while a `/models` fetch is in flight and an error message
+    /// on failure.
     fn render_provider_explorer(f: &mut Frame, p: &ProviderExplorerState, theme: &Theme) {
         use ratatui::widgets::Paragraph;
         let area = centered_rect(f.area(), 65, 75);
@@ -1801,75 +1805,177 @@ pub mod overlay {
             height: area.height.saturating_sub(3),
         };
 
-        let title = format!(
-            " {} — models ({} available, {} shown) — Tab: next provider, Enter: switch, Esc: close ",
-            p.provider,
-            p.all_models.len(),
-            p.filtered().len(),
-        );
-
-        if p.loading {
-            f.render_widget(
-                Paragraph::new(format!("Fetching models from {}…", p.provider))
-                    .style(Style::default().fg(theme.dim))
+        match p.phase {
+            ProviderExplorerPhase::Providers => {
+                let filtered = p.filtered_providers();
+                let title = format!(
+                    " Providers ({} configured, {} shown) — ↑↓ select, Enter: browse models, Esc: close ",
+                    p.providers.len(),
+                    filtered.len(),
+                );
+                if filtered.is_empty() {
+                    f.render_widget(
+                        Paragraph::new("No provider matches the filter.")
+                            .style(theme.dimmed())
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(title)
+                                    .border_style(theme.border_style())
+                                    .style(Style::default().bg(theme.bg)),
+                            ),
+                        list_area,
+                    );
+                    return;
+                }
+                let mut list_state = ListState::default();
+                list_state.select(Some(p.selected.min(filtered.len() - 1)));
+                let items: Vec<ListItem> = filtered
+                    .iter()
+                    .map(|provider| {
+                        let marker = if p.current_provider.as_deref() == Some(provider.name.as_str())
+                        {
+                            " ● "
+                        } else {
+                            "   "
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!("{marker}{}", provider.name),
+                                Style::default()
+                                    .fg(theme.text_primary)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  ({} models)", provider.models.len()),
+                                theme.dimmed(),
+                            ),
+                        ]))
+                    })
+                    .collect();
+                let list = List::new(items)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .title(title)
                             .border_style(theme.border_style())
                             .style(Style::default().bg(theme.bg)),
-                    ),
-                list_area,
-            );
-            return;
-        }
-        if !p.error.is_empty() {
-            f.render_widget(
-                Paragraph::new(format!("Failed to fetch models:\n{}", p.error))
-                    .style(theme.error_style())
+                    )
+                    .highlight_style(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol(">");
+                f.render_stateful_widget(list, list_area, &mut list_state);
+            }
+            ProviderExplorerPhase::Models => {
+                let provider_name = p
+                    .provider
+                    .as_ref()
+                    .map(|pp| pp.name.as_str())
+                    .unwrap_or("?");
+                let free_note = if p.free_only { " — free only" } else { "" };
+                let title = format!(
+                    " {} — models ({} available, {} shown{}) — ↑↓ select, Enter: switch, f: free-only, Esc: back ",
+                    provider_name,
+                    p.all_models.len(),
+                    p.filtered_models().len(),
+                    free_note,
+                );
+
+                if p.loading {
+                    f.render_widget(
+                        Paragraph::new(format!("Fetching models from {provider_name}…"))
+                            .style(Style::default().fg(theme.dim))
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(title)
+                                    .border_style(theme.border_style())
+                                    .style(Style::default().bg(theme.bg)),
+                            ),
+                        list_area,
+                    );
+                    return;
+                }
+                if !p.error.is_empty() {
+                    f.render_widget(
+                        Paragraph::new(format!("Failed to fetch models:\n{}", p.error))
+                            .style(theme.error_style())
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(title)
+                                    .border_style(theme.border_style())
+                                    .style(Style::default().bg(theme.bg)),
+                            ),
+                        list_area,
+                    );
+                    return;
+                }
+
+                let filtered = p.filtered_models();
+                if filtered.is_empty() {
+                    let msg = if p.all_models.is_empty() {
+                        "No models returned by this provider."
+                    } else if p.free_only {
+                        "No free models match the filter."
+                    } else {
+                        "No model matches the filter."
+                    };
+                    f.render_widget(
+                        Paragraph::new(msg)
+                            .style(theme.dimmed())
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title(title)
+                                    .border_style(theme.border_style())
+                                    .style(Style::default().bg(theme.bg)),
+                            ),
+                        list_area,
+                    );
+                    return;
+                }
+
+                let mut list_state = ListState::default();
+                list_state.select(Some(p.selected.min(filtered.len() - 1)));
+                let items: Vec<ListItem> = filtered
+                    .iter()
+                    .map(|model| {
+                        if p.is_free(model) {
+                            // Free models are highlighted (accent + tag).
+                            ListItem::new(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    model.to_string(),
+                                    Style::default().fg(theme.accent),
+                                ),
+                                Span::styled("  [free]", theme.dimmed()),
+                            ]))
+                        } else {
+                            ListItem::new(format!("  {model}"))
+                        }
+                    })
+                    .collect();
+                let list = List::new(items)
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .title(title)
                             .border_style(theme.border_style())
                             .style(Style::default().bg(theme.bg)),
-                    ),
-                list_area,
-            );
-            return;
+                    )
+                    .highlight_style(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .highlight_symbol(">");
+                f.render_stateful_widget(list, list_area, &mut list_state);
+            }
         }
-
-        let filtered = p.filtered();
-        let mut list_state = ListState::default();
-        list_state.select(Some(p.selected.min(filtered.len().saturating_sub(1))));
-        // Grouped by provider: since this explorer fetches one provider at a
-        // time, all entries share the same provider header.
-        let provider_header = p.provider.clone();
-        let mut items: Vec<ListItem> = Vec::with_capacity(filtered.len() + 1);
-        items.push(ListItem::new(Span::styled(
-            provider_header,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for (model, _score) in &filtered {
-            items.push(ListItem::new(format!("  {model}")));
-        }
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(theme.border_style())
-                    .style(Style::default().bg(theme.bg)),
-            )
-            .highlight_style(
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">");
-        f.render_stateful_widget(list, list_area, &mut list_state);
     }
 
     fn render_recovery(f: &mut Frame, r: &RecoveryOverlay, theme: &Theme) {
