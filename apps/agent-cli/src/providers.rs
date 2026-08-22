@@ -50,6 +50,7 @@ pub fn agent_tools(
     events: crate::subagents::SubAgentEventSink,
     fs_reader: crate::subagents::AcpFsSink,
     readonly: bool,
+    reasoning: cersei::provider::ReasoningField,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
@@ -80,9 +81,26 @@ pub fn agent_tools(
             resolved.clone(),
             parent,
             events,
+            reasoning,
         )));
     }
     tools
+}
+
+/// Build the OpenAI-compatible provider for a resolved selection, carrying the
+/// model family's reasoning field so the SSE reader captures `delta.reasoning`
+/// (see `response_format::reasoning_field_for`).
+pub fn openai_provider(
+    resolved: &Resolved,
+    reasoning: cersei::provider::ReasoningField,
+) -> anyhow::Result<OpenAi> {
+    OpenAi::builder()
+        .base_url(&resolved.base_url)
+        .api_key(&resolved.api_key)
+        .model(&resolved.model)
+        .reasoning_field(reasoning)
+        .build()
+        .context("failed to build provider")
 }
 
 /// A provider/model selection with the API key already resolved.
@@ -114,6 +132,11 @@ pub struct BuildParams {
     /// Optional ACP client-filesystem bridge; when present the wrapping file
     /// tools consult/mirror the client's editor buffers. None in TUI/`-p`.
     pub fs_reader: crate::subagents::AcpFsSink,
+    /// Which delta field the provider reads thinking from (resolved from
+    /// `config.model_families`; see `response_format::reasoning_field_for`).
+    /// Lets the OpenAI-compatible SSE reader capture `delta.reasoning` for
+    /// reasoning models before it would be dropped.
+    pub reasoning: cersei::provider::ReasoningField,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -780,12 +803,7 @@ pub fn resolve_selection(
 // ─── Agent construction ─────────────────────────────────────────────────────
 
 pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<Arc<Agent>> {
-    let provider = OpenAi::builder()
-        .base_url(&resolved.base_url)
-        .api_key(&resolved.api_key)
-        .model(&resolved.model)
-        .build()
-        .context("failed to build provider")?;
+    let provider = openai_provider(resolved, params.reasoning)?;
 
     let tools = agent_tools(
         resolved,
@@ -794,6 +812,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         params.subagent_events.clone(),
         params.fs_reader.clone(),
         params.readonly,
+        params.reasoning,
     );
     let mut builder = Agent::builder()
         .provider(provider)
@@ -874,6 +893,7 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
+                reasoning: crate::response_format::reasoning_field_for(config, &resolved.model),
             },
         )?;
         let fallback = fallback_for(config, &provider, &model);            Ok(Self {
@@ -1058,6 +1078,7 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
+                reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
             },
         )?;
         let mut g = self.inner.lock();
@@ -1096,6 +1117,7 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
+                reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
             },
         )?;
         let fallback = fallback_for(&config, provider, model);
@@ -1937,6 +1959,164 @@ mod tests {
         assert!(saw_finished, "no Finished event forwarded to subscribers");
     }
 
+    /// A fake OpenAI-compatible SSE server that streams an ox-alpha-style
+    /// reasoning response: thinking in `reasoning` (with `reasoning_details`
+    /// alongside, exactly like the live captures) followed by the answer in
+    /// `content`. Returns the base URL to point a provider at.
+    async fn reasoning_mock_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let Some(end) = find_header_end(&buf) else {
+                            continue;
+                        };
+                        let head = String::from_utf8_lossy(&buf[..end]);
+                        let content_length = head.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        match content_length {
+                            Some(len) if buf.len() >= end + 4 + len => break,
+                            Some(_) => continue,
+                            None if buf.windows(5).any(|w| w == b"0\r\n\r\n") => break,
+                            None => continue,
+                        }
+                    }
+
+                    let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+                        serde_json::json!({
+                            "id": "chatcmpl-r",
+                            "object": "chat.completion.chunk",
+                            "choices": [{
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish,
+                            }]
+                        })
+                    };
+                    let parts = [
+                        chunk(
+                            serde_json::json!({
+                                "role": "assistant",
+                                "reasoning": "Let me ",
+                                "reasoning_details": [{
+                                    "type": "reasoning.text",
+                                    "text": "Let me ",
+                                    "format": "unknown",
+                                    "index": 0,
+                                }],
+                                "content": "",
+                            }),
+                            None,
+                        ),
+                        chunk(
+                            serde_json::json!({
+                                "reasoning": "think about it.",
+                                "reasoning_details": [{
+                                    "type": "reasoning.text",
+                                    "text": "think about it.",
+                                    "format": "unknown",
+                                    "index": 0,
+                                }],
+                            }),
+                            None,
+                        ),
+                        chunk(serde_json::json!({ "content": "The answer is 42." }), None),
+                        chunk(serde_json::json!({}), Some("stop")),
+                    ];
+                    let mut body = String::new();
+                    for part in parts {
+                        body.push_str(&format!("data: {}\n\n", part));
+                    }
+                    body.push_str("data: [DONE]\n\n");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        format!("http://{addr}")
+    }
+
+    /// End-to-end: an ox-alpha-style stream (thinking in `reasoning` +
+    /// `reasoning_details`, answer in `content`) must reach the agent event
+    /// stream as `ThinkingDelta` events — the exact events the ACP server
+    /// maps to `agent_thought_chunk` — with the thinking kept out of the
+    /// answer text.
+    #[tokio::test]
+    async fn ox_alpha_thinking_streams_as_agent_events() {
+        use cersei::events::AgentEvent;
+        use std::time::Duration;
+
+        let base_url = reasoning_mock_server().await;
+        // Build the agent directly with an empty tool set: the runner's
+        // no-tool-use nudge (F-08) only fires when tools are available, and a
+        // nudge would force a second turn. This keeps the run at exactly one
+        // turn so the thinking/answer split is asserted against a single
+        // streamed response.
+        let provider = OpenAi::builder()
+            .base_url(&base_url)
+            .api_key("test-key")
+            .model("mock/test-model")
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .provider(provider)
+            .model("mock/test-model")
+            .working_dir(std::env::temp_dir())
+            .build()
+            .unwrap();
+        let mut stream = std::sync::Arc::new(agent).run_stream("What is the answer?");
+
+        let mut thinking = String::new();
+        let mut text = String::new();
+        let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    AgentEvent::ThinkingDelta(t) => thinking.push_str(&t),
+                    AgentEvent::TextDelta(t) => text.push_str(&t),
+                    AgentEvent::Complete(_) => return Ok(()),
+                    AgentEvent::Error(e) => return Err(anyhow::anyhow!("agent error: {e}")),
+                    _ => {}
+                }
+            }
+            Err(anyhow::anyhow!("agent stream ended without completing"))
+        })
+        .await;
+
+        outcome.expect("agent run did not complete in time").unwrap();
+        assert_eq!(
+            thinking, "Let me think about it.",
+            "thinking deltas must stream in order and be kept separate"
+        );
+        assert_eq!(
+            text, "The answer is 42.",
+            "answer text must not contain the thinking"
+        );
+    }
+
     /// A minimal `Resolved` for tool-wiring tests (fields are otherwise
     /// unused by `agent_tools`, which only inspects tool names).
     fn resolved_stub() -> Resolved {
@@ -1946,6 +2126,33 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "test-key".into(),
         }
+    }
+
+    /// The reasoning-aware provider path: the field resolved from
+    /// `config.model_families` must reach the OpenAi provider (which reads
+    /// `delta.reasoning` in its SSE reader instead of letting it drop).
+    #[test]
+    fn openai_provider_carries_the_reasoning_field() {
+        let resolved = resolved_stub();
+
+        // A configured reasoning family is carried into the provider...
+        let provider = openai_provider(
+            &resolved,
+            cersei::provider::ReasoningField::Field("reasoning"),
+        )
+        .unwrap();
+        assert_eq!(
+            provider.reasoning_field(),
+            cersei::provider::ReasoningField::Field("reasoning")
+        );
+
+        // ...an unlisted model auto-detects...
+        let provider = openai_provider(&resolved, cersei::provider::ReasoningField::Auto).unwrap();
+        assert_eq!(provider.reasoning_field(), cersei::provider::ReasoningField::Auto);
+
+        // ...and `plain` opts out.
+        let provider = openai_provider(&resolved, cersei::provider::ReasoningField::Off).unwrap();
+        assert_eq!(provider.reasoning_field(), cersei::provider::ReasoningField::Off);
     }
 
     /// The sink handles `agent_tools` needs (parent/followups/events).
@@ -1967,7 +2174,15 @@ mod tests {
         // Read/Write/Edit tools must remain (not the ACP client wrappers).
         let resolved = resolved_stub();
         let (parent, followups, events) = empty_handles();
-        let tools = agent_tools(&resolved, parent, followups, events, None, false);
+        let tools = agent_tools(
+            &resolved,
+            parent,
+            followups,
+            events,
+            None,
+            false,
+            cersei::provider::ReasoningField::Auto,
+        );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"Read"), "built-in Read should be present");
         assert!(names.contains(&"Write"), "built-in Write should be present");
@@ -2027,7 +2242,15 @@ mod tests {
 
         let resolved = resolved_stub();
         let (parent, followups, events) = empty_handles();
-        let tools = agent_tools(&resolved, parent, followups, events, fs, false);
+        let tools = agent_tools(
+            &resolved,
+            parent,
+            followups,
+            events,
+            fs,
+            false,
+            cersei::provider::ReasoningField::Auto,
+        );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // The wrappers register under the same Read/Write/Edit names, so the
         // built-ins were removed and exactly one of each name remains.

@@ -387,13 +387,21 @@ pub struct SpawnAgentsTool {
     description: String,
     /// Broadcast channel for sub-agent activity, consumed by the TUI.
     events: SubAgentEventSink,
+    /// Which delta field sub-agent providers read thinking from (same model
+    /// family as the parent; see `response_format::reasoning_field_for`).
+    reasoning: cersei::provider::ReasoningField,
     /// Unique ids handed out per spawned sub-agent, so the UI can tell the
     /// sub-agents of one `spawn_agents` call apart (and across calls).
     run_counter: AtomicU64,
 }
 
 impl SpawnAgentsTool {
-    pub fn new(resolved: Resolved, parent: ParentHandle, events: SubAgentEventSink) -> Self {
+    pub fn new(
+        resolved: Resolved,
+        parent: ParentHandle,
+        events: SubAgentEventSink,
+        reasoning: cersei::provider::ReasoningField,
+    ) -> Self {
         let defs = sub_agent_defs();
         let run_counter = AtomicU64::new(0);
         let mut description = String::from(
@@ -413,6 +421,7 @@ impl SpawnAgentsTool {
             defs,
             description,
             events,
+            reasoning,
             run_counter,
         }
     }
@@ -542,11 +551,13 @@ impl Tool for SpawnAgentsTool {
             let def = (**def).clone();
             let working_dir = ctx.working_dir.clone();
             let events = self.events.clone();
+            let reasoning = self.reasoning;
             set.spawn(async move {
                 (
                     i,
                     run_sub_agent(
                         def, resolved, parent, &prompt, working_dir, events, run_id,
+                        reasoning,
                     )
                     .await,
                 )
@@ -651,6 +662,9 @@ fn strip_think_tags(text: &str) -> String {
 /// Every activity event is forwarded to `events` (if a receiver is
 /// subscribed) so the TUI can render the sub-agent's tool calls nested under
 /// the parent `spawn_agents` call.
+// Single call site (SpawnAgentsTool::execute); the parameters are all the
+// distinct inputs a spawned sub-agent needs.
+#[allow(clippy::too_many_arguments)]
 async fn run_sub_agent(
     def: SubAgentDef,
     resolved: Resolved,
@@ -659,11 +673,13 @@ async fn run_sub_agent(
     working_dir: PathBuf,
     events: SubAgentEventSink,
     run_id: u64,
+    reasoning: cersei::provider::ReasoningField,
 ) -> Result<String, String> {
     let provider = OpenAi::builder()
         .base_url(&resolved.base_url)
         .api_key(&resolved.api_key)
         .model(&resolved.model)
+        .reasoning_field(reasoning)
         .build()
         .map_err(|e| format!("failed to build sub-agent provider: {e}"))?;
 
@@ -915,7 +931,12 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
+        let tool = SpawnAgentsTool::new(
+                resolved,
+                Arc::new(Mutex::new(None)),
+                None,
+                cersei::provider::ReasoningField::Auto,
+            );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(json!({ "agents": [{ "agent_type": "nope" }] }), &ctx)
@@ -938,7 +959,12 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
+        let tool = SpawnAgentsTool::new(
+                resolved,
+                Arc::new(Mutex::new(None)),
+                None,
+                cersei::provider::ReasoningField::Auto,
+            );
         let ctx = test_context(dir.clone());
         let result = tool
             .execute(
@@ -1056,7 +1082,12 @@ mod tests {
         };
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
-        let tool = SpawnAgentsTool::new(resolved, parent.clone(), Some(tx));
+        let tool = SpawnAgentsTool::new(
+                resolved,
+                parent.clone(),
+                Some(tx),
+                cersei::provider::ReasoningField::Auto,
+            );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -1108,7 +1139,12 @@ mod tests {
         };
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
-        let tool = SpawnAgentsTool::new(resolved, parent.clone(), Some(tx));
+        let tool = SpawnAgentsTool::new(
+                resolved,
+                parent.clone(),
+                Some(tx),
+                cersei::provider::ReasoningField::Auto,
+            );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -1149,7 +1185,12 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
         };
-        let tool = SpawnAgentsTool::new(resolved, Arc::new(Mutex::new(None)), None);
+        let tool = SpawnAgentsTool::new(
+                resolved,
+                Arc::new(Mutex::new(None)),
+                None,
+                cersei::provider::ReasoningField::Auto,
+            );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(

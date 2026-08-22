@@ -34,3 +34,9 @@ dirs = { workspace = true }
 # which = "8.0.2"
 ctrlc = "3"
 parking_lot = "0.12"
+
+[features]
+# Tests that hit live model endpoints (prompting real models like ox-alpha to
+# capture response formats). Not enabled by default: run them with
+# `cargo test -p agent-cli --features live-tests -- --ignored`.
+live-tests = []

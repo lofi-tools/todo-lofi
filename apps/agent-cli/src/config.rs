@@ -57,6 +57,12 @@ pub struct AppConfig {
     /// `availableModels`). Set to `false` to show every configured model.
     #[serde(default = "default_true")]
     pub free_models_only: bool,
+    /// Per-model response format families: model id (e.g. "stealth/ox-alpha")
+    /// → family name ("reasoning", "reasoning_content", "plain"). The family
+    /// determines how a model's streamed thinking is delimited from its
+    /// answer text — see `crate::response_format::family`.
+    #[serde(default)]
+    pub model_families: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub benchmark_mode: bool,
     #[serde(default)]
@@ -96,6 +102,7 @@ impl Default for AppConfig {
             providers: std::collections::HashMap::new(),
             combos: std::collections::HashMap::new(),
             free_models_only: true,
+            model_families: std::collections::HashMap::new(),
             benchmark_mode: false,
             embedding_api: false,
             output_format: "text".into(),
@@ -350,6 +357,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     if !overlay.combos.is_empty() {
         base.combos = overlay.combos;
     }
+    if !overlay.model_families.is_empty() {
+        base.model_families = overlay.model_families;
+    }
 }
 
 fn apply_env(config: &mut AppConfig) {
@@ -489,6 +499,33 @@ mod tests {
         assert_eq!(coding[0].model, "poolside/laguna-xs-2.1");
         assert_eq!(coding[1].provider, "openrouter");
         assert_eq!(coding[1].model, "openrouter/free");
+    }
+
+    #[test]
+    fn model_families_merge_into_defaults() {
+        let mut config = AppConfig::default();
+        let overlay: AppConfig = serde_json::from_str(
+            r#"{
+                "model_families": {
+                    "stealth/ox-alpha": "reasoning",
+                    "deepseek/deepseek-chat": "reasoning_content"
+                }
+            }"#,
+        )
+        .unwrap();
+        merge(&mut config, overlay);
+        assert_eq!(
+            config.model_families.get("stealth/ox-alpha").map(String::as_str),
+            Some("reasoning")
+        );
+        assert_eq!(
+            config.model_families.get("deepseek/deepseek-chat").map(String::as_str),
+            Some("reasoning_content")
+        );
+        // An empty map leaves existing families untouched.
+        let mut config2 = config.clone();
+        merge(&mut config2, AppConfig::default());
+        assert_eq!(config2.model_families.len(), 2);
     }
 
     #[test]

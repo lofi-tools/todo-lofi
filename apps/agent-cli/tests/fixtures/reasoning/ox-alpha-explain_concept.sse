@@ -1,0 +1,234 @@
+: OPENROUTER PROCESSING
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"The","reasoning_details":[{"type":"reasoning.text","text":"The","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" user wants","reasoning_details":[{"type":"reasoning.text","text":" user wants","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a","reasoning_details":[{"type":"reasoning.text","text":" a","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" two-sentence explanation of what","reasoning_details":[{"type":"reasoning.text","text":" two-sentence explanation of what","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a monad is. This","reasoning_details":[{"type":"reasoning.text","text":" a monad is. This","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" is likely","reasoning_details":[{"type":"reasoning.text","text":" is likely","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" about","reasoning_details":[{"type":"reasoning.text","text":" about","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" the functional","reasoning_details":[{"type":"reasoning.text","text":" the functional","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" programming concept (monads","reasoning_details":[{"type":"reasoning.text","text":" programming concept (monads","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" in Haskell","reasoning_details":[{"type":"reasoning.text","text":" in Haskell","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":",","reasoning_details":[{"type":"reasoning.text","text":",","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" category","reasoning_details":[{"type":"reasoning.text","text":" category","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" theory","reasoning_details":[{"type":"reasoning.text","text":" theory","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":").","reasoning_details":[{"type":"reasoning.text","text":").","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" Let me give","reasoning_details":[{"type":"reasoning.text","text":" Let me give","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a clear","reasoning_details":[{"type":"reasoning.text","text":" a clear","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", accurate","reasoning_details":[{"type":"reasoning.text","text":", accurate","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" two-sentence explanation.\n\nA","reasoning_details":[{"type":"reasoning.text","text":" two-sentence explanation.\n\nA","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" monad is a design","reasoning_details":[{"type":"reasoning.text","text":" monad is a design","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" pattern in","reasoning_details":[{"type":"reasoning.text","text":" pattern in","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" functional programming (and","reasoning_details":[{"type":"reasoning.text","text":" functional programming (and","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" originally from","reasoning_details":[{"type":"reasoning.text","text":" originally from","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" category theory) that represents","reasoning_details":[{"type":"reasoning.text","text":" category theory) that represents","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" computations","reasoning_details":[{"type":"reasoning.text","text":" computations","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" as sequences","reasoning_details":[{"type":"reasoning.text","text":" as sequences","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" of steps","reasoning_details":[{"type":"reasoning.text","text":" of steps","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", wrapping values in a context","reasoning_details":[{"type":"reasoning.text","text":", wrapping values in a context","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" and providing a way to chain","reasoning_details":[{"type":"reasoning.text","text":" and providing a way to chain","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" operations on","reasoning_details":[{"type":"reasoning.text","text":" operations on","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" those","reasoning_details":[{"type":"reasoning.text","text":" those","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" wrapped","reasoning_details":[{"type":"reasoning.text","text":" wrapped","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" values while handling","reasoning_details":[{"type":"reasoning.text","text":" values while handling","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" the context (","reasoning_details":[{"type":"reasoning.text","text":" the context (","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"like side","reasoning_details":[{"type":"reasoning.text","text":"like side","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" effects, option","reasoning_details":[{"type":"reasoning.text","text":" effects, option","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ality, etc.)","reasoning_details":[{"type":"reasoning.text","text":"ality, etc.)","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" automatically.\n\nTwo","reasoning_details":[{"type":"reasoning.text","text":" automatically.\n\nTwo","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" sentences:\n\n","reasoning_details":[{"type":"reasoning.text","text":" sentences:\n\n","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"1. A monad is","reasoning_details":[{"type":"reasoning.text","text":"1. A monad is","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a structure","reasoning_details":[{"type":"reasoning.text","text":" a structure","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" from category theory used","reasoning_details":[{"type":"reasoning.text","text":" from category theory used","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" in functional programming that wraps","reasoning_details":[{"type":"reasoning.text","text":" in functional programming that wraps","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" values","reasoning_details":[{"type":"reasoning.text","text":" values","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" in a computational","reasoning_details":[{"type":"reasoning.text","text":" in a computational","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" context and","reasoning_details":[{"type":"reasoning.text","text":" context and","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" defines","reasoning_details":[{"type":"reasoning.text","text":" defines","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" two","reasoning_details":[{"type":"reasoning.text","text":" two","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" operations","reasoning_details":[{"type":"reasoning.text","text":" operations","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":": one","reasoning_details":[{"type":"reasoning.text","text":": one","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" to","reasoning_details":[{"type":"reasoning.text","text":" to","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" wrap","reasoning_details":[{"type":"reasoning.text","text":" wrap","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a plain","reasoning_details":[{"type":"reasoning.text","text":" a plain","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" value into the","reasoning_details":[{"type":"reasoning.text","text":" value into the","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" monad (often","reasoning_details":[{"type":"reasoning.text","text":" monad (often","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" called `","reasoning_details":[{"type":"reasoning.text","text":" called `","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"return` or `unit","reasoning_details":[{"type":"reasoning.text","text":"return` or `unit","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"`)","reasoning_details":[{"type":"reasoning.text","text":"`)","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" and one to chain together","reasoning_details":[{"type":"reasoning.text","text":" and one to chain together","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" functions","reasoning_details":[{"type":"reasoning.text","text":" functions","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" that produce","reasoning_details":[{"type":"reasoning.text","text":" that produce","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" mon","reasoning_details":[{"type":"reasoning.text","text":" mon","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"adic values (often","reasoning_details":[{"type":"reasoning.text","text":"adic values (often","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" called `bind` or","reasoning_details":[{"type":"reasoning.text","text":" called `bind` or","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" flat","reasoning_details":[{"type":"reasoning.text","text":" flat","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"Map).\n\n2. By","reasoning_details":[{"type":"reasoning.text","text":"Map).\n\n2. By","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" standard","reasoning_details":[{"type":"reasoning.text","text":" standard","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"izing how","reasoning_details":[{"type":"reasoning.text","text":"izing how","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" these chained","reasoning_details":[{"type":"reasoning.text","text":" these chained","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" operations","reasoning_details":[{"type":"reasoning.text","text":" operations","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" work","reasoning_details":[{"type":"reasoning.text","text":" work","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", mon","reasoning_details":[{"type":"reasoning.text","text":", mon","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"ads let programmers","reasoning_details":[{"type":"reasoning.text","text":"ads let programmers","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" compose","reasoning_details":[{"type":"reasoning.text","text":" compose","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" computations","reasoning_details":[{"type":"reasoning.text","text":" computations","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"—","reasoning_details":[{"type":"reasoning.text","text":"—","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":"such as handling","reasoning_details":[{"type":"reasoning.text","text":"such as handling","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" optional values, errors","reasoning_details":[{"type":"reasoning.text","text":" optional values, errors","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", asynchronous","reasoning_details":[{"type":"reasoning.text","text":", asynchronous","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" results","reasoning_details":[{"type":"reasoning.text","text":" results","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", or state—in","reasoning_details":[{"type":"reasoning.text","text":", or state—in","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" a clean","reasoning_details":[{"type":"reasoning.text","text":" a clean","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":", uniform way without manually","reasoning_details":[{"type":"reasoning.text","text":", uniform way without manually","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" managing the underlying","reasoning_details":[{"type":"reasoning.text","text":" managing the underlying","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" context.\n\nThat's exactly","reasoning_details":[{"type":"reasoning.text","text":" context.\n\nThat's exactly","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":" two sentences. Good","reasoning_details":[{"type":"reasoning.text","text":" two sentences. Good","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":".","reasoning_details":[{"type":"reasoning.text","text":".","format":"unknown","index":0}]},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"A monad is","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" a structure","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" from category theory, widely","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" used in functional programming,","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" that wraps values inside","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" a computational context and provides","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" two core","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" operations: one to place","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" a plain value into that","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" context (often called `return","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"` or `unit`","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"), and one to chain together","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" functions that operate","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" on","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" wrapped values (often","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" called `bind` or `","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"flatMap`). By standardizing this","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" chaining process","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":", monads let programmers compose","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" computations—such as handling optional","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" values, errors, asynchronous results","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":", or mutable","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" state—in","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" a uniform","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" way without manually managing the underlying","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":" context at each step.","role":"assistant"},"finish_reason":null,"native_finish_reason":null}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning":null},"finish_reason":"stop","native_finish_reason":"stop"}]}
+
+data: {"id":"gen-1787394390-8bDFBciEOrGqwe8ISF8u","object":"chat.completion.chunk","created":1787394390,"model":"stealth/ox-alpha","provider":"Stealth","service_tier":null,"choices":[{"index":0,"delta":{"content":"","role":"assistant"},"finish_reason":"stop","native_finish_reason":"stop"}],"usage":{"prompt_tokens":98,"completion_tokens":338,"total_tokens":436,"cost":0,"is_byok":false,"prompt_tokens_details":{"cached_tokens":64,"cache_write_tokens":0,"audio_tokens":0,"video_tokens":0},"cost_details":{"upstream_inference_cost":0,"upstream_inference_prompt_cost":0,"upstream_inference_completions_cost":0},"completion_tokens_details":{"reasoning_tokens":0,"image_tokens":0,"audio_tokens":0}}}
+
+data: [DONE]
+

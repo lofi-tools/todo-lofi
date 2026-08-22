@@ -1,0 +1,38 @@
+# Standalone crate: keep it out of the root workspace so its own `cargo
+# test` runs here, mirroring how the repo's other patched dep is isolated.
+[workspace]
+
+[package]
+name = "cersei-provider"
+version = "0.2.6"
+edition = "2021"
+authors = ["Adib Mohsin"]
+license = "MIT"
+repository = "https://github.com/pacifio/cersei"
+description = "Provider trait and built-in LLM providers for the Cersei SDK"
+
+# Vendored from upstream cersei (rev 708c5055845ba6c682d92960cec99e3adbcca3e1)
+# and patched so the OpenAI-compatible SSE reader emits `ThinkingDelta` events
+# for `delta.reasoning` / `delta.reasoning_content` / `delta.reasoning_details`
+# (reasoning models like stealth/ox-alpha stream their thinking there instead
+# of in `delta.content`). The ACP server relies on `AgentEvent::ThinkingDelta`
+# to stream `agent_thought_chunk` blocks; without this patch the thinking is
+# dropped before agent-cli ever sees it.
+#
+# Keep in sync with upstream: bump version + rev here and in the workspace
+# `[patch."https://github.com/pacifio/cersei"]` when updating.
+
+[dependencies]
+cersei-types = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+async-trait = "0.1"
+tokio = { version = "1.44", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "rustls-tls-webpki-roots", "hickory-dns"], default-features = false }
+reqwest-eventsource = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+url = "2"
+gcp_auth = { version = "0.12", features = ["webpki-roots"] }

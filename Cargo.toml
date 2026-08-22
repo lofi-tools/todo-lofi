@@ -124,3 +124,12 @@ pathfinder_simd = { git = "https://github.com/servo/pathfinder", rev = "ae70f36"
 # dispatch2 = { git = "https://github.com/madsmtm/objc2", tag = "dispatch2-0.3.1" }
 ctrlc = { path = "./patched/ctrlc" }
 # (https://github.com/pacifio/cersei?rev=708c5055845ba6c682d92960cec99e3adbcca3e1#708c505)
+
+# The vendored cersei-provider below is the ONLY patch to the cersei git
+# source: it makes the OpenAI-compatible SSE reader emit `ThinkingDelta` for
+# `delta.reasoning` / `reasoning_content` / `reasoning_details` (reasoning
+# models like stealth/ox-alpha stream their thinking there), which the ACP
+# server streams out as `agent_thought_chunk`. Keep its version + the rev
+# below in sync with patched/cersei-provider/Cargo.toml.
+[patch."https://github.com/pacifio/cersei"]
+cersei-provider = { path = "patched/cersei-provider" }

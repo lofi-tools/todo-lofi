@@ -1127,6 +1127,10 @@ impl AcpServer {
                 // No TUI consumer for sub-agent activity in ACP mode.
                 subagent_events: None,
                 fs_reader: Some(fs_reader),
+                reasoning: crate::response_format::reasoning_field_for(
+                    &self.config,
+                    &resolved.model,
+                ),
             },
         )
     }
