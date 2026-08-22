@@ -34,7 +34,7 @@ regex = "1.12.4"
 url = "2.5.8"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = { version = "6.0.0" }
-cersei = { git = "https://github.com/pacifio/cersei", rev = "59883b1d429fa1ac024a7b089b5917185cdd2039" }
+cersei = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
 
 
 # # HTTP
@@ -123,7 +123,4 @@ pathfinder_simd = { git = "https://github.com/servo/pathfinder", rev = "ae70f36"
 # tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "ff4dbc058918336ad4dda3aa930b5d832ff9758d" }
 # dispatch2 = { git = "https://github.com/madsmtm/objc2", tag = "dispatch2-0.3.1" }
 ctrlc = { path = "./patched/ctrlc" }
-# (https://github.com/pacifio/cersei?rev=59883b1d429fa1ac024a7b089b5917185cdd2039#59883b1d)
-[patch."https://github.com/pacifio/cersei"]
-# cersei-tools = { path = "./patched/cersei-tools" }
-cersei = { git = "https://github.com/nmrshll-contrib/cersei.git", branch = "nmrshll/cersei-tools-update-treesitter" }
+# (https://github.com/pacifio/cersei?rev=708c5055845ba6c682d92960cec99e3adbcca3e1#708c505)

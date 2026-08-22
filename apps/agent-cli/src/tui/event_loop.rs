@@ -1752,6 +1752,7 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             result,
             is_error,
             duration,
+            compression: _,
         } => {
             if let Some(tool) = state.active_tools.iter_mut().rev().find(|t| t.name == name) {
                 tool.status = if is_error {
@@ -1845,14 +1846,13 @@ fn find_spawn_parent(state: &AppState, run_id: u64) -> Option<SpawnParentLoc> {
     {
         return Some(SpawnParentLoc::Active(idx));
     }
-    if let Some(turn) = state.turns.last() {
-        if let Some(idx) = turn
+    if let Some(turn) = state.turns.last()
+        && let Some(idx) = turn
             .tools
             .iter()
             .rposition(|t| t.name == "spawn_agents" && tool_owns_run(t, run_id))
-        {
-            return Some(SpawnParentLoc::Committed(idx));
-        }
+    {
+        return Some(SpawnParentLoc::Committed(idx));
     }
     state
         .active_tools
@@ -1960,21 +1960,19 @@ fn attach_subagent_activity(
                 .iter_mut()
                 .rev()
                 .find(|c| c.run_id == Some(run_id))
-            {
-                if let Some(tool) = header
+                && let Some(tool) = header
                     .children
                     .iter_mut()
                     .rev()
                     .find(|t| t.name == name && t.status == ToolStatus::Running)
-                {
-                    tool.status = if is_error {
-                        ToolStatus::Error
-                    } else {
-                        ToolStatus::Done
-                    };
-                    tool.duration_ms = Some(duration_ms);
-                    tool.output_preview = Some(output_preview);
-                }
+            {
+                tool.status = if is_error {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Done
+                };
+                tool.duration_ms = Some(duration_ms);
+                tool.output_preview = Some(output_preview);
             }
         }
         // Finished: the sub-agent's final output; the header is done.
@@ -2631,17 +2629,18 @@ mod tests {
     /// A runtime that builds offline (dummy provider, literal key).
     fn runtime() -> Arc<AgentRuntime> {
         use crate::config::{AppConfig, ProviderConfigEntry};
-        let mut config = AppConfig::default();
-        config.provider = "test".into();
-        config.model = "test/test-model".into();
-        config.permissions_mode = "allow_all".into();
+        let mut config = AppConfig {
+            provider: "test".into(),
+            model: "test/test-model".into(),
+            permissions_mode: "allow_all".into(),
+            ..Default::default()
+        };
         config.providers.insert(
             "test".into(),
             ProviderConfigEntry {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into()],
-                ..Default::default()
             },
         );
         Arc::new(AgentRuntime::new(&config).unwrap())
@@ -2650,17 +2649,18 @@ mod tests {
     /// A runtime with a `test` provider and two combos referencing it.
     fn runtime_with_combos() -> (AppConfig, Arc<AgentRuntime>) {
         use crate::config::{ComboEntry, ProviderConfigEntry};
-        let mut config = AppConfig::default();
-        config.provider = "test".into();
-        config.model = "test/test-model".into();
-        config.permissions_mode = "allow_all".into();
+        let mut config = AppConfig {
+            provider: "test".into(),
+            model: "test/test-model".into(),
+            permissions_mode: "allow_all".into(),
+            ..Default::default()
+        };
         config.providers.insert(
             "test".into(),
             ProviderConfigEntry {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
-                ..Default::default()
             },
         );
         config.combos.insert(

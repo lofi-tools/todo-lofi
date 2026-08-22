@@ -1,6 +1,6 @@
 use cersei::{
     prelude::{Auth, CompletionRequest, Provider},
-    provider::{CompletionStream, ProviderCapabilities},
+    provider::CompletionStream,
     types::{CerseiError, ContentBlock, MessageContent, Role, StopReason, StreamEvent, Usage},
 };
 use futures::StreamExt;
@@ -51,17 +51,6 @@ impl Provider for OpenAiCompatible {
         //     _ => 128_000,
         // }
         128_000
-    }
-
-    fn capabilities(&self, _model: &str) -> ProviderCapabilities {
-        ProviderCapabilities {
-            streaming: true,
-            tool_use: true,
-            vision: true,
-            thinking: false,
-            system_prompt: true,
-            caching: false,
-        }
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream, CerseiError> {
@@ -275,6 +264,7 @@ impl Provider for OpenAiCompatible {
                         .send(StreamEvent::MessageStart {
                             id: String::new(),
                             model: String::new(),
+                            usage: None,
                         })
                         .await;
                     let mut stream = response.bytes_stream();

@@ -1092,8 +1092,10 @@ mod tests {
 
     #[test]
     fn default_selection_derives_provider_from_model() {
-        let mut config = AppConfig::default();
-        config.model = "groq/compound".into();
+        let config = AppConfig {
+            model: "groq/compound".into(),
+            ..Default::default()
+        };
         let (provider, model) = default_selection(&config).unwrap();
         assert_eq!(provider, "groq");
         assert_eq!(model, "groq/compound");
@@ -1170,8 +1172,10 @@ mod tests {
 
     #[test]
     fn free_models_only_can_be_disabled() {
-        let mut config = AppConfig::default();
-        config.free_models_only = false;
+        let config = AppConfig {
+            free_models_only: false,
+            ..Default::default()
+        };
         let openrouter = provider(&config, "openrouter").unwrap();
         assert!(openrouter.models.contains(&"openrouter/auto".to_string()));
         assert!(openrouter.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
@@ -1193,8 +1197,10 @@ mod tests {
             ]
         );
         // The paid coding models appear once the filter is off.
-        let mut config = AppConfig::default();
-        config.free_models_only = false;
+        let config = AppConfig {
+            free_models_only: false,
+            ..Default::default()
+        };
         let tr = provider(&config, "tokenrouter").unwrap();
         assert!(tr.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
         assert!(tr.models.contains(&"qwen/qwen3-coder-next".to_string()));
@@ -1771,11 +1777,13 @@ mod tests {
         let base_url =
             mock_openai_server(file_path.to_str().unwrap(), "hello from the agent").await;
 
-        let mut config = AppConfig::default();
-        config.provider = "mock".into();
-        config.model = "mock/test-model".into();
-        config.working_dir = dir.clone();
-        config.permissions_mode = "allow_all".into();
+        let mut config = AppConfig {
+            provider: "mock".into(),
+            model: "mock/test-model".into(),
+            working_dir: dir.clone(),
+            permissions_mode: "allow_all".into(),
+            ..Default::default()
+        };
         config.providers.insert(
             "mock".into(),
             ProviderConfigEntry {
@@ -1830,11 +1838,13 @@ mod tests {
         use std::time::Duration;
 
         let base_url = spawn_mock_server().await;
-        let mut config = AppConfig::default();
-        config.provider = "mock".into();
-        config.model = "mock/test-model".into();
-        config.working_dir = std::env::temp_dir();
-        config.permissions_mode = "allow_all".into();
+        let mut config = AppConfig {
+            provider: "mock".into(),
+            model: "mock/test-model".into(),
+            working_dir: std::env::temp_dir(),
+            permissions_mode: "allow_all".into(),
+            ..Default::default()
+        };
         config.providers.insert(
             "mock".into(),
             ProviderConfigEntry {
@@ -1867,17 +1877,16 @@ mod tests {
         // events beyond those).
         let mut saw_started = false;
         let mut saw_finished = false;
-        loop {
-            match tokio::time::timeout(Duration::from_millis(500), sub_rx.recv()).await {
-                Ok(Ok(activity)) => match activity {
-                    crate::subagents::SubAgentActivity::Started { agent_type, .. } => {
-                        assert_eq!(agent_type, "researcher-web");
-                        saw_started = true;
-                    }
-                    crate::subagents::SubAgentActivity::Finished { .. } => saw_finished = true,
-                    _ => {}
-                },
-                _ => break,
+        while let Ok(Ok(activity)) =
+            tokio::time::timeout(Duration::from_millis(500), sub_rx.recv()).await
+        {
+            match activity {
+                crate::subagents::SubAgentActivity::Started { agent_type, .. } => {
+                    assert_eq!(agent_type, "researcher-web");
+                    saw_started = true;
+                }
+                crate::subagents::SubAgentActivity::Finished { .. } => saw_finished = true,
+                _ => {}
             }
         }
         assert!(saw_started, "no Started event forwarded to subscribers");

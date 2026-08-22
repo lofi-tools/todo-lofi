@@ -614,13 +614,13 @@ async fn grep_fallback(
     if let Some(flags) = flags {
         let mut iter = flags.split_whitespace();
         while let Some(flag) = iter.next() {
-            if flag == "-g" {
-                if let Some(glob) = iter.next() {
-                    if let Some(rest) = glob.strip_prefix('!') {
-                        cmd.arg("--exclude").arg(rest);
-                    } else {
-                        cmd.arg("--include").arg(glob);
-                    }
+            if flag == "-g"
+                && let Some(glob) = iter.next()
+            {
+                if let Some(rest) = glob.strip_prefix('!') {
+                    cmd.arg("--exclude").arg(rest);
+                } else {
+                    cmd.arg("--include").arg(glob);
                 }
             }
         }

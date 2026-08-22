@@ -1620,17 +1620,18 @@ mod tests {
     /// A config with a `test` provider and one combo referencing it; builds
     /// offline (literal key, loopback base URL).
     fn config_with_combo() -> AppConfig {
-        let mut config = AppConfig::default();
-        config.provider = "test".into();
-        config.model = "test/test-model".into();
-        config.permissions_mode = "allow_all".into();
+        let mut config = AppConfig {
+            provider: "test".into(),
+            model: "test/test-model".into(),
+            permissions_mode: "allow_all".into(),
+            ..Default::default()
+        };
         config.providers.insert(
             "test".into(),
             ProviderConfigEntry {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
-                ..Default::default()
             },
         );
         config.combos.insert(

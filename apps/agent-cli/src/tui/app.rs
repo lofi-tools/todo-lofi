@@ -159,6 +159,11 @@ impl PartialEq for Overlay {
     }
 }
 
+/// Result channel for a `/provider` model-list fetch: the provider name plus
+/// the fetched model ids (or an error string).
+pub type ProviderFetchRx =
+    tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>;
+
 /// Provider model explorer shown by `/provider`: fetches the full model list
 /// from the provider's OpenAI-compatible `/models` endpoint and offers a
 /// fuzzy-filterable, provider-grouped list. Selecting an entry switches the
@@ -385,7 +390,7 @@ pub struct AppState {
     /// cancels the fetch.
     pub _provider_fetch_task: Option<tokio::task::JoinHandle<()>>,
     /// Receiver for the `/provider` fetch result; the tick loop drains it.
-    pub provider_fetch_rx: Option<tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>>,
+    pub provider_fetch_rx: Option<ProviderFetchRx>,
 
     // ── Animation ──
     pub frame_count: u64,
