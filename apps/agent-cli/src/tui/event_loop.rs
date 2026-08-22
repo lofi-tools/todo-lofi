@@ -10,7 +10,7 @@ use crate::{
     providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, ModelPickerState, Overlay, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
+        app::{AppState, ModelPickerState, Overlay, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
@@ -165,6 +165,8 @@ pub async fn run(
 
             // ── Terminal events + tick ───────────────────────────────────
             _ = tokio::time::sleep(TICK_RATE) => {
+                // Drain a completed `/provider` fetch (if one arrived).
+                poll_provider_fetch(&mut state);
                 // Drain pending events (cap at 50 to prevent infinite loop on resize storms)
                 let mut event_count = 0u32;
                 while event_count < 50 && event::poll(Duration::ZERO)? {
@@ -305,6 +307,9 @@ fn handle_key(
     // Model picker gets full key handling while open.
     if matches!(state.overlay, Overlay::ModelPicker(_)) {
         return handle_model_picker_key(state, key, runtime);
+    }
+    if matches!(state.overlay, Overlay::ProviderExplorer(_)) {
+        return handle_provider_explorer_key(state, key, runtime);
     }
 
     // Fuzzy command selector gets key handling while open.
@@ -1513,6 +1518,204 @@ fn handle_model_picker_key(
     None
 }
 
+/// Open the `/provider` model explorer overlay and kick off the fetch of the
+/// current provider's full model list.
+fn open_provider_explorer(state: &mut AppState, runtime: &Arc<AgentRuntime>) {
+    let (provider, _model) = runtime.current();
+    let (base_url, api_key) = match runtime.resolve_provider_endpoint(&provider) {
+        Ok(v) => v,
+        Err(e) => {
+            state.push_system(format!("Cannot explore {provider}: {e}"));
+            return;
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.provider_fetch_rx = Some(rx);
+    // Cancel any prior in-flight fetch (closing and reopening the overlay).
+    if let Some(prev) = state._provider_fetch_task.take()
+        && !prev.is_finished()
+    {
+        prev.abort();
+    }
+    let provider_name = provider.clone();
+    state._provider_fetch_task = Some(tokio::spawn({
+        let base_url = base_url.clone();
+        async move {
+            let result = crate::providers::fetch_models(&base_url, &api_key)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send((provider_name, result));
+        }
+    }));
+    state.overlay = Overlay::ProviderExplorer(ProviderExplorerState {
+        provider,
+        base_url,
+        all_models: Vec::new(),
+        query: String::new(),
+        selected: 0,
+        loading: true,
+        error: String::new(),
+    });
+    state.dirty = true;
+}
+
+/// Drain the `/provider` fetch result, if one arrived, and update the overlay.
+fn poll_provider_fetch(state: &mut AppState) {
+    use tokio::sync::oneshot::error::TryRecvError;
+    let Some(rx) = state.provider_fetch_rx.as_mut() else {
+        return;
+    };
+    let (provider, result) = match rx.try_recv() {
+        Ok(v) => v,
+        Err(TryRecvError::Empty) => return,
+        Err(TryRecvError::Closed) => {
+            state.provider_fetch_rx = None;
+            return;
+        }
+    };
+    state.provider_fetch_rx = None;
+    let Overlay::ProviderExplorer(p) = &mut state.overlay else {
+        return;
+    };
+    if p.provider != provider {
+        // Stale result from a prior provider; ignore.
+        return;
+    }
+    p.loading = false;
+    match result {
+        Ok(models) => {
+            p.all_models = models;
+            p.selected = 0;
+        }
+        Err(e) => {
+            p.error = e;
+        }
+    }
+    state.dirty = true;
+}
+
+/// Handle keys while the `/provider` model explorer is open.
+fn handle_provider_explorer_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    runtime: &Arc<AgentRuntime>,
+) -> Option<String> {
+    let Overlay::ProviderExplorer(p) = &mut state.overlay else {
+        return None;
+    };
+    match key.code {
+        // Typing filters the list (live fuzzy).
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            p.query.push(c);
+            p.selected = 0;
+            state.dirty = true;
+        }
+        KeyCode::Backspace => {
+            p.query.pop();
+            p.selected = 0;
+            state.dirty = true;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            p.selected = p.selected.saturating_sub(1);
+            state.dirty = true;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = p.filtered().len();
+            if p.selected + 1 < len {
+                p.selected += 1;
+            }
+            state.dirty = true;
+        }
+        // Tab cycles to the next configured provider and re-fetches.
+        KeyCode::Tab => {
+            let names = runtime.provider_names();
+            if names.len() > 1 {
+                let idx = names.iter().position(|n| n == &p.provider).unwrap_or(0);
+                let next_name = names[(idx + 1) % names.len()].clone();
+                // Re-open for the next provider.
+                match runtime.resolve_provider_endpoint(&next_name) {
+                    Ok((base_url, api_key)) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        state.provider_fetch_rx = Some(rx);
+                        if let Some(prev) = state._provider_fetch_task.take()
+                            && !prev.is_finished()
+                        {
+                            prev.abort();
+                        }
+                        let provider_name = next_name.clone();
+                        state._provider_fetch_task = Some(tokio::spawn({
+                            let base_url = base_url.clone();
+                            async move {
+                                let result =
+                                    crate::providers::fetch_models(&base_url, &api_key)
+                                        .await
+                                        .map_err(|e| e.to_string());
+                                let _ = tx.send((provider_name, result));
+                            }
+                        }));
+                        state.overlay = Overlay::ProviderExplorer(ProviderExplorerState {
+                            provider: next_name,
+                            base_url,
+                            all_models: Vec::new(),
+                            query: String::new(),
+                            selected: 0,
+                            loading: true,
+                            error: String::new(),
+                        });
+                        state.dirty = true;
+                    }
+                    Err(e) => state.push_system(format!("Cannot switch provider: {e}")),
+                }
+            }
+        }
+        KeyCode::Enter => {
+            let filtered = p.filtered();
+            if filtered.is_empty() {
+                return None;
+            }
+            let idx = p.selected.min(filtered.len() - 1);
+            let model = filtered[idx].0.clone();
+            let provider = p.provider.clone();
+            state.overlay = Overlay::None;
+            // Abort the in-flight fetch (if any) since we're closing.
+            if let Some(task) = state._provider_fetch_task.take()
+                && !task.is_finished()
+            {
+                task.abort();
+            }
+            state.provider_fetch_rx = None;
+            match runtime.switch(&provider, &model) {
+                Ok(()) => {
+                    let label =
+                        crate::providers::display_model_id(&provider, &model);
+                    state.model = label.clone();
+                    state.effective_model = Some(crate::providers::display_model_id(
+                        &runtime.effective().0,
+                        &runtime.effective().1,
+                    ));
+                    state.push_system(format!("Switched to {label}"));
+                }
+                Err(e) => {
+                    state.push_system(format!("Failed to switch to {provider}/{model}: {e}"))
+                }
+            }
+            state.dirty = true;
+        }
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.overlay = Overlay::None;
+            if let Some(task) = state._provider_fetch_task.take()
+                && !task.is_finished()
+            {
+                task.abort();
+            }
+            state.provider_fetch_rx = None;
+            state.dirty = true;
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: AgentEvent) {
     match event {
         AgentEvent::TextDelta(text) => {
@@ -2080,6 +2283,12 @@ fn handle_slash_command(
                 tools: Vec::new(),
                 thinking: None,
             });
+        }
+        "provider" => {
+            // Open the model explorer: fetch the full model list from the
+            // current provider's `/models` endpoint and present it for
+            // fuzzy filtering. Selecting an entry switches live.
+            open_provider_explorer(state, runtime);
         }
         _ => {
             state.turns.push(crate::tui::app::Turn {

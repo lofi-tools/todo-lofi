@@ -455,6 +455,50 @@ pub fn entries(config: &AppConfig) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Fetch the full available model list from a provider's OpenAI-compatible
+/// `/models` endpoint. Used by the `/provider` explorer to show models the
+/// config doesn't list (so the user can discover and switch live). The
+/// endpoint shape is `{base_url}/models` returning `{ "data": [{"id": ...}] }`.
+/// Returns model ids sorted and de-duplicated.
+pub async fn fetch_models(
+    base_url: &str,
+    api_key: &str,
+) -> anyhow::Result<Vec<String>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await?
+        .error_for_status()
+        .with_context(|| format!("GET {url} failed"))?;
+    let body: ModelsResponse = resp.json().await?;
+    Ok(parse_model_ids(&body))
+}
+
+/// OpenAI-compatible `/models` response shape.
+#[derive(serde::Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    data: Vec<ModelEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
+/// Extract, sort, and de-duplicate model ids from a parsed response.
+fn parse_model_ids(resp: &ModelsResponse) -> Vec<String> {
+    let mut models: Vec<String> = resp.data.iter().map(|m| m.id.clone()).collect();
+    models.sort();
+    models.dedup();
+    models
+}
+
 // ─── API key resolution ─────────────────────────────────────────────────────
 
 pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
@@ -855,6 +899,41 @@ impl AgentRuntime {
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity> {
         self.inner.lock().subagent_tx.subscribe()
+    }
+
+    /// Resolve a provider's base URL and API key for an out-of-band API call
+    /// (e.g. the `/provider` model-list fetch). `provider` is the user-facing
+    /// selection; combos are mapped to their concrete first entry.
+    pub fn resolve_provider_endpoint(&self, provider: &str) -> anyhow::Result<(String, String)> {
+        let config = &self.inner.lock().config;
+        // Map a combos selection to its concrete first entry; other
+        // selections resolve directly.
+        let (eff_provider, _eff_model) = if provider == "combos" {
+            let combos = combos(config);
+            anyhow::ensure!(!combos.is_empty(), "no combos configured");
+            let first = &combos[0].entries[0];
+            (first.provider.clone(), first.model.clone())
+        } else {
+            (provider.to_string(), String::new())
+        };
+        // Pick any model for the provider so `resolve` produces base_url/key.
+        let prov = providers(config)
+            .into_iter()
+            .find(|p| p.name == eff_provider)
+            .with_context(|| format!("unknown provider '{eff_provider}'"))?;
+        let model = prov.models.first().cloned().unwrap_or_default();
+        let resolved = resolve(config, &eff_provider, &model)?;
+        Ok((resolved.base_url, resolved.api_key))
+    }
+
+    /// The names of all providers available to switch to in the explorer
+    /// (built-ins + virtual combos + config additions).
+    pub fn provider_names(&self) -> Vec<String> {
+        let config = &self.inner.lock().config;
+        providers(config)
+            .into_iter()
+            .map(|p| p.name)
+            .collect()
     }
 
     /// Drain the followup suggestions collected by the `suggest_followups`
@@ -1914,5 +1993,36 @@ mod tests {
             1,
             "built-in Grep replaced by RgSearchTool (same name) in both modes"
         );
+    }
+
+    #[test]
+    fn parse_model_ids_extracts_sorts_dedups() {
+        // Sample OpenAI-compatible /models response body.
+        let body = serde_json::json!({
+            "data": [
+                {"id": "gpt-oss-20b"},
+                {"id": "llama-3.3-70b"},
+                {"id": "llama-3.3-70b"}, // duplicate
+                {"id": "compound"}
+            ]
+        });
+        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
+        let ids = parse_model_ids(&resp);
+        assert_eq!(ids, vec!["compound", "gpt-oss-20b", "llama-3.3-70b"]);
+    }
+
+    #[test]
+    fn parse_model_ids_empty_data() {
+        let body = serde_json::json!({"data": []});
+        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
+        assert!(parse_model_ids(&resp).is_empty());
+    }
+
+    #[test]
+    fn parse_model_ids_missing_data_field_defaults_empty() {
+        // A well-formed response with no `data` key deserializes to empty.
+        let body = serde_json::json!({"object": "list"});
+        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
+        assert!(parse_model_ids(&resp).is_empty());
     }
 }

@@ -1401,7 +1401,7 @@ pub mod overlay {
     //! Modal overlays: help, permission, recovery.
 
     use crate::tui::{
-        app::{AppState, ModelPickerState, Overlay, PermissionOverlay, RecoveryOverlay},
+        app::{AppState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerState, RecoveryOverlay},
         theme::Theme,
     };
     use ratatui::{
@@ -1416,6 +1416,7 @@ pub mod overlay {
             Overlay::Permission(p) => render_permission(f, p, theme),
             Overlay::Recovery(r) => render_recovery(f, r, theme),
             Overlay::ModelPicker(p) => render_model_picker(f, p, theme),
+            Overlay::ProviderExplorer(p) => render_provider_explorer(f, p, theme),
             Overlay::Graph(g) => super::graph::render(f, g, theme),
         }
     }
@@ -1596,6 +1597,111 @@ pub mod overlay {
             .highlight_symbol(">");
 
         f.render_stateful_widget(list, area, &mut list_state);
+    }
+
+    /// Render the `/provider` model explorer: a query box at the top and a
+    /// fuzzy-filtered, provider-grouped list below. Shows a loading hint
+    /// while the fetch is in flight and an error message on failure.
+    fn render_provider_explorer(f: &mut Frame, p: &ProviderExplorerState, theme: &Theme) {
+        use ratatui::widgets::Paragraph;
+        let area = centered_rect(f.area(), 65, 75);
+        f.render_widget(Clear, area);
+
+        // ── Query box (top row) ──
+        let query_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 3,
+        };
+        let query_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border_style())
+            .style(Style::default().bg(theme.bg));
+        f.render_widget(
+            Paragraph::new(format!("filter: {}▌", p.query))
+                .style(Style::default().fg(theme.fg))
+                .block(query_block),
+            query_area,
+        );
+
+        // ── List area (below the query box) ──
+        let list_area = Rect {
+            x: area.x,
+            y: area.y + 3,
+            width: area.width,
+            height: area.height.saturating_sub(3),
+        };
+
+        let title = format!(
+            " {} — models ({} available, {} shown) — Tab: next provider, Enter: switch, Esc: close ",
+            p.provider,
+            p.all_models.len(),
+            p.filtered().len(),
+        );
+
+        if p.loading {
+            f.render_widget(
+                Paragraph::new(format!("Fetching models from {}…", p.provider))
+                    .style(Style::default().fg(theme.dim))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(theme.border_style())
+                            .style(Style::default().bg(theme.bg)),
+                    ),
+                list_area,
+            );
+            return;
+        }
+        if !p.error.is_empty() {
+            f.render_widget(
+                Paragraph::new(format!("Failed to fetch models:\n{}", p.error))
+                    .style(theme.error_style())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(theme.border_style())
+                            .style(Style::default().bg(theme.bg)),
+                    ),
+                list_area,
+            );
+            return;
+        }
+
+        let filtered = p.filtered();
+        let mut list_state = ListState::default();
+        list_state.select(Some(p.selected.min(filtered.len().saturating_sub(1))));
+        // Grouped by provider: since this explorer fetches one provider at a
+        // time, all entries share the same provider header.
+        let provider_header = p.provider.clone();
+        let mut items: Vec<ListItem> = Vec::with_capacity(filtered.len() + 1);
+        items.push(ListItem::new(Span::styled(
+            provider_header,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (model, _score) in &filtered {
+            items.push(ListItem::new(format!("  {model}")));
+        }
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(theme.border_style())
+                    .style(Style::default().bg(theme.bg)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">");
+        f.render_stateful_widget(list, list_area, &mut list_state);
     }
 
     fn render_recovery(f: &mut Frame, r: &RecoveryOverlay, theme: &Theme) {

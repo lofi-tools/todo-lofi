@@ -140,6 +140,7 @@ pub enum Overlay {
     Permission(PermissionOverlay),
     Recovery(RecoveryOverlay),
     ModelPicker(ModelPickerState),
+    ProviderExplorer(ProviderExplorerState),
     Graph(crate::tui::widgets::graph::GraphOverlayState),
 }
 
@@ -151,9 +152,47 @@ impl PartialEq for Overlay {
                 | (Self::Help, Self::Help)
                 | (Self::Permission(_), Self::Permission(_))
                 | (Self::Recovery(_), Self::Recovery(_))
-                | (Self::ModelPicker(_), Self::ModelPicker(_))
+                |            (Self::ModelPicker(_), Self::ModelPicker(_))
+                | (Self::ProviderExplorer(_), Self::ProviderExplorer(_))
                 | (Self::Graph(_), Self::Graph(_))
         )
+    }
+}
+
+/// Provider model explorer shown by `/provider`: fetches the full model list
+/// from the provider's OpenAI-compatible `/models` endpoint and offers a
+/// fuzzy-filterable, provider-grouped list. Selecting an entry switches the
+/// runtime to it live (the model is used immediately, not persisted).
+#[derive(Debug, Clone)]
+pub struct ProviderExplorerState {
+    /// Provider name whose models are shown.
+    pub provider: String,
+    /// Base URL + resolved API key for the fetch (stored so a re-fetch via
+    /// `Tab` to another provider can re-issue the request).
+    pub base_url: String,
+    /// Full unfiltered model list as returned by the API (one entry per
+    /// model id). Empty while loading or on error.
+    pub all_models: Vec<String>,
+    /// Current fuzzy query typed in the filter box.
+    pub query: String,
+    /// Index into the filtered list of the highlighted entry.
+    pub selected: usize,
+    /// `true` while the `/models` fetch is in flight.
+    pub loading: bool,
+    /// Error message when the fetch failed (empty otherwise).
+    pub error: String,
+}
+
+impl ProviderExplorerState {
+    /// The filtered, score-sorted model list for the current query.
+    pub fn filtered(&self) -> Vec<(String, u32)> {
+        let mut scored: Vec<(u32, String)> = self
+            .all_models
+            .iter()
+            .filter_map(|m| fuzzy_score(&self.query, m).map(|s| (s, m.clone())))
+            .collect();
+        scored.sort_by_key(|(s, m)| (*s, m.clone()));
+        scored.into_iter().map(|(s, m)| (m, s)).collect()
     }
 }
 
@@ -342,6 +381,11 @@ pub struct AppState {
 
     // ── Command selector (fuzzy `/` popup) ──
     pub command_selector: Option<CommandSelectorState>,
+    /// In-flight `/provider` model-list fetch. Stored so dropping the overlay
+    /// cancels the fetch.
+    pub _provider_fetch_task: Option<tokio::task::JoinHandle<()>>,
+    /// Receiver for the `/provider` fetch result; the tick loop drains it.
+    pub provider_fetch_rx: Option<tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>>,
 
     // ── Animation ──
     pub frame_count: u64,
@@ -404,6 +448,8 @@ impl AppState {
             overlay: Overlay::None,
             pending_permission_tx: None,
             command_selector: None,
+            _provider_fetch_task: None,
+            provider_fetch_rx: None,
             frame_count: 0,
             should_quit: false,
             dirty: true,
@@ -710,5 +756,57 @@ mod tests {
             dragging: false,
         });
         assert_eq!(s.selection_text().as_deref(), Some("ow tw"));
+    }
+
+    #[test]
+    fn provider_explorer_filter_narrows_by_subsequence() {
+        let p = ProviderExplorerState {
+            provider: "groq".into(),
+            base_url: "http://x".into(),
+            all_models: vec![
+                "llama-3.3-70b".into(),
+                "llama-3.1-8b-instant".into(),
+                "compound".into(),
+                "gpt-oss-20b".into(),
+            ],
+            query: "ll".into(),
+            selected: 0,
+            loading: false,
+            error: String::new(),
+        };
+        let filtered = p.filtered();
+        // Both llama models match the "ll" subsequence; compound and gpt-oss don't.
+        let names: Vec<String> = filtered.iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(names, vec!["llama-3.1-8b-instant", "llama-3.3-70b"]);
+    }
+
+    #[test]
+    fn provider_explorer_empty_query_returns_all() {
+        let p = ProviderExplorerState {
+            provider: "groq".into(),
+            base_url: "http://x".into(),
+            all_models: vec!["b".into(), "a".into(), "c".into()],
+            query: String::new(),
+            selected: 0,
+            loading: false,
+            error: String::new(),
+        };
+        // Empty query matches everything, sorted by score then name.
+        let names: Vec<String> = p.filtered().iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn provider_explorer_no_match_returns_empty() {
+        let p = ProviderExplorerState {
+            provider: "groq".into(),
+            base_url: "http://x".into(),
+            all_models: vec!["llama".into()],
+            query: "xyz".into(),
+            selected: 0,
+            loading: false,
+            error: String::new(),
+        };
+        assert!(p.filtered().is_empty());
     }
 }
