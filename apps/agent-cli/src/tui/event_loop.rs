@@ -573,21 +573,23 @@ fn handle_key(
             state.refresh_command_selector();
         }
 
-        // Backspace — remove the char before the cursor
+        // Backspace — remove the grapheme cluster before the cursor
         (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
-            if let Some((char_start, _)) =
-                state.input[..state.cursor_pos].char_indices().next_back()
-            {
-                state.input.remove(char_start);
-                state.cursor_pos = char_start;
+            let cluster_start = prev_grapheme_boundary(&state.input, state.cursor_pos);
+            if cluster_start < state.cursor_pos {
+                state.input.replace_range(cluster_start..state.cursor_pos, "");
+                state.cursor_pos = cluster_start;
             }
             state.selection = None;
             state.refresh_command_selector();
         }
 
-        // Delete — remove the char at the cursor
+        // Delete — remove the grapheme cluster at the cursor
         (_, KeyCode::Delete) if !state.is_streaming && state.cursor_pos < state.input.len() => {
-            state.input.remove(state.cursor_pos);
+            let cluster_end = next_grapheme_boundary(&state.input, state.cursor_pos);
+            if cluster_end > state.cursor_pos {
+                state.input.replace_range(state.cursor_pos..cluster_end, "");
+            }
             state.selection = None;
             state.refresh_command_selector();
         }
@@ -634,13 +636,13 @@ fn handle_key(
             state.dirty = true;
         }
 
-        // Shift+Left/Right — extend the input selection by one char
+        // Shift+Left/Right — extend the input selection by one grapheme
         (KeyModifiers::SHIFT, KeyCode::Left) if !state.is_streaming => {
-            let new_pos = prev_char_boundary(&state.input, state.cursor_pos);
+            let new_pos = prev_grapheme_boundary(&state.input, state.cursor_pos);
             apply_input_cursor_move(state, new_pos, true);
         }
         (KeyModifiers::SHIFT, KeyCode::Right) if !state.is_streaming => {
-            let new_pos = next_char_boundary(&state.input, state.cursor_pos);
+            let new_pos = next_grapheme_boundary(&state.input, state.cursor_pos);
             apply_input_cursor_move(state, new_pos, true);
         }
 
@@ -688,22 +690,16 @@ fn handle_key(
             state.refresh_command_selector();
         }
 
-        // Left arrow — move back one char
+        // Left arrow — move back one grapheme cluster
         (_, KeyCode::Left) if !state.is_streaming && state.cursor_pos > 0 => {
-            if let Some((char_start, _)) =
-                state.input[..state.cursor_pos].char_indices().next_back()
-            {
-                state.cursor_pos = char_start;
-            }
+            state.cursor_pos = prev_grapheme_boundary(&state.input, state.cursor_pos);
             state.selection = None;
             state.refresh_command_selector();
         }
 
-        // Right arrow — move forward one char
+        // Right arrow — move forward one grapheme cluster
         (_, KeyCode::Right) if !state.is_streaming && state.cursor_pos < state.input.len() => {
-            if let Some(ch) = state.input[state.cursor_pos..].chars().next() {
-                state.cursor_pos += ch.len_utf8();
-            }
+            state.cursor_pos = next_grapheme_boundary(&state.input, state.cursor_pos);
             state.selection = None;
             state.refresh_command_selector();
         }
@@ -1025,93 +1021,125 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric()
 }
 
-/// The char boundary immediately before `pos` (the previous character's start).
-fn prev_char_boundary(input: &str, pos: usize) -> usize {
-    input[..pos.min(input.len())]
-        .char_indices()
-        .next_back()
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+/// The grapheme-cluster boundary immediately before `pos`: the byte offset
+/// where the previous grapheme cluster starts. A combining-mark cluster
+/// (e.g. `e` + `◌́` = `é`) is treated as a single unit, so the cursor never
+/// lands between a base char and its combining marks.
+fn prev_grapheme_boundary(input: &str, pos: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let pos = pos.min(input.len());
+    // The cluster that strictly contains `pos` (start < pos). When `pos` is
+    // already on a boundary, the previous cluster's start is the answer.
+    let mut prev_end = 0;
+    for (start, end) in input
+        .grapheme_indices(true)
+        .map(|(s, cluster)| (s, s + cluster.len()))
+    {
+        if end <= pos {
+            prev_end = start;
+            continue;
+        }
+        break;
+    }
+    prev_end
 }
 
-/// The char boundary immediately after `pos` (the next character's end).
-fn next_char_boundary(input: &str, pos: usize) -> usize {
-    match input[pos.min(input.len())..].chars().next() {
-        Some(ch) => pos.min(input.len()) + ch.len_utf8(),
-        None => input.len(),
+/// The grapheme-cluster boundary immediately after `pos`: the byte offset
+/// where the next grapheme cluster starts (or `input.len()` at the end).
+/// See [`prev_grapheme_boundary`] for why clusters, not codepoints.
+fn next_grapheme_boundary(input: &str, pos: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let pos = pos.min(input.len());
+    for (_, end) in input
+        .grapheme_indices(true)
+        .map(|(s, cluster)| (s, s + cluster.len()))
+    {
+        if end > pos {
+            return end;
+        }
     }
+    input.len()
 }
 
 /// The start of the word at or immediately before `pos` (readline `Alt+B`).
-/// From the middle of a word this lands on that word's start.
+/// From the middle of a word this lands on that word's start. Walks grapheme
+/// clusters so combining marks stay attached to their base char.
 fn word_start_before(input: &str, pos: usize) -> usize {
-    let pos = input.floor_char_boundary(pos.min(input.len()));
-    let before = &input[..pos];
-    let mut i = before.len();
-    if let Some((_, ch)) = before[..i].char_indices().next_back()
-        && is_word_char(ch)
-    {
-        while i > 0 {
-            let (idx, ch) = before[..i].char_indices().next_back().unwrap();
-            if !is_word_char(ch) {
-                break;
+    use unicode_segmentation::UnicodeSegmentation;
+    let pos = pos.min(input.len());
+    // Cluster start byte offsets strictly before `pos`, newest first.
+    let starts: Vec<usize> = input[..pos]
+        .grapheme_indices(true)
+        .map(|(s, _)| s)
+        .collect();
+    // Two-phase backward walk: skip the non-word gap, then walk to the start
+    // of the first word encountered. If `pos` is already mid-word, the gap
+    // phase is empty and the word phase starts immediately.
+    let mut prev = pos;
+    let mut in_word = false;
+    for &s in starts.iter().rev() {
+        let is_word = cluster_is_word_char(&input[s..prev]);
+        if !is_word {
+            if in_word {
+                // Just stepped out of the word's left edge.
+                return prev;
             }
-            i = idx;
+            // Still in the leading gap.
+            prev = s;
+            continue;
         }
-        return i;
+        in_word = true;
+        prev = s;
     }
-    // Skip the gap, then the previous word.
-    while i > 0 {
-        let (idx, ch) = before[..i].char_indices().next_back().unwrap();
-        if is_word_char(ch) {
-            break;
-        }
-        i = idx;
-    }
-    while i > 0 {
-        let (idx, ch) = before[..i].char_indices().next_back().unwrap();
-        if !is_word_char(ch) {
-            break;
-        }
-        i = idx;
-    }
-    i
+    prev
 }
 
 /// The end of the word at or immediately after `pos` (readline `Alt+F`). From
-/// the middle of a word this lands on that word's end.
+/// the middle of a word this lands on that word's end. Walks grapheme
+/// clusters so combining marks stay attached to their base char.
 fn word_end_after(input: &str, pos: usize) -> usize {
-    let pos = input.floor_char_boundary(pos.min(input.len()));
-    let after = &input[pos..];
-    let mut i = 0;
-    if let Some(ch) = after[i..].chars().next()
-        && is_word_char(ch)
+    use unicode_segmentation::UnicodeSegmentation;
+    let pos = pos.min(input.len());
+    // If the cluster at `pos` is a word char, consume the word rightward.
+    if let Some((_, first_cluster)) = input[pos..].grapheme_indices(true).next()
+        && cluster_is_word_char(first_cluster)
     {
-        while i < after.len() {
-            let (idx, ch) = after[i..].char_indices().next().unwrap();
-            if !is_word_char(ch) {
+        let mut end = pos + first_cluster.len();
+        for cluster in input[end..].graphemes(true) {
+            if !cluster_is_word_char(cluster) {
                 break;
             }
-            i += idx + ch.len_utf8();
+            end += cluster.len();
         }
-        return pos + i;
+        return end;
     }
-    // Skip the gap, then the next word.
-    while i < after.len() {
-        let (idx, ch) = after[i..].char_indices().next().unwrap();
-        if is_word_char(ch) {
-            break;
+    // Otherwise skip the non-word gap, then the next word.
+    let mut end = pos;
+    for cluster in input[pos..].graphemes(true) {
+        if cluster_is_word_char(cluster) {
+            // Consume the word rightward.
+            end += cluster.len();
+            for cluster2 in input[end..].graphemes(true) {
+                if !cluster_is_word_char(cluster2) {
+                    break;
+                }
+                end += cluster2.len();
+            }
+            return end;
         }
-        i += idx + ch.len_utf8();
+        end += cluster.len();
     }
-    while i < after.len() {
-        let (idx, ch) = after[i..].char_indices().next().unwrap();
-        if !is_word_char(ch) {
-            break;
-        }
-        i += idx + ch.len_utf8();
+    end
+}
+
+/// Whether `cluster` starts a word: its first codepoint is alphanumeric.
+/// Combining marks are zero-width and classified by the base they attach to,
+/// so checking the cluster's first char is the right test.
+fn cluster_is_word_char(cluster: &str) -> bool {
+    match cluster.chars().next() {
+        Some(c) => is_word_char(c),
+        None => false,
     }
-    pos + i
 }
 
 /// Byte offset of the start of the logical line containing `pos` (the byte
@@ -2850,5 +2878,70 @@ mod tests {
         handle_editing_key(&mut s, key_for(KeyCode::Char('k'), M::CONTROL));
         assert_eq!(s.input, "foo ");
         assert_eq!(s.cursor_pos, 4);
+    }
+
+    #[test]
+    fn grapheme_boundaries_skip_combining_marks() {
+        // `e` + U+0301 (combining acute) + `b`: one grapheme cluster `é` (bytes
+        // 0..3), then `b` (byte 3). Cursor movement must treat `é` as a unit.
+        let input = "e\u{0301}b";
+        // Moving forward from 0 lands past the whole cluster (byte 3), never
+        // between `e` and the combining mark (byte 1).
+        assert_eq!(next_grapheme_boundary(input, 0), 3);
+        assert_eq!(next_grapheme_boundary(input, 3), input.len());
+        // Moving backward from the end lands on the `b` cluster's start (byte 3).
+        assert_eq!(prev_grapheme_boundary(input, input.len()), 3);
+        // Moving backward again lands on the `é` cluster's start (byte 0).
+        assert_eq!(prev_grapheme_boundary(input, 3), 0);
+        // Moving backward from inside the `é` cluster snaps to its start too.
+        assert_eq!(prev_grapheme_boundary(input, 1), 0);
+        assert_eq!(prev_grapheme_boundary(input, 2), 0);
+        // ASCII-only input behaves as before (1 byte = 1 grapheme).
+        assert_eq!(next_grapheme_boundary("abc", 1), 2);
+        assert_eq!(prev_grapheme_boundary("abc", 2), 1);
+        assert_eq!(prev_grapheme_boundary("abc", 3), 2);
+    }
+
+    #[test]
+    fn grapheme_backspace_removes_whole_cluster() {
+        // Backspace on `e` + combining acute removes the whole `é` cluster, not
+        // just the combining mark.
+        use crossterm::event::KeyModifiers as M;
+        let mut s = state();
+        s.input = "xe\u{0301}y".into();
+        s.cursor_pos = 4; // after the `é` cluster (bytes 0=x, 1..4=é, 4=y)
+        handle_editing_key(&mut s, key_for(KeyCode::Backspace, M::NONE));
+        assert_eq!(s.input, "xy");
+        assert_eq!(s.cursor_pos, 1);
+    }
+
+    #[test]
+    fn grapheme_arrows_move_by_cluster() {
+        use crossterm::event::KeyModifiers as M;
+        let mut s = state();
+        // `ab` + `é` (combining) + `c`: bytes 0=a,1=b,2..5=é,5=c.
+        s.input = "abe\u{0301}c".into();
+        s.cursor_pos = 2; // between `b` and `é`
+        // Right arrow skips the entire `é` cluster to byte 5.
+        handle_editing_key(&mut s, key_for(KeyCode::Right, M::NONE));
+        assert_eq!(s.cursor_pos, 5);
+        // Left arrow returns to the cluster's start (byte 2), never mid-cluster.
+        handle_editing_key(&mut s, key_for(KeyCode::Left, M::NONE));
+        assert_eq!(s.cursor_pos, 2);
+    }
+
+    #[test]
+    fn grapheme_word_move_treats_cluster_as_unit() {
+        // A combining mark sticks to its base char: `foé bar` (é = e+◌́).
+        // bytes: f0 o1 é2..5 (space)5 b6 a7 r8.
+        let input = "foe\u{0301} bar";
+        // From the end, the previous word starts at byte 6 ("bar").
+        assert_eq!(word_start_before(input, input.len()), 6);
+        // From inside `foé`, the word starts at 0.
+        assert_eq!(word_start_before(input, 3), 0);
+        // word_end_after from byte 0 stops at byte 5 (after `foé`, before space).
+        assert_eq!(word_end_after(input, 0), 5);
+        // From the space, the next word ends at byte 9.
+        assert_eq!(word_end_after(input, 5), 9);
     }
 }

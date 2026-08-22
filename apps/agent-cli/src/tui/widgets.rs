@@ -872,6 +872,7 @@ pub mod input {
         row: usize,
         col: usize,
     ) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
         let rows = layout(input, usable);
         if rows.is_empty() {
             return 0;
@@ -879,13 +880,17 @@ pub mod input {
         let row_index = row.min(rows.len() - 1);
         let target = &rows[row_index];
         let col_in = col.saturating_sub(target.prefix_len(prompt));
+        // Walk grapheme clusters so a click lands on a cluster boundary — a
+        // combining-mark cluster (e.g. `e` + `◌́` = `é`) is one visual cell
+        // and never splits. A cluster's width is the sum of its codepoints'
+        // widths (combining marks contribute 0).
         let mut width = 0;
-        for (i, ch) in input[target.start..target.end].char_indices() {
-            let w = ch.width().unwrap_or(0);
-            if width + w > col_in {
+        for (i, cluster) in input[target.start..target.end].grapheme_indices(true) {
+            let cw = cluster.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+            if width + cw > col_in {
                 return target.start + i;
             }
-            width += w;
+            width += cw;
         }
         target.end
     }
@@ -1070,6 +1075,17 @@ pub mod input {
             assert_eq!(char_pos_at_click("héllo", "> ", 20, 0, 4), 3); // after 'é'
             // Clicking on the prompt of a later line -> start of that line.
             assert_eq!(char_pos_at_click("ab\ncd", "> ", 20, 1, 0), 3);
+        }
+
+        #[test]
+        fn click_snaps_to_grapheme_boundaries() {
+            // `e` + combining acute = `é` (one grapheme, one display cell).
+            // A click on that cell returns the cluster's start byte (0), never
+            // a mid-cluster offset like 1 (between `e` and the mark).
+            assert_eq!(char_pos_at_click("e\u{0301}b", "> ", 20, 0, 2), 0); // on `é`
+            assert_eq!(char_pos_at_click("e\u{0301}b", "> ", 20, 0, 3), 3); // after `é`, on `b`
+            // A click past the end clamps to the end (byte 4).
+            assert_eq!(char_pos_at_click("e\u{0301}b", "> ", 20, 0, 30), 4);
         }
 
         #[test]
