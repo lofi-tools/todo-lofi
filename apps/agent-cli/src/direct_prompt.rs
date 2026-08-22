@@ -164,6 +164,56 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
         }
     }
 
+    // ─── nvidia/nemotron-3-ultra (reasoning_content format) ─────────────
+
+    #[test]
+    fn nemotron_thinking_precedes_answer_and_is_split() {
+        let segments = replay("reasoning_content", "nemotron-3-ultra", "list_of_steps");
+        assert_eq!(segments[0].kind, SegmentKind::Thinking);
+        let thinking = segments[0].text.trim();
+        assert!(!thinking.is_empty());
+        let text_segments: Vec<&str> = segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Text)
+            .map(|s| s.text.as_str())
+            .collect();
+        let answer = text_segments.concat();
+        assert!(!answer.is_empty());
+        assert!(answer.contains("1."), "answer should start a numbered list: {answer:?}");
+        assert_ne!(thinking, answer.trim());
+    }
+
+    #[test]
+    fn nemotron_fixture_reasoning_content_never_leaks_into_answer() {
+        let segments = replay("reasoning_content", "nemotron-3-ultra", "list_of_steps");
+        let answer: String = segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Text)
+            .map(|s| s.text.as_str())
+            .collect();
+        for marker in ["The user wants", "Let me think", "think about"] {
+            assert!(
+                !answer.contains(marker),
+                "thinking marker {marker:?} leaked into the answer: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nemotron_all_fixtures_have_thinking_and_text() {
+        for name in ["list_of_steps", "code_snippet", "explain_concept"] {
+            let segments = replay("reasoning_content", "nemotron-3-ultra", name);
+            assert!(
+                segments.iter().any(|s| s.kind == SegmentKind::Thinking),
+                "{name}: expected thinking segments"
+            );
+            assert!(
+                segments.iter().any(|s| s.kind == SegmentKind::Text),
+                "{name}: expected text segments"
+            );
+        }
+    }
+
     #[cfg(feature = "live-tests")]
     mod live_tests {
         use super::*;
@@ -211,6 +261,59 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
                     "{name}: expected answer text, got {segments:?}"
                 );
                 let path = save_fixture("reasoning", "ox-alpha", name, &body).unwrap();
+                eprintln!("captured {name} -> {}", path.display());
+            }
+        }
+
+        /// Prompt nvidia/nemotron-3-ultra (reasoning_content format) and
+        /// capture fixtures. Run with:
+        /// `cargo test -p agent-cli --features live-tests -- --ignored`
+        #[tokio::test]
+        #[ignore]
+        async fn capture_nvidia_nemotron_response_examples() {
+            let config = crate::config::load();
+            let cases = [
+                (
+                    "list_of_steps",
+                    "List the three main steps to debug a failing Rust test. Keep it short.",
+                ),
+                (
+                    "code_snippet",
+                    "Write a short Rust function that returns the sum of a slice of integers. Keep it to a few lines.",
+                ),
+                (
+                    "explain_concept",
+                    "In two sentences, explain what a monad is.",
+                ),
+            ];
+            for (name, prompt) in cases {
+                let body = prompt_raw(
+                    &config,
+                    "nvidia",
+                    "nvidia/nemotron-3-ultra-550b-a55b",
+                    prompt,
+                    1024,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{name}: direct prompt failed: {e}"));
+                assert!(
+                    body.contains("data:"),
+                    "{name}: expected an SSE body, got: {body}"
+                );
+                let segments = parse_sse(
+                    &crate::response_format::family("reasoning_content").unwrap(),
+                    &body,
+                );
+                assert!(
+                    segments.iter().any(|s| s.kind == SegmentKind::Thinking),
+                    "{name}: expected thinking segments, got {segments:?}"
+                );
+                assert!(
+                    segments.iter().any(|s| s.kind == SegmentKind::Text),
+                    "{name}: expected answer text, got {segments:?}"
+                );
+                let path = save_fixture("reasoning_content", "nemotron-3-ultra", name, &body)
+                    .unwrap();
                 eprintln!("captured {name} -> {}", path.display());
             }
         }

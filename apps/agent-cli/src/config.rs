@@ -508,7 +508,8 @@ mod tests {
             r#"{
                 "model_families": {
                     "stealth/ox-alpha": "reasoning",
-                    "deepseek/deepseek-chat": "reasoning_content"
+                    "deepseek/deepseek-chat": "reasoning_content",
+                    "nvidia/nemotron-3-ultra-550b-a55b": "reasoning_content"
                 }
             }"#,
         )
@@ -522,10 +523,14 @@ mod tests {
             config.model_families.get("deepseek/deepseek-chat").map(String::as_str),
             Some("reasoning_content")
         );
+        assert_eq!(
+            config.model_families.get("nvidia/nemotron-3-ultra-550b-a55b").map(String::as_str),
+            Some("reasoning_content")
+        );
         // An empty map leaves existing families untouched.
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
-        assert_eq!(config2.model_families.len(), 2);
+        assert_eq!(config2.model_families.len(), 3);
     }
 
     #[test]
