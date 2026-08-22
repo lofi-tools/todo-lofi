@@ -882,11 +882,12 @@ pub mod input {
         let col_in = col.saturating_sub(target.prefix_len(prompt));
         // Walk grapheme clusters so a click lands on a cluster boundary — a
         // combining-mark cluster (e.g. `e` + `◌́` = `é`) is one visual cell
-        // and never splits. A cluster's width is the sum of its codepoints'
-        // widths (combining marks contribute 0).
+        // and never splits. Use `UnicodeWidthStr::width` on the whole cluster
+        // (not per-codepoint sums) so ZWJ emoji sequences report their true
+        // joined width (2 cells, not the sum of their codepoints' widths).
         let mut width = 0;
         for (i, cluster) in input[target.start..target.end].grapheme_indices(true) {
-            let cw = cluster.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+            let cw = cluster.width();
             if width + cw > col_in {
                 return target.start + i;
             }
@@ -1053,6 +1054,39 @@ pub mod input {
             ]);
             assert_eq!(cursor_in_rows(&rows, "hello world foo", 6), (1, 2));
             assert_eq!(cursor_in_rows(&rows, "hello world foo", 12), (2, 2));
+        }
+
+        #[test]
+        fn cursor_position_zwj_emoji_sequence() {
+            // A ZWJ emoji sequence is one grapheme cluster spanning many
+            // bytes (here 18) but renders as a single 2-cell-wide unit.
+            // The cursor must jump from column 2 (start) to column 4 (end)
+            // across the whole cluster, and never panic on a mid-cluster
+            // byte offset the movement helpers wouldn't produce.
+            use unicode_width::UnicodeWidthStr;
+            let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"; // 👨‍👩‍👧
+            let input = format!("ab{}cd", emoji);
+            // Before the emoji: column = prompt(2) + "ab"(2) = 4.
+            let ab = 2;
+            let after_emoji = ab + emoji.len();
+            assert_eq!(cursor(&input, ab), (0, 4));
+            // After the whole emoji: column = prompt + 2 + emoji width (2).
+            assert_eq!(cursor(&input, after_emoji), (0, 4 + emoji.width()));
+            // A mid-cluster byte offset must not panic and lands at the
+            // cluster's leading edge (unicode-width ignores the partial
+            // trailing sequence).
+            let mid = ab + 4; // inside the man codepoint's follower (ZWJ)
+            let pos = cursor(&input, mid);
+            assert_eq!(pos.0, 0);
+
+            // Click round-trip: a click inside the emoji's 2-cell span
+            // returns the cluster's start byte; just past it returns the end.
+            // Prompt is "> " (2 cells); `a`/`b` are content cols 0,1, the emoji
+            // spans content cols 2..4, so screen cols 4..6 are on the emoji and
+            // screen col 6 (content col 4) is just past it.
+            assert_eq!(char_pos_at_click(&input, "> ", 20, 0, 4), ab); // on emoji -> start
+            assert_eq!(char_pos_at_click(&input, "> ", 20, 0, 5), ab); // middle -> still start
+            assert_eq!(char_pos_at_click(&input, "> ", 20, 0, 6), after_emoji); // past -> end
         }
 
         #[test]
