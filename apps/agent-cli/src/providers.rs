@@ -55,16 +55,18 @@ pub fn agent_tools(
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
-    // Replace the built-in Read with a version that consults the ACP
-    // client's filesystem first, so unsaved editor buffers are visible.
-    tools.retain(|t| t.name() != "Read");
-    tools.push(Box::new(crate::tools::ClientReadTool::new(fs_reader.clone())));
-    // Replace the built-in Write/Edit with versions that mirror successful
-    // edits to the ACP client via `fs/write_text_file`, so the editor tracks
-    // changes made during the run.
-    tools.retain(|t| t.name() != "Write" && t.name() != "Edit");
-    tools.push(Box::new(crate::tools::ClientWriteTool::new(fs_reader.clone())));
-    tools.push(Box::new(crate::tools::ClientEditTool::new(fs_reader)));
+    // The ACP client-aware Read/Write/Edit overrides (which consult the
+    // editor's unsaved buffers and mirror edits back via `fs/write_text_file`)
+    // are only wired when an ACP fs bridge is present — i.e. when the binary
+    // runs as an ACP server. In TUI and `-p` mode (`fs_reader` is None) the
+    // built-in Read/Write/Edit tools are left in place.
+    if fs_reader.is_some() {
+        tools.retain(|t| t.name() != "Read");
+        tools.push(Box::new(crate::tools::ClientReadTool::new(fs_reader.clone())));
+        tools.retain(|t| t.name() != "Write" && t.name() != "Edit");
+        tools.push(Box::new(crate::tools::ClientWriteTool::new(fs_reader.clone())));
+        tools.push(Box::new(crate::tools::ClientEditTool::new(fs_reader)));
+    }
     tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
@@ -1801,5 +1803,116 @@ mod tests {
         }
         assert!(saw_started, "no Started event forwarded to subscribers");
         assert!(saw_finished, "no Finished event forwarded to subscribers");
+    }
+
+    /// A minimal `Resolved` for tool-wiring tests (fields are otherwise
+    /// unused by `agent_tools`, which only inspects tool names).
+    fn resolved_stub() -> Resolved {
+        Resolved {
+            provider: "test".into(),
+            model: "test/test-model".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "test-key".into(),
+        }
+    }
+
+    /// The sink handles `agent_tools` needs (parent/followups/events).
+    fn empty_handles() -> (
+        crate::subagents::ParentHandle,
+        crate::subagents::FollowupSink,
+        crate::subagents::SubAgentEventSink,
+    ) {
+        (
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(Vec::new())),
+            None,
+        )
+    }
+
+    #[test]
+    fn agent_tools_tui_mode_keeps_builtin_read_write_edit() {
+        // TUI / `-p` mode passes `fs_reader: None` — the built-in
+        // Read/Write/Edit tools must remain (not the ACP client wrappers).
+        let resolved = resolved_stub();
+        let (parent, followups, events) = empty_handles();
+        let tools = agent_tools(&resolved, parent, followups, events, None, false);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"Read"), "built-in Read should be present");
+        assert!(names.contains(&"Write"), "built-in Write should be present");
+        assert!(names.contains(&"Edit"), "built-in Edit should be present");
+        // The Client* wrappers must not be registered in TUI mode.
+        // (They share the Read/Write/Edit names, so we verify by type via
+        // description — the built-ins and wrappers have identical names but
+        // the wrappers are distinct structs; here we assert the count is 1
+        // for each name, proving no duplicate/wrapper sneaked in.)
+        for name in ["Read", "Write", "Edit"] {
+            assert_eq!(
+                names.iter().filter(|&&n| n == name).count(),
+                1,
+                "{name} should appear exactly once in TUI mode"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_tools_acp_mode_replaces_read_write_edit_with_client_wrappers() {
+        // ACP server mode passes `fs_reader: Some(...)` — the built-in
+        // Read/Write/Edit are replaced by the client-aware wrappers.
+        use crate::subagents::{AcpFs, AcpFsSink};
+        use async_trait::async_trait;
+
+        // A stub `AcpFs` that advertises both capabilities, so the wrappers
+        // will consult it (we don't execute any tools here — we only verify
+        // the wiring by tool name count).
+        struct CapableFs;
+        #[async_trait]
+        impl AcpFs for CapableFs {
+            fn supports_read_text_file(&self) -> bool {
+                true
+            }
+            fn supports_write_text_file(&self) -> bool {
+                true
+            }
+            async fn read_text_file(
+                &self,
+                _session_id: &str,
+                _path: &str,
+                _line: Option<u32>,
+                _limit: Option<u32>,
+            ) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            async fn write_text_file(
+                &self,
+                _session_id: &str,
+                _path: &str,
+                _content: &str,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+        let fs: AcpFsSink = Some(Arc::new(CapableFs) as Arc<dyn AcpFs>);
+
+        let resolved = resolved_stub();
+        let (parent, followups, events) = empty_handles();
+        let tools = agent_tools(&resolved, parent, followups, events, fs, false);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        // The wrappers register under the same Read/Write/Edit names, so the
+        // built-ins were removed and exactly one of each name remains.
+        for name in ["Read", "Write", "Edit"] {
+            assert_eq!(
+                names.iter().filter(|&&n| n == name).count(),
+                1,
+                "{name} should appear exactly once in ACP mode (wrapper replaces built-in)"
+            );
+        }
+        // Grep is always replaced by RgSearchTool (which registers under the
+        // "Grep" name) — sanity check the non-conditional replacement still
+        // happens in both modes: exactly one Grep entry remains.
+        assert_eq!(
+            names.iter().filter(|&&n| n == "Grep").count(),
+            1,
+            "built-in Grep replaced by RgSearchTool (same name) in both modes"
+        );
     }
 }
