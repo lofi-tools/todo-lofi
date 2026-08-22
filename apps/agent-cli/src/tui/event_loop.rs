@@ -1719,16 +1719,16 @@ fn handle_provider_explorer_key(
 fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: AgentEvent) {
     match event {
         AgentEvent::TextDelta(text) => {
-            state.streaming_text.push_str(&text);
+            state.append_text(&text);
         }
         AgentEvent::ThinkingDelta(text) => {
-            state.streaming_thinking.push_str(&text);
+            state.append_thinking(&text);
         }
         AgentEvent::ToolStart {
             name, id: _, input, ..
         } => {
             let summary = tool_input_summary(&name, &input);
-            state.active_tools.push(ToolCall {
+            state.active_blocks.push(crate::tui::app::OutputBlock::Tool(ToolCall {
                 name,
                 input_summary: summary,
                 status: ToolStatus::Running,
@@ -1737,12 +1737,16 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 duration_ms: None,
                 children: Vec::new(),
                 run_id: None,
-            });
+            }));
             state.tool_count += 1;
             // A `spawn_agents` call may have started before the UI processed
             // its ToolStart — attach any sub-agent activity that arrived in
             // the meantime.
-            if state.active_tools.last().is_some_and(|t| t.name == "spawn_agents") {
+            if state
+                .active_blocks
+                .last()
+                .is_some_and(|b| matches!(b, crate::tui::app::OutputBlock::Tool(t) if t.name == "spawn_agents"))
+            {
                 drain_pending_subagents(state);
             }
         }
@@ -1754,7 +1758,12 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             duration,
             compression: _,
         } => {
-            if let Some(tool) = state.active_tools.iter_mut().rev().find(|t| t.name == name) {
+            if let Some(crate::tui::app::OutputBlock::Tool(tool)) = state
+                .active_blocks
+                .iter_mut()
+                .rev()
+                .find(|b| matches!(b, crate::tui::app::OutputBlock::Tool(t) if t.name == name))
+            {
                 tool.status = if is_error {
                     ToolStatus::Error
                 } else {
@@ -1795,8 +1804,7 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             state.turns.push(crate::tui::app::Turn {
                 role: crate::tui::app::TurnRole::System,
                 content: format!("Error: {msg}"),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             });
         }
         AgentEvent::Complete(_) => {
@@ -1834,30 +1842,32 @@ enum SpawnParentLoc {
     Committed(usize),
 }
 
+/// The index of the last `spawn_agents` tool call in `blocks` matching
+/// `pred` (None when no block holds such a call).
+fn last_spawn_tool_block(
+    blocks: &[crate::tui::app::OutputBlock],
+    pred: impl Fn(&ToolCall) -> bool,
+) -> Option<usize> {
+    blocks.iter().rposition(|b| match b {
+        crate::tui::app::OutputBlock::Tool(t) => t.name == "spawn_agents" && pred(t),
+        _ => false,
+    })
+}
+
 /// Find the `spawn_agents` call that owns `run_id`: first any call already
 /// bound to that run (active or committed — late-arriving events land here),
 /// then the currently-running spawn call to bind to. Tools run sequentially,
 /// so at most one spawn call is in flight at a time.
 fn find_spawn_parent(state: &AppState, run_id: u64) -> Option<SpawnParentLoc> {
-    if let Some(idx) = state
-        .active_tools
-        .iter()
-        .rposition(|t| t.name == "spawn_agents" && tool_owns_run(t, run_id))
-    {
+    if let Some(idx) = last_spawn_tool_block(&state.active_blocks, |t| tool_owns_run(t, run_id)) {
         return Some(SpawnParentLoc::Active(idx));
     }
     if let Some(turn) = state.turns.last()
-        && let Some(idx) = turn
-            .tools
-            .iter()
-            .rposition(|t| t.name == "spawn_agents" && tool_owns_run(t, run_id))
+        && let Some(idx) = last_spawn_tool_block(&turn.blocks, |t| tool_owns_run(t, run_id))
     {
         return Some(SpawnParentLoc::Committed(idx));
     }
-    state
-        .active_tools
-        .iter()
-        .rposition(|t| t.name == "spawn_agents" && t.status == ToolStatus::Running)
+    last_spawn_tool_block(&state.active_blocks, |t| t.status == ToolStatus::Running)
         .map(SpawnParentLoc::Active)
 }
 
@@ -1875,9 +1885,19 @@ fn handle_subagent_event(
         state.pending_subagent.push((run_id, activity));
         return;
     };
+    // `loc` always points at a Tool block (find_spawn_parent only returns
+    // indices of `spawn_agents` tool calls).
     let parent = match loc {
-        SpawnParentLoc::Active(idx) => &mut state.active_tools[idx],
-        SpawnParentLoc::Committed(idx) => &mut state.turns.last_mut().expect("checked").tools[idx],
+        SpawnParentLoc::Active(idx) => match &mut state.active_blocks[idx] {
+            crate::tui::app::OutputBlock::Tool(t) => t,
+            _ => return,
+        },
+        SpawnParentLoc::Committed(idx) => {
+            match &mut state.turns.last_mut().expect("checked").blocks[idx] {
+                crate::tui::app::OutputBlock::Tool(t) => t,
+                _ => return,
+            }
+        }
     };
     if parent.run_id.is_none() {
         parent.run_id = Some(run_id);
@@ -1889,9 +1909,14 @@ fn handle_subagent_event(
 /// created to the just-pushed call. Tools run sequentially, so all buffered
 /// events belong to it.
 fn drain_pending_subagents(state: &mut AppState) {
+    // Only called right after the `spawn_agents` ToolStart was pushed, so the
+    // trailing block is that call; without it there is nothing to attach to
+    // yet, so keep the events buffered.
+    let Some(crate::tui::app::OutputBlock::Tool(parent)) = state.active_blocks.last_mut() else {
+        return;
+    };
     let pending = std::mem::take(&mut state.pending_subagent);
     for (run_id, activity) in pending {
-        let parent = state.active_tools.last_mut().expect("call was just pushed");
         if parent.run_id.is_none() {
             parent.run_id = Some(run_id);
         }
@@ -2008,9 +2033,7 @@ fn handle_slash_command(
         }
         "clear" => {
             state.turns.clear();
-            state.streaming_text.clear();
-            state.streaming_thinking.clear();
-            state.active_tools.clear();
+            state.active_blocks.clear();
         }
         "exit" | "quit" | "q" => {
             state.should_quit = true;
@@ -2060,15 +2083,13 @@ fn handle_slash_command(
                     content: format!(
                         "Rewound {removed} turn(s). You can now re-send your last message."
                     ),
-                    tools: Vec::new(),
-                    thinking: None,
+                    blocks: Vec::new(),
                 });
             } else {
                 state.turns.push(crate::tui::app::Turn {
                     role: crate::tui::app::TurnRole::System,
                     content: "Nothing to rewind.".into(),
-                    tools: Vec::new(),
-                    thinking: None,
+                    blocks: Vec::new(),
                 });
             }
         }
@@ -2107,8 +2128,7 @@ fn handle_slash_command(
             state.turns.push(crate::tui::app::Turn {
                 role: crate::tui::app::TurnRole::System,
                 content: "Memory is injected into the system prompt automatically.\nUse AGENTS.md or .abstract/instructions.md in your project for persistent instructions.".into(),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             });
         }
         // "sessions" | "session" | "ls" => {
@@ -2235,8 +2255,7 @@ fn handle_slash_command(
             state.turns.push(crate::tui::app::Turn {
                 role: crate::tui::app::TurnRole::System,
                 content: "Compaction will run automatically at 90% context usage.".into(),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             });
         }
         "proxy" => {
@@ -2278,8 +2297,7 @@ fn handle_slash_command(
                 content: format!(
                     "Proxy: {status}\nURL: {proxy_url}\nAccounts:\n{accounts_str}\n\nConfigure in .abstract/config.toml:\n[proxy]\nenabled = true\nurl = \"http://localhost:8317/v1\""
                 ),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             });
         }
         "provider" => {
@@ -2292,8 +2310,7 @@ fn handle_slash_command(
             state.turns.push(crate::tui::app::Turn {
                 role: crate::tui::app::TurnRole::System,
                 content: format!("Unknown command: /{cmd}. Type /help for commands."),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             });
         }
     }
@@ -2378,6 +2395,19 @@ mod tests {
         }
     }
 
+    /// Push a tool call as the trailing active block (as ToolStart does).
+    fn push_tool(state: &mut AppState, tool: ToolCall) {
+        state.active_blocks.push(crate::tui::app::OutputBlock::Tool(tool));
+    }
+
+    /// The tool call in `blocks` at `idx` (panics if that block isn't a tool).
+    fn tool_at(blocks: &[crate::tui::app::OutputBlock], idx: usize) -> &ToolCall {
+        match &blocks[idx] {
+            crate::tui::app::OutputBlock::Tool(t) => t,
+            _ => panic!("block {idx} is not a tool call"),
+        }
+    }
+
     #[test]
     fn subagent_events_buffer_until_parent_tool_start() {
         let mut s = state();
@@ -2392,15 +2422,15 @@ mod tests {
         );
         // No spawn_agents call yet: the event is buffered, not dropped.
         assert_eq!(s.pending_subagent.len(), 1);
-        assert!(s.active_tools.is_empty());
+        assert!(s.active_blocks.is_empty());
 
         // The parent ToolStart arrives (as handle_agent_event pushes it) and
         // drains the buffer.
-        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        push_tool(&mut s, spawn_call(ToolStatus::Running, None));
         drain_pending_subagents(&mut s);
         assert!(s.pending_subagent.is_empty());
 
-        let parent = &s.active_tools[0];
+        let parent = tool_at(&s.active_blocks, 0);
         assert_eq!(parent.run_id, Some(1));
         assert_eq!(parent.children.len(), 1);
         assert_eq!(parent.children[0].name, "[code-reviewer]");
@@ -2410,7 +2440,7 @@ mod tests {
     #[test]
     fn subagent_events_nest_under_running_parent() {
         let mut s = state();
-        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        push_tool(&mut s, spawn_call(ToolStatus::Running, None));
 
         let run_id = 7;
         handle_subagent_event(
@@ -2448,7 +2478,7 @@ mod tests {
             },
         );
 
-        let parent = &s.active_tools[0];
+        let parent = tool_at(&s.active_blocks, 0);
         assert_eq!(parent.run_id, Some(run_id));
         assert_eq!(parent.children.len(), 1);
         let header = &parent.children[0];
@@ -2465,7 +2495,7 @@ mod tests {
     #[test]
     fn multiple_subagents_in_one_spawn_call() {
         let mut s = state();
-        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        push_tool(&mut s, spawn_call(ToolStatus::Running, None));
 
         for (run_id, agent_type) in [(1u64, "researcher-web"), (2, "code-searcher")] {
             handle_subagent_event(
@@ -2486,7 +2516,7 @@ mod tests {
             );
         }
 
-        let parent = &s.active_tools[0];
+        let parent = tool_at(&s.active_blocks, 0);
         assert_eq!(parent.children.len(), 2);
         assert_eq!(parent.children[0].name, "[researcher-web]");
         assert_eq!(parent.children[1].name, "[code-searcher]");
@@ -2497,7 +2527,7 @@ mod tests {
     #[test]
     fn late_events_attach_to_committed_turn() {
         let mut s = state();
-        s.active_tools.push(spawn_call(ToolStatus::Running, None));
+        push_tool(&mut s, spawn_call(ToolStatus::Running, None));
         let run_id = 3;
         handle_subagent_event(
             &mut s,
@@ -2530,10 +2560,10 @@ mod tests {
             },
         );
 
-        assert!(s.active_tools.is_empty());
+        assert!(s.active_blocks.is_empty());
         assert!(s.pending_subagent.is_empty());
         let turn = s.turns.last().expect("committed");
-        let parent = &turn.tools[0];
+        let parent = tool_at(&turn.blocks, 0);
         assert_eq!(parent.children[0].name, "[researcher-web]");
         assert_eq!(parent.children[0].children[0].status, ToolStatus::Done);
     }

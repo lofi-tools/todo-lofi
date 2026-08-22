@@ -1213,18 +1213,10 @@ pub mod messages {
                     items.push(VItem::new(Line::default()));
                 }
                 TurnRole::Assistant => {
-                    for tool in &turn.tools {
-                        for line in render_tool_call(tool, theme, frame_count) {
-                            items.push(VItem::new(line));
-                        }
-                    }
-                    if !turn.content.is_empty() {
-                        let md_lines = crate::tui::markdown::render_markdown(&turn.content, width);
-                        for md_line in md_lines {
-                            let mut spans = vec![Span::raw("  ")];
-                            spans.extend(md_line.spans);
-                            items.push(VItem::new(Line::from(spans)));
-                        }
+                    // Render the turn's blocks in arrival order: text,
+                    // thinking, and tool calls interleaved as they happened.
+                    for block in &turn.blocks {
+                        items.extend(render_block_lines(block, theme, width, frame_count));
                     }
                     items.push(VItem::new(Line::default()));
                 }
@@ -1259,33 +1251,14 @@ pub mod messages {
             return items;
         }
 
-        // Active tool calls
-        for tool in &state.active_tools {
-            for line in render_tool_call(tool, theme, state.frame_count) {
-                items.push(VItem::new(line));
-            }
-        }
-
-        // Thinking indicator
-        if !state.streaming_thinking.is_empty() {
-            items.push(VItem::new(Line::from(Span::styled(
-                "  thinking...",
-                Style::default().fg(theme.thinking),
-            ))));
-        }
-
-        // Streaming text
-        if !state.streaming_text.is_empty() {
-            let md_lines = crate::tui::markdown::render_markdown(&state.streaming_text, width);
-            for md_line in md_lines {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(md_line.spans);
-                items.push(VItem::new(Line::from(spans)));
-            }
+        // The in-progress turn's blocks in arrival order: tools, thinking,
+        // and text exactly as the agent produced them.
+        for block in &state.active_blocks {
+            items.extend(render_block_lines(block, theme, width, state.frame_count));
         }
 
         // Cursor blink
-        if state.streaming_text.is_empty() && state.active_tools.is_empty() {
+        if state.active_blocks.is_empty() {
             let dot = if state.frame_count % 8 < 4 {
                 "▊"
             } else {
@@ -1297,6 +1270,45 @@ pub mod messages {
             ))));
         }
 
+        items
+    }
+
+    /// Render one assistant output block (text / thinking / tool call) into
+    /// virtual-list items. Shared by the committed and streaming paths so a
+    /// block renders identically before and after the turn commits.
+    fn render_block_lines(
+        block: &crate::tui::app::OutputBlock,
+        theme: &Theme,
+        width: u16,
+        frame_count: u64,
+    ) -> Vec<VItem> {
+        let mut items = Vec::new();
+        match block {
+            crate::tui::app::OutputBlock::Tool(tool) => {
+                for line in render_tool_call(tool, theme, frame_count) {
+                    items.push(VItem::new(line));
+                }
+            }
+            crate::tui::app::OutputBlock::Thinking(text) => {
+                // Reasoning is dimmed and italic so it reads as background
+                // thought rather than part of the answer.
+                let style = Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC);
+                for wline in wrap_text(text, (width as usize).saturating_sub(3)) {
+                    items.push(VItem::new(Line::from(vec![
+                        Span::styled("  ", Style::default().fg(theme.thinking)),
+                        Span::styled(wline, style),
+                    ])));
+                }
+            }
+            crate::tui::app::OutputBlock::Text(text) => {
+                let md_lines = crate::tui::markdown::render_markdown(text, width);
+                for md_line in md_lines {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(md_line.spans);
+                    items.push(VItem::new(Line::from(spans)));
+                }
+            }
+        }
         items
     }
 
@@ -1361,6 +1373,56 @@ pub mod messages {
         }
 
         #[test]
+        fn assistant_blocks_render_in_arrival_order() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{OutputBlock, ToolCall, ToolStatus, Turn, TurnRole},
+                theme::Theme,
+            };
+            use std::time::Instant;
+
+            let turn = Turn {
+                role: TurnRole::Assistant,
+                content: String::new(),
+                blocks: vec![
+                    OutputBlock::Text("leading words".into()),
+                    OutputBlock::Tool(ToolCall {
+                        name: "Grep".into(),
+                        input_summary: "pattern".into(),
+                        status: ToolStatus::Done,
+                        output_preview: Some("matches".into()),
+                        started_at: Instant::now(),
+                        duration_ms: Some(5),
+                        children: Vec::new(),
+                        run_id: None,
+                    }),
+                    OutputBlock::Thinking("hmm".into()),
+                    OutputBlock::Text("trailing words".into()),
+                ],
+            };
+            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let joined: String = lines
+                .iter()
+                .map(|item| {
+                    item.line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let lead = joined.find("leading words").expect("leading text rendered");
+            let tool = joined.find("Grep").expect("tool call rendered");
+            let think = joined.find("hmm").expect("thinking rendered");
+            let trail = joined.find("trailing words").expect("trailing text rendered");
+            assert!(
+                lead < tool && tool < think && think < trail,
+                "blocks rendered out of order:\n{joined}"
+            );
+        }
+
+        #[test]
         fn system_turns_render_as_inline_block() {
             use super::build_committed_lines;
             use crate::tui::{
@@ -1371,8 +1433,7 @@ pub mod messages {
             let turn = Turn {
                 role: TurnRole::System,
                 content: "model a failed — falling back to model b".into(),
-                tools: Vec::new(),
-                thinking: None,
+                blocks: Vec::new(),
             };
             let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
             let texts: Vec<String> = lines
@@ -2143,7 +2204,7 @@ pub mod status {
         let text = if state.is_streaming {
             let elapsed = state.elapsed_ms();
             let secs = elapsed as f64 / 1000.0;
-            let tools = state.active_tools.len();
+            let tools = state.active_tools().count();
             let tokens = state.input_tokens + state.output_tokens;
             format!(
                 " streaming... | {} tool(s) | {:.1}s | {} tokens",

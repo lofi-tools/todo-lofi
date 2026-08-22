@@ -10,9 +10,13 @@ use tokio::sync::oneshot;
 #[derive(Debug, Clone)]
 pub struct Turn {
     pub role: TurnRole,
+    /// Assistant turns render from these ordered blocks — text, thinking, and
+    /// tool calls in the order they happened, so the output box shows the
+    /// turn exactly as it unfolded instead of all text and all tools in two
+    /// separate piles. Empty for User/System turns.
+    pub blocks: Vec<OutputBlock>,
+    /// Plain text for User/System turns.
     pub content: String,
-    pub tools: Vec<ToolCall>,
-    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +48,36 @@ pub enum ToolStatus {
     Running,
     Done,
     Error,
+}
+
+/// One unit of assistant output, kept in arrival order: a text chunk, a
+/// thinking chunk, or a tool call. Consecutive text (or thinking) deltas are
+/// coalesced into a single block; tool calls get their own block so the UI
+/// can interleave them with the surrounding prose exactly as the agent
+/// produced them.
+#[derive(Debug, Clone)]
+pub enum OutputBlock {
+    Text(String),
+    Thinking(String),
+    Tool(ToolCall),
+}
+
+impl OutputBlock {
+    /// The tool call inside this block, if it is one.
+    pub fn as_tool(&self) -> Option<&ToolCall> {
+        match self {
+            OutputBlock::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the tool call inside this block, if it is one.
+    pub fn as_tool_mut(&mut self) -> Option<&mut ToolCall> {
+        match self {
+            OutputBlock::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
 }
 
 /// Provider/model picker shown by `/model`.
@@ -318,10 +352,11 @@ pub struct OutputSelectionRange {
 pub struct AppState {
     // ── Conversation ──
     pub turns: Vec<Turn>,
-    pub streaming_text: String,
-    pub streaming_thinking: String,
+    /// The in-progress assistant turn as an ordered block list (text,
+    /// thinking, and tool calls interleaved in arrival order). Committed into
+    /// a `Turn` by [`AppState::commit_turn`].
+    pub active_blocks: Vec<OutputBlock>,
     pub is_streaming: bool,
-    pub active_tools: Vec<ToolCall>,
     /// Sub-agent activity stream (forwarded from the `spawn_agents` tool).
     pub subagent_rx: Option<tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity>>,
     /// Sub-agent events that arrived before their `spawn_agents` parent call
@@ -409,10 +444,8 @@ impl AppState {
     ) -> Self {
         Self {
             turns: Vec::new(),
-            streaming_text: String::new(),
-            streaming_thinking: String::new(),
+            active_blocks: Vec::new(),
             is_streaming: false,
-            active_tools: Vec::new(),
             subagent_rx,
             pending_subagent: Vec::new(),
             input: String::new(),
@@ -592,18 +625,42 @@ impl AppState {
         }
     }
 
-    /// Commit the current streaming text into a completed turn.
+    /// Append a text delta to the streaming output, coalescing consecutive
+    /// deltas into one block (keeps the block list small and the text
+    /// contiguous).
+    pub fn append_text(&mut self, text: &str) {
+        match self.active_blocks.last_mut() {
+            Some(OutputBlock::Text(t)) => t.push_str(text),
+            _ => self.active_blocks.push(OutputBlock::Text(text.to_string())),
+        }
+    }
+
+    /// Append a thinking delta to the streaming output, coalescing
+    /// consecutive deltas into one block.
+    pub fn append_thinking(&mut self, text: &str) {
+        match self.active_blocks.last_mut() {
+            Some(OutputBlock::Thinking(t)) => t.push_str(text),
+            _ => self.active_blocks.push(OutputBlock::Thinking(text.to_string())),
+        }
+    }
+
+    /// The active (streaming) tool calls, in order.
+    pub fn active_tools(&self) -> impl Iterator<Item = &ToolCall> {
+        self.active_blocks.iter().filter_map(OutputBlock::as_tool)
+    }
+
+    /// Mutable access to the active (streaming) tool calls, in order.
+    pub fn active_tools_mut(&mut self) -> impl Iterator<Item = &mut ToolCall> {
+        self.active_blocks.iter_mut().filter_map(OutputBlock::as_tool_mut)
+    }
+
+    /// Commit the current streaming blocks into a completed turn.
     pub fn commit_turn(&mut self) {
-        if !self.streaming_text.is_empty() || !self.active_tools.is_empty() {
+        if !self.active_blocks.is_empty() {
             self.turns.push(Turn {
                 role: TurnRole::Assistant,
-                content: std::mem::take(&mut self.streaming_text),
-                tools: std::mem::take(&mut self.active_tools),
-                thinking: if self.streaming_thinking.is_empty() {
-                    None
-                } else {
-                    Some(std::mem::take(&mut self.streaming_thinking))
-                },
+                blocks: std::mem::take(&mut self.active_blocks),
+                content: String::new(),
             });
             self.turn_count += 1;
         }
@@ -618,8 +675,7 @@ impl AppState {
         self.turns.push(Turn {
             role: TurnRole::User,
             content: text.to_string(),
-            tools: Vec::new(),
-            thinking: None,
+            blocks: Vec::new(),
         });
         self.messages_dirty = true;
         self.dirty = true;
@@ -630,8 +686,7 @@ impl AppState {
         self.turns.push(Turn {
             role: TurnRole::System,
             content: text.into(),
-            tools: Vec::new(),
-            thinking: None,
+            blocks: Vec::new(),
         });
         self.messages_dirty = true;
         self.dirty = true;
@@ -668,6 +723,66 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_blocks_coalesce_and_commit_in_order() {
+        let mut s = AppState::new("test-model", None);
+        s.is_streaming = true;
+        // The agent alternates: text, tool call, thinking, then more text.
+        s.append_text("Hello ");
+        s.append_text("world");
+        s.active_blocks.push(OutputBlock::Tool(ToolCall {
+            name: "Grep".into(),
+            input_summary: "pattern".into(),
+            status: ToolStatus::Running,
+            output_preview: None,
+            started_at: Instant::now(),
+            duration_ms: None,
+            children: Vec::new(),
+            run_id: None,
+        }));
+        s.append_thinking("let me reason");
+        s.append_text(" Done.");
+
+        // Consecutive text (or thinking) deltas coalesce into one block;
+        // tools and interleaved chunks keep their own blocks, in order.
+        let kinds: Vec<&str> = s
+            .active_blocks
+            .iter()
+            .map(|b| match b {
+                OutputBlock::Text(_) => "text",
+                OutputBlock::Thinking(_) => "thinking",
+                OutputBlock::Tool(_) => "tool",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "tool", "thinking", "text"]);
+        match &s.active_blocks[0] {
+            OutputBlock::Text(t) => assert_eq!(t, "Hello world"),
+            _ => panic!("expected text block"),
+        }
+
+        // Committing moves the ordered blocks into the turn untouched.
+        s.commit_turn();
+        assert!(s.active_blocks.is_empty());
+        let turn = s.turns.last().expect("committed");
+        assert_eq!(turn.role, TurnRole::Assistant);
+        let kinds: Vec<&str> = turn
+            .blocks
+            .iter()
+            .map(|b| match b {
+                OutputBlock::Text(_) => "text",
+                OutputBlock::Thinking(_) => "thinking",
+                OutputBlock::Tool(_) => "tool",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["text", "tool", "thinking", "text"]);
+        // A turn with only thinking (no text/tools) still commits.
+        let mut s = AppState::new("test-model", None);
+        s.append_thinking("deep thought");
+        s.commit_turn();
+        assert_eq!(s.turns.len(), 1);
+        assert!(matches!(s.turns[0].blocks[0], OutputBlock::Thinking(_)));
+    }
 
     #[test]
     fn empty_query_lists_all_commands() {
