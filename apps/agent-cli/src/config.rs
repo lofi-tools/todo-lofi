@@ -111,6 +111,109 @@ impl Default for AppConfig {
     }
 }
 
+// ─── Default-config template ────────────────────────────────────────────────
+
+/// Render every config field with its default value as pretty-printed JSONC
+/// (JSON with `//` comments). Each comment documents the field's possible
+/// values; the output parses with `serde_json_lenient`, so it can be saved
+/// directly as `config.json`.
+pub fn default_config_jsonc() -> String {
+    let defaults = AppConfig::default();
+    let value = serde_json::to_value(&defaults).expect("default config is serializable");
+    let obj = value.as_object().expect("config serializes to an object");
+    let mut out = String::from("{\n");
+    // (field, possible values). Order mirrors the struct declaration.
+    let fields: &[(&str, &str)] = &[
+        ("model", "Model id or alias (\"auto\", \"opus\", \"sonnet\", \"haiku\", \"gpt4o\", \"gemini\", \"llama\", \"deepseek\", \"grok\", \"mistral\", or \"provider/model\")"),
+        ("provider", "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"combos\", or a name from `providers`)"),
+        ("max_turns", "Maximum agent turns per run (u32)"),
+        ("max_tokens", "Maximum output tokens per response (u32)"),
+        ("effort", "Thinking effort: \"low\", \"medium\", \"high\", \"max\""),
+        ("output_style", "Answer style: \"default\""),
+        ("theme", "TUI theme: \"enterprise\", \"light\", \"solarized\""),
+        ("auto_compact", "Auto-compact context near the limit (true/false)"),
+        ("graph_memory", "Enable memory graph (true/false)"),
+        ("permissions_mode", "Tool permission mode: \"interactive\", \"allow_all\""),
+        ("working_dir", "Working directory (path)"),
+        ("fallback_models", "Fallback model ids (\"provider/model\") tried on error"),
+        ("mcp_servers", "MCP servers: [{ \"name\", \"command\", \"args\", \"env\" }]"),
+        ("hooks", "Lifecycle hooks: [{ \"event\", \"command\" }]"),
+        ("proxy", "Proxy routing (VibeProxy or compatible)"),
+        ("fallback", "Combo fallback tuning"),
+        ("providers", "Per-provider overrides (base_url, api_key, models)"),
+        ("combos", "Named fallback combos: { name: [[\"provider\", \"model\"], ...] }"),
+        ("free_models_only", "Only show free coding models in pickers (true/false)"),
+        ("model_families", "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\""),
+        ("benchmark_mode", "Benchmark/headless mode (true/false)"),
+        ("embedding_api", "Enable embedding API for semantic search (true/false)"),
+        ("output_format", "Output format: \"text\", \"stream-json\""),
+        ("compression_level", "Tool output compression: \"off\", \"minimal\", \"aggressive\""),
+    ];
+    for (i, (key, comment)) in fields.iter().enumerate() {
+        let field_value = obj.get(*key).expect("serialized config has every field");
+        out.push_str(&format!("  // {comment}\n"));
+        out.push_str(&format!("  \"{key}\": "));
+        match *key {
+            "proxy" => append_nested_jsonc(
+                &mut out,
+                field_value,
+                &[
+                    ("enabled", "Auto-detect the proxy (true/false)"),
+                    ("force", "Force the proxy even when API keys are present (true/false)"),
+                    ("url", "Proxy base URL (default http://localhost:8317/v1)"),
+                ],
+            ),
+            "fallback" => append_nested_jsonc(
+                &mut out,
+                field_value,
+                &[
+                    ("enabled", "Enable combo fallback (true/false)"),
+                    ("cooldown_seconds", "Cooldown after a failed entry, in seconds (u64)"),
+                    ("cooldowns_file", "Cooldown persistence path, or null to disable (path | null)"),
+                ],
+            ),
+            _ => out.push_str(&pretty_indented(field_value, 2)),
+        }
+        out.push_str(if i + 1 < fields.len() { "," } else { "" });
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Append `value` as a JSONC object with a comment line above each subfield.
+fn append_nested_jsonc(out: &mut String, value: &serde_json::Value, subfields: &[(&str, &str)]) {
+    let obj = value.as_object().expect("nested config field is an object");
+    out.push_str("{\n");
+    for (i, (key, comment)) in subfields.iter().enumerate() {
+        let field_value = obj.get(*key).expect("nested field present");
+        out.push_str(&format!("    // {comment}\n"));
+        out.push_str(&format!("    \"{key}\": "));
+        out.push_str(&pretty_indented(field_value, 4));
+        out.push_str(if i + 1 < subfields.len() { "," } else { "" });
+        out.push('\n');
+    }
+    out.push_str("  }");
+}
+
+/// Pretty-print `value`, indenting continuation lines by `base_indent` spaces
+/// so they align under the key that introduced the value.
+fn pretty_indented(value: &serde_json::Value, base_indent: usize) -> String {
+    let pretty = serde_json::to_string_pretty(value).unwrap_or_default();
+    if !pretty.contains('\n') {
+        return pretty;
+    }
+    let pad = " ".repeat(base_indent);
+    let mut lines = pretty.lines();
+    let mut out = String::from(lines.next().unwrap_or_default());
+    for line in lines {
+        out.push('\n');
+        out.push_str(&pad);
+        out.push_str(line);
+    }
+    out
+}
+
 /// Per-provider config-file entry. All fields optional: set only what you want
 /// to override from the built-in defaults (or define a brand-new provider).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -305,7 +408,9 @@ pub fn load() -> AppConfig {
 
 fn load_json_file(path: &std::path::Path) -> Option<AppConfig> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    // Lenient parser: accepts `//` comments and trailing commas, so a
+    // commented default-config template can be saved as config.json.
+    serde_json_lenient::from_str(&content).ok()
 }
 
 fn load_toml_file(path: &std::path::Path) -> Option<AppConfig> {
@@ -531,6 +636,53 @@ mod tests {
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
         assert_eq!(config2.model_families.len(), 3);
+    }
+
+    #[test]
+    fn default_config_jsonc_lists_all_fields_with_comments() {
+        let jsonc = default_config_jsonc();
+        // Every config field appears with its default value.
+        for (key, value) in [
+            ("model", "auto"),
+            ("provider", "auto"),
+            ("max_turns", "50"),
+            ("max_tokens", "16384"),
+            ("effort", "medium"),
+            ("theme", "dark"),
+            ("permissions_mode", "interactive"),
+            ("free_models_only", "true"),
+        ] {
+            assert!(
+                jsonc.contains(&format!("\"{key}\": \"{value}\""))
+                    || jsonc.contains(&format!("\"{key}\": {value}")),
+                "missing {key} = {value} in:\n{jsonc}"
+            );
+        }
+        // Possible-value comments sit above the fields.
+        assert!(jsonc.contains("// Model id or alias"));
+        assert!(jsonc.contains("// Thinking effort"));
+        assert!(jsonc.contains("// Tool output compression"));
+        // Nested proxy fields carry their own comments.
+        assert!(jsonc.contains("// Auto-detect the proxy"));
+        assert!(jsonc.contains("// Proxy base URL"));
+    }
+
+    #[test]
+    fn default_config_jsonc_round_trips_through_lenient_parser() {
+        let jsonc = default_config_jsonc();
+        // serde_json_lenient accepts the `//` comments; the strict parser
+        // rejects them, proving the file is JSONC, not plain JSON.
+        let parsed: AppConfig = serde_json_lenient::from_str(&jsonc).unwrap();
+        let defaults = AppConfig::default();
+        assert_eq!(parsed.model, defaults.model);
+        assert_eq!(parsed.provider, defaults.provider);
+        assert_eq!(parsed.max_turns, defaults.max_turns);
+        assert_eq!(parsed.max_tokens, defaults.max_tokens);
+        assert_eq!(parsed.effort, defaults.effort);
+        assert_eq!(parsed.proxy.enabled, defaults.proxy.enabled);
+        assert_eq!(parsed.proxy.url, defaults.proxy.url);
+        assert_eq!(parsed.fallback.cooldown_seconds, defaults.fallback.cooldown_seconds);
+        assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
     }
 
     #[test]

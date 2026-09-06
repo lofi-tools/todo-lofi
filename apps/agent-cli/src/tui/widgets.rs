@@ -1675,6 +1675,7 @@ pub mod overlay {
             Line::from("  /undo        Undo last file change"),
             Line::from("  /rewind      Remove last assistant turn"),
             Line::from("  /compact     Context compaction info"),
+            Line::from("  /default-config  Show default config in editor"),
             Line::from("  /exit        Exit"),
             Line::default(),
             Line::from(Span::styled(

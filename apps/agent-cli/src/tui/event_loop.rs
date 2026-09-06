@@ -240,6 +240,20 @@ pub async fn run(
             }
         }
 
+        // ── /default-config: open the generated config in the user's editor ──
+        if let Some(path) = state.pending_editor.take() {
+            crate::tui::suspend_terminal(terminal)?;
+            let status = open_in_editor(&path);
+            crate::tui::resume_terminal(terminal)?;
+            match status {
+                Ok(()) => {
+                    state.push_system(format!("Default config written to {}", path.display()));
+                }
+                Err(e) => state.push_system(format!("Failed to open editor: {e}")),
+            }
+            state.dirty = true;
+        }
+
         if state.dirty || state.is_streaming {
             draw(terminal, &mut state, &theme)?;
             state.dirty = false;
@@ -2295,6 +2309,22 @@ fn handle_slash_command(
                 return Some(prompt);
             }
         }
+        "default-config" | "default_config" => {
+            // Write every config field with its default value (plus possible
+            // values as `//` comments) to a temp file, then open it in the
+            // user's editor. The run loop suspends the TUI around the editor.
+            let jsonc = crate::config::default_config_jsonc();
+            let path = std::env::temp_dir().join("abstract-default-config.jsonc");
+            match std::fs::write(&path, &jsonc) {
+                Ok(()) => {
+                    state.pending_editor = Some(path);
+                    state.push_system("Opening default config in editor…");
+                }
+                Err(e) => {
+                    state.push_system(format!("Failed to write default config: {e}"));
+                }
+            }
+        }
         "help" | "h" | "?" => {
             state.overlay = Overlay::Help;
         }
@@ -2609,6 +2639,28 @@ pub(crate) fn tool_input_summary(name: &str, input: &serde_json::Value) -> Strin
             None => truncate(&serde_json::to_string(input).unwrap_or_default(), 60),
         },
         _ => truncate(&serde_json::to_string(input).unwrap_or_default(), 60),
+    }
+}
+
+/// Open `path` in the user's editor ($VISUAL, then $EDITOR, falling back to
+/// `vi`), waiting for the editor to exit. Returns Ok when the editor exits
+/// cleanly.
+fn open_in_editor(path: &std::path::Path) -> anyhow::Result<()> {
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("EDITOR").ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "vi".to_string());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let status = std::process::Command::new(program)
+        .args(parts)
+        .arg(path)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("editor exited with {status}")
     }
 }
 
@@ -3049,6 +3101,29 @@ mod tests {
         handle_slash_command(&mut s, "/combos nope", &config, &runtime);
         let last = s.turns.last().unwrap();
         assert!(!last.content.contains("Switched to"), "{}", last.content);
+    }
+
+    #[test]
+    fn default_config_command_writes_template_and_opens_editor() {
+        let (config, runtime) = runtime_with_combos();
+        let mut s = state();
+        let prompt = handle_slash_command(&mut s, "/default-config", &config, &runtime);
+        // Not a prompt: the command writes a file and defers to the editor.
+        assert!(prompt.is_none());
+        let Some(path) = &s.pending_editor else {
+            panic!("expected pending_editor to be set");
+        };
+        // The file exists and holds the commented JSONC template.
+        let jsonc = std::fs::read_to_string(path).unwrap();
+        assert!(jsonc.contains("// Model id or alias"));
+        assert!(jsonc.contains("\"model\": \"auto\""));
+        assert!(jsonc.contains("\"max_turns\": 50"));
+        // A system turn reports what is about to happen.
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::System);
+        assert!(last.content.contains("Opening default config"));
+        // Clean up the temp file.
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

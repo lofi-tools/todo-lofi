@@ -159,6 +159,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("combos", "List/switch combos"),
     ("provider", "Browse provider models"),
     ("interview", "Run an interview and write a spec"),
+    ("default-config", "Show default config in editor"),
     ("help", "Show help"),
     ("clear", "Clear conversation"),
     ("panel", "Toggle side panel"),
@@ -522,6 +523,9 @@ pub struct AppState {
     /// When set, the next user message is treated as the interview target
     /// instead of a normal chat message.
     pub pending_interview_target: Option<String>,
+    /// When set, the run loop suspends the TUI and opens this file in the
+    /// user's editor (`$EDITOR` / `$VISUAL`).
+    pub pending_editor: Option<std::path::PathBuf>,
     /// Buffer for ask_user requests drained from the runtime (polled each tick).
     pub ask_user_buffer: Vec<crate::providers::AskUserRequest>,
 
@@ -587,6 +591,7 @@ impl AppState {
             should_quit: false,
             dirty: true,
             pending_interview_target: None,
+            pending_editor: None,
             ask_user_buffer: Vec::new(),
         }
     }

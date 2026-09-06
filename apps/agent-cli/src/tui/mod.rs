@@ -109,3 +109,39 @@ pub fn restore_terminal(terminal: &mut Terminal) -> io::Result<()> {
     terminal.show_cursor()?;
     Ok(())
 }
+
+/// Leave the TUI (alternate screen + raw mode) so an external program like
+/// `$EDITOR` can take over the terminal. Call [`resume_terminal`] afterwards.
+pub fn suspend_terminal(terminal: &mut Terminal) -> io::Result<()> {
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Re-enter the TUI after [`suspend_terminal`].
+pub fn resume_terminal(terminal: &mut Terminal) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
+    let supports_keyboard_enhancement =
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if supports_keyboard_enhancement {
+        let _ = execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+    terminal.clear()?;
+    Ok(())
+}
