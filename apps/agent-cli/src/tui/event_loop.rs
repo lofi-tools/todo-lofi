@@ -592,8 +592,10 @@ fn handle_key(
 
             if state.pending_interview_target.take().is_some() {
                 // Interview input mode: the submitted text is the interview target.
+                // The templated prompt is both sent to the agent and shown in
+                // the conversation, so the user sees exactly what the agent got.
                 let prompt = crate::interview::build_interview_prompt(&input_text);
-                state.push_user(&input_text);
+                state.push_user(&prompt);
                 return Some(prompt);
             }
 
@@ -2282,9 +2284,11 @@ fn handle_slash_command(
                 // Enter interview input mode: the next message is the target.
                 state.pending_interview_target = Some(String::new());
             } else {
-                // Inline mode: build the interview prompt and return it.
+                // Inline mode: build the interview prompt and return it. Show
+                // the full templated prompt so the user sees what the agent
+                // received, not just their raw target text.
                 let prompt = crate::interview::build_interview_prompt(rest);
-                state.push_user(rest);
+                state.push_user(&prompt);
                 return Some(prompt);
             }
         }
@@ -3040,6 +3044,56 @@ mod tests {
         handle_slash_command(&mut s, "/combos nope", &config, &runtime);
         let last = s.turns.last().unwrap();
         assert!(!last.content.contains("Switched to"), "{}", last.content);
+    }
+
+    #[test]
+    fn interview_inline_mode_sends_and_displays_full_prompt() {
+        let (config, runtime) = runtime_with_combos();
+        let mut s = state();
+        let prompt = handle_slash_command(&mut s, "/interview add OAuth support", &config, &runtime)
+            .expect("inline /interview returns a prompt");
+        // The agent receives the full templated prompt, not the raw command.
+        assert!(prompt.starts_with(crate::interview::INTERVIEW_BASE_PROMPT));
+        assert!(prompt.ends_with("add OAuth support"));
+        assert!(!prompt.contains("/interview"));
+        // The TUI shows the same full prompt as the user turn.
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::User);
+        assert_eq!(last.content, prompt);
+    }
+
+    #[test]
+    fn interview_input_mode_sends_and_displays_full_prompt() {
+        let config = AppConfig::default();
+        let cancel = CancellationToken::new();
+        let rt = runtime();
+        let mut s = state();
+
+        // `/interview` with no args enters the highlighted input mode.
+        assert!(handle_slash_command(&mut s, "/interview", &config, &rt).is_none());
+        assert!(s.pending_interview_target.is_some());
+        assert!(!s.is_streaming);
+
+        // Submitting the target returns the full templated prompt to the agent
+        // and shows it in the conversation.
+        s.input = "add OAuth support".into();
+        s.cursor_pos = s.input.len();
+        let prompt = handle_key(
+            &mut s,
+            key_for(KeyCode::Enter, KeyModifiers::NONE),
+            &config,
+            &cancel,
+            &rt,
+        )
+        .expect("submitting an interview target returns a prompt");
+        assert!(prompt.starts_with(crate::interview::INTERVIEW_BASE_PROMPT));
+        assert!(prompt.ends_with("add OAuth support"));
+        assert!(!prompt.contains("/interview"));
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::User);
+        assert_eq!(last.content, prompt);
+        // The mode resets after submission.
+        assert!(s.pending_interview_target.is_none());
     }
 
     fn key_for(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
