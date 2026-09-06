@@ -596,7 +596,11 @@ impl AppState {
     pub fn refresh_command_selector(&mut self) {
         let input = &self.input;
         let at_end = self.cursor_pos == input.len();
-        if self.is_streaming || !input.starts_with('/') || !at_end {
+        if self.is_streaming
+            || self.pending_interview_target.is_some()
+            || !input.starts_with('/')
+            || !at_end
+        {
             self.command_selector = None;
             return;
         }

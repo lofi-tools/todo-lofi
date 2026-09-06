@@ -308,4 +308,9 @@ concrete model the session runs on) whenever it differs from `currentModelId`
 — i.e. while a combo runs on a fallback entry. Prompt runs use the same combo
 fallback as the TUI (per session: each session tracks its own cooldowns), with
 switches logged via `agent_message_chunk` notifications and reported to
-clients with a `model_changed` session/update.
+clients with a `model_changed` session/update. After `session/new` (and
+`session/load`) the server advertises its slash commands via an
+`available_commands_update` session/update; currently that is the
+`/interview` command, which starts an interview flow whose lifecycle is
+reported with `interview/started`, `interview/question` and
+`interview/completed` notifications.

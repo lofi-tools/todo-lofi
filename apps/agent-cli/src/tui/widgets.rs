@@ -654,16 +654,24 @@ pub mod input {
     }
 
     pub fn render(f: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-        let border_color = if state.side_panel_focused {
+        // Interview input mode: highlight the box with an info-colored border
+        // and an "Interview" label while awaiting the target.
+        let interview_mode = state.pending_interview_target.is_some();
+        let border_color = if interview_mode {
+            theme.info
+        } else if state.side_panel_focused {
             theme.dim
         } else {
             theme.border_strong
         };
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border_color))
             .style(Style::default().bg(theme.input_bg));
+        if interview_mode {
+            block = block.title(" Interview ");
+        }
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -710,6 +718,15 @@ pub mod input {
             .map(|row| {
                 let content = &state.input[row.start..row.end];
                 let mut spans = vec![Span::raw(row.prefix(prompt))];
+                // Interview mode placeholder: hint at what to type when the
+                // box is empty (mirrors the freebuff input-mode placeholder).
+                if interview_mode && state.input.is_empty() && row.is_first {
+                    spans.push(Span::styled(
+                        "describe a feature/bug or other request to be fleshed out...",
+                        Style::default().fg(theme.dim),
+                    ));
+                    return Line::from(spans);
+                }
                 let highlight = sel.map(|(sel_start, sel_end)| {
                     let rel_start = sel_start.saturating_sub(row.start).min(content.len());
                     let rel_end = sel_end.saturating_sub(row.start).min(content.len());

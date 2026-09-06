@@ -576,6 +576,12 @@ fn handle_key(
         (_, KeyCode::Enter) if !state.is_streaming => {
             let input_text = state.input.trim().to_string();
             if input_text.is_empty() {
+                // Empty submission while in interview input mode: reject the
+                // empty target with the shared wording.
+                if state.pending_interview_target.is_some() {
+                    state.push_system(crate::interview::EMPTY_TARGET_MESSAGE);
+                    state.dirty = true;
+                }
                 return None;
             }
 
@@ -586,9 +592,8 @@ fn handle_key(
 
             if state.pending_interview_target.take().is_some() {
                 // Interview input mode: the submitted text is the interview target.
-                let prompt = format!("{INTERVIEW_BASE_PROMPT}{input_text}");
+                let prompt = crate::interview::build_interview_prompt(&input_text);
                 state.push_user(&input_text);
-                state.pending_interview_target = None;
                 return Some(prompt);
             }
 
@@ -806,6 +811,10 @@ fn handle_key(
             state.overlay = Overlay::None;
         }
         (_, KeyCode::Esc) => {
+            // Leave interview input mode without submitting a target.
+            if state.pending_interview_target.take().is_some() {
+                state.dirty = true;
+            }
             // Clear any active selection.
             if state.selection.is_some() {
                 state.selection = None;
@@ -2251,45 +2260,6 @@ fn attach_subagent_activity(
     }
 }
 
-// ─── Interview prompt ──────────────────────────────────────────────────────
-
-/// Base prompt used for every `/interview` flow. The user's raw request is
-/// appended so the same prompt works for all models and providers.
-const INTERVIEW_BASE_PROMPT: &str = "\
-You are running an interview for a user request. Your job is to gather context \
-and ask clarifying questions before producing a detailed spec.
-
-## Process
-
-1. First, gather relevant context about the request — read files, search the \
-   codebase, check existing docs — whatever helps you understand the current \
-   state.
-2. Then ask clarifying questions using the `ask_user` tool. Ask at least a \
-   few rounds of questions when needed. Always use `ask_user` for questions, \
-   never plain text.
-3. When you have enough context, write a detailed spec file.
-
-## Spec file output
-
-- Write the spec to `./docs/spec/<slug>-spec.md` where `<slug>` is derived from \
-   the request (a short kebab-case name).
-- If the request doesn't suggest an obvious slug, use a sensible name in the \
-   same `docs/spec/` location.
-- The spec should be detailed: capture everything you learned during the \
-   interview — requirements, constraints, decisions, open questions, and the \
-   planned approach.
-- Create the `docs/spec/` directory if it doesn't exist.
-
-## Final reply
-
-- After writing the spec file, reply with a short summary plus the spec file \
-   path (e.g. `Wrote spec to ./docs/spec/add-oauth-spec.md`).
-- The summary is included even if the interview only produced a spec file.
-
-## Request
-
-Request to interview: ";
-
 fn handle_slash_command(
     state: &mut AppState,
     input: &str,
@@ -2310,15 +2280,10 @@ fn handle_slash_command(
                 .unwrap_or("");
             if rest.is_empty() {
                 // Enter interview input mode: the next message is the target.
-                state.push_system("What would you like to interview? (submit your request)");
                 state.pending_interview_target = Some(String::new());
-            } else if rest.trim().is_empty() {
-                state.push_system(
-                    "Nothing to interview — give /interview a request to clarify.",
-                );
             } else {
                 // Inline mode: build the interview prompt and return it.
-                let prompt = format!("{INTERVIEW_BASE_PROMPT}{rest}");
+                let prompt = crate::interview::build_interview_prompt(rest);
                 state.push_user(rest);
                 return Some(prompt);
             }

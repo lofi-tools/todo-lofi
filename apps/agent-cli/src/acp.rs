@@ -177,6 +177,48 @@ impl AcpConnection {
         self.notification("session/update", json!({ "sessionId": session_id, "update": update }));
     }
 
+    /// Advertise the slash commands available in this session (per the ACP
+    /// slash-commands spec, sent after session creation/load).
+    fn send_available_commands(&self, session_id: &str) {
+        self.send_update(
+            session_id,
+            SessionUpdate::AvailableCommandsUpdate {
+                available_commands: vec![AvailableCommand {
+                    name: "interview".into(),
+                    description: "Interview you about a task or spec to produce requirements".into(),
+                    input: Some(AvailableCommandInput {
+                        ty: "text",
+                        hint: "what to interview about".into(),
+                    }),
+                }],
+            },
+        );
+    }
+
+    /// Send an `interview/started` notification.
+    fn send_interview_started(&self, session_id: &str, params: InterviewStartedParams) {
+        self.notification(
+            "interview/started",
+            json!({ "sessionId": session_id, "interview": params }),
+        );
+    }
+
+    /// Send an `interview/question` notification.
+    fn send_interview_question(&self, session_id: &str, params: InterviewQuestionParams) {
+        self.notification(
+            "interview/question",
+            json!({ "sessionId": session_id, "question": params }),
+        );
+    }
+
+    /// Send an `interview/completed` notification.
+    fn send_interview_completed(&self, session_id: &str, params: InterviewCompletedParams) {
+        self.notification(
+            "interview/completed",
+            json!({ "sessionId": session_id, "completed": params }),
+        );
+    }
+
     /// Route an inbound JSON-RPC response (a message with `id` but no
     /// `method`) to the outbound caller waiting on that id. Returns true when
     /// a pending caller was found. Errors are delivered as `RpcResponse::Error`.
@@ -318,12 +360,113 @@ enum SessionUpdate {
         #[serde(rename = "effectiveModelId")]
         effective_model_id: String,
     },
+    /// Advertise the slash commands available in this session.
+    AvailableCommandsUpdate {
+        #[serde(rename = "availableCommands")]
+        available_commands: Vec<AvailableCommand>,
+    },
+}
+
+/// A slash command advertised to the client via `available_commands_update`.
+/// Clients surface these (e.g. `/interview`) and send them back as the first
+/// text block of a `session/prompt`.
+#[derive(Serialize)]
+struct AvailableCommand {
+    /// The command name as typed by the user (without the leading `/`).
+    name: String,
+    /// Human-readable description of what the command does.
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<AvailableCommandInput>,
+}
+
+/// Optional input specification for an advertised command.
+#[derive(Serialize)]
+struct AvailableCommandInput {
+    #[serde(rename = "type")]
+    ty: &'static str,
+    /// Hint to display when the input hasn't been provided yet.
+    hint: String,
 }
 
 #[derive(Serialize)]
 struct Cost {
     amount: f64,
     currency: &'static str,
+}
+
+// ─── Interview lifecycle notifications ──────────────────────────────────────
+
+/// Sent when an interview flow begins (when a prompt starts with `/interview`).
+#[derive(Serialize)]
+struct InterviewStartedParams {
+    /// Unique identifier for this interview.
+    interview_id: String,
+    /// The target/request being interviewed.
+    target: String,
+    /// The base prompt reference used to start the interview.
+    base_prompt: String,
+}
+
+/// Sent for each round of clarifying questions from the agent.
+/// The questions use the same schema as the `ask_user` tool.
+#[derive(Serialize)]
+struct InterviewQuestionParams {
+    /// Unique identifier for this interview.
+    interview_id: String,
+    /// The questions in this round.
+    questions: Vec<AskUserQuestionParams>,
+}
+
+/// A single clarifying question, mirroring the `ask_user` tool schema.
+#[derive(Serialize)]
+struct AskUserQuestionParams {
+    question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<AskUserOptionParams>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    multi_select: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation: Option<AskUserValidationParams>,
+}
+
+#[derive(Serialize)]
+struct AskUserOptionParams {
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AskUserValidationParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern_error: Option<String>,
+}
+
+/// Sent when the interview finishes.
+#[derive(Serialize)]
+struct InterviewCompletedParams {
+    /// Unique identifier for this interview.
+    interview_id: String,
+    /// Outcome: "success" or "failure".
+    status: String,
+    /// Path to the written spec file, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spec_file_path: Option<String>,
+    /// Short summary of what was produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    /// Agent's final reply text, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_reply: Option<String>,
 }
 
 // ─── Request params ─────────────────────────────────────────────────────────
@@ -471,6 +614,8 @@ struct AcpSession {
     /// session runs a plain provider/model).
     fallback: providers::FallbackManager,
     _mcp_servers: Vec<cersei::mcp::McpServerConfig>,
+    /// Active interview ID, if the current prompt is an interview.
+    active_interview_id: Option<String>,
 }
 
 impl AcpSession {
@@ -853,6 +998,7 @@ impl AcpServer {
                 &self.default_model,
             ),
             _mcp_servers: mcp_servers,
+            active_interview_id: None,
         };
         session_state.refresh_effective(&self.config);
         let session = Arc::new(Mutex::new(session_state));
@@ -871,6 +1017,9 @@ impl AcpServer {
                 "configOptions": self.config_options(&session),
             }),
         );
+
+        // Advertise slash commands now that the session exists.
+        self.connection.send_available_commands(&session_id);
     }
 
     async fn handle_load_session(&self, id: Value, params: SessionIdParams) {
@@ -916,6 +1065,10 @@ impl AcpServer {
         }
 
         self.connection.response(id, Value::Null);
+
+        // Re-advertise slash commands so a client restoring this session still
+        // knows what commands are available.
+        self.connection.send_available_commands(&session_id);
     }
 
     fn handle_set_config_option(&self, id: Value, params: SetConfigOptionParams) {
@@ -1229,6 +1382,45 @@ impl AcpServer {
             return;
         }
 
+        // Check if this is an interview prompt (starts with /interview).
+        let is_interview = text.starts_with("/interview");
+        let mut run_text = text.clone();
+        let interview_id: Option<String> = if is_interview {
+            let tid = uuid_short();
+            // Extract the target from the prompt.
+            let target = if text.starts_with("/interview ") {
+                text["/interview ".len()..].trim().to_string()
+            } else {
+                String::new()
+            };
+            if target.is_empty() {
+                self.connection.error(id, -32602, crate::interview::EMPTY_TARGET_MESSAGE);
+                return;
+            }
+            // The model runs the wrapped interview prompt (INTERVIEW_BASE_PROMPT
+            // + target), not the raw `/interview ...` text — the same routed
+            // prompt the TUI and freebuff send.
+            run_text = crate::interview::build_interview_prompt(&target);
+            let params = InterviewStartedParams {
+                interview_id: tid.clone(),
+                target,
+                base_prompt: crate::interview::INTERVIEW_BASE_PROMPT.to_string(),
+            };
+            let sid = session_id.clone();
+            // Send notification before starting the agent run.
+            // (The session might be dropped if the agent run fails early,
+            // but we send the notification regardless.)
+            self.connection.send_interview_started(&sid, params);
+            Some(tid)
+        } else {
+            None
+        };
+
+        // Store the interview ID in the session if this is an interview.
+        if let Some(ref iid) = interview_id {
+            session.lock().active_interview_id = Some(iid.clone());
+        }
+
         // Cancel any turn still running for this session before starting a new one.
         let cancel_token = CancellationToken::new();
         let run_id = {
@@ -1265,7 +1457,7 @@ impl AcpServer {
                 }
             };
 
-        let mut stream = agent.run_stream(&text);
+        let mut stream = agent.run_stream(&run_text);
 
         let mut cancelled = false;
         let mut terminal: Option<TerminalOutcome> = None;
@@ -1278,6 +1470,11 @@ impl AcpServer {
         // (partial text/tool results would be duplicated), so fallback only
         // happens on failures before the first event.
         let mut produced_output = false;
+        // Interview bookkeeping for the `interview/completed` notification:
+        // the spec file written by the agent (from Write tool calls) and the
+        // agent's final reply text.
+        let mut spec_file_path: Option<String> = None;
+        let mut final_reply = String::new();
         loop {
             let event = if cancelled {
                 // Keep draining briefly after a cancel so in-flight tool results
@@ -1364,7 +1561,7 @@ impl AcpServer {
                                     ),
                                 },
                             );
-                            stream = new_agent.run_stream(&text);
+                            stream = new_agent.run_stream(&run_text);
                             agent = new_agent;
                             current_provider = next.provider;
                             current_model = next.model;
@@ -1385,6 +1582,27 @@ impl AcpServer {
                             | AgentEvent::ToolStart { .. }
                             | AgentEvent::ToolEnd { .. }
                     );
+                    // Intercept tool calls during an interview: forward
+                    // ask_user questions as notifications and remember the
+                    // spec file the agent writes (Write tool, `file_path`
+                    // input) for the completion notification.
+                    if let Some(ref iid) = interview_id {
+                        if let AgentEvent::ToolStart { name, id: _, input } = &other {
+                            if name == "ask_user" {
+                                self.send_interview_question_from_input(&session_id, iid, input);
+                            } else if name == "Write"
+                                && let Some(path) =
+                                    input.get("file_path").and_then(Value::as_str)
+                            {
+                                spec_file_path = Some(path.to_string());
+                            }
+                        }
+                    }
+                    // Accumulate the agent's reply so the completion
+                    // notification can report it.
+                    if let AgentEvent::TextDelta(text) = &other {
+                        final_reply.push_str(text);
+                    }
                     self.handle_event(&session, other).await;
                 }
                 None => {
@@ -1394,6 +1612,30 @@ impl AcpServer {
         }
         // Clear our pending slot, unless a newer prompt has already replaced it.
         self.clear_pending(&session, run_id);
+
+        // Send interview/completed notification if this was an interview.
+        if let Some(ref iid) = interview_id {
+            let status = if cancelled {
+                "cancelled"
+            } else {
+                match &terminal {
+                    Some(TerminalOutcome::Complete(_)) => "success",
+                    Some(TerminalOutcome::Error(_)) => "failure",
+                    None => "cancelled",
+                }
+            };
+            let final_reply = (!final_reply.trim().is_empty()).then_some(final_reply.trim().to_string());
+            let params = InterviewCompletedParams {
+                interview_id: iid.clone(),
+                status: status.to_string(),
+                spec_file_path,
+                summary: None,
+                final_reply,
+            };
+            self.connection.send_interview_completed(&session_id, params);
+            // Clear the interview ID from the session.
+            session.lock().active_interview_id = None;
+        }
 
         match terminal {
             Some(TerminalOutcome::Complete(stop_reason)) if !cancelled => {
@@ -1491,6 +1733,84 @@ impl AcpServer {
             }
             _ => {}
         }
+    }
+
+    /// Convert an `ask_user` tool input (JSON Value) into an
+    /// `InterviewQuestionParams` and send the `interview/question`
+    /// notification.
+    fn send_interview_question_from_input(
+        &self,
+        session_id: &str,
+        interview_id: &str,
+        input: &Value,
+    ) {
+        // The ask_user input has a "questions" array. Parse it into
+        // InterviewQuestionParams.
+        let questions: Vec<AskUserQuestionParams> = input
+            .get("questions")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|q| {
+                        let question = q.get("question")?.as_str()?.to_string();
+                        let header = q.get("header")?.as_str()?.to_string();
+                        let header = if header.is_empty() { None } else { Some(header) };
+                        let options = q.get("options")?.as_array().map(|opts| {
+                            opts.iter()
+                                .filter_map(|o| {
+                                    let label = o.get("label")?.as_str()?.to_string();
+                                    let desc = o.get("description")?.as_str()?.to_string();
+                                    let desc = if desc.is_empty() { None } else { Some(desc) };
+                                    Some(AskUserOptionParams { label, description: desc })
+                                })
+                                .collect()
+                        });
+                        let multi_select = q.get("multiSelect")?.as_bool();
+                        let multi_select = if multi_select == Some(true) { Some(true) } else { None };
+                        let validation = if let Some(v) = q.get("validation").and_then(Value::as_object) {
+                            let max_length = v.get("maxLength")?.as_u64().map(|n| n as u32);
+                            let min_length = v.get("minLength")?.as_u64().map(|n| n as u32);
+                            let pattern = v.get("pattern")?.as_str().map(String::from);
+                            let pattern_error = v.get("patternError")?.as_str().map(String::from);
+                            // Only include if at least one field is present.
+                            if max_length.is_none()
+                                && min_length.is_none()
+                                && pattern.is_none()
+                                && pattern_error.is_none()
+                            {
+                                None
+                            } else {
+                                Some(AskUserValidationParams {
+                                    max_length,
+                                    min_length,
+                                    pattern,
+                                    pattern_error,
+                                })
+                            }
+                        } else {
+                            None
+                        };
+                        Some(AskUserQuestionParams {
+                            question,
+                            header,
+                            options,
+                            multi_select,
+                            validation,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if questions.is_empty() {
+            return;
+        }
+
+        let params = InterviewQuestionParams {
+            interview_id: interview_id.to_string(),
+            questions,
+        };
+        self.connection.send_interview_question(session_id, params);
     }
 }
 
@@ -1670,6 +1990,7 @@ mod tests {
             pending_cancel: None,
             fallback: providers::fallback_for(config, &provider, &model),
             _mcp_servers: Vec::new(),
+            active_interview_id: None,
         };
         session.refresh_effective(config);
         session
@@ -1746,6 +2067,26 @@ mod tests {
         assert_eq!(value["sessionUpdate"], "model_changed");
         assert_eq!(value["modelId"], "combos/coding");
         assert_eq!(value["effectiveModelId"], "test/test-2");
+    }
+
+    #[test]
+    fn available_commands_update_serializes_per_spec() {
+        let line = serde_json::to_string(&SessionUpdate::AvailableCommandsUpdate {
+            available_commands: vec![AvailableCommand {
+                name: "interview".into(),
+                description: "Interview you about a task or spec to produce requirements".into(),
+                input: Some(AvailableCommandInput {
+                    ty: "text",
+                    hint: "what to interview about".into(),
+                }),
+            }],
+        })
+        .unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["sessionUpdate"], "available_commands_update");
+        assert_eq!(value["availableCommands"][0]["name"], "interview");
+        assert_eq!(value["availableCommands"][0]["input"]["type"], "text");
+        assert_eq!(value["availableCommands"][0]["input"]["hint"], "what to interview about");
     }
 
     #[test]
