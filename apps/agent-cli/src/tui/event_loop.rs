@@ -197,7 +197,9 @@ pub async fn run(
                         Event::Key(key) => {
                             if let Some(prompt) =
                                 handle_key(&mut state, key, config, &cancel_token, &runtime)
-                            {                                state.stream_start = Some(Instant::now());
+                            {
+                                state.is_streaming = true;
+                                state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
                                 let (effective_provider, effective_model) = runtime.effective();
                                 agent_run = Some(AgentRun {
@@ -207,8 +209,8 @@ pub async fn run(
                                     model: effective_model,
                                     produced_output: false,
                                 });
-                                }
-                                state.dirty = true;
+                            }
+                            state.dirty = true;
                         }
                         Event::Mouse(mouse) => {
                             handle_mouse(&mut state, mouse);
@@ -608,6 +610,7 @@ fn handle_key(
 
             state.input_history.push(input_text.clone());
             state.history_index = None;
+            state.push_user(&input_text);
             return Some(input_text);
         }
 
@@ -3060,6 +3063,31 @@ mod tests {
         let last = s.turns.last().unwrap();
         assert_eq!(last.role, crate::tui::app::TurnRole::User);
         assert_eq!(last.content, prompt);
+    }
+
+    #[test]
+    fn plain_message_enter_displays_user_turn() {
+        let config = AppConfig::default();
+        let cancel = CancellationToken::new();
+        let rt = runtime();
+        let mut s = state();
+
+        // A normal (non-slash) message: the submitted text is returned as the
+        // prompt AND shown as a user turn in the conversation.
+        s.input = "hello world".into();
+        s.cursor_pos = s.input.len();
+        let prompt = handle_key(
+            &mut s,
+            key_for(KeyCode::Enter, KeyModifiers::NONE),
+            &config,
+            &cancel,
+            &rt,
+        )
+        .expect("submitting a plain message returns a prompt");
+        assert_eq!(prompt, "hello world");
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::User);
+        assert_eq!(last.content, "hello world");
     }
 
     #[test]
