@@ -1154,6 +1154,11 @@ pub mod messages {
     //! Only renders visible items. Committed turns are pre-built once;
     //! streaming content is rebuilt every frame (only a few lines).
 
+    /// Maximum number of wrapped rows a thinking block shows at once. Only
+    /// the newest rows are kept (with a `...` marker when truncated), so the
+    /// preview follows the tail of the thinking stream as it grows.
+    const THINKING_PREVIEW_LINES: usize = 5;
+
     use crate::tui::{
         app::{AppState, Selection, SelectionTarget, TurnRole},
         theme::Theme,
@@ -1307,15 +1312,40 @@ pub mod messages {
                 }
             }
             crate::tui::app::OutputBlock::Thinking(text) => {
-                // Reasoning is dimmed and italic so it reads as background
-                // thought rather than part of the answer.
+                // Reasoning renders as a delimited preview block: a labeled
+                // header, then only the newest wrapped lines (the stream's
+                // tail) so it stays compact and auto-follows the ongoing
+                // thinking as new deltas arrive.
+                let border = Style::default().fg(theme.thinking);
+                items.push(VItem::new(Line::from(vec![
+                    Span::styled("  ┌─ ", border),
+                    Span::styled(
+                        "Thinking",
+                        Style::default()
+                            .fg(theme.thinking)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ])));
+                // Wrap, then keep only the last `THINKING_PREVIEW_LINES` rows.
+                let mut wrapped = wrap_text(text, (width as usize).saturating_sub(7));
+                let truncated = wrapped.len() > THINKING_PREVIEW_LINES;
+                if truncated {
+                    wrapped = wrapped[wrapped.len() - THINKING_PREVIEW_LINES..].to_vec();
+                }
                 let style = Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC);
-                for wline in wrap_text(text, (width as usize).saturating_sub(3)) {
+                if truncated {
                     items.push(VItem::new(Line::from(vec![
-                        Span::styled("  ", Style::default().fg(theme.thinking)),
+                        Span::styled("  │ ", border),
+                        Span::styled("...", style),
+                    ])));
+                }
+                for wline in wrapped {
+                    items.push(VItem::new(Line::from(vec![
+                        Span::styled("  │ ", border),
                         Span::styled(wline, style),
                     ])));
                 }
+                items.push(VItem::new(Line::from(Span::styled("  └─", border))));
             }
             crate::tui::app::OutputBlock::Text(text) => {
                 let md_lines = crate::tui::markdown::render_markdown(text, width);
@@ -1437,6 +1467,80 @@ pub mod messages {
                 lead < tool && tool < think && think < trail,
                 "blocks rendered out of order:\n{joined}"
             );
+        }
+
+        #[test]
+        fn thinking_block_is_delimited_with_header_and_borders() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{OutputBlock, Turn, TurnRole},
+                theme::Theme,
+            };
+
+            let turn = Turn {
+                role: TurnRole::Assistant,
+                content: String::new(),
+                blocks: vec![OutputBlock::Thinking("step by step reasoning".into())],
+            };
+            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|item| {
+                    item.line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            assert_eq!(
+                texts,
+                vec![
+                    "  ┌─ Thinking",
+                    "  │ step by step reasoning",
+                    "  └─",
+                    ""
+                ]
+            );
+        }
+
+        #[test]
+        fn thinking_block_preview_keeps_only_last_rows_with_marker() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{OutputBlock, Turn, TurnRole},
+                theme::Theme,
+            };
+
+            // 20 wrapped rows: well over the 5-row preview limit.
+            let text = (1..=20)
+                .map(|i| format!("reasoning line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let turn = Turn {
+                role: TurnRole::Assistant,
+                content: String::new(),
+                blocks: vec![OutputBlock::Thinking(text)],
+            };
+            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|item| {
+                    item.line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            // Header, `...` marker, the newest 5 rows, footer, blank row.
+            assert_eq!(texts.len(), 1 + 1 + super::THINKING_PREVIEW_LINES + 1 + 1);
+            assert_eq!(texts[0], "  ┌─ Thinking");
+            assert_eq!(texts[1], "  │ ...");
+            // The preview shows the tail: the last rows, not the first.
+            assert!(texts[2].contains("reasoning line 16"), "{texts:?}");
+            assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES - 1], "  │ reasoning line 20");
+            assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES], "  └─");
         }
 
         #[test]
