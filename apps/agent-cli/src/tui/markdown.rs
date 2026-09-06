@@ -1,4 +1,8 @@
 //! Markdown to ratatui spans — pulldown-cmark parsing + syntect code highlighting.
+//!
+//! Colors mirror freebuff's dark-theme markdown palette: yellow (`#facc15`)
+//! titles, orange (`#FF8534`) highlighted inline code, secondary bullets and
+//! gray blockquote/code-frame chrome.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
@@ -6,6 +10,15 @@ use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+
+/// Freebuff dark-theme markdown palette.
+const TITLE_YELLOW: Color = Color::Rgb(0xfa, 0xcc, 0x15);   // headingFg
+const HIGHLIGHT_ORANGE: Color = Color::Rgb(0xff, 0x85, 0x34); // inlineCodeFg
+const CODE_BG: Color = Color::Rgb(0x37, 0x41, 0x51);         // codeBackground
+const SECONDARY: Color = Color::Rgb(0xa3, 0xae, 0xd0);       // listBulletFg
+const QUOTE_BORDER: Color = Color::Rgb(0x33, 0x41, 0x55);    // blockquoteBorderFg
+const QUOTE_TEXT: Color = Color::Rgb(0xe2, 0xe8, 0xf0);      // blockquoteTextFg
+const CODE_HEADER: Color = Color::Rgb(0x5b, 0x64, 0x7a);     // codeHeaderFg
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -35,6 +48,7 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
     let mut bold = false;
     let mut italic = false;
     let mut heading_level: u8 = 0;
+    let mut in_blockquote = false;
 
     for event in parser {
         match event {
@@ -52,7 +66,7 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                 current_spans.push(Span::styled(
                     format!("{prefix} {text}"),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(TITLE_YELLOW)
                         .add_modifier(Modifier::BOLD),
                 ));
                 flush_line(&mut lines, &mut current_spans);
@@ -75,7 +89,7 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                             &code_lang
                         }
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(CODE_HEADER),
                 )));
             }
             Event::End(TagEnd::CodeBlock) => {
@@ -85,7 +99,7 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                 }
                 lines.push(Line::from(Span::styled(
                     "  └─",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(CODE_HEADER),
                 )));
                 in_code_block = false;
                 code_buffer.clear();
@@ -108,7 +122,7 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                 flush_line(&mut lines, &mut current_spans);
             }
             Event::Start(Tag::Item) => {
-                current_spans.push(Span::styled("  • ", Style::default().fg(Color::DarkGray)));
+                current_spans.push(Span::styled("  • ", Style::default().fg(SECONDARY)));
             }
             Event::End(TagEnd::Item) => {
                 flush_line(&mut lines, &mut current_spans);
@@ -116,10 +130,12 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
 
             Event::Start(Tag::BlockQuote(_)) => {
                 flush_line(&mut lines, &mut current_spans);
-                current_spans.push(Span::styled("  │ ", Style::default().fg(Color::Green)));
+                in_blockquote = true;
+                current_spans.push(Span::styled("  │ ", Style::default().fg(QUOTE_BORDER)));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 flush_line(&mut lines, &mut current_spans);
+                in_blockquote = false;
             }
 
             Event::Start(Tag::Paragraph) => {}
@@ -139,14 +155,21 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                     if italic {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
+                    if in_blockquote {
+                        style = style.fg(QUOTE_TEXT);
+                    }
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
 
             Event::Code(code) => {
+                // Freebuff inline code: padded, orange on a dark chip, bold.
                 current_spans.push(Span::styled(
-                    format!("`{code}`"),
-                    Style::default().fg(Color::Cyan),
+                    format!(" {code} "),
+                    Style::default()
+                        .fg(HIGHLIGHT_ORANGE)
+                        .bg(CODE_BG)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
 

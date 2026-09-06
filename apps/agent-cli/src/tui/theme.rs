@@ -45,10 +45,10 @@ impl Theme {
             bg: Color::Rgb(0, 0, 0),               // #000000
             fg: Color::Rgb(179, 179, 179),         // #b3b3b3 (editor.foreground)
             dim: Color::Rgb(88, 88, 88),           // #585858 (text.muted)
-            accent: Color::Rgb(255, 255, 0),       // #ffff00 (text.accent / function)
-            success: Color::Rgb(77, 77, 77),       // #4d4d4d
+            accent: Color::Rgb(0xfa, 0xcc, 0x15),  // #facc15 (freebuff markdown-title yellow)
+            success: Color::Rgb(0x22, 0xc5, 0x5e),  // #22c55e (freebuff success green)
             error: Color::Rgb(244, 71, 71),        // #F44747
-            warning: Color::Rgb(205, 151, 49),     // #CD9731
+            warning: Color::Rgb(0xff, 0xa5, 0x00),  // #FFA500 (freebuff warning orange)
             info: Color::Rgb(103, 150, 230),       // #6796E6
             border: Color::Rgb(30, 30, 30),        // #1e1e1e
             input_bg: Color::Rgb(10, 10, 10),      // #0a0a0a
@@ -63,7 +63,7 @@ impl Theme {
             text_tertiary: Color::Rgb(119, 119, 119), // #777777
             text_ghost: Color::Rgb(51, 51, 51),      // #333333
             text_muted: Color::Rgb(88, 88, 88),      // #585858
-            text_accent: Color::Rgb(255, 255, 0),    // #ffff00
+            text_accent: Color::Rgb(0xfa, 0xcc, 0x15), // #facc15 (freebuff markdown-title yellow)
             bg_raised: Color::Rgb(15, 15, 15),       // #0f0f0f
             bg_hover: Color::Rgb(10, 10, 10),        // ~rgba(255,255,255,0.04)
             bg_selected: Color::Rgb(15, 15, 15),     // ~rgba(255,255,255,0.06)
@@ -85,9 +85,9 @@ impl Theme {
             fg: Color::Rgb(30, 30, 30),
             dim: Color::Rgb(130, 130, 130),
             accent: Color::Rgb(0, 120, 200),
-            success: Color::Rgb(0, 150, 50),
+            success: Color::Rgb(0x05, 0x96, 0x69),   // #059669 (freebuff light success)
             error: Color::Rgb(200, 30, 30),
-            warning: Color::Rgb(180, 120, 0),
+            warning: Color::Rgb(0xf5, 0x9e, 0x0b),   // #F59E0B (freebuff light warning)
             info: Color::Rgb(0, 100, 180),
             border: Color::Rgb(200, 200, 200),
             input_bg: Color::Rgb(240, 240, 240),

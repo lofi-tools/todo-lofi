@@ -1329,7 +1329,7 @@ pub mod messages {
         let mut items = Vec::new();
         match block {
             crate::tui::app::OutputBlock::Tool(tool) => {
-                for line in render_tool_call(tool, theme, frame_count) {
+                for line in render_tool_call(tool, theme, frame_count, width as usize) {
                     items.push(VItem::new(line));
                 }
             }
@@ -1384,7 +1384,7 @@ pub mod messages {
     }
 
     /// Word-wrap text.
-    fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    pub(super) fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         if max_width == 0 {
             return vec![text.to_string()];
         }
@@ -2702,13 +2702,15 @@ pub mod tool_call {
 
     /// Render a tool call as lines: badge + optional diff or output preview.
     /// Nested sub-agent tool calls (`spawn_agents` children) are rendered
-    /// recursively, indented one level deeper per nesting.
+    /// recursively, indented one level deeper per nesting. `width` is the
+    /// available content width (used to wrap long bash commands).
     pub fn render_tool_call(
         tool: &ToolCall,
         theme: &Theme,
         frame_count: u64,
+        width: usize,
     ) -> Vec<Line<'static>> {
-        render_tool_call_at(tool, theme, frame_count, 0)
+        render_tool_call_at(tool, theme, frame_count, 0, width)
     }
 
     fn render_tool_call_at(
@@ -2716,6 +2718,7 @@ pub mod tool_call {
         theme: &Theme,
         frame_count: u64,
         depth: usize,
+        width: usize,
     ) -> Vec<Line<'static>> {
         let indent = "  ".repeat(depth);
         let frame = Style::default().fg(theme.tool_badge);
@@ -2740,27 +2743,57 @@ pub mod tool_call {
             .map(|d| format!(" ({d}ms)"))
             .unwrap_or_default();
 
-        // Freebuff AgentBranchItem: a rounded frame with the badge inline in
-        // the header and a vertical gutter down the left of the content.
-        lines.push(Line::from(vec![
-            Span::styled(format!("{indent}{BORDER_TL} "), frame),
-            Span::styled(format!("{icon} "), icon_style),
-            Span::styled(
-                tool.name.clone(),
-                Style::default()
-                    .fg(theme.tool_badge)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(tool.input_summary.clone(), Style::default().fg(theme.dim)),
-            Span::styled(dur, Style::default().fg(theme.dim)),
-        ]));
+        let is_bash = tool.name == "Bash" || tool.name == "bash";
+
+        if is_bash {
+            // Freebuff TerminalCommandDisplay: the header is `$ <command>`
+            // with the `$` in success green and the command bold. The full
+            // command is shown — never elided — wrapped onto gutter rows.
+            let command_style = Style::default()
+                .fg(theme.fg)
+                .add_modifier(Modifier::BOLD);
+            let wrap_width = width.saturating_sub(
+                indent.chars().count() + BORDER_TL.chars().count() + 4,
+            );
+            let command_lines =
+                super::messages::wrap_text(&tool.input_summary, wrap_width.max(1));
+            for (i, cl) in command_lines.iter().enumerate() {
+                let prefix = if i == 0 {
+                    format!("{indent}{BORDER_TL} ")
+                } else {
+                    format!("{indent}{BORDER_V}  ")
+                };
+                let mut spans = vec![Span::styled(prefix, frame)];
+                if i == 0 {
+                    spans.push(Span::styled(format!("{icon} "), icon_style));
+                    spans.push(Span::styled("$ ", Style::default().fg(theme.success)));
+                }
+                spans.push(Span::styled(cl.clone(), command_style));
+                lines.push(Line::from(spans));
+            }
+        } else {
+            // Freebuff AgentBranchItem: a rounded frame with the badge inline
+            // in the header and a vertical gutter down the left of the content.
+            lines.push(Line::from(vec![
+                Span::styled(format!("{indent}{BORDER_TL} "), frame),
+                Span::styled(format!("{icon} "), icon_style),
+                Span::styled(
+                    tool.name.clone(),
+                    Style::default()
+                        .fg(theme.tool_badge)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(tool.input_summary.clone(), Style::default().fg(theme.dim)),
+                Span::styled(dur, Style::default().fg(theme.dim)),
+            ]));
+        }
 
         // Nested sub-agent activity first, then the preview: for a
         // `spawn_agents` call the children carry the detail, so its own
         // (combined) output preview is skipped as redundant.
         for child in &tool.children {
-            lines.extend(render_tool_call_at(child, theme, frame_count, depth + 1));
+            lines.extend(render_tool_call_at(child, theme, frame_count, depth + 1, width));
         }
 
         let has_nested_children = !tool.children.is_empty();
@@ -2832,6 +2865,10 @@ pub mod tool_call {
             }
         }
 
+        fn render(tool: &ToolCall, theme: &Theme, frame_count: u64) -> Vec<Line<'static>> {
+            render_tool_call(tool, theme, frame_count, 200)
+        }
+
         #[test]
         fn renders_nested_subagent_activity() {
             let theme = Theme::enterprise();
@@ -2851,7 +2888,7 @@ pub mod tool_call {
             parent.run_id = Some(1);
             parent.children.push(header);
 
-            let lines = render_tool_call(&parent, &theme, 0);
+            let lines = render(&parent, &theme, 0);
             let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
 
             // Parent badge at depth 0, child at depth 1, grandchild at depth 2,
@@ -2869,6 +2906,55 @@ pub mod tool_call {
         }
 
         #[test]
+        fn bash_shows_full_command_with_green_dollar_and_green_tick() {
+            let theme = Theme::enterprise();
+
+            let mut bash = tool("Bash", ToolStatus::Done);
+            bash.input_summary = "echo hello && echo world".into();
+            bash.duration_ms = Some(40);
+
+            let lines = render(&bash, &theme, 0);
+            let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+            // The header is `✓ $ <full command>` — no tool-name label, the
+            // whole command present (never elided with ...).
+            assert!(rendered[0].contains("✓ $"), "header: {}", rendered[0]);
+            assert!(rendered[0].contains("echo hello && echo world"));
+            assert!(!rendered[0].contains("..."));
+            assert!(!rendered[0].contains("Bash"));
+            // The `$` is styled with the success (green) color.
+            let spans = &lines[0].spans;
+            let dollar = spans
+                .iter()
+                .find(|s| s.content == "$ ")
+                .expect("green $ prefix");
+            assert_eq!(dollar.style.fg, Some(theme.success));
+            // The ✓ tick uses the success (green) color too.
+            let tick = spans.iter().find(|s| s.content == "✓ ").expect("tick");
+            assert_eq!(tick.style.fg, Some(theme.success));
+        }
+
+        #[test]
+        fn bash_long_command_wraps_without_eliding() {
+            let theme = Theme::enterprise();
+
+            let mut bash = tool("Bash", ToolStatus::Done);
+            bash.input_summary = "npm run build --very-long-flag-here".into();
+
+            let lines = render_tool_call(&bash, &theme, 0, 30);
+            let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+
+            // The command is wrapped onto gutter rows, never truncated.
+            assert!(rendered[0].contains("npm run build"));
+            assert!(rendered.iter().any(|l| l.contains("--very")));
+            // Every piece of the command survives the wrap (word-split across
+            // gutter rows) and nothing is elided.
+            assert!(rendered.iter().any(|l| l.contains("npm run build")));
+            assert!(rendered.iter().any(|l| l.contains("--very-long-flag-here")));
+            assert!(!rendered.iter().any(|l| l.contains("...")));
+        }
+
+        #[test]
         fn spawn_agents_preview_is_skipped_when_children_exist() {
             let theme = Theme::enterprise();
 
@@ -2879,7 +2965,7 @@ pub mod tool_call {
             parent.output_preview = Some("[code-searcher]\nresults here".into());
             parent.children.push(header);
 
-            let lines = render_tool_call(&parent, &theme, 0);
+            let lines = render(&parent, &theme, 0);
             let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
             assert!(rendered.iter().any(|l| l.contains("spawn_agents")));
             assert!(

@@ -2571,11 +2571,13 @@ fn handle_slash_command(
 /// the sub-agent event forwarder in `subagents.rs`.
 pub(crate) fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
     match name {
+        // The full command is shown in the tool block — never elided (the
+        // renderer wraps it to the available width instead of truncating).
         "Bash" | "bash" => input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| truncate(s, 60))
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .to_string(),
         "Read" | "Write" | "Edit" => input
             .get("file_path")
             .and_then(|v| v.as_str())
