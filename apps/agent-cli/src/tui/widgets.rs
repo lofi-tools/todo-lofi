@@ -1,8 +1,21 @@
 //! TUI widgets — header, footer, messages, input, status, tool calls, overlays.
 
+// ── Freebuff-style border characters (mirrors freebuff's ui-constants.ts) ──
+// Rounded corners, solid lines: the default frame for regular blocks
+// (thinking, tool calls). Dashed variant: ghost/ephemeral blocks (system
+// turns). Only the left edge is drawn — the virtual list renders wrapped
+// rows of varying width, so a right border would be misaligned.
+pub const BORDER_TL: &str = "╭─";
+pub const BORDER_V: &str = "│ ";
+pub const BORDER_BL: &str = "╰─";
+pub const DASHED_TL: &str = "╭╌";
+pub const DASHED_V: &str = "╎ ";
+pub const DASHED_BL: &str = "╰╌";
+
 pub mod diff_inline {
     //! Inline diff renderer: shows file changes with syntax-highlighted diff coloring.
 
+    use super::{BORDER_BL, BORDER_TL, BORDER_V};
     use crate::tui::theme::Theme;
     use ratatui::prelude::*;
 
@@ -37,10 +50,10 @@ pub mod diff_inline {
 
         let mut lines = Vec::new();
 
-        // Header
+        // Header (rounded corners, matching the other freebuff-style blocks)
         let label = if has_diff_markers { "diff" } else { "content" };
         lines.push(Line::from(Span::styled(
-            format!("    ┌─ {label}"),
+            format!("    {BORDER_TL} {label}"),
             Style::default().fg(theme.border),
         )));
 
@@ -81,21 +94,21 @@ pub mod diff_inline {
             };
 
             lines.push(Line::from(vec![
-                Span::styled("    │ ", prefix_style),
+                Span::styled(format!("    {BORDER_V}"), prefix_style),
                 Span::styled(line.to_string(), text_style),
             ]));
         }
 
         if total > MAX_DIFF_LINES {
             lines.push(Line::from(Span::styled(
-                format!("    │ ... ({} more lines)", total - MAX_DIFF_LINES),
+                format!("    {BORDER_V}... ({} more lines)", total - MAX_DIFF_LINES),
                 Style::default().fg(theme.text_ghost),
             )));
         }
 
         // Footer
         lines.push(Line::from(Span::styled(
-            "    └─".to_string(),
+            format!("    {BORDER_BL}"),
             Style::default().fg(theme.border),
         )));
 
@@ -140,7 +153,7 @@ pub mod graph {
     use crate::tui::theme::Theme;
     use ratatui::{
         prelude::*,
-        widgets::{Block, Borders, Clear, Paragraph, Wrap},
+        widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
     };
 
     /// A node in the graph visualization.
@@ -333,6 +346,7 @@ pub mod graph {
         let block = Block::default()
             .title(" Memory Graph (↑↓ select | ←→ pan | Esc close) ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.accent))
             .style(Style::default().bg(theme.bg));
 
@@ -378,6 +392,7 @@ pub mod graph {
 
             let node_block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(border_style);
 
             let label = format!("{} {}", node.kind.icon(), node.label);
@@ -1159,6 +1174,7 @@ pub mod messages {
     /// preview follows the tail of the thinking stream as it grows.
     const THINKING_PREVIEW_LINES: usize = 5;
 
+    use super::{BORDER_BL, BORDER_TL, BORDER_V, DASHED_BL, DASHED_TL, DASHED_V};
     use crate::tui::{
         app::{AppState, Selection, SelectionTarget, TurnRole},
         theme::Theme,
@@ -1224,11 +1240,12 @@ pub mod messages {
         for turn in turns {
             match turn.role {
                 TurnRole::User => {
+                    // Freebuff MessageWithAgents: a 1px colored vertical rule
+                    // beside user messages rather than a full border.
                     let wrapped = wrap_text(&turn.content, width as usize);
-                    for (i, wline) in wrapped.iter().enumerate() {
-                        let prefix = if i == 0 { "> " } else { "  " };
+                    for wline in &wrapped {
                         items.push(VItem::new(Line::from(vec![
-                            Span::styled(prefix, theme.accent_style()),
+                            Span::styled(BORDER_V, theme.accent_style()),
                             Span::styled(wline.clone(), Style::default().fg(theme.user_msg)),
                         ])));
                     }
@@ -1243,20 +1260,25 @@ pub mod messages {
                     items.push(VItem::new(Line::default()));
                 }
                 TurnRole::System => {
+                    // Freebuff ghost/ephemeral elements: dashed rounded border
+                    // (DASHED_BORDER_CHARS) — system turns are transient.
                     let border = Style::default().fg(theme.border);
                     items.push(VItem::new(Line::from(Span::styled(
-                        "  ┌─ system",
+                        format!("  {DASHED_TL} system"),
                         border,
                     ))));
                     // Leave room for the left border prefix so wrapped rows fit.
                     let wrapped = wrap_text(&turn.content, (width as usize).saturating_sub(7));
                     for wline in &wrapped {
                         items.push(VItem::new(Line::from(vec![
-                            Span::styled("  │ ", border),
+                            Span::styled(format!("  {DASHED_V}"), border),
                             Span::styled(wline.clone(), theme.dimmed()),
                         ])));
                     }
-                    items.push(VItem::new(Line::from(Span::styled("  └─", border))));
+                    items.push(VItem::new(Line::from(Span::styled(
+                        format!("  {DASHED_BL}"),
+                        border,
+                    ))));
                     items.push(VItem::new(Line::default()));
                 }
             }
@@ -1312,13 +1334,15 @@ pub mod messages {
                 }
             }
             crate::tui::app::OutputBlock::Thinking(text) => {
-                // Reasoning renders as a delimited preview block: a labeled
-                // header, then only the newest wrapped lines (the stream's
-                // tail) so it stays compact and auto-follows the ongoing
-                // thinking as new deltas arrive.
+                // Freebuff ThinkingBlock: a labeled header with the streaming
+                // glyph (• while the reasoning is in flight), then only the
+                // newest wrapped lines (the stream's tail) so it stays
+                // compact and auto-follows the ongoing thinking as new
+                // deltas arrive.
                 let border = Style::default().fg(theme.thinking);
                 items.push(VItem::new(Line::from(vec![
-                    Span::styled("  ┌─ ", border),
+                    Span::styled(format!("  {BORDER_TL} "), border),
+                    Span::styled("• ", border),
                     Span::styled(
                         "Thinking",
                         Style::default()
@@ -1335,17 +1359,17 @@ pub mod messages {
                 let style = Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC);
                 if truncated {
                     items.push(VItem::new(Line::from(vec![
-                        Span::styled("  │ ", border),
+                        Span::styled(format!("  {BORDER_V}"), border),
                         Span::styled("...", style),
                     ])));
                 }
                 for wline in wrapped {
                     items.push(VItem::new(Line::from(vec![
-                        Span::styled("  │ ", border),
+                        Span::styled(format!("  {BORDER_V}"), border),
                         Span::styled(wline, style),
                     ])));
                 }
-                items.push(VItem::new(Line::from(Span::styled("  └─", border))));
+                items.push(VItem::new(Line::from(Span::styled(format!("  {BORDER_BL}"), border))));
             }
             crate::tui::app::OutputBlock::Text(text) => {
                 let md_lines = crate::tui::markdown::render_markdown(text, width);
@@ -1496,9 +1520,9 @@ pub mod messages {
             assert_eq!(
                 texts,
                 vec![
-                    "  ┌─ Thinking",
+                    "  ╭─ • Thinking",
                     "  │ step by step reasoning",
-                    "  └─",
+                    "  ╰─",
                     ""
                 ]
             );
@@ -1535,12 +1559,12 @@ pub mod messages {
                 .collect();
             // Header, `...` marker, the newest 5 rows, footer, blank row.
             assert_eq!(texts.len(), 1 + 1 + super::THINKING_PREVIEW_LINES + 1 + 1);
-            assert_eq!(texts[0], "  ┌─ Thinking");
+            assert_eq!(texts[0], "  ╭─ • Thinking");
             assert_eq!(texts[1], "  │ ...");
             // The preview shows the tail: the last rows, not the first.
             assert!(texts[2].contains("reasoning line 16"), "{texts:?}");
             assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES - 1], "  │ reasoning line 20");
-            assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES], "  └─");
+            assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES], "  ╰─");
         }
 
         #[test]
@@ -1570,9 +1594,9 @@ pub mod messages {
             assert_eq!(
                 texts,
                 vec![
-                    "  ┌─ system",
-                    "  │ model a failed — falling back to model b",
-                    "  └─",
+                    "  ╭╌ system",
+                    "  ╎ model a failed — falling back to model b",
+                    "  ╰╌",
                     ""
                 ]
             );
@@ -1588,7 +1612,7 @@ pub mod overlay {
     };
     use ratatui::{
         prelude::*,
-        widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+        widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     };
 
     pub fn render(f: &mut Frame, state: &AppState, theme: &Theme) {
@@ -1690,6 +1714,7 @@ pub mod overlay {
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(theme.border_style())
             .style(Style::default().bg(theme.bg));
 
@@ -1741,6 +1766,7 @@ pub mod overlay {
         let block = Block::default()
             .title(" Permission Required ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.warning))
             .style(Style::default().bg(theme.bg));
 
@@ -1771,6 +1797,7 @@ pub mod overlay {
                 Block::default()
                     .title(" Provider / Model (↑↓ select, Enter switch, Esc close) ")
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .border_style(theme.border_style())
                     .style(Style::default().bg(theme.bg)),
             )
@@ -1801,6 +1828,7 @@ pub mod overlay {
         };
         let query_block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(theme.border_style())
             .style(Style::default().bg(theme.bg));
         f.render_widget(
@@ -1837,6 +1865,7 @@ pub mod overlay {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
                             .title(title)
                             .border_style(theme.border_style())
                             .style(Style::default().bg(theme.bg)),
@@ -1876,6 +1905,7 @@ pub mod overlay {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
                     .title(title)
                     .border_style(theme.border_style())
                     .style(Style::default().bg(theme.bg)),
@@ -1910,6 +1940,7 @@ pub mod overlay {
         };
         let query_block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(theme.border_style())
             .style(Style::default().bg(theme.bg));
         f.render_widget(
@@ -1942,6 +1973,7 @@ pub mod overlay {
                             .block(
                                 Block::default()
                                     .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
                                     .title(title)
                                     .border_style(theme.border_style())
                                     .style(Style::default().bg(theme.bg)),
@@ -1979,6 +2011,7 @@ pub mod overlay {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
                             .title(title)
                             .border_style(theme.border_style())
                             .style(Style::default().bg(theme.bg)),
@@ -2013,6 +2046,7 @@ pub mod overlay {
                             .block(
                                 Block::default()
                                     .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
                                     .title(title)
                                     .border_style(theme.border_style())
                                     .style(Style::default().bg(theme.bg)),
@@ -2028,6 +2062,7 @@ pub mod overlay {
                             .block(
                                 Block::default()
                                     .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
                                     .title(title)
                                     .border_style(theme.border_style())
                                     .style(Style::default().bg(theme.bg)),
@@ -2052,6 +2087,7 @@ pub mod overlay {
                             .block(
                                 Block::default()
                                     .borders(Borders::ALL)
+                                    .border_type(BorderType::Rounded)
                                     .title(title)
                                     .border_style(theme.border_style())
                                     .style(Style::default().bg(theme.bg)),
@@ -2085,6 +2121,7 @@ pub mod overlay {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
                             .title(title)
                             .border_style(theme.border_style())
                             .style(Style::default().bg(theme.bg)),
@@ -2108,13 +2145,15 @@ pub mod overlay {
         let area = centered_rect(f.area(), 80, 70);
         f.render_widget(Clear, area);
 
+        // Freebuff AskUserBranch: rounded single border in the secondary color.
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .title(Span::styled(
                 "Clarifying Questions — type answers, press Enter to submit, Esc to skip",
                 theme.accent_style().add_modifier(Modifier::BOLD),
             ))
-            .border_style(theme.border_style())
+            .border_style(Style::default().fg(theme.text_secondary))
             .style(Style::default().bg(theme.bg));
 
         let inner = block.inner(area);
@@ -2219,6 +2258,7 @@ pub mod overlay {
         let block = Block::default()
             .title(" Provider Error ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.error))
             .style(Style::default().bg(theme.bg));
 
@@ -2651,6 +2691,7 @@ pub mod status {
 pub mod tool_call {
     //! Tool call rendering with output preview and inline diffs.
 
+    use super::{BORDER_BL, BORDER_TL, BORDER_V};
     use crate::tui::app::{ToolCall, ToolStatus};
     use crate::tui::theme::Theme;
     use crate::tui::widgets::diff_inline;
@@ -2677,6 +2718,7 @@ pub mod tool_call {
         depth: usize,
     ) -> Vec<Line<'static>> {
         let indent = "  ".repeat(depth);
+        let frame = Style::default().fg(theme.tool_badge);
         let mut lines = Vec::new();
 
         let (icon, icon_style) = match tool.status {
@@ -2698,8 +2740,11 @@ pub mod tool_call {
             .map(|d| format!(" ({d}ms)"))
             .unwrap_or_default();
 
+        // Freebuff AgentBranchItem: a rounded frame with the badge inline in
+        // the header and a vertical gutter down the left of the content.
         lines.push(Line::from(vec![
-            Span::styled(format!("{indent}{icon} "), icon_style),
+            Span::styled(format!("{indent}{BORDER_TL} "), frame),
+            Span::styled(format!("{icon} "), icon_style),
             Span::styled(
                 tool.name.clone(),
                 Style::default()
@@ -2728,7 +2773,7 @@ pub mod tool_call {
             if let Some(diff_lines) = diff_inline::render_diff_output(output, &tool.name, theme) {
                 lines.extend(diff_lines);
             } else {
-                // Default: plain text preview
+                // Default: plain text preview, gutter-prefixed inside the frame
                 let is_file_tool = matches!(tool.name.as_str(), "Edit" | "Write" | "ApplyPatch");
                 let max_lines = if is_file_tool {
                     MAX_FILE_TOOL_LINES
@@ -2741,23 +2786,29 @@ pub mod tool_call {
                 let style = if tool.status == ToolStatus::Error {
                     Style::default().fg(theme.error)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.text_tertiary)
                 };
 
                 for pl in &preview_lines {
-                    lines.push(Line::from(Span::styled(
-                        format!("{indent}  {pl}"),
-                        style,
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{indent}{BORDER_V}  "), frame),
+                        Span::styled(pl.to_string(), style),
+                    ]));
                 }
                 if total > max_lines {
-                    lines.push(Line::from(Span::styled(
-                        format!("{indent}  ... ({} more lines)", total - max_lines),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{indent}{BORDER_V}  "), frame),
+                        Span::styled(
+                            format!("... ({} more lines)", total - max_lines),
+                            Style::default().fg(theme.text_ghost),
+                        ),
+                    ]));
                 }
             }
         }
+
+        // Close the frame.
+        lines.push(Line::from(Span::styled(format!("{indent}{BORDER_BL}"), frame)));
 
         lines
     }
@@ -2803,10 +2854,14 @@ pub mod tool_call {
             let lines = render_tool_call(&parent, &theme, 0);
             let rendered: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
 
-            // Parent badge at depth 0, child at depth 1, grandchild at depth 2.
+            // Parent badge at depth 0, child at depth 1, grandchild at depth 2,
+            // each wrapped in a rounded frame (╭─ … ╰─).
             assert!(rendered.iter().any(|l| l.contains("spawn_agents")));
-            assert!(rendered.iter().any(|l| l.starts_with("  ✓ [researcher-web]")));
-            assert!(rendered.iter().any(|l| l.starts_with("    ✓ WebSearch")));
+            assert!(rendered.iter().any(|l| l.starts_with("  ╭─ ✓ [researcher-web]")));
+            assert!(rendered.iter().any(|l| l.starts_with("    ╭─ ✓ WebSearch")));
+            // Every frame is closed by its ╰─ footer.
+            assert_eq!(rendered.iter().filter(|l| l.starts_with("    ╰─")).count(), 1);
+            assert_eq!(rendered.iter().filter(|l| l.starts_with("  ╰─")).count(), 1);
             // The sub-agent's final text preview renders under its header.
             assert!(rendered.iter().any(|l| l.contains("the answer")));
             // A done nested header shows its duration.
