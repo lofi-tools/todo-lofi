@@ -114,7 +114,8 @@ impl Tool for AskUserTool {
             question: String,
             header: Option<String>,
             options: Option<Vec<OptionDef>>,
-            multiSelect: Option<bool>,
+            #[serde(rename = "multiSelect")]
+            multi_select: Option<bool>,
             validation: Option<Validation>,
         }
         #[derive(serde::Deserialize, serde::Serialize, Clone)]
@@ -124,10 +125,13 @@ impl Tool for AskUserTool {
         }
         #[derive(serde::Deserialize, serde::Serialize, Clone)]
         struct Validation {
-            maxLength: Option<u32>,
-            minLength: Option<u32>,
+            #[serde(rename = "maxLength")]
+            max_length: Option<u32>,
+            #[serde(rename = "minLength")]
+            min_length: Option<u32>,
             pattern: Option<String>,
-            patternError: Option<String>,
+            #[serde(rename = "patternError")]
+            pattern_error: Option<String>,
         }
 
         #[derive(serde::Deserialize, serde::Serialize)]
