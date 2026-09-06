@@ -1131,6 +1131,7 @@ impl AcpServer {
                     &self.config,
                     &resolved.model,
                 ),
+                ask_user_tool: None,
             },
         )
     }

@@ -51,6 +51,7 @@ pub fn agent_tools(
     fs_reader: crate::subagents::AcpFsSink,
     readonly: bool,
     reasoning: cersei::provider::ReasoningField,
+    ask_user_tool: Option<Box<dyn cersei::tools::Tool>>,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
@@ -70,6 +71,11 @@ pub fn agent_tools(
     }
     tools.push(Box::new(crate::tools::RgSearchTool));
     tools.push(Box::new(crate::tools::ReadDocsTool));
+    if let Some(tool) = ask_user_tool {
+        tools.push(tool);
+    } else {
+        tools.push(Box::new(crate::tools::AskUserTool::new()));
+    }
     tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
     // write_todos tracking, used by the phase workflow in the system prompt.
     tools.push(Box::new(cersei::tools::todo_write::TodoWriteTool));
@@ -137,6 +143,10 @@ pub struct BuildParams {
     /// Lets the OpenAI-compatible SSE reader capture `delta.reasoning` for
     /// reasoning models before it would be dropped.
     pub reasoning: cersei::provider::ReasoningField,
+    /// The configured `ask_user` tool. When `Some`, the tool uses the TUI
+    /// channel to pause for user answers. When `None`, a default non-interactive
+    /// tool is used.
+    pub ask_user_tool: Option<Box<dyn cersei::tools::Tool>>,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -813,6 +823,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         params.fs_reader.clone(),
         params.readonly,
         params.reasoning,
+        params.ask_user_tool,
     );
     let mut builder = Agent::builder()
         .provider(provider)
@@ -845,6 +856,35 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
 // ─── Runtime agent holder (TUI) ─────────────────────────────────────────────
 
 /// Holds the live agent and lets the TUI switch provider/model at runtime.
+/// A pending `ask_user` question set sent from the agent's tool to the TUI.
+pub struct AskUserRequest {
+    /// Unique id for this question set, so the TUI can match answers to requests.
+    pub request_id: u64,
+    /// The questions to display.
+    pub questions: Vec<serde_json::Value>,
+}
+
+/// An answer sent from the TUI back to the agent's `ask_user` tool.
+pub struct AskUserAnswer {
+    /// Matches the `request_id` of the corresponding `AskUserRequest`.
+    pub request_id: u64,
+    /// The user's answers. Each entry corresponds to one question in the
+    /// original request. `None` means the question was skipped.
+    pub answers: Vec<Option<AskUserAnswerValue>>,
+}
+
+/// A single answer value: either a selected option index, a set of selected
+/// option indices (multi-select), or free-text input.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub enum AskUserAnswerValue {
+    /// Single-select: index of the chosen option (0-based).
+    SelectedIndex(usize),
+    /// Multi-select: indices of the chosen options.
+    SelectedIndices(Vec<usize>),
+    /// Free-text input (including "Other").
+    OtherText(String),
+}
+
 pub struct AgentRuntime {
     inner: Mutex<AgentRuntimeInner>,
 }
@@ -870,6 +910,13 @@ struct AgentRuntimeInner {
     /// whole run so the `/provider` explorer never re-fetches a provider it
     /// already browsed. Successes are cached; failures are retried.
     model_cache: Mutex<HashMap<String, Result<Vec<String>, String>>>,
+    /// Channel for `ask_user` questions from the agent's tool to the runtime.
+    /// The runtime forwards these to the TUI.
+    ask_user_tx: tokio::sync::mpsc::UnboundedSender<AskUserRequest>,
+    /// Receiver for `ask_user` questions from the tool.
+    ask_user_rx: tokio::sync::mpsc::UnboundedReceiver<AskUserRequest>,
+    /// Channel for answers from the runtime back to the tool.
+    answer_tx: tokio::sync::mpsc::UnboundedSender<AskUserAnswer>,
 }
 
 impl AgentRuntime {
@@ -880,6 +927,14 @@ impl AgentRuntime {
         let parent = Arc::new(Mutex::new(None));
         let followups = Arc::new(Mutex::new(Vec::new()));
         let (subagent_tx, _) = tokio::sync::broadcast::channel(1024);
+        // Channel from tool -> runtime for ask_user questions.
+        let (ask_user_tx, ask_user_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserRequest>();
+        // Channel from runtime -> tool for ask_user answers.
+        let (answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserAnswer>();
+        let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> = Some(Box::new(crate::tools::AskUserTool::with_channel(
+            ask_user_tx.clone(),
+            answer_rx,
+        )));
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -894,6 +949,7 @@ impl AgentRuntime {
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(config, &resolved.model),
+                ask_user_tool,
             },
         )?;
         let fallback = fallback_for(config, &provider, &model);            Ok(Self {
@@ -909,6 +965,9 @@ impl AgentRuntime {
                     subagent_tx,
                     fallback,
                     model_cache: Mutex::new(HashMap::new()),
+                    ask_user_tx,
+                    ask_user_rx,
+                    answer_tx,
                 }),
             })
     }
@@ -923,6 +982,28 @@ impl AgentRuntime {
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::subagents::SubAgentActivity> {
         self.inner.lock().subagent_tx.subscribe()
+    }
+
+    /// The sender for `ask_user` requests. The `AskUserTool` uses this to
+    /// send questions to the TUI and await answers.
+    pub fn ask_user_tx(&self) -> tokio::sync::mpsc::UnboundedSender<AskUserRequest> {
+        let inner = self.inner.lock();
+        inner.ask_user_tx.clone()
+    }
+
+    /// Drain all pending `ask_user` requests from the tool into `buf`. Called
+    /// by the TUI tick loop to surface pending questions.
+    pub fn drain_ask_user(&self, buf: &mut Vec<AskUserRequest>) {
+        let mut inner = self.inner.lock();
+        while let Ok(req) = inner.ask_user_rx.try_recv() {
+            buf.push(req);
+        }
+    }
+
+    /// Send an answer back to the agent's pending `ask_user` tool call.
+    pub fn send_ask_user_answer(&self, answer: AskUserAnswer) {
+        let inner = self.inner.lock();
+        let _ = inner.answer_tx.send(answer);
     }
 
     /// Resolve a provider's base URL and API key for an out-of-band API call
@@ -1079,6 +1160,7 @@ impl AgentRuntime {
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
+                ask_user_tool: None,
             },
         )?;
         let mut g = self.inner.lock();
@@ -1118,6 +1200,7 @@ impl AgentRuntime {
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
+                ask_user_tool: None,
             },
         )?;
         let fallback = fallback_for(&config, provider, model);
@@ -2182,9 +2265,11 @@ mod tests {
             None,
             false,
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"Read"), "built-in Read should be present");
+        assert!(names.contains(&"ask_user"), "ask_user tool should be present");
         assert!(names.contains(&"Write"), "built-in Write should be present");
         assert!(names.contains(&"Edit"), "built-in Edit should be present");
         // The Client* wrappers must not be registered in TUI mode.
@@ -2250,6 +2335,7 @@ mod tests {
             fs,
             false,
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // The wrappers register under the same Read/Write/Edit names, so the

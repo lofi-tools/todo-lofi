@@ -6,6 +6,25 @@ use cersei::tools::permissions::PermissionDecision;
 use std::time::Instant;
 use tokio::sync::oneshot;
 
+/// An active `ask_user` question set waiting for user answers.
+#[derive(Debug, Clone)]
+pub struct AskUserPending {
+    /// Matches the request id from the agent.
+    pub request_id: u64,
+    /// The questions to display.
+    pub questions: Vec<serde_json::Value>,
+    /// Cached display strings for each question.
+    pub question_summaries: Vec<String>,
+    /// The user's typed answers so far (free-text for each question).
+    pub answers: Vec<String>,
+    /// Which question is currently being edited (for navigation).
+    pub focused_question: usize,
+    /// The current text being typed for the focused question.
+    pub current_input: String,
+    /// Cursor position in `current_input`.
+    pub cursor_pos: usize,
+}
+
 /// A single message turn in the conversation.
 #[derive(Debug, Clone)]
 pub struct Turn {
@@ -139,6 +158,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "Switch provider/model"),
     ("combos", "List/switch combos"),
     ("provider", "Browse provider models"),
+    ("interview", "Run an interview and write a spec"),
     ("help", "Show help"),
     ("clear", "Clear conversation"),
     ("panel", "Toggle side panel"),
@@ -206,6 +226,7 @@ pub enum Overlay {
     ComboPicker(ComboPickerState),
     ProviderExplorer(ProviderExplorerState),
     Graph(crate::tui::widgets::graph::GraphOverlayState),
+    AskUser(AskUserPending),
 }
 
 impl PartialEq for Overlay {
@@ -220,6 +241,7 @@ impl PartialEq for Overlay {
                 | (Self::ComboPicker(_), Self::ComboPicker(_))
                 | (Self::ProviderExplorer(_), Self::ProviderExplorer(_))
                 | (Self::Graph(_), Self::Graph(_))
+                | (Self::AskUser(_), Self::AskUser(_))
         )
     }
 }
@@ -496,6 +518,13 @@ pub struct AppState {
     // ── Animation ──
     pub frame_count: u64,
 
+    // ── Interview flow ──
+    /// When set, the next user message is treated as the interview target
+    /// instead of a normal chat message.
+    pub pending_interview_target: Option<String>,
+    /// Buffer for ask_user requests drained from the runtime (polled each tick).
+    pub ask_user_buffer: Vec<crate::providers::AskUserRequest>,
+
     // ── Flags ──
     pub should_quit: bool,
     pub dirty: bool,
@@ -557,6 +586,8 @@ impl AppState {
             frame_count: 0,
             should_quit: false,
             dirty: true,
+            pending_interview_target: None,
+            ask_user_buffer: Vec::new(),
         }
     }
 

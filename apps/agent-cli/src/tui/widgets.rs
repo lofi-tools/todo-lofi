@@ -1480,6 +1480,7 @@ pub mod overlay {
             Overlay::ComboPicker(p) => render_combo_picker(f, p, theme),
             Overlay::ProviderExplorer(p) => render_provider_explorer(f, p, theme),
             Overlay::Graph(g) => super::graph::render(f, g, theme),
+            Overlay::AskUser(p) => render_ask_user(f, p, theme),
         }
     }
 
@@ -1975,6 +1976,90 @@ pub mod overlay {
                     .highlight_symbol(">");
                 f.render_stateful_widget(list, list_area, &mut list_state);
             }
+        }
+    }
+
+    /// Render the AskUser overlay: shows questions with text input areas.
+    fn render_ask_user(f: &mut Frame, p: &crate::tui::app::AskUserPending, theme: &Theme) {
+        use ratatui::widgets::{Block, Borders, Paragraph};
+        use ratatui::text::{Line, Span};
+
+        let area = centered_rect(f.area(), 80, 70);
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                "Clarifying Questions — type answers, press Enter to submit, Esc to skip",
+                theme.accent_style().add_modifier(Modifier::BOLD),
+            ))
+            .border_style(theme.border_style())
+            .style(Style::default().bg(theme.bg));
+
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        // Layout: each question gets a row with the question text and an input line.
+        let row_height = 3; // question line + answer line + blank
+        let total_height = p.questions.len() * row_height + 2; // +2 for padding
+        let visible_height = inner.height.min(total_height as u16);
+
+        let mut y = inner.y;
+        for (i, (question, answer)) in p.questions.iter().zip(p.answers.iter()).enumerate() {
+            if y >= inner.y + visible_height {
+                break;
+            }
+            let is_focused = i == p.focused_question;
+
+            // Question line
+            let q_text = question["question"].as_str().unwrap_or("?");
+            let q_line = Line::from(Span::styled(
+                format!("Q{}): {}", i + 1, q_text),
+                if is_focused {
+                    theme.accent_style()
+                } else {
+                    Style::default().fg(theme.fg)
+                },
+            ));
+            f.render_widget(
+                Paragraph::new(q_line).block(Block::default().style(Style::default())),
+                Rect { x: inner.x, y: y as u16, width: inner.width, height: 1 },
+            );
+            y += 1;
+
+            // Answer line (input or filled)
+            let answer_text = if i == p.focused_question {
+                // Show the current input being typed
+                let input = &p.current_input;
+                let cursor_marker = if p.cursor_pos <= input.len() {
+                    let mut s = input.clone();
+                    if p.cursor_pos < s.len() {
+                        s.insert(p.cursor_pos, '│');
+                    } else {
+                        s.push('│');
+                    }
+                    s
+                } else {
+                    input.clone()
+                };
+                format!("A{}): {}", i + 1, cursor_marker)
+            } else {
+                format!("A{}): {}", i + 1, answer.as_str())
+            };
+            let a_style = if is_focused {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(answer_text, a_style)))
+                    .block(Block::default().style(Style::default())),
+                Rect { x: inner.x, y: y as u16, width: inner.width, height: 1 },
+            );
+            y += 1;
+
+            // Blank separator line
+            y += 1;
         }
     }
 

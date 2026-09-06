@@ -7,6 +7,250 @@ use std::path::Path;
 
 use crate::subagents::AcpFsSink;
 
+// ─── AskUser tool ──────────────────────────────────────────────────────────
+
+/// `ask_user` is the first-class tool the interviewing agent calls to pose
+/// clarifying questions during an `/interview` flow. It mirrors the freebuff
+/// `AskUserParams` shape so the same schema works across TUI and ACP.
+pub struct AskUserTool {
+    /// Sender for piping questions to the TUI. When `None`, the tool operates
+    /// in non-interactive mode (ACP/headless) and returns a structured result.
+    ask_user_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>>,
+    /// Receiver for answers from the TUI (wrapped in Tokio Mutex for async access).
+    answer_rx: Option<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
+    /// Monotonic counter for request ids.
+    request_counter: std::sync::atomic::AtomicU64,
+}
+
+impl AskUserTool {
+    pub fn new() -> Self {
+        Self {
+            ask_user_tx: None,
+            answer_rx: None,
+            request_counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub fn with_channel(
+        tx: tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
+        rx: tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>,
+    ) -> Self {
+        Self {
+            ask_user_tx: Some(tx),
+            answer_rx: Some(tokio::sync::Mutex::new(rx)),
+            request_counter: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn name(&self) -> &str {
+        "ask_user"
+    }
+
+    fn description(&self) -> &str {
+        "Ask the user one or more clarifying questions. Each question can be \
+         single-select (radio), multi-select (checkbox), or free-text. Use this \
+         tool when you need clarification before proceeding — never ask questions \
+         as plain text."
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Custom
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "description": "One or more questions to ask the user.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string", "description": "The question text." },
+                            "header": { "type": "string", "description": "Short label, <= 12 chars (optional)." },
+                            "options": {
+                                "type": "array",
+                                "description": "Answer options for select-style questions.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["label"]
+                                }
+                            },
+                            "multiSelect": { "type": "boolean", "description": "Checkbox (multi-select) when true; radio (single-select) when false/omitted." },
+                            "validation": {
+                                "type": "object",
+                                "description": "Optional free-text validation constraints.",
+                                "properties": {
+                                    "maxLength": { "type": "integer" },
+                                    "minLength": { "type": "integer" },
+                                    "pattern": { "type": "string" },
+                                    "patternError": { "type": "string" }
+                                }
+                            }
+                        },
+                        "required": ["question"]
+                    }
+                }
+            },
+            "required": ["questions"]
+        })
+    }
+
+    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+        #[derive(serde::Deserialize, serde::Serialize, Clone)]
+        struct Question {
+            question: String,
+            header: Option<String>,
+            options: Option<Vec<OptionDef>>,
+            multiSelect: Option<bool>,
+            validation: Option<Validation>,
+        }
+        #[derive(serde::Deserialize, serde::Serialize, Clone)]
+        struct OptionDef {
+            label: String,
+            description: Option<String>,
+        }
+        #[derive(serde::Deserialize, serde::Serialize, Clone)]
+        struct Validation {
+            maxLength: Option<u32>,
+            minLength: Option<u32>,
+            pattern: Option<String>,
+            patternError: Option<String>,
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct ParsedInput {
+            questions: Vec<Question>,
+        }
+
+        let parsed: ParsedInput = match serde_json::from_value(input) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
+        };
+
+        if parsed.questions.is_empty() {
+            return ToolResult::error("ask_user requires at least one question".to_string());
+        }
+
+        let questions_json: Vec<serde_json::Value> = parsed
+            .questions
+            .iter()
+            .map(|q| serde_json::to_value(q).unwrap())
+            .collect();
+
+        let q_count = parsed.questions.len();
+
+        if self.ask_user_tx.is_some() && self.answer_rx.is_some() {
+            // Send the questions to the TUI and await an answer.
+            let request_id = self
+                .request_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            let request = crate::providers::AskUserRequest {
+                request_id,
+                questions: questions_json.clone(),
+            };
+
+            if self.ask_user_tx.as_ref().unwrap().send(request).is_err() {
+                return ToolResult::error("ask_user channel closed — cannot await user answer".to_string());
+            }
+
+            // Wait for the user's answer. This pauses the agent until the TUI
+            // surfaces the question and the user responds.
+            use tokio::time::{timeout, Duration};
+
+            let mut rx_guard = self.answer_rx.as_ref().unwrap().lock().await;
+            loop {
+                match timeout(Duration::from_secs(300), rx_guard.recv()).await {
+                    Ok(Some(answer)) if answer.request_id == request_id => {
+                        let answer_text = format_ask_user_answer(
+                            &questions_json,
+                            &answer.answers,
+                        );
+                        return ToolResult::success(answer_text);
+                    }
+                    Ok(Some(_)) => {
+                        // Stale answer, keep waiting
+                        continue;
+                    }
+                    Ok(None) => {
+                        return ToolResult::error("ask_user answer channel closed".to_string());
+                    }
+                    Err(_) => {
+                        return ToolResult::error("ask_user timed out waiting for user answer".to_string());
+                    }
+                }
+            }
+        }
+
+        // No TUI channel: return the questions as a structured result for
+        // non-interactive modes (ACP clients handle ask_user themselves).
+        ToolResult::success(format!(
+            "[ask_user: {q_count} question{qs}]\n{q_labels}",
+            qs = if q_count == 1 { "" } else { "s" },
+            q_labels = questions_json
+                .iter()
+                .enumerate()
+                .map(|(i, q)| format!("{})) {}", i + 1, q["question"].as_str().unwrap_or("?")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+}
+
+/// Format the questions and answers as a readable QA block.
+fn format_ask_user_answer(
+    questions_json: &[serde_json::Value],
+    answers: &[Option<crate::providers::AskUserAnswerValue>],
+) -> String {
+    let mut out = String::new();
+    out.push_str("## Clarifying Questions\n\n");
+    for (i, (q, a)) in questions_json.iter().zip(answers.iter()).enumerate() {
+        let question = q["question"].as_str().unwrap_or("?");
+        out.push_str(&format!("### {}\n", i + 1));
+        out.push_str(&format!("**Q:** {}\n", question));
+        match a {
+            Some(crate::providers::AskUserAnswerValue::SelectedIndex(idx)) => {
+                if let Some(options) = q["options"].as_array() {
+                    if let Some(opt) = options.get(*idx) {
+                        let label = opt["label"].as_str().unwrap_or("?");
+                        out.push_str(&format!("**A:** {}\n", label));
+                    }
+                }
+            }
+            Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices)) => {
+                if let Some(options) = q["options"].as_array() {
+                    let labels: Vec<&str> = indices
+                        .iter()
+                        .filter_map(|idx| options.get(*idx).and_then(|o| o["label"].as_str()))
+                        .collect();
+                    out.push_str(&format!("**A:** {}\n", labels.join(", ")));
+                }
+            }
+            Some(crate::providers::AskUserAnswerValue::OtherText(text)) => {
+                out.push_str(&format!("**A:** {}\n", text));
+            }
+            None => {
+                out.push_str("**A:** Skipped\n");
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 // ─── Ripgrep code search (replaces the built-in Grep tool) ────────────────
 
 /// Matches (per file) and total (global) caps for search results.

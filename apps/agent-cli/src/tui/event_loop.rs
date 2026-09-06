@@ -111,6 +111,8 @@ pub async fn run(
     // state.set_shared_mode(shared_mode);
     let mut agent_run: Option<AgentRun> = None;
 
+
+
     // Initial render
     draw(terminal, &mut state, &theme)?;
 
@@ -165,6 +167,26 @@ pub async fn run(
 
             // ── Terminal events + tick ───────────────────────────────────
             _ = tokio::time::sleep(TICK_RATE) => {
+                // Drain pending ask_user requests from the runtime.
+                runtime.drain_ask_user(&mut state.ask_user_buffer);
+                while let Some(req) = state.ask_user_buffer.pop() {
+                    let summaries: Vec<String> = req
+                        .questions
+                        .iter()
+                        .map(|q| q["question"].as_str().unwrap_or("?").to_string())
+                        .collect();
+                    let answers: Vec<String> = (0..req.questions.len()).map(|_| String::new()).collect();
+                    state.overlay = Overlay::AskUser(crate::tui::app::AskUserPending {
+                        request_id: req.request_id,
+                        questions: req.questions,
+                        question_summaries: summaries,
+                        answers,
+                        focused_question: 0,
+                        current_input: String::new(),
+                        cursor_pos: 0,
+                    });
+                    state.dirty = true;
+                }
                 // Drain a completed `/provider` fetch (if one arrived).
                 poll_provider_fetch(&mut state);
                 // Drain pending events (cap at 50 to prevent infinite loop on resize storms)
@@ -175,10 +197,7 @@ pub async fn run(
                         Event::Key(key) => {
                             if let Some(prompt) =
                                 handle_key(&mut state, key, config, &cancel_token, &runtime)
-                            {
-                                state.push_user(&prompt);
-                                state.is_streaming = true;
-                                state.stream_start = Some(Instant::now());
+                            {                                state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
                                 let (effective_provider, effective_model) = runtime.effective();
                                 agent_run = Some(AgentRun {
@@ -188,8 +207,8 @@ pub async fn run(
                                     model: effective_model,
                                     produced_output: false,
                                 });
-                            }
-                            state.dirty = true;
+                                }
+                                state.dirty = true;
                         }
                         Event::Mouse(mouse) => {
                             handle_mouse(&mut state, mouse);
@@ -314,6 +333,10 @@ fn handle_key(
     }
     if matches!(state.overlay, Overlay::ProviderExplorer(_)) {
         return handle_provider_explorer_key(state, key, runtime);
+    }
+    // AskUser overlay gets full key handling while open.
+    if matches!(state.overlay, Overlay::AskUser(_)) {
+        return handle_ask_user_key(state, key, runtime);
     }
 
     // Fuzzy command selector gets key handling while open.
@@ -561,8 +584,18 @@ fn handle_key(
             state.cursor_pos = 0;
             state.command_selector = None;
 
+            if state.pending_interview_target.take().is_some() {
+                // Interview input mode: the submitted text is the interview target.
+                let prompt = format!("{INTERVIEW_BASE_PROMPT}{input_text}");
+                state.push_user(&input_text);
+                state.pending_interview_target = None;
+                return Some(prompt);
+            }
+
             if input_text.starts_with('/') {
-                handle_slash_command(state, &input_text, config, runtime);
+                if let Some(prompt) = handle_slash_command(state, &input_text, config, runtime) {
+                    return Some(prompt);
+                }
                 return None;
             }
 
@@ -1825,6 +1858,99 @@ fn handle_provider_explorer_key(
     None
 }
 
+/// Handle key events while the AskUser overlay is showing.
+fn handle_ask_user_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    runtime: &Arc<AgentRuntime>,
+) -> Option<String> {
+    let Overlay::AskUser(p) = &mut state.overlay else {
+        return None;
+    };
+    match key.code {
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            p.current_input.push(c);
+            p.cursor_pos = p.current_input.len();
+            state.dirty = true;
+        }
+        KeyCode::Backspace if !p.current_input.is_empty() => {
+            p.current_input.pop();
+            p.cursor_pos = p.current_input.len();
+            state.dirty = true;
+        }
+        KeyCode::Left if p.cursor_pos > 0 => {
+            p.cursor_pos -= 1;
+            state.dirty = true;
+        }
+        KeyCode::Right if p.cursor_pos < p.current_input.len() => {
+            p.cursor_pos += 1;
+            state.dirty = true;
+        }
+        KeyCode::Up if p.focused_question > 0 => {
+            // Save current answer before moving up.
+            if p.focused_question < p.answers.len() {
+                p.answers[p.focused_question] = p.current_input.clone();
+            }
+            p.focused_question -= 1;
+            p.current_input = p.answers[p.focused_question].clone();
+            p.cursor_pos = p.current_input.len();
+            state.dirty = true;
+        }
+        KeyCode::Down if p.focused_question + 1 < p.questions.len() => {
+            // Save current answer before moving down.
+            p.answers[p.focused_question] = p.current_input.clone();
+            p.focused_question += 1;
+            p.current_input = p.answers[p.focused_question].clone();
+            p.cursor_pos = p.current_input.len();
+            state.dirty = true;
+        }
+        KeyCode::Enter => {
+            // Save current answer and submit all answers.
+            p.answers[p.focused_question] = p.current_input.clone();
+            let request_id = p.request_id;
+            let answers: Vec<Option<crate::providers::AskUserAnswerValue>> = p
+                .answers
+                .iter()
+                .map(|a| {
+                    if a.is_empty() {
+                        None // Skipped
+                    } else {
+                        Some(crate::providers::AskUserAnswerValue::OtherText(a.clone()))
+                    }
+                })
+                .collect();
+            let answer = crate::providers::AskUserAnswer {
+                request_id,
+                answers,
+            };
+            runtime.send_ask_user_answer(answer);
+            state.overlay = Overlay::None;
+            state.dirty = true;
+            // Return a placeholder prompt so the event loop doesn't try to
+            // send a chat message — the agent run is already streaming.
+            return Some(String::new());
+        }
+        KeyCode::Esc => {
+            // Cancel the interview: send all-skipped answers.
+            let request_id = p.request_id;
+            let answers: Vec<Option<crate::providers::AskUserAnswerValue>> = vec![
+                None;
+                p.questions.len()
+            ];
+            let answer = crate::providers::AskUserAnswer {
+                request_id,
+                answers,
+            };
+            runtime.send_ask_user_answer(answer);
+            state.overlay = Overlay::None;
+            state.dirty = true;
+            return Some(String::new());
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: AgentEvent) {
     match event {
         AgentEvent::TextDelta(text) => {
@@ -2125,18 +2251,78 @@ fn attach_subagent_activity(
     }
 }
 
+// ─── Interview prompt ──────────────────────────────────────────────────────
+
+/// Base prompt used for every `/interview` flow. The user's raw request is
+/// appended so the same prompt works for all models and providers.
+const INTERVIEW_BASE_PROMPT: &str = "\
+You are running an interview for a user request. Your job is to gather context \
+and ask clarifying questions before producing a detailed spec.
+
+## Process
+
+1. First, gather relevant context about the request — read files, search the \
+   codebase, check existing docs — whatever helps you understand the current \
+   state.
+2. Then ask clarifying questions using the `ask_user` tool. Ask at least a \
+   few rounds of questions when needed. Always use `ask_user` for questions, \
+   never plain text.
+3. When you have enough context, write a detailed spec file.
+
+## Spec file output
+
+- Write the spec to `./docs/spec/<slug>-spec.md` where `<slug>` is derived from \
+   the request (a short kebab-case name).
+- If the request doesn't suggest an obvious slug, use a sensible name in the \
+   same `docs/spec/` location.
+- The spec should be detailed: capture everything you learned during the \
+   interview — requirements, constraints, decisions, open questions, and the \
+   planned approach.
+- Create the `docs/spec/` directory if it doesn't exist.
+
+## Final reply
+
+- After writing the spec file, reply with a short summary plus the spec file \
+   path (e.g. `Wrote spec to ./docs/spec/add-oauth-spec.md`).
+- The summary is included even if the interview only produced a spec file.
+
+## Request
+
+Request to interview: ";
+
 fn handle_slash_command(
     state: &mut AppState,
     input: &str,
     config: &AppConfig,
     runtime: &Arc<AgentRuntime>,
-) {
+) -> Option<String> {
     let cmd = input
         .trim_start_matches('/')
         .split_whitespace()
         .next()
         .unwrap_or("");
     match cmd {
+        "interview" => {
+            let rest = input
+                .trim_start_matches('/')
+                .strip_prefix("interview")
+                .map(str::trim)
+                .unwrap_or("");
+            if rest.is_empty() {
+                // Enter interview input mode: the next message is the target.
+                state.push_system("What would you like to interview? (submit your request)");
+                state.pending_interview_target = Some(String::new());
+            } else if rest.trim().is_empty() {
+                state.push_system(
+                    "Nothing to interview — give /interview a request to clarify.",
+                );
+            } else {
+                // Inline mode: build the interview prompt and return it.
+                let prompt = format!("{INTERVIEW_BASE_PROMPT}{rest}");
+                state.push_user(rest);
+                return Some(prompt);
+            }
+        }
         "help" | "h" | "?" => {
             state.overlay = Overlay::Help;
         }
@@ -2406,6 +2592,7 @@ fn handle_slash_command(
             });
         }
     }
+    None
 }
 
 /// A short summary of a tool call's input for the tool badge line. Shared with
