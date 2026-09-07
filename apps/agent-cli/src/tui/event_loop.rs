@@ -1666,7 +1666,6 @@ fn open_provider_explorer(state: &mut AppState, runtime: &Arc<AgentRuntime>) {
         all_models: Vec::new(),
         loading: false,
         error: String::new(),
-        free_only: false,
     });
     state.dirty = true;
 }
@@ -1732,9 +1731,8 @@ fn poll_provider_fetch(state: &mut AppState) {
 /// Handle keys while the `/provider` explorer is open. In the Providers
 /// phase, typing filters the provider list, Enter browses the selected
 /// provider's models, Esc closes. In the Models phase, typing filters the
-/// model list (free models highlighted), `f` toggles the free-models-only
-/// filter, Enter switches the runtime to the selected model, Esc goes back
-/// to the provider list. All of it is keyboard-only.
+/// model list, Enter switches the runtime to the selected model, Esc goes
+/// back to the provider list. All of it is keyboard-only.
 fn handle_provider_explorer_key(
     state: &mut AppState,
     key: KeyEvent,
@@ -1782,7 +1780,6 @@ fn handle_provider_explorer_key(
                 p.all_models.clear();
                 p.loading = false;
                 p.error = String::new();
-                p.free_only = false;
                 state.dirty = true;
                 // Show the cached model list if already fetched this run;
                 // otherwise kick off the (cached) fetch.
@@ -1802,13 +1799,6 @@ fn handle_provider_explorer_key(
             _ => {}
         },
         ProviderExplorerPhase::Models => match key.code {
-            // `f` toggles the free-models-only filter (typed into the query
-            // everywhere else).
-            KeyCode::Char('f') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                p.free_only = !p.free_only;
-                p.selected = 0;
-                state.dirty = true;
-            }
             // Typing filters the model list (live fuzzy).
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 p.query.push(c);
@@ -1877,7 +1867,6 @@ fn handle_provider_explorer_key(
                 p.all_models.clear();
                 p.loading = false;
                 p.error = String::new();
-                p.free_only = false;
                 state.dirty = true;
             }
             _ => {}

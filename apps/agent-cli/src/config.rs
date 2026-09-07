@@ -52,10 +52,6 @@ pub struct AppConfig {
     /// the rest on errors / rate limits.
     #[serde(default)]
     pub combos: std::collections::HashMap<String, Vec<ComboEntry>>,
-    /// Only show free coding models by default (TUI picker and ACP
-    /// `availableModels`). Set to `false` to show every configured model.
-    #[serde(default = "default_true")]
-    pub free_models_only: bool,
     /// Per-model response format families: model id (e.g. "stealth/ox-alpha")
     /// → family name ("reasoning", "reasoning_content", "plain"). The family
     /// determines how a model's streamed thinking is delimited from its
@@ -108,7 +104,6 @@ impl Default for AppConfig {
             fallback: FallbackConfig::default(),
             providers: std::collections::HashMap::new(),
             combos: std::collections::HashMap::new(),
-            free_models_only: true,
             model_families: std::collections::HashMap::new(),
             benchmark_mode: false,
             embedding_api: false,
@@ -149,7 +144,6 @@ pub fn default_config_jsonc() -> String {
         ("fallback", "Combo fallback tuning"),
         ("providers", "Per-provider overrides (base_url, api_key, models)"),
         ("combos", "Named fallback combos: { name: [[\"provider\", \"model\"], ...] }"),
-        ("free_models_only", "Only show free coding models in pickers (true/false)"),
         ("model_families", "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\""),
         ("benchmark_mode", "Benchmark/headless mode (true/false)"),
         ("embedding_api", "Enable embedding API for semantic search (true/false)"),
@@ -497,7 +491,6 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     copy_if_set!(working_dir);
     copy_if_set!(output_format);
     copy_if_set!(compression_level);
-    copy_if_set!(free_models_only);
     copy_if_set!(fallback);
     copy_if_set!(embedding_api);
     copy_if_set!(benchmark_mode);
@@ -542,9 +535,6 @@ fn apply_env(config: &mut AppConfig) {
     }
     if let Ok(v) = std::env::var("ABSTRACT_COMPRESSION") {
         config.compression_level = v;
-    }
-    if let Ok(v) = std::env::var("ABSTRACT_FREE_MODELS_ONLY") {
-        config.free_models_only = v == "1" || v.eq_ignore_ascii_case("true");
     }
 }
 
@@ -718,7 +708,6 @@ mod tests {
             ("effort", "medium"),
             ("theme", "dark"),
             ("permissions_mode", "interactive"),
-            ("free_models_only", "true"),
         ] {
             assert!(
                 jsonc.contains(&format!("\"{key}\": \"{value}\""))

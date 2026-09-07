@@ -30,11 +30,6 @@ pub struct Provider {
     pub base_url: String,
     /// API key spec: `!command`, `env:VAR`, or a literal key.
     pub api_key: String,
-    /// Subset of `models` that are free coding models. When
-    /// `free_models_only` is enabled and this list is non-empty, `models` is
-    /// filtered down to it. Empty means "unknown" (user-defined providers,
-    /// or an explicit `models` override) → all models are shown.
-    pub free_models: Vec<String>,
     pub models: Vec<String>,
 }
 
@@ -161,11 +156,6 @@ fn builtin_providers() -> Vec<Provider> {
             name: "poolside".into(),
             base_url: "https://inference.poolside.ai/v1".into(),
             api_key: "env:POOLSIDE_API_KEY".into(),
-            // Laguna is poolside's coding model family; both are free.
-            free_models: vec![
-                "poolside/laguna-xs-2.1".into(),
-                "poolside/laguna-s-2.1".into(),
-            ],
             models: vec![
                 "poolside/laguna-xs-2.1".into(),
                 "poolside/laguna-s-2.1".into(),
@@ -175,13 +165,6 @@ fn builtin_providers() -> Vec<Provider> {
             name: "openrouter".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
             api_key: "env:OPENROUTER_API_KEY".into(),
-            // Free coding models on openrouter (zero-priced `:free` variants).
-            free_models: vec![
-                "openrouter/free".into(),
-                "openai/gpt-oss-20b:free".into(),
-                "cohere/north-mini-code:free".into(),
-                "poolside/laguna-xs-2.1:free".into(),
-            ],
             models: vec![
                 "openrouter/auto".into(),
                 "openrouter/free".into(),
@@ -197,12 +180,6 @@ fn builtin_providers() -> Vec<Provider> {
             name: "groq".into(),
             base_url: "https://api.groq.com/openai/v1".into(),
             api_key: "env:GROQ_API_KEY".into(),
-            // groq/compound and compound-mini are free; the gpt-oss models
-            // hosted on groq are paid.
-            free_models: vec![
-                "groq/compound".into(),
-                "groq/compound-mini".into(),
-            ],
             models: vec![
                 "groq/compound".into(),
                 "groq/compound-mini".into(),
@@ -214,14 +191,6 @@ fn builtin_providers() -> Vec<Provider> {
             name: "nvidia".into(),
             base_url: "https://integrate.api.nvidia.com/v1".into(),
             api_key: "env:NVIDIA_API_KEY".into(),
-            // NVIDIA NIM offers free serverless APIs for development; all
-            // built-in models are available through the free tier.
-            free_models: vec![
-                "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
-                "meta/llama-3.3-70b-instruct".into(),
-                "deepseek-ai/deepseek-r1".into(),
-                "qwen/qwen2.5-72b-instruct".into(),
-            ],
             models: vec![
                 "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
                 "meta/llama-3.3-70b-instruct".into(),
@@ -235,13 +204,7 @@ fn builtin_providers() -> Vec<Provider> {
             api_key: "env:TOKENROUTER_API_KEY".into(),
             // TokenRouter is a unified gateway; this is a curated subset of its
             // coding-capable chat models (all exposed over the OpenAI-compatible
-            // endpoint). The `-free` variants are zero-ratio (free) on the
-            // gateway.
-            free_models: vec![
-                "deepseek/deepseek-v4-pro-0813-free".into(),
-                "qwen/qwen3.8-max-free".into(),
-                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".into(),
-            ],
+            // endpoint).
             models: vec![
                 "deepseek/deepseek-v4-pro-0813-free".into(),
                 "qwen/qwen3.8-max-free".into(),
@@ -262,7 +225,6 @@ fn builtin_providers() -> Vec<Provider> {
             api_key: "env:KIOSAPI_API_KEY".into(),
             // KiosAPI is a New API-style OpenAI-compatible gateway; the
             // default model is qwen3.8-flash.
-            free_models: vec!["kiosapi/qwen3.8-flash".into()],
             models: vec!["kiosapi/qwen3.8-flash".into()],
         },
     ]
@@ -270,20 +232,13 @@ fn builtin_providers() -> Vec<Provider> {
 
 /// The built-in providers rendered as config-file entries — used by the
 /// default-config template so `providers` shows the real defaults a user
-/// would edit. Each entry carries one model (the provider's first free model
-/// when it has one, else its first model), keeping the template compact.
+/// would edit. Each entry carries the provider's first model, keeping the
+/// template compact.
 pub(crate) fn builtin_provider_entries() -> Vec<(String, crate::config::ProviderConfigEntry)> {
     builtin_providers()
         .into_iter()
         .map(|p| {
-            let models = if p.free_models.is_empty() {
-                p.models
-            } else {
-                p.free_models
-            }
-            .into_iter()
-            .take(1)
-            .collect();
+            let models = p.models.into_iter().take(1).collect();
             (
                 p.name,
                 crate::config::ProviderConfigEntry {
@@ -411,7 +366,6 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
                 name: "combos".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                free_models: Vec::new(),
                 models: combo_names.into_iter().map(|c| c.name).collect(),
             },
         );
@@ -422,7 +376,6 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
             name: name.clone(),
             base_url: String::new(),
             api_key: String::new(),
-            free_models: Vec::new(),
             models: Vec::new(),
         });
         if let Some(base_url) = &entry.base_url {
@@ -432,10 +385,8 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
             provider.api_key = api_key.clone();
         }
         if !entry.models.is_empty() {
-            // An explicit `models` override takes full control of the list:
-            // free-model filtering no longer applies to it.
+            // An explicit `models` override takes full control of the list.
             provider.models = entry.models.clone();
-            provider.free_models.clear();
         }
     }
 
@@ -451,13 +402,6 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
         (builtin_rank, p.name.clone())
     });
 
-    if config.free_models_only {
-        for p in &mut all {
-            if !p.free_models.is_empty() {
-                p.models.retain(|m| p.free_models.contains(m));
-            }
-        }
-    }
     all
 }
 
@@ -1350,56 +1294,11 @@ mod tests {
     }
 
     #[test]
-    fn free_models_only_filters_builtins_by_default() {
-        let config = AppConfig::default(); // free_models_only: true
-        let openrouter = provider(&config, "openrouter").unwrap();
-        assert_eq!(
-            openrouter.models,
-            vec![
-                "openrouter/free",
-                "openai/gpt-oss-20b:free",
-                "cohere/north-mini-code:free",
-                "poolside/laguna-xs-2.1:free",
-            ]
-        );
-        // gpt-oss and the paid frontier models are hidden from the default view.
-        let groq = provider(&config, "groq").unwrap();
-        assert_eq!(groq.models, vec!["groq/compound", "groq/compound-mini"]);
-        assert!(!groq.models.iter().any(|m| m.contains("gpt-oss")));
-    }
-
-    #[test]
-    fn free_models_only_can_be_disabled() {
-        let config = AppConfig {
-            free_models_only: false,
-            ..Default::default()
-        };
-        let openrouter = provider(&config, "openrouter").unwrap();
-        assert!(openrouter.models.contains(&"openrouter/auto".to_string()));
-        assert!(openrouter.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
-    }
-
-    #[test]
     fn tokenrouter_builtin_provider() {
         let config = AppConfig::default();
         let tr = provider(&config, "tokenrouter").unwrap();
         assert_eq!(tr.base_url, "https://api.tokenrouter.com/v1");
         assert_eq!(tr.api_key, "env:TOKENROUTER_API_KEY");
-        // With the free filter on (default), only the free gateway models show.
-        assert_eq!(
-            tr.models,
-            vec![
-                "deepseek/deepseek-v4-pro-0813-free",
-                "qwen/qwen3.8-max-free",
-                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-            ]
-        );
-        // The paid coding models appear once the filter is off.
-        let config = AppConfig {
-            free_models_only: false,
-            ..Default::default()
-        };
-        let tr = provider(&config, "tokenrouter").unwrap();
         assert!(tr.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
         assert!(tr.models.contains(&"qwen/qwen3-coder-next".to_string()));
         assert!(tr.models.contains(&"openai/gpt-oss-120b".to_string()));

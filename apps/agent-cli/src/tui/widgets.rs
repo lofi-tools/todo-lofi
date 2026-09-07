@@ -1923,10 +1923,8 @@ pub mod overlay {
 
     /// Render the `/provider` explorer: a query box at the top and, below it,
     /// either the fuzzy provider list (Providers phase) or the selected
-    /// provider's fuzzy model list (Models phase), where free models are
-    /// highlighted and a free-models-only filter can be active. Shows a
-    /// loading hint while a `/models` fetch is in flight and an error message
-    /// on failure.
+    /// provider's fuzzy model list (Models phase). Shows a loading hint while
+    /// a `/models` fetch is in flight and an error message on failure.
     fn render_provider_explorer(f: &mut Frame, p: &ProviderExplorerState, theme: &Theme) {
         use ratatui::widgets::Paragraph;
         let area = centered_rect(f.area(), 65, 75);
@@ -2031,13 +2029,11 @@ pub mod overlay {
                     .as_ref()
                     .map(|pp| pp.name.as_str())
                     .unwrap_or("?");
-                let free_note = if p.free_only { " — free only" } else { "" };
                 let title = format!(
-                    " {} — models ({} available, {} shown{}) — ↑↓ select, Enter: switch, f: free-only, Esc: back ",
+                    " {} — models ({} available, {} shown) — ↑↓ select, Enter: switch, Esc: back ",
                     provider_name,
                     p.all_models.len(),
                     p.filtered_models().len(),
-                    free_note,
                 );
 
                 if p.loading {
@@ -2077,8 +2073,6 @@ pub mod overlay {
                 if filtered.is_empty() {
                     let msg = if p.all_models.is_empty() {
                         "No models returned by this provider."
-                    } else if p.free_only {
-                        "No free models match the filter."
                     } else {
                         "No model matches the filter."
                     };
@@ -2102,21 +2096,7 @@ pub mod overlay {
                 list_state.select(Some(p.selected.min(filtered.len() - 1)));
                 let items: Vec<ListItem> = filtered
                     .iter()
-                    .map(|model| {
-                        if p.is_free(model) {
-                            // Free models are highlighted (accent + tag).
-                            ListItem::new(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(
-                                    model.to_string(),
-                                    Style::default().fg(theme.accent),
-                                ),
-                                Span::styled("  [free]", theme.dimmed()),
-                            ]))
-                        } else {
-                            ListItem::new(format!("  {model}"))
-                        }
-                    })
+                    .map(|model| ListItem::new(format!("  {model}")))
                     .collect();
                 let list = List::new(items)
                     .block(

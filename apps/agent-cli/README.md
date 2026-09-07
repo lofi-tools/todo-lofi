@@ -68,7 +68,6 @@ mkdir -p .abstract
   "graph_memory": true,
   "output_format": "text",
   "compression_level": "off",
-  "free_models_only": true,
 
   "fallback": {
     "enabled": true,
@@ -107,8 +106,6 @@ Notes:
 
 - `provider`/`model`: `"auto"` picks the first configured provider and its
   first model; a bare model id like `"groq/compound"` implies its provider.
-- `free_models_only`: only show free coding models in the `/model` picker and
-  the ACP `availableModels`. Set to `false` to show every configured model.
 - `working_dir`: project directory (defaults to the launch directory).
 
 ### Combos (model fallback)
@@ -194,8 +191,7 @@ the shape and edit from there.
 }
 ```
 
-Overriding `models` takes full control of the list — free-model filtering
-(`free_models_only`) no longer applies to it.
+Overriding `models` takes full control of the list.
 
 #### API keys
 
@@ -246,16 +242,6 @@ placeholder. Replace the placeholders with real sources (e.g. `!cat ~/.key`)
 or set the variables in your shell; a shell-set variable always wins over the
 config entry.
 
-#### Free models by default
-
-`free_models_only` (default `true`) filters each built-in provider's model list
-to its free coding models, so the picker and ACP `availableModels` never
-surprise you with a bill. The per-provider free lists are curated from the
-providers' current free tiers — e.g. groq's `groq/compound` / `groq/compound-mini`
-are free while `openai/gpt-oss-*` on groq are paid, and openrouter exposes
-zero-priced `:free` variants of coding models. To see paid models too, set
-`"free_models_only": false`.
-
 ### Environment variables
 
 | Variable                     | Overrides                                  |
@@ -266,7 +252,6 @@ zero-priced `:free` variants of coding models. To see paid models too, set
 | `ABSTRACT_THEME`             | `theme`                                    |
 | `ABSTRACT_MAX_TURNS`         | `max_turns`                                |
 | `ABSTRACT_COMPRESSION`       | `compression_level`                        |
-| `ABSTRACT_FREE_MODELS_ONLY`  | `free_models_only` (`true`/`false`/`1`/`0`) |
 | `<PROVIDER>_API_KEY`         | per-provider api key (via `env:` specs)    |
 
 ### CLI flags
@@ -336,9 +321,8 @@ work run only the relevant phases.
 (newline-delimited JSON-RPC 2.0): `initialize`, `session/new`, `session/load`,
 `session/prompt` (with streaming `session/update` notifications),
 `session/set_config_option` and `session/cancel`. `session/new` advertises
-`provider` + `model` config options and `availableModels` (respecting
-`free_models_only`), so clients can switch provider/model — same registry as
-the TUI's `/model`. The `models` object also reports `effectiveModelId` (the
+`provider` + `model` config options and `availableModels`, so clients can
+switch provider/model — same registry as the TUI's `/model`. The `models` object also reports `effectiveModelId` (the
 concrete model the session runs on) whenever it differs from `currentModelId`
 — i.e. while a combo runs on a fallback entry. Prompt runs use the same combo
 fallback as the TUI (per session: each session tracks its own cooldowns), with
