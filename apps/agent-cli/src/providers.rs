@@ -2,9 +2,10 @@
 //! resolution, and shared agent construction.
 //!
 //! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
-//! nvidia nim, the tokenrouter gateway, kiosapi, and google (AI Studio).
-//! Their base URL / api key / models can be overridden — or new providers
-//! added — via the config file's `[providers.NAME]` section.
+//! nvidia nim, the tokenrouter gateway, kiosapi, google (AI Studio), ollama
+//! (ollama.com's hosted cloud API), and opencode-zen (opencode.ai's Zen
+//! gateway). Their base URL / api key / models can be overridden — or new
+//! providers added — via the config file's `[providers.NAME]` section.
 //!
 //! An `api_key` value in config is either:
 //! - `!command` — run the rest as a shell command and use its trimmed stdout,
@@ -226,6 +227,24 @@ fn builtin_providers() -> Vec<Provider> {
             // KiosAPI is a New API-style OpenAI-compatible gateway; the
             // default model is qwen3.8-flash.
             models: vec!["kiosapi/qwen3.8-flash".into()],
+        },
+        Provider {
+            name: "ollama".into(),
+            base_url: "https://ollama.com/v1".into(),
+            api_key: "env:OLLAMA_API_KEY".into(),
+            // ollama.com's hosted cloud API — the same OpenAI-compatible
+            // endpoint the local server exposes, backed by the hosted model
+            // catalog. Default is gpt-oss:120b.
+            models: vec!["ollama/gpt-oss:120b".into()],
+        },
+        Provider {
+            name: "opencode-zen".into(),
+            base_url: "https://opencode.ai/zen/v1".into(),
+            api_key: "env:OPENCODE_API_KEY".into(),
+            // OpenCode Zen (opencode.ai) — an OpenAI-compatible gateway over
+            // frontier model providers (Anthropic, Google, OpenAI, …). The
+            // default model is gemini-3.8-flash.
+            models: vec!["opencode-zen/gemini-3.8-flash".into()],
         },
         Provider {
             name: "google".into(),
@@ -1350,6 +1369,38 @@ mod tests {
         assert_eq!(resolved.base_url, "https://generativelanguage.googleapis.com/v1beta/openai/");
         assert_eq!(resolved.model, "google/gemini-3.8-flash");
         assert_eq!(resolved.api_key, "google-test-key");
+    }
+
+    #[test]
+    fn ollama_builtin_provider() {
+        let config = AppConfig::default();
+        let o = provider(&config, "ollama").unwrap();
+        assert_eq!(o.base_url, "https://ollama.com/v1");
+        assert_eq!(o.api_key, "env:OLLAMA_API_KEY");
+        assert_eq!(o.models, vec!["ollama/gpt-oss:120b"]);
+        // Resolution wires up the hosted cloud base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("OLLAMA_API_KEY", "ollama-test-key") };
+        let resolved = resolve(&config, "ollama", "ollama/gpt-oss:120b").unwrap();
+        assert_eq!(resolved.base_url, "https://ollama.com/v1");
+        assert_eq!(resolved.model, "ollama/gpt-oss:120b");
+        assert_eq!(resolved.api_key, "ollama-test-key");
+    }
+
+    #[test]
+    fn opencode_zen_builtin_provider() {
+        let config = AppConfig::default();
+        let oz = provider(&config, "opencode-zen").unwrap();
+        assert_eq!(oz.base_url, "https://opencode.ai/zen/v1");
+        assert_eq!(oz.api_key, "env:OPENCODE_API_KEY");
+        assert_eq!(oz.models, vec!["opencode-zen/gemini-3.8-flash"]);
+        // Resolution wires up the Zen gateway base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("OPENCODE_API_KEY", "opencode-test-key") };
+        let resolved = resolve(&config, "opencode-zen", "opencode-zen/gemini-3.8-flash").unwrap();
+        assert_eq!(resolved.base_url, "https://opencode.ai/zen/v1");
+        assert_eq!(resolved.model, "opencode-zen/gemini-3.8-flash");
+        assert_eq!(resolved.api_key, "opencode-test-key");
     }
 
     /// A config whose cooldowns persist to a unique temp file, so tests never

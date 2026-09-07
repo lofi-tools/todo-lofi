@@ -43,7 +43,7 @@ pub struct AppConfig {
     pub fallback: FallbackConfig,
     /// Per-provider overrides (base_url, api_key, models). Keys extend or
     /// override the built-in providers (poolside, openrouter, groq, nvidia,
-    /// tokenrouter, kiosapi, google).
+    /// tokenrouter, kiosapi, google, ollama, opencode-zen).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
     /// Named fallback "combos": exposed as the virtual provider `combos` with
@@ -128,7 +128,7 @@ pub fn default_config_jsonc() -> String {
     // (field, possible values). Order mirrors the struct declaration.
     let fields: &[(&str, &str)] = &[
         ("model", "Model id or alias (\"auto\", \"opus\", \"sonnet\", \"haiku\", \"gpt4o\", \"gemini\", \"llama\", \"deepseek\", \"grok\", \"mistral\", or \"provider/model\")"),
-        ("provider", "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"combos\", or a name from `providers`)"),
+        ("provider", "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"ollama\", \"opencode-zen\", \"combos\", or a name from `providers`)"),
         ("max_turns", "Maximum agent turns per run (u32)"),
         ("max_tokens", "Maximum output tokens per response (u32)"),
         ("effort", "Thinking effort: \"low\", \"medium\", \"high\", \"max\""),
@@ -240,6 +240,8 @@ fn append_env_jsonc(out: &mut String) {
     out.push_str("    \"TOKENROUTER_API_KEY\": \"!echo TOKENROUTER_API_KEY\",\n");
     out.push_str("    \"KIOSAPI_API_KEY\": \"!echo KIOSAPI_API_KEY\",\n");
     out.push_str("    \"GEMINI_API_KEY\": \"!echo GEMINI_API_KEY\",\n");
+    out.push_str("    \"OLLAMA_API_KEY\": \"!echo OLLAMA_API_KEY\",\n");
+    out.push_str("    \"OPENCODE_API_KEY\": \"!echo OPENCODE_API_KEY\",\n");
     out.push_str("    // WebSearch keys (Parallel Search via MCP needs no key).\n");
     out.push_str("    \"TINYFISH_API_KEY\": \"!echo TINYFISH_API_KEY\",\n");
     out.push_str("    \"LANGSEARCH_API_KEY\": \"!echo LANGSEARCH_API_KEY\"\n");
@@ -742,9 +744,9 @@ mod tests {
         assert_eq!(parsed.fallback.cooldown_seconds, defaults.fallback.cooldown_seconds);
         // The providers/env sections are template content (the runtime
         // defaults keep empty maps), so assert the rendered entries parse
-        // back: the seven default providers and nine necessary env vars.
-        assert_eq!(parsed.providers.len(), 7);
-        assert_eq!(parsed.env.len(), 9);
+        // back: the nine default providers and eleven necessary env vars.
+        assert_eq!(parsed.providers.len(), 9);
+        assert_eq!(parsed.env.len(), 11);
         assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
     }
 
@@ -761,6 +763,8 @@ mod tests {
             ("tokenrouter", "TOKENROUTER_API_KEY"),
             ("kiosapi", "KIOSAPI_API_KEY"),
             ("google", "GEMINI_API_KEY"),
+            ("ollama", "OLLAMA_API_KEY"),
+            ("opencode-zen", "OPENCODE_API_KEY"),
         ] {
             assert!(
                 jsonc.contains(&format!("    \"{name}\": {{")),
@@ -781,6 +785,8 @@ mod tests {
             "TOKENROUTER_API_KEY",
             "KIOSAPI_API_KEY",
             "GEMINI_API_KEY",
+            "OLLAMA_API_KEY",
+            "OPENCODE_API_KEY",
             "TINYFISH_API_KEY",
             "LANGSEARCH_API_KEY",
         ] {

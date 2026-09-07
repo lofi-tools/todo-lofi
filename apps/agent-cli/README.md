@@ -172,9 +172,10 @@ both the selection (`modelId`) and the new effective model
 
 Providers are OpenAI-compatible and configured under the `providers` object.
 The built-ins are `poolside`, `openrouter`, `groq`, `nvidia`, `tokenrouter`
-(the tokenrouter.com unified gateway), `kiosapi` (kiosapi.com) and `google`
+(the tokenrouter.com unified gateway), `kiosapi` (kiosapi.com), `google`
 (Google AI Studio's OpenAI-compatible endpoint, `gemini-3.8-flash` at low
-thinking). A `providers.NAME` entry either
+thinking), `ollama` (ollama.com's hosted cloud API) and `opencode-zen`
+(opencode.ai's Zen gateway). A `providers.NAME` entry either
 overrides a built-in (by name) or defines a brand-new provider. All fields are optional; only set what you want to
 override. The default config (`/default-config`) includes every built-in
 provider with its `base_url`, `api_key` spec, and one model, so you can see
@@ -215,7 +216,8 @@ The `api_key` field accepts three forms:
 The `!command` form is resolved each time a provider is used (opencode/pi
 convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 `env:OPENROUTER_API_KEY`, `env:GROQ_API_KEY`, `env:NVIDIA_API_KEY`,
-`env:TOKENROUTER_API_KEY`, `env:KIOSAPI_API_KEY`, `env:GEMINI_API_KEY`.
+`env:TOKENROUTER_API_KEY`, `env:KIOSAPI_API_KEY`, `env:GEMINI_API_KEY`,
+`env:OLLAMA_API_KEY`, `env:OPENCODE_API_KEY`.
 
 #### Environment variables for tools
 
@@ -245,7 +247,7 @@ them. Precedence: a variable already set in your shell environment always
 wins — the config value only fills in when the variable is not already set.
 
 The default config (`/default-config`) lists every env var the agent needs
-— the seven provider API keys plus `TINYFISH_API_KEY` and
+— the nine provider API keys plus `TINYFISH_API_KEY` and
 `LANGSEARCH_API_KEY` — as explicit fields, each defaulting to a `!echo <VAR>`
 placeholder. Replace the placeholders with real sources (e.g. `!cat ~/.key`)
 or set the variables in your shell; a shell-set variable always wins over the
