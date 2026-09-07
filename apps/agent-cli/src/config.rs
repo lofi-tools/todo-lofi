@@ -73,8 +73,8 @@ pub struct AppConfig {
     #[serde(default = "default_compression")]
     pub compression_level: String,
     /// Extra environment variables made available to agent tools (e.g. the
-    /// WebSearch tool's `LANGSEARCH_API_KEY`). Keys are env var names;
-    /// values use the same spec format as `providers.*.api_key`:
+    /// WebSearch tool's `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY`). Keys are
+    /// env var names; values use the same spec format as `providers.*.api_key`:
     /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
     /// variable), or a literal value. An env var already set in the
     /// environment wins; the config value is only a fallback.
@@ -186,8 +186,10 @@ pub fn default_config_jsonc() -> String {
             "env" => {
                 out.push_str("{\n");
                 out.push_str(
-                    "    // Example: the WebSearch tool reads LANGSEARCH_API_KEY.\n",
+                    "    // Example: WebSearch tries TINYFISH_API_KEY first, then\n",
                 );
+                out.push_str("    // falls back to LANGSEARCH_API_KEY.\n");
+                out.push_str("    // \"TINYFISH_API_KEY\": \"!cat ~/.tinyfish_key\"\n");
                 out.push_str("    // \"LANGSEARCH_API_KEY\": \"!cat ~/.langsearch_key\"\n");
                 out.push_str("  }");
             }
@@ -525,7 +527,7 @@ fn apply_env(config: &mut AppConfig) {
 /// Resolve each entry of the config `env` map (spec format like api_key:
 /// `!command`, `env:VAR`, or a literal) and set it in the process
 /// environment, so agent tools that read env vars (e.g. the WebSearch tool's
-/// `LANGSEARCH_API_KEY`) can find them.
+/// `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY`) can find them.
 ///
 /// Precedence: a variable already set in the environment wins as-is; the
 /// config value only fills in when the variable is not already set.
@@ -736,6 +738,7 @@ mod tests {
         let overlay: AppConfig = serde_json::from_str(
             r#"{
                 "env": {
+                    "TINYFISH_API_KEY": "!cat ~/.tinyfish_key",
                     "LANGSEARCH_API_KEY": "!cat ~/.langsearch_key",
                     "MY_LITERAL": "literal-value"
                 }
@@ -743,14 +746,17 @@ mod tests {
         )
         .unwrap();
         merge(&mut config, overlay);
+        assert_eq!(config.env.get("TINYFISH_API_KEY").map(String::as_str), Some("!cat ~/.tinyfish_key"));
         assert_eq!(config.env.get("LANGSEARCH_API_KEY").map(String::as_str), Some("!cat ~/.langsearch_key"));
         assert_eq!(config.env.get("MY_LITERAL").map(String::as_str), Some("literal-value"));
         // An empty map leaves existing entries untouched.
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
-        assert_eq!(config2.env.len(), 2);
-        // The default config template shows the LANGSEARCH_API_KEY example.
-        assert!(default_config_jsonc().contains("LANGSEARCH_API_KEY"));
+        assert_eq!(config2.env.len(), 3);
+        // The default config template shows both web search key examples.
+        let jsonc = default_config_jsonc();
+        assert!(jsonc.contains("TINYFISH_API_KEY"));
+        assert!(jsonc.contains("LANGSEARCH_API_KEY"));
     }
 
     #[test]

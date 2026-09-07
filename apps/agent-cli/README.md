@@ -213,11 +213,13 @@ convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 #### Environment variables for tools
 
 The top-level `env` object sets environment variables that agent tools read
-at runtime (for example `WebSearch`, which requires a LangSearch API key in
+at runtime (for example `WebSearch`, which tries TinyFish Search first — key
+in `TINYFISH_API_KEY` — and falls back to LangSearch — key in
 `LANGSEARCH_API_KEY`). Each value uses the same three forms as `api_key`:
 
 ```json
 "env": {
+  "TINYFISH_API_KEY": "!kubectl get secret tinyfish-key -o jsonpath='{.data.key}' | base64 -d",
   "LANGSEARCH_API_KEY": "!kubectl get secret langsearch-key -o jsonpath='{.data.key}' | base64 -d",
   "SOME_LITERAL": "literal-value"
 }

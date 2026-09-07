@@ -937,28 +937,133 @@ async fn grep_fallback(
 
 // ─── Web search ────────────────────────────────────────────────────────────
 
-/// Environment variable for the LangSearch API key.
-const LANGSEARCH_API_KEY_ENV: &str = "LANGSEARCH_API_KEY";
-/// Environment variable for the search API endpoint (defaults to LangSearch).
-const LANGSEARCH_API_URL_ENV: &str = "LANGSEARCH_API_URL";
-/// Default search endpoint (LangSearch Web Search API).
-const DEFAULT_SEARCH_URL: &str = "https://api.langsearch.com/v1/web-search";
+/// Environment variable for the TinyFish Search API key (tried first).
+const TINYFISH_API_KEY_ENV: &str = "TINYFISH_API_KEY";
+/// Environment variable for the TinyFish Search API endpoint.
+const TINYFISH_API_URL_ENV: &str = "TINYFISH_API_URL";
+/// Default TinyFish Search endpoint.
+const DEFAULT_TINYFISH_URL: &str = "https://api.search.tinyfish.ai";
 
-/// LangSearch API-backed web search, registered under the `WebSearch` name
-/// so it replaces cersei's built-in WebSearchTool (which reads the legacy
-/// `CERSEI_SEARCH_API_KEY` env var). The response is Bing-compatible
-/// (`webPages.value[]`); keyed on `LANGSEARCH_API_KEY` so the config `env`
-/// map can supply it.
-pub struct LangSearchTool;
+/// Environment variable for the LangSearch API key (fallback).
+const LANGSEARCH_API_KEY_ENV: &str = "LANGSEARCH_API_KEY";
+/// Environment variable for the LangSearch API endpoint.
+const LANGSEARCH_API_URL_ENV: &str = "LANGSEARCH_API_URL";
+/// Default LangSearch endpoint (LangSearch Web Search API).
+const DEFAULT_LANGSEARCH_URL: &str = "https://api.langsearch.com/v1/web-search";
+
+/// One formatted web search result.
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+/// Format results as "N. **title**\n url\n snippet\n".
+fn format_search_results(results: &[SearchResult]) -> String {
+    let mut output = String::new();
+    for (i, result) in results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. **{}**\n {}\n {}\n\n",
+            i + 1, result.title, result.url, result.snippet
+        ));
+    }
+    output
+}
+
+/// TinyFish Search: GET the endpoint with `X-API-Key` auth; the response
+/// carries results in `results[]` with `title`/`url`/`snippet`.
+async fn tinyfish_search(
+    query: &str,
+    num_results: usize,
+    api_key: &str,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let search_url =
+        std::env::var(TINYFISH_API_URL_ENV).unwrap_or_else(|_| DEFAULT_TINYFISH_URL.to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let response = client
+        .get(&search_url)
+        .header("X-API-Key", api_key)
+        .query(&[("query", query)])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("TinyFish search API error ({status}): {body}");
+    }
+    let json: Value = response.json().await?;
+    let mut results = Vec::new();
+    if let Some(items) = json["results"].as_array() {
+        for item in items.iter().take(num_results) {
+            results.push(SearchResult {
+                title: item["title"].as_str().unwrap_or("(no title)").to_string(),
+                url: item["url"].as_str().unwrap_or("").to_string(),
+                snippet: item["snippet"].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// LangSearch Web Search: POST the endpoint with Bearer auth; the
+/// Bing-compatible response carries results in `webPages.value[]` with
+/// `name`/`url`/`snippet`.
+async fn langsearch_search(
+    query: &str,
+    num_results: usize,
+    api_key: &str,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let search_url = std::env::var(LANGSEARCH_API_URL_ENV)
+        .unwrap_or_else(|_| DEFAULT_LANGSEARCH_URL.to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let response = client
+        .post(&search_url)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "query": query,
+            "count": num_results,
+        }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("LangSearch search API error ({status}): {body}");
+    }
+    let json: Value = response.json().await?;
+    let mut results = Vec::new();
+    if let Some(items) = json["webPages"]["value"].as_array() {
+        for item in items.iter().take(num_results) {
+            results.push(SearchResult {
+                title: item["name"].as_str().unwrap_or("(no title)").to_string(),
+                url: item["url"].as_str().unwrap_or("").to_string(),
+                snippet: item["snippet"].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// Web search backed by TinyFish Search (preferred) with LangSearch as a
+/// fallback, registered under the `WebSearch` name so it replaces cersei's
+/// built-in WebSearchTool (which reads the legacy `CERSEI_SEARCH_API_KEY`
+/// env var). Tries `TINYFISH_API_KEY` first; on any failure falls back to
+/// `LANGSEARCH_API_KEY`. Both keys can be supplied via the config `env` map.
+pub struct WebSearchTool;
 
 #[async_trait]
-impl Tool for LangSearchTool {
+impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "WebSearch"
     }
 
     fn description(&self) -> &str {
-        "Search the web and return relevant results. Requires LANGSEARCH_API_KEY environment variable."
+        "Search the web and return relevant results. Requires TINYFISH_API_KEY (preferred) or LANGSEARCH_API_KEY environment variable."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -991,69 +1096,38 @@ impl Tool for LangSearchTool {
             Ok(i) => i,
             Err(e) => return ToolResult::error(format!("Invalid input: {e}")),
         };
-        let api_key = match std::env::var(LANGSEARCH_API_KEY_ENV) {
-            Ok(k) if !k.is_empty() => k,
-            _ => {
-                return ToolResult::error(format!(
-                    "Web search requires {}. Set it to your LangSearch API key.",
-                    LANGSEARCH_API_KEY_ENV
-                ))
-            }
-        };
-        let search_url = std::env::var(LANGSEARCH_API_URL_ENV)
-            .unwrap_or_else(|_| DEFAULT_SEARCH_URL.to_string());
         let num_results = input.num_results.unwrap_or(8).min(10);
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => return ToolResult::error(format!("HTTP client error: {e}")),
-        };
-        let response = match client
-            .post(&search_url)
-            .bearer_auth(&api_key)
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "query": input.query,
-                "count": num_results,
-            }))
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return ToolResult::error(format!("Search request failed: {e}")),
-        };
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return ToolResult::error(format!("Search API error ({status}): {body}"));
+        let query = input.query;
+        let mut failures = Vec::new();
+
+        // TinyFish first; LangSearch only on failure.
+        match std::env::var(TINYFISH_API_KEY_ENV) {
+            Ok(key) if !key.is_empty() => match tinyfish_search(&query, num_results, &key).await {
+                Ok(results) if results.is_empty() => {
+                    return ToolResult::success(format!("No results found for: {query}"))
+                }
+                Ok(results) => return ToolResult::success(format_search_results(&results)),
+                Err(e) => failures.push(format!("TinyFish: {e}")),
+            },
+            _ => failures.push(format!("{} is not set", TINYFISH_API_KEY_ENV)),
         }
-        let json: Value = match response.json().await {
-            Ok(j) => j,
-            Err(e) => return ToolResult::error(format!("Failed to parse response: {e}")),
-        };
-        // Format results (Bing-compatible response: webPages.value[])
-        let mut output = String::new();
-        if let Some(results) = json["webPages"]["value"].as_array() {
-            for (i, result) in results.iter().enumerate().take(num_results) {
-                let title = result["name"].as_str().unwrap_or("(no title)");
-                let url = result["url"].as_str().unwrap_or("");
-                let desc = result["snippet"].as_str().unwrap_or("");
-                output.push_str(&format!(
-                    "{}. **{}**\n {}\n {}\n\n",
-                    i + 1,
-                    title,
-                    url,
-                    desc
-                ));
-            }
+
+        // LangSearch fallback.
+        match std::env::var(LANGSEARCH_API_KEY_ENV) {
+            Ok(key) if !key.is_empty() => match langsearch_search(&query, num_results, &key).await {
+                Ok(results) if results.is_empty() => {
+                    return ToolResult::success(format!("No results found for: {query}"))
+                }
+                Ok(results) => return ToolResult::success(format_search_results(&results)),
+                Err(e) => failures.push(format!("LangSearch: {e}")),
+            },
+            _ => failures.push(format!("{} is not set", LANGSEARCH_API_KEY_ENV)),
         }
-        if output.is_empty() {
-            ToolResult::success(format!("No results found for: {}", input.query))
-        } else {
-            ToolResult::success(output)
-        }
+
+        ToolResult::error(format!(
+            "Web search failed. Set TINYFISH_API_KEY or LANGSEARCH_API_KEY (directly or via the config `env` map).\n{}",
+            failures.join("\n")
+        ))
     }
 }
 
@@ -1100,19 +1174,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn langsearch_reports_missing_key() {
-        // Unset in case a previous test set it; the error path must not hit
-        // the network.
+    async fn web_search_reports_missing_keys() {
+        // Unset in case a previous test set them; the error path must not
+        // hit the network.
+        unsafe { std::env::remove_var(TINYFISH_API_KEY_ENV) };
         unsafe { std::env::remove_var(LANGSEARCH_API_KEY_ENV) };
         let input = serde_json::json!({ "query": "rust async" });
-        let result = LangSearchTool
+        let result = WebSearchTool
             .execute(input, &test_context(std::env::temp_dir()))
             .await;
         assert!(result.is_error);
+        assert!(result.content.contains(TINYFISH_API_KEY_ENV));
         assert!(result.content.contains(LANGSEARCH_API_KEY_ENV));
         // Registers under the WebSearch name so it replaces the built-in.
-        assert_eq!(LangSearchTool.name(), "WebSearch");
-        assert!(LangSearchTool.input_schema()["properties"]["query"].is_object());
+        assert_eq!(WebSearchTool.name(), "WebSearch");
+        assert!(WebSearchTool.input_schema()["properties"]["query"].is_object());
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@
 //! freebuff's base2 instructions, not a state machine.
 
 use crate::providers::Resolved;
-use crate::tools::{LangSearchTool, ReadDocsTool, RgSearchTool};
+use crate::tools::{ReadDocsTool, RgSearchTool, WebSearchTool};
 use async_trait::async_trait;
 use cersei::events::AgentEvent;
 use cersei::tools::permissions::AllowAll;
@@ -177,7 +177,7 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
              Do not stop after a tool call — always continue with either more tool calls or your final written answer.",
             tools: || {
                 vec![
-                    Box::new(LangSearchTool) as Box<dyn Tool>,
+                    Box::new(WebSearchTool) as Box<dyn Tool>,
                     Box::new(WebFetchTool) as Box<dyn Tool>,
                 ]
             },
