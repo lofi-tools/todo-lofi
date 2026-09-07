@@ -937,7 +937,13 @@ async fn grep_fallback(
 
 // ─── Web search ────────────────────────────────────────────────────────────
 
-/// Environment variable for the TinyFish Search API key (tried first).
+/// Environment variable for the Parallel Search MCP endpoint. The default
+/// endpoint needs no API key (anonymous free tier).
+const PARALLEL_MCP_URL_ENV: &str = "PARALLEL_SEARCH_MCP_URL";
+/// Default Parallel Search MCP endpoint (Streamable HTTP, no API key).
+const DEFAULT_PARALLEL_MCP_URL: &str = "https://search.parallel.ai/mcp";
+
+/// Environment variable for the TinyFish Search API key.
 const TINYFISH_API_KEY_ENV: &str = "TINYFISH_API_KEY";
 /// Environment variable for the TinyFish Search API endpoint.
 const TINYFISH_API_URL_ENV: &str = "TINYFISH_API_URL";
@@ -1049,11 +1055,177 @@ async fn langsearch_search(
     Ok(results)
 }
 
-/// Web search backed by TinyFish Search (preferred) with LangSearch as a
-/// fallback, registered under the `WebSearch` name so it replaces cersei's
+/// Send one MCP JSON-RPC request over Streamable HTTP, returning the parsed
+/// response and any `Mcp-Session-Id` header the server issued. Handles both
+/// plain JSON and SSE-framed responses (SSE is what most Streamable HTTP
+/// servers pick when the client advertises `text/event-stream`).
+async fn mcp_request(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: Option<&str>,
+    body: serde_json::Value,
+) -> anyhow::Result<(Value, Option<String>)> {
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+    if let Some(session) = session_id {
+        request = request.header("Mcp-Session-Id", session);
+    }
+    let response = request.json(&body).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("Parallel MCP request failed ({status}): {text}");
+    }
+    let new_session = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let text = response.text().await?;
+    let json = if content_type.contains("text/event-stream") {
+        // SSE: each event is `event: message` / `data: {...}`; take the last
+        // `data:` line, which carries the JSON-RPC payload.
+        let mut data = None;
+        for line in text.lines() {
+            if let Some(payload) = line.strip_prefix("data:") {
+                data = Some(payload.trim().to_string());
+            }
+        }
+        match data {
+            Some(payload) if !payload.is_empty() => serde_json::from_str(&payload)?,
+            _ => anyhow::bail!("Parallel MCP returned an empty SSE response"),
+        }
+    } else {
+        serde_json::from_str(&text)?
+    };
+    Ok((json, new_session))
+}
+
+/// Call the Parallel Search MCP `web_search` tool and parse its results.
+/// Anonymous free tier — no API key required. The MCP handshake is
+/// initialize → notifications/initialized → tools/call; the tool returns a
+/// JSON payload (`results[]` with `title`/`url`/`excerpts`) inside the text
+/// content, which we parse into the shared `SearchResult` shape.
+async fn parallel_mcp_search(query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
+    let url = std::env::var(PARALLEL_MCP_URL_ENV)
+        .unwrap_or_else(|_| DEFAULT_PARALLEL_MCP_URL.to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    let (init_result, session) = mcp_request(
+        &client,
+        &url,
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "agent-cli",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            }
+        }),
+    )
+    .await?;
+    if init_result.get("error").is_some() {
+        anyhow::bail!("Parallel MCP initialize error: {}", init_result["error"]);
+    }
+
+    // Notification that initialization is complete (no request id).
+    mcp_request(
+        &client,
+        &url,
+        session.as_deref(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    )
+    .await?;
+
+    let (call_result, _) = mcp_request(
+        &client,
+        &url,
+        session.as_deref(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search",
+                "arguments": {
+                    "objective": query,
+                    "search_queries": [query],
+                }
+            }
+        }),
+    )
+    .await?;
+    if call_result.get("error").is_some() {
+        anyhow::bail!("Parallel MCP web_search error: {}", call_result["error"]);
+    }
+    let result = &call_result["result"];
+    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        anyhow::bail!("Parallel web_search failed: {}", result["content"]);
+    }
+    let mut output = String::new();
+    if let Some(content) = result["content"].as_array() {
+        for block in content {
+            if let Some(text) = block["text"].as_str() {
+                output.push_str(text);
+            }
+        }
+    }
+    let output = output.trim();
+    if output.is_empty() {
+        anyhow::bail!("Parallel web_search returned no content");
+    }
+    let json: Value = serde_json::from_str(output)?;
+    let mut results = Vec::new();
+    if let Some(items) = json["results"].as_array() {
+        for item in items.iter().take(num_results) {
+            results.push(SearchResult {
+                title: item["title"].as_str().unwrap_or("(no title)").to_string(),
+                url: item["url"].as_str().unwrap_or("").to_string(),
+                snippet: item["excerpts"]
+                    .as_array()
+                    .map(|excerpts| {
+                        excerpts
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    if results.is_empty() {
+        anyhow::bail!("Parallel web_search returned no results");
+    }
+    Ok(results)
+}
+
+/// Web search registered under the `WebSearch` name so it replaces cersei's
 /// built-in WebSearchTool (which reads the legacy `CERSEI_SEARCH_API_KEY`
-/// env var). Tries `TINYFISH_API_KEY` first; on any failure falls back to
-/// `LANGSEARCH_API_KEY`. Both keys can be supplied via the config `env` map.
+/// env var). Provider precedence is handled in the background so the model
+/// still only sees one tool: Parallel Search via MCP (anonymous, no key)
+/// first, then TinyFish (`TINYFISH_API_KEY`), then LangSearch
+/// (`LANGSEARCH_API_KEY`). The keyed providers fall back to the config `env`
+/// map when the vars aren't already set.
 pub struct WebSearchTool;
 
 #[async_trait]
@@ -1063,7 +1235,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web and return relevant results. Requires TINYFISH_API_KEY (preferred) or LANGSEARCH_API_KEY environment variable."
+        "Search the web and return relevant results. Tries Parallel Search (free, no key), then TinyFish (TINYFISH_API_KEY), then LangSearch (LANGSEARCH_API_KEY)."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -1100,7 +1272,16 @@ impl Tool for WebSearchTool {
         let query = input.query;
         let mut failures = Vec::new();
 
-        // TinyFish first; LangSearch only on failure.
+        // Parallel via MCP first — anonymous, no API key.
+        match parallel_mcp_search(&query, num_results).await {
+            Ok(results) if results.is_empty() => {
+                return ToolResult::success(format!("No results found for: {query}"))
+            }
+            Ok(results) => return ToolResult::success(format_search_results(&results)),
+            Err(e) => failures.push(format!("Parallel: {e}")),
+        }
+
+        // TinyFish next.
         match std::env::var(TINYFISH_API_KEY_ENV) {
             Ok(key) if !key.is_empty() => match tinyfish_search(&query, num_results, &key).await {
                 Ok(results) if results.is_empty() => {
@@ -1112,7 +1293,7 @@ impl Tool for WebSearchTool {
             _ => failures.push(format!("{} is not set", TINYFISH_API_KEY_ENV)),
         }
 
-        // LangSearch fallback.
+        // LangSearch last.
         match std::env::var(LANGSEARCH_API_KEY_ENV) {
             Ok(key) if !key.is_empty() => match langsearch_search(&query, num_results, &key).await {
                 Ok(results) if results.is_empty() => {
@@ -1125,7 +1306,7 @@ impl Tool for WebSearchTool {
         }
 
         ToolResult::error(format!(
-            "Web search failed. Set TINYFISH_API_KEY or LANGSEARCH_API_KEY (directly or via the config `env` map).\n{}",
+            "Web search failed. Parallel Search (no key needed), TINYFISH_API_KEY, and LANGSEARCH_API_KEY were all unavailable.\n{}",
             failures.join("\n")
         ))
     }
@@ -1175,15 +1356,19 @@ mod tests {
 
     #[tokio::test]
     async fn web_search_reports_missing_keys() {
-        // Unset in case a previous test set them; the error path must not
-        // hit the network.
+        // Unset in case a previous test set them. The Parallel MCP endpoint
+        // is pointed at a closed local port so the fallback chain completes
+        // without touching the network (connection refused fails fast); the
+        // other two providers fail on their missing keys.
         unsafe { std::env::remove_var(TINYFISH_API_KEY_ENV) };
         unsafe { std::env::remove_var(LANGSEARCH_API_KEY_ENV) };
+        unsafe { std::env::set_var(PARALLEL_MCP_URL_ENV, "http://127.0.0.1:1/mcp") };
         let input = serde_json::json!({ "query": "rust async" });
         let result = WebSearchTool
             .execute(input, &test_context(std::env::temp_dir()))
             .await;
         assert!(result.is_error);
+        assert!(result.content.contains("Parallel"));
         assert!(result.content.contains(TINYFISH_API_KEY_ENV));
         assert!(result.content.contains(LANGSEARCH_API_KEY_ENV));
         // Registers under the WebSearch name so it replaces the built-in.

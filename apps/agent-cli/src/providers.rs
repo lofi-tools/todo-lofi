@@ -58,7 +58,7 @@ pub fn agent_tools(
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
     // Replace the built-in WebSearch (reads the legacy CERSEI_SEARCH_API_KEY
-    // env var) with our TinyFish-first / LangSearch-fallback version.
+    // env var) with our Parallel-first / TinyFish / LangSearch version.
     tools.retain(|t| t.name() != "WebSearch");
     tools.push(Box::new(crate::tools::WebSearchTool));
     // The ACP client-aware Read/Write/Edit overrides (which consult the

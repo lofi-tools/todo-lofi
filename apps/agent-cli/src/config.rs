@@ -73,8 +73,9 @@ pub struct AppConfig {
     #[serde(default = "default_compression")]
     pub compression_level: String,
     /// Extra environment variables made available to agent tools (e.g. the
-    /// WebSearch tool's `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY`). Keys are
-    /// env var names; values use the same spec format as `providers.*.api_key`:
+    /// WebSearch tool's `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY` — its
+    /// first provider, Parallel Search via MCP, needs no key). Keys are env
+    /// var names; values use the same spec format as `providers.*.api_key`:
     /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
     /// variable), or a literal value. An env var already set in the
     /// environment wins; the config value is only a fallback.
@@ -186,9 +187,9 @@ pub fn default_config_jsonc() -> String {
             "env" => {
                 out.push_str("{\n");
                 out.push_str(
-                    "    // Example: WebSearch tries TINYFISH_API_KEY first, then\n",
+                    "    // Example: WebSearch tries Parallel Search via MCP (no key),\n",
                 );
-                out.push_str("    // falls back to LANGSEARCH_API_KEY.\n");
+                out.push_str("    // then TINYFISH_API_KEY, then LANGSEARCH_API_KEY.\n");
                 out.push_str("    // \"TINYFISH_API_KEY\": \"!cat ~/.tinyfish_key\"\n");
                 out.push_str("    // \"LANGSEARCH_API_KEY\": \"!cat ~/.langsearch_key\"\n");
                 out.push_str("  }");

@@ -213,9 +213,11 @@ convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 #### Environment variables for tools
 
 The top-level `env` object sets environment variables that agent tools read
-at runtime (for example `WebSearch`, which tries TinyFish Search first — key
-in `TINYFISH_API_KEY` — and falls back to LangSearch — key in
-`LANGSEARCH_API_KEY`). Each value uses the same three forms as `api_key`:
+at runtime. `WebSearch` is a single tool whose provider precedence is
+resolved in the background: Parallel Search via MCP first (anonymous free
+tier — no API key), then TinyFish (key in `TINYFISH_API_KEY`), then
+LangSearch (key in `LANGSEARCH_API_KEY`). Each value uses the same three
+forms as `api_key`:
 
 ```json
 "env": {
@@ -224,6 +226,11 @@ in `TINYFISH_API_KEY` — and falls back to LangSearch — key in
   "SOME_LITERAL": "literal-value"
 }
 ```
+
+The Parallel MCP endpoint defaults to `https://search.parallel.ai/mcp` and
+can be overridden with the `PARALLEL_SEARCH_MCP_URL` environment variable
+(same precedence rules as above — the shell wins over the config `env`
+entry).
 
 Values are resolved once at startup and exported into the process
 environment, so the web search tool (and any other env-reading tool) sees
