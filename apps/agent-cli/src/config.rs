@@ -10,6 +10,7 @@
 //! Legacy `.toml` files are still read when no `.json` file exists, so
 //! existing configs keep working after the format switch.
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -71,6 +72,13 @@ pub struct AppConfig {
     pub output_format: String,
     #[serde(default = "default_compression")]
     pub compression_level: String,
+    /// Extra environment variables made available to agent tools (e.g. the
+    /// WebSearch tool's `BRAVE_SEARCH_API_KEY`). Keys are env var names;
+    /// values use the same spec format as `providers.*.api_key`:
+    /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
+    /// variable), or a literal value.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 fn default_output_format() -> String {
@@ -107,6 +115,7 @@ impl Default for AppConfig {
             embedding_api: false,
             output_format: "text".into(),
             compression_level: "off".into(),
+            env: std::collections::HashMap::new(),
         }
     }
 }
@@ -148,6 +157,7 @@ pub fn default_config_jsonc() -> String {
         ("embedding_api", "Enable embedding API for semantic search (true/false)"),
         ("output_format", "Output format: \"text\", \"stream-json\""),
         ("compression_level", "Tool output compression: \"off\", \"minimal\", \"aggressive\""),
+        ("env", "Extra environment variables for agent tools: { name: \"!cmd | env:VAR | literal\" }"),
     ];
     for (i, (key, comment)) in fields.iter().enumerate() {
         let field_value = obj.get(*key).expect("serialized config has every field");
@@ -465,6 +475,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     if !overlay.model_families.is_empty() {
         base.model_families = overlay.model_families;
     }
+    if !overlay.env.is_empty() {
+        base.env = overlay.env;
+    }
 }
 
 fn apply_env(config: &mut AppConfig) {
@@ -498,6 +511,21 @@ fn apply_env(config: &mut AppConfig) {
     if let Ok(v) = std::env::var("ABSTRACT_FREE_MODELS_ONLY") {
         config.free_models_only = v == "1" || v.eq_ignore_ascii_case("true");
     }
+}
+
+/// Resolve each entry of the config `env` map (spec format like api_key:
+/// `!command`, `env:VAR`, or a literal) and set it in the process
+/// environment, so agent tools that read env vars (e.g. the WebSearch tool's
+/// `BRAVE_SEARCH_API_KEY`) can find them.
+pub fn apply_config_env(config: &AppConfig) -> anyhow::Result<()> {
+    for (name, spec) in &config.env {
+        let value = crate::providers::resolve_value_spec(spec, "env")
+            .with_context(|| format!("failed to resolve config env var '{name}'"))?;
+        // SAFETY: called once at startup on the main thread before agent
+        // threads spawn; matches the existing `set_var` usage in this crate.
+        unsafe { std::env::set_var(name, value) };
+    }
+    Ok(())
 }
 
 pub fn apply_cli_overrides(cli: &Cli, config: &mut AppConfig) {
@@ -683,6 +711,60 @@ mod tests {
         assert_eq!(parsed.proxy.url, defaults.proxy.url);
         assert_eq!(parsed.fallback.cooldown_seconds, defaults.fallback.cooldown_seconds);
         assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
+    }
+
+    #[test]
+    fn env_map_merges_into_defaults() {
+        let mut config = AppConfig::default();
+        let overlay: AppConfig = serde_json::from_str(
+            r#"{
+                "env": {
+                    "BRAVE_SEARCH_API_KEY": "!cat ~/.brave_key",
+                    "MY_LITERAL": "literal-value"
+                }
+            }"#,
+        )
+        .unwrap();
+        merge(&mut config, overlay);
+        assert_eq!(config.env.get("BRAVE_SEARCH_API_KEY").map(String::as_str), Some("!cat ~/.brave_key"));
+        assert_eq!(config.env.get("MY_LITERAL").map(String::as_str), Some("literal-value"));
+        // An empty map leaves existing entries untouched.
+        let mut config2 = config.clone();
+        merge(&mut config2, AppConfig::default());
+        assert_eq!(config2.env.len(), 2);
+        assert!(default_config_jsonc().contains("\"env\": {}"));
+    }
+
+    #[test]
+    fn apply_config_env_resolves_specs_into_process_env() {
+        // Source for the `env:VAR` copy form — read from the real process
+        // environment, not from sibling entries (HashMap order is arbitrary).
+        unsafe { std::env::set_var("TEST_ABSTRACT_SOURCE", "source-value") };
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "env": {
+                    "TEST_ABSTRACT_LITERAL": "literal-value",
+                    "TEST_ABSTRACT_CMD": "!echo cmd-value",
+                    "TEST_ABSTRACT_COPY": "env:TEST_ABSTRACT_SOURCE"
+                }
+            }"#,
+        )
+        .unwrap();
+        apply_config_env(&config).unwrap();
+        assert_eq!(std::env::var("TEST_ABSTRACT_LITERAL").unwrap(), "literal-value");
+        assert_eq!(std::env::var("TEST_ABSTRACT_CMD").unwrap(), "cmd-value");
+        assert_eq!(std::env::var("TEST_ABSTRACT_COPY").unwrap(), "source-value");
+        // A failing spec surfaces as an error instead of being swallowed.
+        let bad: AppConfig = serde_json::from_str(
+            r#"{ "env": { "TEST_ABSTRACT_BAD": "!exit 1" } }"#,
+        )
+        .unwrap();
+        assert!(apply_config_env(&bad).is_err());
+        let missing: AppConfig = serde_json::from_str(
+            r#"{ "env": { "TEST_ABSTRACT_MISSING": "env:TEST_ABSTRACT_DOES_NOT_EXIST_XYZ" } }"#,
+        )
+        .unwrap();
+        assert!(apply_config_env(&missing).is_err());
     }
 
     #[test]

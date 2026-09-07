@@ -13,12 +13,12 @@
 //! freebuff's base2 instructions, not a state machine.
 
 use crate::providers::Resolved;
-use crate::tools::{ReadDocsTool, RgSearchTool};
+use crate::tools::{BraveSearchTool, ReadDocsTool, RgSearchTool};
 use async_trait::async_trait;
 use cersei::events::AgentEvent;
 use cersei::tools::permissions::AllowAll;
+use cersei::tools::web_fetch::WebFetchTool;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
-use cersei::tools::{web_fetch::WebFetchTool, web_search::WebSearchTool};
 use cersei::{Agent, OpenAi};
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -177,7 +177,7 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
              Do not stop after a tool call — always continue with either more tool calls or your final written answer.",
             tools: || {
                 vec![
-                    Box::new(WebSearchTool) as Box<dyn Tool>,
+                    Box::new(BraveSearchTool) as Box<dyn Tool>,
                     Box::new(WebFetchTool) as Box<dyn Tool>,
                 ]
             },

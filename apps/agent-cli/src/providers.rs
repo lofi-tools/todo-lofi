@@ -57,6 +57,10 @@ pub fn agent_tools(
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
+    // Replace the built-in WebSearch (reads the legacy CERSEI_SEARCH_API_KEY
+    // env var) with our Brave-based version reading BRAVE_SEARCH_API_KEY.
+    tools.retain(|t| t.name() != "WebSearch");
+    tools.push(Box::new(crate::tools::BraveSearchTool));
     // The ACP client-aware Read/Write/Edit overrides (which consult the
     // editor's unsaved buffers and mirror edits back via `fs/write_text_file`)
     // are only wired when an ACP fs bridge is present — i.e. when the binary
@@ -534,34 +538,42 @@ fn parse_model_ids(resp: &ModelsResponse) -> Vec<String> {
 
 // ─── API key resolution ─────────────────────────────────────────────────────
 
-pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
+/// Resolve a value spec — `!command` (run shell, use trimmed stdout),
+/// `env:VAR` (read the environment variable), or a literal — into a concrete
+/// value. `what` names the setting in error messages (e.g. "api_key" or
+/// "env"). Used by provider api keys and the config `env` map.
+pub fn resolve_value_spec(spec: &str, what: &str) -> anyhow::Result<String> {
     if let Some(cmd) = spec.strip_prefix('!') {
         let cmd = cmd.trim();
         if cmd.is_empty() {
-            anyhow::bail!("empty api_key command in config");
+            anyhow::bail!("empty {what} command in config");
         }
         let output = std::process::Command::new("sh")
             .args(["-c", cmd])
             .output()
-            .with_context(|| format!("failed to run api_key command: {cmd}"))?;
+            .with_context(|| format!("failed to run {what} command: {cmd}"))?;
         if !output.status.success() {
             anyhow::bail!(
-                "api_key command failed ({status}): {stderr}",
+                "{what} command failed ({status}): {stderr}",
                 status = output.status,
                 stderr = String::from_utf8_lossy(&output.stderr).trim(),
             );
         }
-        let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if key.is_empty() {
-            anyhow::bail!("api_key command produced no output: {cmd}");
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            anyhow::bail!("{what} command produced no output: {cmd}");
         }
-        Ok(key)
+        Ok(value)
     } else if let Some(var) = spec.strip_prefix("env:") {
         std::env::var(var.trim())
-            .with_context(|| format!("environment variable '{var}' is not set (used for api_key)"))
+            .with_context(|| format!("environment variable '{var}' is not set (used for {what})"))
     } else {
         Ok(spec.to_string())
     }
+}
+
+pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
+    resolve_value_spec(spec, "api_key")
 }
 
 /// Resolve a provider + model into concrete base URL and API key. The virtual

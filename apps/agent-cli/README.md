@@ -210,6 +210,24 @@ The `!command` form is resolved each time a provider is used (opencode/pi
 convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 `env:OPENROUTER_API_KEY`, `env:GROQ_API_KEY`, `env:NVIDIA_API_KEY`.
 
+#### Environment variables for tools
+
+The top-level `env` object sets environment variables that agent tools read
+at runtime (for example `WebSearch`, which requires a Brave Search API key in
+`BRAVE_SEARCH_API_KEY`). Each value uses the same three forms as `api_key`:
+
+```json
+"env": {
+  "BRAVE_SEARCH_API_KEY": "!kubectl get secret brave-key -o jsonpath='{.data.key}' | base64 -d",
+  "BRAVE_SEARCH_API_URL": "env:CUSTOM_BRAVE_ENDPOINT",
+  "SOME_LITERAL": "literal-value"
+}
+```
+
+Values are resolved once at startup and exported into the process
+environment, so the web search tool (and any other env-reading tool) sees
+them.
+
 #### Free models by default
 
 `free_models_only` (default `true`) filters each built-in provider's model list
