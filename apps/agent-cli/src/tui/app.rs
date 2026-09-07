@@ -1110,6 +1110,10 @@ mod tests {
             base_url: "http://x".into(),
             api_key: "k".into(),
             models: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         ProviderExplorerState {
             phase: ProviderExplorerPhase::Models,
@@ -1163,6 +1167,10 @@ mod tests {
             base_url: String::new(),
             api_key: String::new(),
             models: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let p = ProviderExplorerState {
             phase: ProviderExplorerPhase::Providers,

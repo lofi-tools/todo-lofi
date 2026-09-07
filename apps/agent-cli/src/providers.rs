@@ -32,6 +32,16 @@ pub struct Provider {
     /// API key spec: `!command`, `env:VAR`, or a literal key.
     pub api_key: String,
     pub models: Vec<String>,
+    /// Maximum output tokens per response for this provider. When `None`, the
+    /// agent's default max tokens is used.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature for this provider. When `Some`, overrides the
+    /// agent's temperature.
+    pub temperature: Option<f32>,
+    /// Nucleus sampling cutoff. When `Some`, passed as `top_p` on the wire.
+    pub top_p: Option<f32>,
+    /// Extra JSON body fields merged into every request to this provider.
+    pub extra_body: Option<serde_json::Value>,
 }
 
 /// The full tool set for the agent: cersei's coding tools (file
@@ -103,27 +113,98 @@ pub fn agent_tools(
 
 /// Build the OpenAI-compatible provider for a resolved selection, carrying the
 /// model family's reasoning field so the SSE reader captures `delta.reasoning`
-/// (see `response_format::reasoning_field_for`).
+/// (see `response_format::reasoning_field_for`), and wrapping it so the
+/// provider's configured request parameters (`max_tokens`, `temperature`,
+/// `top_p`, `extra_body`) are applied to every completion request.
 pub fn openai_provider(
     resolved: &Resolved,
     reasoning: cersei::provider::ReasoningField,
-) -> anyhow::Result<OpenAi> {
-    OpenAi::builder()
+) -> anyhow::Result<ConfiguredProvider> {
+    let inner = OpenAi::builder()
         .base_url(&resolved.base_url)
         .api_key(&resolved.api_key)
         .model(&resolved.model)
         .reasoning_field(reasoning)
         .build()
-        .context("failed to build provider")
+        .context("failed to build provider")?;
+    Ok(ConfiguredProvider {
+        inner,
+        max_tokens: resolved.max_tokens,
+        temperature: resolved.temperature,
+        top_p: resolved.top_p,
+        extra_body: resolved.extra_body.clone(),
+    })
 }
 
-/// A provider/model selection with the API key already resolved.
+/// An OpenAI-compatible provider with per-provider request parameters applied
+/// on top of every completion request. The parameters come from the config
+/// file's `providers.NAME` entry (`max_tokens`, `temperature`, `top_p`,
+/// `extra_body`); unset parameters leave the request untouched.
+///
+/// `top_p` and `extra_body` ride in the request's `ProviderOptions` and are
+/// emitted by cersei's OpenAi provider on the wire (`top_p` as a top-level
+/// body field, `extra_body` merged as an object of extra body fields).
+pub struct ConfiguredProvider {
+    inner: OpenAi,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    extra_body: Option<serde_json::Value>,
+}
+
+impl ConfiguredProvider {
+    /// The configured reasoning field (for tests / diagnostics).
+    pub fn reasoning_field(&self) -> cersei::provider::ReasoningField {
+        self.inner.reasoning_field()
+    }
+}
+
+#[async_trait::async_trait]
+impl cersei::provider::Provider for ConfiguredProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn context_window(&self, model: &str) -> u64 {
+        self.inner.context_window(model)
+    }
+
+    async fn complete(
+        &self,
+        mut request: cersei::provider::CompletionRequest,
+    ) -> cersei::types::Result<cersei::provider::CompletionStream> {
+        if let Some(max_tokens) = self.max_tokens {
+            request.max_tokens = max_tokens;
+        }
+        if let Some(temperature) = self.temperature {
+            request.temperature = Some(temperature);
+        }
+        if let Some(top_p) = self.top_p {
+            request.options.set("top_p", top_p);
+        }
+        if let Some(extra_body) = &self.extra_body {
+            request.options.set("extra_body", extra_body.clone());
+        }
+        self.inner.complete(request).await
+    }
+}
+
+/// A provider/model selection with the API key already resolved, plus the
+/// provider's configured request parameters (None = use the agent defaults).
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub provider: String,
     pub model: String,
     pub base_url: String,
     pub api_key: String,
+    /// Per-provider max output tokens; `None` falls back to the agent default.
+    pub max_tokens: Option<u32>,
+    /// Per-provider sampling temperature; `None` leaves the agent default.
+    pub temperature: Option<f32>,
+    /// Per-provider nucleus sampling cutoff; `None` leaves the server default.
+    pub top_p: Option<f32>,
+    /// Extra JSON body fields merged into every request to this provider.
+    pub extra_body: Option<serde_json::Value>,
 }
 
 /// Parameters shared by all agent builders (TUI and ACP sessions).
@@ -169,6 +250,10 @@ fn builtin_providers() -> Vec<Provider> {
                 "poolside/laguna-xs-2.1".into(),
                 "poolside/laguna-s-2.1".into(),
             ],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "openrouter".into(),
@@ -184,6 +269,10 @@ fn builtin_providers() -> Vec<Provider> {
                 "cohere/north-mini-code:free".into(),
                 "poolside/laguna-xs-2.1:free".into(),
             ],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "groq".into(),
@@ -195,6 +284,10 @@ fn builtin_providers() -> Vec<Provider> {
                 "openai/gpt-oss-120b".into(),
                 "openai/gpt-oss-20b".into(),
             ],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "nvidia".into(),
@@ -206,6 +299,10 @@ fn builtin_providers() -> Vec<Provider> {
                 "deepseek-ai/deepseek-r1".into(),
                 "qwen/qwen2.5-72b-instruct".into(),
             ],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "tokenrouter".into(),
@@ -227,6 +324,10 @@ fn builtin_providers() -> Vec<Provider> {
                 "z-ai/glm-5.2".into(),
                 "x-ai/grok-4.5".into(),
             ],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "kiosapi".into(),
@@ -235,6 +336,10 @@ fn builtin_providers() -> Vec<Provider> {
             // KiosAPI is a New API-style OpenAI-compatible gateway; the
             // default model is qwen3.8-flash.
             models: vec!["kiosapi/qwen3.8-flash".into()],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "ollama".into(),
@@ -244,6 +349,10 @@ fn builtin_providers() -> Vec<Provider> {
             // endpoint the local server exposes, backed by the hosted model
             // catalog. Default is gpt-oss:120b.
             models: vec!["ollama/gpt-oss:120b".into()],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "opencode-zen".into(),
@@ -253,6 +362,10 @@ fn builtin_providers() -> Vec<Provider> {
             // frontier model providers (Anthropic, Google, OpenAI, …). The
             // default model is gemini-3.8-flash.
             models: vec!["opencode-zen/gemini-3.8-flash".into()],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
         Provider {
             name: "google".into(),
@@ -262,6 +375,10 @@ fn builtin_providers() -> Vec<Provider> {
             // maps `reasoning_effort` to Gemini's thinking level; this entry
             // is gemini-3.8-flash at low thinking.
             models: vec!["google/gemini-3.8-flash".into()],
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         },
     ]
 }
@@ -281,6 +398,10 @@ pub(crate) fn builtin_provider_entries() -> Vec<(String, crate::config::Provider
                     base_url: Some(p.base_url),
                     api_key: Some(p.api_key),
                     models,
+                    max_tokens: p.max_tokens,
+                    temperature: p.temperature,
+                    top_p: p.top_p,
+                    extra_body: p.extra_body,
                 },
             )
         })
@@ -403,6 +524,10 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
                 base_url: String::new(),
                 api_key: String::new(),
                 models: combo_names.into_iter().map(|c| c.name).collect(),
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                extra_body: None,
             },
         );
     }
@@ -413,6 +538,10 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
             base_url: String::new(),
             api_key: String::new(),
             models: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         });
         if let Some(base_url) = &entry.base_url {
             provider.base_url = base_url.clone();
@@ -423,6 +552,18 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
         if !entry.models.is_empty() {
             // An explicit `models` override takes full control of the list.
             provider.models = entry.models.clone();
+        }
+        if let Some(max_tokens) = entry.max_tokens {
+            provider.max_tokens = Some(max_tokens);
+        }
+        if let Some(temperature) = entry.temperature {
+            provider.temperature = Some(temperature);
+        }
+        if let Some(top_p) = entry.top_p {
+            provider.top_p = Some(top_p);
+        }
+        if let Some(extra_body) = &entry.extra_body {
+            provider.extra_body = Some(extra_body.clone());
         }
     }
 
@@ -617,6 +758,10 @@ pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::
         model: model.to_string(),
         base_url: p.base_url,
         api_key,
+        max_tokens: p.max_tokens,
+        temperature: p.temperature,
+        top_p: p.top_p,
+        extra_body: p.extra_body.clone(),
     })
 }
 
@@ -1320,6 +1465,10 @@ mod tests {
                 base_url: Some("https://acme.example/v1".into()),
                 api_key: Some("!echo acme-key".into()),
                 models: vec!["acme/big".into(), "acme/small".into()],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                extra_body: None,
             },
         );
         // Custom provider is listed and resolved.
@@ -1737,6 +1886,10 @@ mod tests {
                 base_url: None,
                 api_key: None,
                 models: vec!["openrouter/auto".into()],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                extra_body: None,
             },
         );
         // A config-file `models` list is shown verbatim, even when the free
@@ -2027,6 +2180,10 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                extra_body: None,
             },
         );
 
@@ -2087,6 +2244,10 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                extra_body: None,
             },
         );
 
@@ -2296,6 +2457,10 @@ mod tests {
             model: "test/test-model".into(),
             base_url: "http://127.0.0.1:1".into(),
             api_key: "test-key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         }
     }
 

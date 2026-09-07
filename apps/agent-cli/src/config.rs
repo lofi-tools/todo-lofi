@@ -165,7 +165,7 @@ pub fn default_config_jsonc() -> String {
         ("fallback", "Combo fallback tuning"),
         (
             "providers",
-            "Per-provider overrides (base_url, api_key, models)",
+            "Per-provider overrides (base_url, api_key, models, max_tokens, temperature, top_p, extra_body)",
         ),
         (
             "combos",
@@ -325,6 +325,25 @@ pub struct ProviderConfigEntry {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Maximum output tokens per response for this provider. Overrides the
+    /// agent's default max tokens when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature (0.0–2.0). When set, overrides the agent's
+    /// temperature for requests to this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Nucleus sampling cutoff (0.0–1.0). When set, passed as `top_p` on
+    /// the wire for OpenAI-compatible providers that honor it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Extra JSON body fields sent with every request to this provider. Use
+    /// for provider-specific parameters that don't have a dedicated config
+    /// field (e.g. `chat_template_kwargs`, custom headers, etc.). Values are
+    /// merged into the request body after the standard fields, so they can
+    /// override them if needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 /// Proxy configuration for routing through VibeProxy or similar local proxies.
@@ -933,6 +952,45 @@ mod tests {
         )
         .unwrap();
         assert!(apply_config_env(&missing).is_err());
+    }
+
+    #[test]
+    fn provider_entry_parses_request_parameters() {
+        let entry: ProviderConfigEntry = serde_json::from_str(
+            r#"{
+                "base_url": "https://example.com/v1",
+                "api_key": "env:EXAMPLE_KEY",
+                "models": ["example/model"],
+                "max_tokens": 16384,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "extra_body": {
+                    "chat_template_kwargs": {
+                        "thinking": true,
+                        "reasoning_effort": "high"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(entry.max_tokens, Some(16384));
+        assert_eq!(entry.temperature, Some(1.0));
+        assert_eq!(entry.top_p, Some(0.95));
+        let extra = entry.extra_body.unwrap();
+        assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
+        assert_eq!(extra["chat_template_kwargs"]["reasoning_effort"], "high");
+        // Unset parameters stay None and are omitted on serialization.
+        let bare: ProviderConfigEntry = serde_json::from_str(
+            r#"{ "base_url": "https://example.com/v1" }"#,
+        )
+        .unwrap();
+        assert_eq!(bare.max_tokens, None);
+        assert_eq!(bare.temperature, None);
+        assert_eq!(bare.top_p, None);
+        assert_eq!(bare.extra_body, None);
+        let serialized = serde_json::to_string(&bare).unwrap();
+        assert!(!serialized.contains("max_tokens"));
+        assert!(!serialized.contains("extra_body"));
     }
 
     #[test]

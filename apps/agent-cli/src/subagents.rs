@@ -19,7 +19,7 @@ use cersei::events::AgentEvent;
 use cersei::tools::permissions::AllowAll;
 use cersei::tools::web_fetch::WebFetchTool;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
-use cersei::{Agent, OpenAi};
+use cersei::Agent;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -675,12 +675,7 @@ async fn run_sub_agent(
     run_id: u64,
     reasoning: cersei::provider::ReasoningField,
 ) -> Result<String, String> {
-    let provider = OpenAi::builder()
-        .base_url(&resolved.base_url)
-        .api_key(&resolved.api_key)
-        .model(&resolved.model)
-        .reasoning_field(reasoning)
-        .build()
+    let provider = crate::providers::openai_provider(&resolved, reasoning)
         .map_err(|e| format!("failed to build sub-agent provider: {e}"))?;
 
     let events = events.clone();
@@ -930,6 +925,10 @@ mod tests {
             model: "mock/model".into(),
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
                 resolved,
@@ -958,6 +957,10 @@ mod tests {
             model: "mock/model".into(),
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
                 resolved,
@@ -1079,6 +1082,10 @@ mod tests {
             model: "mock/model".into(),
             base_url: base_url.clone(),
             api_key: "test-key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
@@ -1136,6 +1143,10 @@ mod tests {
             model: "mock/model".into(),
             base_url: base_url.clone(),
             api_key: "test-key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
@@ -1184,6 +1195,10 @@ mod tests {
             model: "mock/model".into(),
             base_url: "http://127.0.0.1:1".into(),
             api_key: "key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
                 resolved,

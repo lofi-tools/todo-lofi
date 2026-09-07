@@ -283,6 +283,13 @@ impl Provider for OpenAi {
             body["temperature"] = serde_json::json!(temp);
         }
 
+        // top_p: nucleus sampling cutoff, when the caller configured it via
+        // provider options (agent-cli's `providers.*.top_p`). Omitted when
+        // unset so the server's own default applies.
+        if let Some(top_p) = request.options.get::<f32>("top_p") {
+            body["top_p"] = serde_json::json!(top_p);
+        }
+
         // Reasoning effort: provider-agnostic `reasoning_effort` option
         // ("minimal"/"low"/"medium"/"high"), mapped onto the OpenAI request body.
         // Only the o-series / gpt-5 reasoning models accept it.
@@ -311,6 +318,19 @@ impl Provider for OpenAi {
             // no-tool-call nudge.
             if request.options.get::<String>("tool_choice").as_deref() == Some("required") {
                 body["tool_choice"] = serde_json::json!("required");
+            }
+        }
+
+        // Provider-configured extra body fields (agent-cli's
+        // `providers.*.extra_body`): merged after every standard field so they
+        // act as an escape hatch for server-specific parameters (e.g.
+        // `chat_template_kwargs` to enable thinking on vLLM/SGLang-style
+        // backends). Only a JSON object is merged; anything else is ignored.
+        if let Some(extra) = request.options.get::<serde_json::Value>("extra_body") {
+            if let serde_json::Value::Object(extra) = extra {
+                if let serde_json::Value::Object(body_obj) = &mut body {
+                    body_obj.extend(extra);
+                }
             }
         }
 
@@ -1299,5 +1319,112 @@ data: [DONE]\n";
         };
         assert_eq!(blocks.len(), 1, "blocks: {blocks:?}");
         assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "Plain answer"));
+    }
+}
+
+// Wire-config tests: agent-cli's `providers.*.top_p` / `extra_body` config
+// rides in `ProviderOptions` and must reach the request body as `top_p` and
+// as extra merged fields (e.g. `chat_template_kwargs` for vLLM/SGLang-style
+// backends). Same local-capture technique as the reasoning tests above.
+#[cfg(test)]
+mod wire_config_tests {
+    use super::*;
+
+    /// Start a capture server that reads one request, sends its JSON body to
+    /// `body_rx`, and answers with a bare SSE end. Returns the base URL and the
+    /// receiver; the test must send the request before awaiting the body.
+    fn capture_server() -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .ok();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            use std::io::Read;
+            let head_end = loop {
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => break 0,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+                if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break p + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+            let len = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while buf.len() < head_end + len {
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+            let body = &buf[head_end.min(buf.len())..];
+            let parsed = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+            let _ = body_tx.send(parsed);
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: [DONE]\n\n";
+            use std::io::Write;
+            let _ = sock.write_all(response.as_bytes());
+            let _ = sock.flush();
+        });
+        (format!("http://{addr}/v1"), body_rx)
+    }
+
+    #[tokio::test]
+    async fn top_p_and_extra_body_reach_the_wire_when_configured() {
+        let (url, body_rx) = capture_server();
+        let provider = OpenAi::builder()
+            .api_key("test-key")
+            .base_url(&url)
+            .model("test-model")
+            .build()
+            .unwrap();
+        let mut request = CompletionRequest::new("test-model");
+        request.messages = vec![Message::user("go")];
+        request.options.set("top_p", 0.95f32);
+        request.options.set(
+            "extra_body",
+            serde_json::json!({ "chat_template_kwargs": { "thinking": true, "reasoning_effort": "high" } }),
+        );
+        let _ = async { provider.complete(request).await?.collect().await }.await;
+
+        let body = body_rx.await.expect("request body captured");
+        // f32 round-trips through JSON with float precision, so compare with
+        // the same f32 value the config carried.
+        assert_eq!(body["top_p"], serde_json::json!(0.95f32));
+        assert_eq!(body["chat_template_kwargs"]["thinking"], serde_json::json!(true));
+        assert_eq!(
+            body["chat_template_kwargs"]["reasoning_effort"],
+            serde_json::json!("high")
+        );
+        // The standard fields survive the merge.
+        assert_eq!(body["model"], serde_json::json!("test-model"));
+    }
+
+    #[tokio::test]
+    async fn top_p_and_extra_body_stay_off_the_wire_by_default() {
+        let (url, body_rx) = capture_server();
+        let provider = OpenAi::builder()
+            .api_key("test-key")
+            .base_url(&url)
+            .model("test-model")
+            .build()
+            .unwrap();
+        let mut request = CompletionRequest::new("test-model");
+        request.messages = vec![Message::user("go")];
+        let _ = async { provider.complete(request).await?.collect().await }.await;
+
+        let body = body_rx.await.expect("request body captured");
+        assert!(body.get("top_p").is_none(), "no top_p unless configured: {body:#}");
+        assert!(
+            body.get("chat_template_kwargs").is_none(),
+            "no extra_body fields unless configured: {body:#}"
+        );
     }
 }
