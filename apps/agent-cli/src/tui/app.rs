@@ -38,6 +38,85 @@ pub struct Turn {
     pub content: String,
 }
 
+/// Transient feedback after a copy attempt, shown in the status bar until it
+/// times out (see [`CopyFeedback::expired`]). Set on a copy attempt; the draw
+/// loop reads it via [`AppState::copy_feedback_message`] and it self-expires
+/// after a few frames.
+#[derive(Debug, Clone)]
+pub struct CopyFeedback {
+    /// The frame (`state.frame_count`) the feedback was set on. None before the
+    /// first copy attempt (never shown).
+    pub frame: Option<u64>,
+    pub copied: bool,
+    pub nothing_selected: bool,
+    /// A clipboard error message, when the copy tool failed.
+    pub error: Option<String>,
+}
+
+impl CopyFeedback {
+    /// An empty feedback: never shown (expired immediately), used before the
+    /// first copy attempt.
+    pub fn none() -> Self {
+        Self {
+            frame: None,
+            copied: false,
+            nothing_selected: false,
+            error: None,
+        }
+    }
+
+    /// Whether this feedback should no longer be displayed, given the current
+    /// frame. Shown for ~1.5 s (TICK_RATE is 16 ms ⇒ 90 frames).
+    pub fn expired(&self, now: u64) -> bool {
+        match self.frame {
+            None => true,
+            Some(frame) => now.wrapping_sub(frame) >= 90,
+        }
+    }
+
+    /// The status-bar line for this feedback (None once expired).
+    pub fn message(&self, now: u64) -> Option<String> {
+        if self.expired(now) {
+            return None;
+        }
+        if self.copied {
+            Some("✓ Copied selection to clipboard".into())
+        } else if let Some(err) = &self.error {
+            Some(format!("✗ Copy failed: {err}"))
+        } else {
+            Some("Nothing selected — drag or Shift+arrows to select first".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod copy_feedback_tests {
+    use super::CopyFeedback;
+
+    #[test]
+    fn feedback_expires_after_90_frames() {
+        let fb = CopyFeedback {
+            frame: Some(100),
+            copied: true,
+            nothing_selected: false,
+            error: None,
+        };
+        // Within the window the message shows; afterwards it returns None.
+        assert_eq!(fb.message(100), Some("✓ Copied selection to clipboard".into()));
+        assert_eq!(fb.message(189), Some("✓ Copied selection to clipboard".into()));
+        assert_eq!(fb.message(190), None);
+        assert_eq!(fb.message(u64::MAX), None);
+    }
+
+    #[test]
+    fn empty_feedback_is_never_shown() {
+        let fb = CopyFeedback::none();
+        assert_eq!(fb.message(0), None);
+        assert!(fb.expired(0));
+        assert!(fb.expired(u64::MAX));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnRole {
     User,
@@ -519,9 +598,31 @@ pub struct AppState {
     // ── Flags ──
     pub should_quit: bool,
     pub dirty: bool,
+    /// One-frame feedback after a copy attempt so the user knows whether it
+    /// succeeded or whether nothing was selected.
+    pub copy_feedback: crate::tui::app::CopyFeedback,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new("", None)
+    }
 }
 
 impl AppState {
+    /// The status-bar message for the last copy attempt, if it is still within
+    /// its display window. Returns None once the feedback has expired (or no
+    /// copy has been attempted yet).
+    pub fn copy_feedback_message(&self) -> Option<String> {
+        self.copy_feedback.message(self.frame_count)
+    }
+
+    /// Whether the draw loop should keep re-rendering so the copy feedback can
+    /// disappear on its own once its window elapses.
+    pub fn copy_feedback_active(&self) -> bool {
+        !self.copy_feedback.expired(self.frame_count)
+    }
+
     pub fn new(
         model: &str,
         // session_id: &str,
@@ -580,6 +681,7 @@ impl AppState {
             pending_interview_target: None,
             pending_editor: None,
             ask_user_buffer: Vec::new(),
+            copy_feedback: CopyFeedback::none(),
         }
     }
 

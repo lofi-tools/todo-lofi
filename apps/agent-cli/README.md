@@ -20,7 +20,6 @@ to run):
 | Command    | What it does                              |
 |------------|-------------------------------------------|
 | `/model`   | Switch provider/model (opens a picker; or `/model <provider>` / `/model <provider>/<model>` directly) |
-| `/help`    | Show help                                 |
 | `/clear`   | Clear the conversation                    |
 | `/panel`   | Toggle the side panel                     |
 | `/diff`    | Open the git diff panel                   |
@@ -30,7 +29,15 @@ to run):
 | `/compact` | Context compaction status                 |
 | `/proxy`   | Proxy status                              |
 | `/default-config` | Write the full default config (every field with its possible values as `//` comments) to a temp file and open it in your editor |
+| `/help`    | Show help                                 |
 | `/exit`    | Exit                                      |
+
+### Copy / selection
+
+- **Ctrl+Shift+C** (or **Cmd+C** on macOS) copies the current selection to the system clipboard; the status bar briefly confirms the copy or notes that nothing was selected.
+- **Shift+←/→/↑/↓** (and **Shift+Home/End**, **Shift+PageUp/PageDown**, **Shift+Cmd+↑/↓**) extend an output selection one grapheme or one row/page.
+- **Cmd+A** selects all output when streaming; otherwise it selects just the input text (text-field convention). **Ctrl+Shift+A** always selects all output.
+- **Mouse drag** in the output or input box starts/creates a selection; a click outside clears it.
 
 ## Configuration
 

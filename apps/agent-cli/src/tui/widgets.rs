@@ -2641,7 +2641,12 @@ pub mod status {
     use ratatui::{prelude::*, widgets::Paragraph};
 
     pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-        let text = if state.is_streaming {
+        // A transient copy result (set by Ctrl+Shift+C / Cmd+C) briefly
+        // replaces the status line so the user gets confirmation.
+        let feedback_text = state.copy_feedback_message();
+        let text = if let Some(feedback) = feedback_text {
+            feedback
+        } else if state.is_streaming {
             let elapsed = state.elapsed_ms();
             let secs = elapsed as f64 / 1000.0;
             let tools = state.active_tools().count();
@@ -2659,7 +2664,14 @@ pub mod status {
             " ready".into()
         };
 
-        let style = if state.is_streaming {
+        // A successful copy is green; a failure or empty selection is amber.
+        let style = if state.copy_feedback_active() {
+            if state.copy_feedback.copied {
+                theme.success_style()
+            } else {
+                theme.warning_style()
+            }
+        } else if state.is_streaming {
             theme.accent_style()
         } else {
             theme.dimmed()

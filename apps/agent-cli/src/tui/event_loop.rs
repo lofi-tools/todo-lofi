@@ -254,7 +254,9 @@ pub async fn run(
             state.dirty = true;
         }
 
-        if state.dirty || state.is_streaming {
+        // Keep re-rendering while a copy-feedback message is in its display
+        // window so it can disappear on its own once it expires.
+        if state.dirty || state.is_streaming || state.copy_feedback_active() {
             draw(terminal, &mut state, &theme)?;
             state.dirty = false;
         }
@@ -867,17 +869,39 @@ fn is_copy_shortcut(modifiers: KeyModifiers, code: KeyCode) -> bool {
 }
 
 /// Copy the current selection to the clipboard, if there is one.
-fn copy_selection(state: &AppState) {
-    if let Some(text) = state.selection_text() {
-        copy_to_clipboard(&text);
-    }
+fn copy_selection(state: &mut AppState) {
+    use crate::tui::app::CopyFeedback;
+    let feedback = match state.selection_text() {
+        Some(text) => match copy_to_clipboard(&text) {
+            Ok(()) => CopyFeedback {
+                frame: Some(state.frame_count),
+                copied: true,
+                nothing_selected: false,
+                error: None,
+            },
+            Err(err) => CopyFeedback {
+                frame: Some(state.frame_count),
+                copied: false,
+                nothing_selected: false,
+                error: Some(err),
+            },
+        },
+        None => CopyFeedback {
+            frame: Some(state.frame_count),
+            copied: false,
+            nothing_selected: true,
+            error: None,
+        },
+    };
+    state.copy_feedback = feedback;
 }
 
 /// Copy `text` to the system clipboard. Prefers the platform clipboard tool
 /// (`pbcopy` / `wl-copy` / `xclip` / `clip`), which works in every terminal,
 /// and falls back to the OSC 52 terminal sequence when no tool is available
-/// (some terminals ignore OSC 52 entirely).
-fn copy_to_clipboard(text: &str) {
+/// (some terminals ignore OSC 52 entirely). Returns an error string when no
+/// clipboard route succeeded, so the UI can tell the user why the copy failed.
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
     } else if cfg!(target_os = "windows") {
@@ -896,10 +920,13 @@ fn copy_to_clipboard(text: &str) {
     };
     for (command, args) in commands {
         if copy_via_command(command, args, text) {
-            return;
+            return Ok(());
         }
     }
+    // OSC 52 has no success/failure signal the terminal reports back, so any
+    // command that at least wrote the sequence counts as the last resort.
     write_osc52_clipboard(text);
+    Ok(())
 }
 
 /// Write `text` to the system clipboard through `command`'s stdin, returning
