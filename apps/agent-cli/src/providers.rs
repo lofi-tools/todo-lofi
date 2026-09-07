@@ -2,9 +2,9 @@
 //! resolution, and shared agent construction.
 //!
 //! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
-//! nvidia nim, and the tokenrouter gateway. Their base URL / api key / models
-//! can be overridden — or new providers added — via the config file's
-//! `[providers.NAME]` section.
+//! nvidia nim, the tokenrouter gateway, and kiosapi. Their base URL / api key
+//! / models can be overridden — or new providers added — via the config
+//! file's `[providers.NAME]` section.
 //!
 //! An `api_key` value in config is either:
 //! - `!command` — run the rest as a shell command and use its trimmed stdout,
@@ -255,6 +255,15 @@ fn builtin_providers() -> Vec<Provider> {
                 "z-ai/glm-5.2".into(),
                 "x-ai/grok-4.5".into(),
             ],
+        },
+        Provider {
+            name: "kiosapi".into(),
+            base_url: "https://kiosapi.com/v1".into(),
+            api_key: "env:KIOSAPI_API_KEY".into(),
+            // KiosAPI is a New API-style OpenAI-compatible gateway; the
+            // default model is qwen3.8-flash.
+            free_models: vec!["kiosapi/qwen3.8-flash".into()],
+            models: vec!["kiosapi/qwen3.8-flash".into()],
         },
     ]
 }
@@ -1401,6 +1410,22 @@ mod tests {
         assert_eq!(resolved.base_url, "https://api.tokenrouter.com/v1");
         assert_eq!(resolved.model, "qwen/qwen3-coder-next");
         assert_eq!(resolved.api_key, "tr-test-key");
+    }
+
+    #[test]
+    fn kiosapi_builtin_provider() {
+        let config = AppConfig::default();
+        let ki = provider(&config, "kiosapi").unwrap();
+        assert_eq!(ki.base_url, "https://kiosapi.com/v1");
+        assert_eq!(ki.api_key, "env:KIOSAPI_API_KEY");
+        assert_eq!(ki.models, vec!["kiosapi/qwen3.8-flash"]);
+        // Resolution wires up the gateway base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("KIOSAPI_API_KEY", "kiosapi-test-key") };
+        let resolved = resolve(&config, "kiosapi", "kiosapi/qwen3.8-flash").unwrap();
+        assert_eq!(resolved.base_url, "https://kiosapi.com/v1");
+        assert_eq!(resolved.model, "kiosapi/qwen3.8-flash");
+        assert_eq!(resolved.api_key, "kiosapi-test-key");
     }
 
     /// A config whose cooldowns persist to a unique temp file, so tests never
