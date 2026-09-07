@@ -76,7 +76,8 @@ pub struct AppConfig {
     /// WebSearch tool's `BRAVE_SEARCH_API_KEY`). Keys are env var names;
     /// values use the same spec format as `providers.*.api_key`:
     /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
-    /// variable), or a literal value.
+    /// variable), or a literal value. An env var already set in the
+    /// environment wins; the config value is only a fallback.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }
@@ -517,8 +518,16 @@ fn apply_env(config: &mut AppConfig) {
 /// `!command`, `env:VAR`, or a literal) and set it in the process
 /// environment, so agent tools that read env vars (e.g. the WebSearch tool's
 /// `BRAVE_SEARCH_API_KEY`) can find them.
+///
+/// Precedence: a variable already set in the environment wins as-is; the
+/// config value only fills in when the variable is not already set.
 pub fn apply_config_env(config: &AppConfig) -> anyhow::Result<()> {
     for (name, spec) in &config.env {
+        // An existing env var takes priority; skip resolution entirely so a
+        // configured `!command` isn't run when its value would be unused.
+        if std::env::var_os(name).is_some() {
+            continue;
+        }
         let value = crate::providers::resolve_value_spec(spec, "env")
             .with_context(|| format!("failed to resolve config env var '{name}'"))?;
         // SAFETY: called once at startup on the main thread before agent
@@ -740,12 +749,16 @@ mod tests {
         // Source for the `env:VAR` copy form — read from the real process
         // environment, not from sibling entries (HashMap order is arbitrary).
         unsafe { std::env::set_var("TEST_ABSTRACT_SOURCE", "source-value") };
+        // A var already set in the environment must win over the config
+        // value (fallback only fills in when nothing is set).
+        unsafe { std::env::set_var("TEST_ABSTRACT_PRECEDENCE", "from-env") };
         let config: AppConfig = serde_json::from_str(
             r#"{
                 "env": {
                     "TEST_ABSTRACT_LITERAL": "literal-value",
                     "TEST_ABSTRACT_CMD": "!echo cmd-value",
-                    "TEST_ABSTRACT_COPY": "env:TEST_ABSTRACT_SOURCE"
+                    "TEST_ABSTRACT_COPY": "env:TEST_ABSTRACT_SOURCE",
+                    "TEST_ABSTRACT_PRECEDENCE": "from-config"
                 }
             }"#,
         )
@@ -754,6 +767,8 @@ mod tests {
         assert_eq!(std::env::var("TEST_ABSTRACT_LITERAL").unwrap(), "literal-value");
         assert_eq!(std::env::var("TEST_ABSTRACT_CMD").unwrap(), "cmd-value");
         assert_eq!(std::env::var("TEST_ABSTRACT_COPY").unwrap(), "source-value");
+        // Real env var beats the config fallback.
+        assert_eq!(std::env::var("TEST_ABSTRACT_PRECEDENCE").unwrap(), "from-env");
         // A failing spec surfaces as an error instead of being swallowed.
         let bad: AppConfig = serde_json::from_str(
             r#"{ "env": { "TEST_ABSTRACT_BAD": "!exit 1" } }"#,

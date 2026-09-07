@@ -226,7 +226,8 @@ at runtime (for example `WebSearch`, which requires a Brave Search API key in
 
 Values are resolved once at startup and exported into the process
 environment, so the web search tool (and any other env-reading tool) sees
-them.
+them. Precedence: a variable already set in your shell environment always
+wins — the config value only fills in when the variable is not already set.
 
 #### Free models by default
 
