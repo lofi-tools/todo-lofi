@@ -1,4 +1,4 @@
-use crate::cli_commands::Cli;
+use crate::cli_commands::{Cli, Commands, ConfigAction};
 use crate::config::AppConfig;
 use crate::providers::AgentRuntime;
 use clap::Parser;
@@ -45,6 +45,22 @@ async fn main() -> anyhow::Result<()> {
     // Apply the config file's `env` map to the process environment so agent
     // tools (e.g. WebSearch's TINYFISH_API_KEY / LANGSEARCH_API_KEY) can read them.
     config::apply_config_env(&config)?;
+
+    // `config` subcommand: print the current (merged) or default config.
+    if let Some(Commands::Config { action }) = &cli.command {
+        match action {
+            None | Some(ConfigAction::Show) => {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            }
+            Some(ConfigAction::Default) => {
+                print!("{}", config::default_config_jsonc());
+            }
+            Some(ConfigAction::Set { .. }) => {
+                anyhow::bail!("`config set` is not implemented yet");
+            }
+        }
+        return Ok(());
+    }
 
     // ACP server mode: speak Agent Client Protocol over stdio.
     if cli.acp {

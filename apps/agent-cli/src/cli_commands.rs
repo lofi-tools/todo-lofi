@@ -91,8 +91,9 @@ pub enum Commands {
     },
     /// Manage configuration
     Config {
+        /// Action (defaults to `show` when omitted)
         #[command(subcommand)]
-        action: ConfigAction,
+        action: Option<ConfigAction>,
     },
     /// Manage memory
     Memory {
@@ -130,6 +131,8 @@ pub enum SessionAction {
 pub enum ConfigAction {
     /// Show current configuration
     Show,
+    /// Show the default configuration template
+    Default,
     /// Set a configuration value
     Set { key: String, value: String },
 }
