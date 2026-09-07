@@ -180,16 +180,8 @@ pub fn default_config_jsonc() -> String {
                     ("cooldowns_file", "Cooldown persistence path, or null to disable (path | null)"),
                 ],
             ),
-            "env" => {
-                out.push_str("{\n");
-                out.push_str(
-                    "    // Example: WebSearch tries Parallel Search via MCP (no key),\n",
-                );
-                out.push_str("    // then TINYFISH_API_KEY, then LANGSEARCH_API_KEY.\n");
-                out.push_str("    // \"TINYFISH_API_KEY\": \"!cat ~/.tinyfish_key\"\n");
-                out.push_str("    // \"LANGSEARCH_API_KEY\": \"!cat ~/.langsearch_key\"\n");
-                out.push_str("  }");
-            }
+            "providers" => append_providers_jsonc(&mut out),
+            "env" => append_env_jsonc(&mut out),
             _ => out.push_str(&pretty_indented(field_value, 2)),
         }
         out.push_str(if i + 1 < fields.len() { "," } else { "" });
@@ -211,6 +203,50 @@ fn append_nested_jsonc(out: &mut String, value: &serde_json::Value, subfields: &
         out.push_str(if i + 1 < subfields.len() { "," } else { "" });
         out.push('\n');
     }
+    out.push_str("  }");
+}
+
+/// Render the default `providers` object: the built-in providers as
+/// config-file entries (one model each), so the template shows the real
+/// defaults a user would edit instead of an empty `{}`.
+fn append_providers_jsonc(out: &mut String) {
+    out.push_str("{\n");
+    out.push_str("    // The built-in providers, each with one model. Listing\n");
+    out.push_str("    // `models` takes full control of the list (free-model\n");
+    out.push_str("    // filtering no longer applies to it). API keys resolve\n");
+    out.push_str("    // from the `env` vars below or the shell environment.\n");
+    let entries = crate::providers::builtin_provider_entries();
+    let len = entries.len();
+    for (i, (name, entry)) in entries.into_iter().enumerate() {
+        let value = serde_json::to_value(&entry).expect("provider entry serializes");
+        out.push_str(&format!("    \"{name}\": "));
+        out.push_str(&pretty_indented(&value, 4));
+        out.push_str(if i + 1 < len { "," } else { "" });
+        out.push('\n');
+    }
+    out.push_str("  }");
+}
+
+/// Render the default `env` object: one explicit field per env var the agent
+/// needs, each defaulting to a `!echo VAR` placeholder spec (documents the
+/// variable without failing; a variable already set in the shell still wins
+/// at startup).
+fn append_env_jsonc(out: &mut String) {
+    out.push_str("{\n");
+    out.push_str("    // Environment variables for agent tools. Each entry is a\n");
+    out.push_str("    // fallback: a variable already set in your shell wins; the\n");
+    out.push_str("    // config value only fills in when it isn't. The `!echo VAR`\n");
+    out.push_str("    // defaults are placeholders — replace them with a real\n");
+    out.push_str("    // source (\"!cat ~/.key\", a literal, …).\n");
+    out.push_str("    // Provider API keys (resolved via the `env:` specs in `providers`).\n");
+    out.push_str("    \"POOLSIDE_API_KEY\": \"!echo POOLSIDE_API_KEY\",\n");
+    out.push_str("    \"OPENROUTER_API_KEY\": \"!echo OPENROUTER_API_KEY\",\n");
+    out.push_str("    \"GROQ_API_KEY\": \"!echo GROQ_API_KEY\",\n");
+    out.push_str("    \"NVIDIA_API_KEY\": \"!echo NVIDIA_API_KEY\",\n");
+    out.push_str("    \"TOKENROUTER_API_KEY\": \"!echo TOKENROUTER_API_KEY\",\n");
+    out.push_str("    // WebSearch keys (Parallel Search via MCP needs no key).\n");
+    out.push_str("    \"TINYFISH_API_KEY\": \"!echo TINYFISH_API_KEY\",\n");
+    out.push_str("    \"LANGSEARCH_API_KEY\": \"!echo LANGSEARCH_API_KEY\"\n");
     out.push_str("  }");
 }
 
@@ -713,7 +749,51 @@ mod tests {
         assert_eq!(parsed.proxy.enabled, defaults.proxy.enabled);
         assert_eq!(parsed.proxy.url, defaults.proxy.url);
         assert_eq!(parsed.fallback.cooldown_seconds, defaults.fallback.cooldown_seconds);
+        // The providers/env sections are template content (the runtime
+        // defaults keep empty maps), so assert the rendered entries parse
+        // back: the five default providers and seven necessary env vars.
+        assert_eq!(parsed.providers.len(), 5);
+        assert_eq!(parsed.env.len(), 7);
         assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
+    }
+
+    #[test]
+    fn default_config_jsonc_lists_default_providers_and_env_vars() {
+        let jsonc = default_config_jsonc();
+        // Each default provider appears with its base_url, env: key spec,
+        // and at least one model.
+        for (name, key) in [
+            ("poolside", "POOLSIDE_API_KEY"),
+            ("openrouter", "OPENROUTER_API_KEY"),
+            ("groq", "GROQ_API_KEY"),
+            ("nvidia", "NVIDIA_API_KEY"),
+            ("tokenrouter", "TOKENROUTER_API_KEY"),
+        ] {
+            assert!(
+                jsonc.contains(&format!("    \"{name}\": {{")),
+                "missing provider {name} in:\n{jsonc}"
+            );
+            assert!(
+                jsonc.contains(&format!("\"api_key\": \"env:{key}\"")),
+                "missing env: key spec for {name} in:\n{jsonc}"
+            );
+        }
+        // Every env var the agent needs gets an explicit field defaulting to
+        // a `!echo VAR` placeholder spec.
+        for name in [
+            "POOLSIDE_API_KEY",
+            "OPENROUTER_API_KEY",
+            "GROQ_API_KEY",
+            "NVIDIA_API_KEY",
+            "TOKENROUTER_API_KEY",
+            "TINYFISH_API_KEY",
+            "LANGSEARCH_API_KEY",
+        ] {
+            assert!(
+                jsonc.contains(&format!("\"{name}\": \"!echo {name}\"")),
+                "missing env placeholder for {name} in:\n{jsonc}"
+            );
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ to run):
 | `/memory`  | Memory status                             |
 | `/compact` | Context compaction status                 |
 | `/proxy`   | Proxy status                              |
+| `/default-config` | Write the full default config (every field with its possible values as `//` comments) to a temp file and open it in your editor |
 | `/exit`    | Exit                                      |
 
 ## Configuration
@@ -169,7 +170,9 @@ Providers are OpenAI-compatible and configured under the `providers` object.
 The built-ins are `poolside`, `openrouter`, `groq`, `nvidia` and `tokenrouter`
 (the tokenrouter.com unified gateway). A `providers.NAME` entry either
 overrides a built-in (by name) or defines a brand-new provider. All fields are optional; only set what you want to
-override.
+override. The default config (`/default-config`) includes every built-in
+provider with its `base_url`, `api_key` spec, and one model, so you can see
+the shape and edit from there.
 
 ```json
 "providers": {
@@ -234,6 +237,13 @@ Values are resolved once at startup and exported into the process
 environment, so the web search tool (and any other env-reading tool) sees
 them. Precedence: a variable already set in your shell environment always
 wins — the config value only fills in when the variable is not already set.
+
+The default config (`/default-config`) lists every env var the agent needs
+— the five provider API keys plus `TINYFISH_API_KEY` and
+`LANGSEARCH_API_KEY` — as explicit fields, each defaulting to a `!echo <VAR>`
+placeholder. Replace the placeholders with real sources (e.g. `!cat ~/.key`)
+or set the variables in your shell; a shell-set variable always wins over the
+config entry.
 
 #### Free models by default
 

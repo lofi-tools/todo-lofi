@@ -259,6 +259,34 @@ fn builtin_providers() -> Vec<Provider> {
     ]
 }
 
+/// The built-in providers rendered as config-file entries — used by the
+/// default-config template so `providers` shows the real defaults a user
+/// would edit. Each entry carries one model (the provider's first free model
+/// when it has one, else its first model), keeping the template compact.
+pub(crate) fn builtin_provider_entries() -> Vec<(String, crate::config::ProviderConfigEntry)> {
+    builtin_providers()
+        .into_iter()
+        .map(|p| {
+            let models = if p.free_models.is_empty() {
+                p.models
+            } else {
+                p.free_models
+            }
+            .into_iter()
+            .take(1)
+            .collect();
+            (
+                p.name,
+                crate::config::ProviderConfigEntry {
+                    base_url: Some(p.base_url),
+                    api_key: Some(p.api_key),
+                    models,
+                },
+            )
+        })
+        .collect()
+}
+
 /// A configured combo: a named fallback list of (provider, model) pairs,
 /// selectable as the virtual provider `combos` / model `<name>`.
 #[derive(Debug, Clone)]
