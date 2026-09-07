@@ -58,9 +58,9 @@ pub fn agent_tools(
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
     // Replace the built-in WebSearch (reads the legacy CERSEI_SEARCH_API_KEY
-    // env var) with our Brave-based version reading BRAVE_SEARCH_API_KEY.
+    // env var) with our LangSearch-based version reading LANGSEARCH_API_KEY.
     tools.retain(|t| t.name() != "WebSearch");
-    tools.push(Box::new(crate::tools::BraveSearchTool));
+    tools.push(Box::new(crate::tools::LangSearchTool));
     // The ACP client-aware Read/Write/Edit overrides (which consult the
     // editor's unsaved buffers and mirror edits back via `fs/write_text_file`)
     // are only wired when an ACP fs bridge is present — i.e. when the binary

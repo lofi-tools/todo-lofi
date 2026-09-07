@@ -73,7 +73,7 @@ pub struct AppConfig {
     #[serde(default = "default_compression")]
     pub compression_level: String,
     /// Extra environment variables made available to agent tools (e.g. the
-    /// WebSearch tool's `BRAVE_SEARCH_API_KEY`). Keys are env var names;
+    /// WebSearch tool's `LANGSEARCH_API_KEY`). Keys are env var names;
     /// values use the same spec format as `providers.*.api_key`:
     /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
     /// variable), or a literal value. An env var already set in the
@@ -183,6 +183,14 @@ pub fn default_config_jsonc() -> String {
                     ("cooldowns_file", "Cooldown persistence path, or null to disable (path | null)"),
                 ],
             ),
+            "env" => {
+                out.push_str("{\n");
+                out.push_str(
+                    "    // Example: the WebSearch tool reads LANGSEARCH_API_KEY.\n",
+                );
+                out.push_str("    // \"LANGSEARCH_API_KEY\": \"!cat ~/.langsearch_key\"\n");
+                out.push_str("  }");
+            }
             _ => out.push_str(&pretty_indented(field_value, 2)),
         }
         out.push_str(if i + 1 < fields.len() { "," } else { "" });
@@ -517,7 +525,7 @@ fn apply_env(config: &mut AppConfig) {
 /// Resolve each entry of the config `env` map (spec format like api_key:
 /// `!command`, `env:VAR`, or a literal) and set it in the process
 /// environment, so agent tools that read env vars (e.g. the WebSearch tool's
-/// `BRAVE_SEARCH_API_KEY`) can find them.
+/// `LANGSEARCH_API_KEY`) can find them.
 ///
 /// Precedence: a variable already set in the environment wins as-is; the
 /// config value only fills in when the variable is not already set.
@@ -728,20 +736,21 @@ mod tests {
         let overlay: AppConfig = serde_json::from_str(
             r#"{
                 "env": {
-                    "BRAVE_SEARCH_API_KEY": "!cat ~/.brave_key",
+                    "LANGSEARCH_API_KEY": "!cat ~/.langsearch_key",
                     "MY_LITERAL": "literal-value"
                 }
             }"#,
         )
         .unwrap();
         merge(&mut config, overlay);
-        assert_eq!(config.env.get("BRAVE_SEARCH_API_KEY").map(String::as_str), Some("!cat ~/.brave_key"));
+        assert_eq!(config.env.get("LANGSEARCH_API_KEY").map(String::as_str), Some("!cat ~/.langsearch_key"));
         assert_eq!(config.env.get("MY_LITERAL").map(String::as_str), Some("literal-value"));
         // An empty map leaves existing entries untouched.
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
         assert_eq!(config2.env.len(), 2);
-        assert!(default_config_jsonc().contains("\"env\": {}"));
+        // The default config template shows the LANGSEARCH_API_KEY example.
+        assert!(default_config_jsonc().contains("LANGSEARCH_API_KEY"));
     }
 
     #[test]

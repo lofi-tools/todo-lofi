@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     config::apply_cli_overrides(&cli, &mut config);
 
     // Apply the config file's `env` map to the process environment so agent
-    // tools (e.g. WebSearch's BRAVE_SEARCH_API_KEY) can read them.
+    // tools (e.g. WebSearch's LANGSEARCH_API_KEY) can read them.
     config::apply_config_env(&config)?;
 
     // ACP server mode: speak Agent Client Protocol over stdio.

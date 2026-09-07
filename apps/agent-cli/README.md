@@ -213,13 +213,12 @@ convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 #### Environment variables for tools
 
 The top-level `env` object sets environment variables that agent tools read
-at runtime (for example `WebSearch`, which requires a Brave Search API key in
-`BRAVE_SEARCH_API_KEY`). Each value uses the same three forms as `api_key`:
+at runtime (for example `WebSearch`, which requires a LangSearch API key in
+`LANGSEARCH_API_KEY`). Each value uses the same three forms as `api_key`:
 
 ```json
 "env": {
-  "BRAVE_SEARCH_API_KEY": "!kubectl get secret brave-key -o jsonpath='{.data.key}' | base64 -d",
-  "BRAVE_SEARCH_API_URL": "env:CUSTOM_BRAVE_ENDPOINT",
+  "LANGSEARCH_API_KEY": "!kubectl get secret langsearch-key -o jsonpath='{.data.key}' | base64 -d",
   "SOME_LITERAL": "literal-value"
 }
 ```
