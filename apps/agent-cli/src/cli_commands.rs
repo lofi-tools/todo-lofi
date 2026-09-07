@@ -158,3 +158,40 @@ pub enum McpAction {
     /// Remove an MCP server
     Remove { name: String },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn config_subcommand_without_action_parses() {
+        let cli = Cli::parse_from(["abstract", "config"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config { action: None })
+        ));
+    }
+
+    #[test]
+    fn config_default_subcommand_parses() {
+        let cli = Cli::parse_from(["abstract", "config", "default"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                action: Some(ConfigAction::Default)
+            })
+        ));
+    }
+
+    #[test]
+    fn config_show_subcommand_parses() {
+        let cli = Cli::parse_from(["abstract", "config", "show"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Config {
+                action: Some(ConfigAction::Show)
+            })
+        ));
+    }
+}

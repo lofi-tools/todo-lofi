@@ -2,9 +2,9 @@
 //! resolution, and shared agent construction.
 //!
 //! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
-//! nvidia nim, the tokenrouter gateway, and kiosapi. Their base URL / api key
-//! / models can be overridden — or new providers added — via the config
-//! file's `[providers.NAME]` section.
+//! nvidia nim, the tokenrouter gateway, kiosapi, and google (AI Studio).
+//! Their base URL / api key / models can be overridden — or new providers
+//! added — via the config file's `[providers.NAME]` section.
 //!
 //! An `api_key` value in config is either:
 //! - `!command` — run the rest as a shell command and use its trimmed stdout,
@@ -226,6 +226,15 @@ fn builtin_providers() -> Vec<Provider> {
             // KiosAPI is a New API-style OpenAI-compatible gateway; the
             // default model is qwen3.8-flash.
             models: vec!["kiosapi/qwen3.8-flash".into()],
+        },
+        Provider {
+            name: "google".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai/".into(),
+            api_key: "env:GEMINI_API_KEY".into(),
+            // Google AI Studio (Gemini API). The OpenAI-compatible endpoint
+            // maps `reasoning_effort` to Gemini's thinking level; this entry
+            // is gemini-3.8-flash at low thinking.
+            models: vec!["google/gemini-3.8-flash".into()],
         },
     ]
 }
@@ -1325,6 +1334,22 @@ mod tests {
         assert_eq!(resolved.base_url, "https://kiosapi.com/v1");
         assert_eq!(resolved.model, "kiosapi/qwen3.8-flash");
         assert_eq!(resolved.api_key, "kiosapi-test-key");
+    }
+
+    #[test]
+    fn google_builtin_provider() {
+        let config = AppConfig::default();
+        let g = provider(&config, "google").unwrap();
+        assert_eq!(g.base_url, "https://generativelanguage.googleapis.com/v1beta/openai/");
+        assert_eq!(g.api_key, "env:GEMINI_API_KEY");
+        assert_eq!(g.models, vec!["google/gemini-3.8-flash"]);
+        // Resolution wires up the AI Studio base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("GEMINI_API_KEY", "google-test-key") };
+        let resolved = resolve(&config, "google", "google/gemini-3.8-flash").unwrap();
+        assert_eq!(resolved.base_url, "https://generativelanguage.googleapis.com/v1beta/openai/");
+        assert_eq!(resolved.model, "google/gemini-3.8-flash");
+        assert_eq!(resolved.api_key, "google-test-key");
     }
 
     /// A config whose cooldowns persist to a unique temp file, so tests never
