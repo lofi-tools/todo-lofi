@@ -669,11 +669,11 @@ pub mod input {
     }
 
     pub fn render(f: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
-        // Interview input mode: highlight the box with an info-colored border
-        // and an "Interview" label while awaiting the target.
+        // Interview input mode: highlight the box with a green border and an
+        // "Interview" label while awaiting the target.
         let interview_mode = state.pending_interview_target.is_some();
         let border_color = if interview_mode {
-            theme.info
+            theme.success
         } else if state.side_panel_focused {
             theme.dim
         } else {
