@@ -928,7 +928,7 @@ impl AcpServer {
                 p.models
                     .into_iter()
                     .map(|m| {
-                        let id = providers::display_model_id(&session_provider, &m);
+                        let id = providers::display_model_id(&session_provider, &m.id);
                         json!({ "value": id, "name": id })
                     })
                     .collect()
@@ -1957,10 +1957,6 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
             },
         );
         config.combos.insert(

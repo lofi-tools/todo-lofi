@@ -2992,10 +2992,6 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
             },
         );
         Arc::new(AgentRuntime::new(&config).unwrap())
@@ -3016,10 +3012,6 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
             },
         );
         config.combos.insert(

@@ -165,7 +165,7 @@ pub fn default_config_jsonc() -> String {
         ("fallback", "Combo fallback tuning"),
         (
             "providers",
-            "Per-provider overrides (base_url, api_key, models, max_tokens, temperature, top_p, extra_body)",
+            "Per-provider overrides (base_url, api_key, models; models entries are ids or { id, max_tokens, temperature, top_p, extra_body })",
         ),
         (
             "combos",
@@ -316,6 +316,10 @@ fn pretty_indented(value: &serde_json::Value, base_indent: usize) -> String {
 
 /// Per-provider config-file entry. All fields optional: set only what you want
 /// to override from the built-in defaults (or define a brand-new provider).
+/// Request parameters (`max_tokens`, `temperature`, `top_p`, `extra_body`)
+/// live on individual `models` entries (see [`ModelRef`]), not here: sampling
+/// behavior is per model, so a provider-level default would silently apply one
+/// model's tuning to every other model on the same provider.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderConfigEntry {
     #[serde(default)]
@@ -324,24 +328,62 @@ pub struct ProviderConfigEntry {
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
-    pub models: Vec<String>,
-    /// Maximum output tokens per response for this provider. Overrides the
-    /// agent's default max tokens when set.
+    pub models: Vec<ModelRef>,
+}
+
+/// One entry of a provider's `models` list: either a bare model id string
+/// (`"deepseek-ai/deepseek-v4-flash-0731"`) or a detailed object that pins
+/// request parameters to that model only:
+///
+/// ```json
+/// { "id": "deepseek-ai/deepseek-v4-flash-0731",
+///   "max_tokens": 16384, "temperature": 1.0, "top_p": 0.95,
+///   "extra_body": { "chat_template_kwargs": { "thinking": true } } }
+/// ```
+///
+/// Bare strings use the agent defaults; fields set on the object apply to
+/// that model only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModelRef {
+    Simple(String),
+    Detailed(ModelConfigEntry),
+}
+
+impl ModelRef {
+    /// The wire-level model id.
+    pub fn id(&self) -> &str {
+        match self {
+            ModelRef::Simple(id) => id,
+            ModelRef::Detailed(entry) => &entry.id,
+        }
+    }
+}
+
+impl From<&str> for ModelRef {
+    fn from(id: &str) -> Self {
+        ModelRef::Simple(id.to_string())
+    }
+}
+
+impl From<String> for ModelRef {
+    fn from(id: String) -> Self {
+        ModelRef::Simple(id)
+    }
+}
+
+/// Per-model request parameters. Every field besides `id` is optional and,
+/// when set, applies to this model only. Unset fields leave the request
+/// untouched (the agent default applies).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelConfigEntry {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Sampling temperature (0.0–2.0). When set, overrides the agent's
-    /// temperature for requests to this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Nucleus sampling cutoff (0.0–1.0). When set, passed as `top_p` on
-    /// the wire for OpenAI-compatible providers that honor it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    /// Extra JSON body fields sent with every request to this provider. Use
-    /// for provider-specific parameters that don't have a dedicated config
-    /// field (e.g. `chat_template_kwargs`, custom headers, etc.). Values are
-    /// merged into the request body after the standard fields, so they can
-    /// override them if needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_body: Option<serde_json::Value>,
 }
@@ -955,42 +997,139 @@ mod tests {
     }
 
     #[test]
-    fn provider_entry_parses_request_parameters() {
+    fn provider_entry_holds_connection_fields_only() {
         let entry: ProviderConfigEntry = serde_json::from_str(
             r#"{
                 "base_url": "https://example.com/v1",
                 "api_key": "env:EXAMPLE_KEY",
-                "models": ["example/model"],
+                "models": ["example/model"]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(entry.base_url.as_deref(), Some("https://example.com/v1"));
+        assert_eq!(entry.api_key.as_deref(), Some("env:EXAMPLE_KEY"));
+        assert_eq!(entry.models.len(), 1);
+        // Request parameters are per model, not per provider: top-level
+        // sampling keys are ignored (unknown fields are dropped on parse),
+        // so they must be set on individual `models` entries instead.
+        let legacy: ProviderConfigEntry = serde_json::from_str(
+            r#"{
+                "base_url": "https://example.com/v1",
                 "max_tokens": 16384,
                 "temperature": 1.0,
                 "top_p": 0.95,
-                "extra_body": {
-                    "chat_template_kwargs": {
-                        "thinking": true,
-                        "reasoning_effort": "high"
+                "extra_body": { "chat_template_kwargs": { "thinking": true } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.base_url.as_deref(), Some("https://example.com/v1"));
+        assert!(legacy.models.is_empty());
+        let serialized = serde_json::to_string(&legacy).unwrap();
+        assert!(!serialized.contains("max_tokens"));
+        assert!(!serialized.contains("extra_body"));
+    }
+
+    #[test]
+    fn provider_models_accept_bare_ids_and_detailed_objects() {
+        let entry: ProviderConfigEntry = serde_json::from_str(
+            r#"{
+                "models": [
+                    "z-ai/glm4.7",
+                    { "id": "deepseek-ai/deepseek-v4-flash-0731",
+                      "max_tokens": 16384, "temperature": 1.0, "top_p": 0.95,
+                      "extra_body": { "chat_template_kwargs": { "thinking": true, "reasoning_effort": "high" } } }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(entry.models.len(), 2);
+        assert_eq!(entry.models[0].id(), "z-ai/glm4.7");
+        assert_eq!(entry.models[1].id(), "deepseek-ai/deepseek-v4-flash-0731");
+        match &entry.models[1] {
+            ModelRef::Detailed(detailed) => {
+                assert_eq!(detailed.max_tokens, Some(16384));
+                assert_eq!(detailed.temperature, Some(1.0));
+                assert_eq!(detailed.top_p, Some(0.95));
+                let extra = detailed.extra_body.as_ref().unwrap();
+                assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
+            }
+            ModelRef::Simple(_) => panic!("expected detailed model object"),
+        }
+        // Bare strings round-trip as strings, not objects.
+        let serialized = serde_json::to_string(&entry).unwrap();
+        assert!(serialized.contains("\"z-ai/glm4.7\""));
+    }
+
+    #[test]
+    fn provider_entry_parses_mixed_per_model_list() {
+        // The real-world shape: connection fields on the provider, request
+        // parameters on individual models, bare ids and detailed objects
+        // mixed, detailed objects carrying only the fields they need.
+        let config: AppConfig = serde_json::from_str(
+            r#"{
+                "providers": {
+                    "nvidia": {
+                        "api_key": "!cat /Users/me/.config/sops-nix/secrets/nvidia_api_key",
+                        "base_url": "https://integrate.api.nvidia.com/v1",
+                        "models": [
+                            {
+                                "extra_body": {
+                                    "chat_template_kwargs": {
+                                        "reasoning_effort": "high",
+                                        "thinking": true
+                                    }
+                                },
+                                "id": "deepseek-ai/deepseek-v4-flash-0731",
+                                "max_tokens": 16384,
+                                "temperature": 1.0,
+                                "top_p": 0.95
+                            },
+                            "z-ai/glm4.7",
+                            { "id": "minimaxai/minimax-m2.7", "max_tokens": 16384 },
+                            { "id": "minimaxai/minimax-m3", "max_tokens": 8192 },
+                            { "id": "nvidia/nemotron-3-ultra-550b-a55b", "max_tokens": 16384 },
+                            { "id": "nex-agi/nex-n2-pro", "max_tokens": 32768 }
+                        ]
                     }
                 }
             }"#,
         )
         .unwrap();
-        assert_eq!(entry.max_tokens, Some(16384));
-        assert_eq!(entry.temperature, Some(1.0));
-        assert_eq!(entry.top_p, Some(0.95));
-        let extra = entry.extra_body.unwrap();
-        assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
-        assert_eq!(extra["chat_template_kwargs"]["reasoning_effort"], "high");
-        // Unset parameters stay None and are omitted on serialization.
-        let bare: ProviderConfigEntry = serde_json::from_str(
-            r#"{ "base_url": "https://example.com/v1" }"#,
-        )
-        .unwrap();
-        assert_eq!(bare.max_tokens, None);
-        assert_eq!(bare.temperature, None);
-        assert_eq!(bare.top_p, None);
-        assert_eq!(bare.extra_body, None);
-        let serialized = serde_json::to_string(&bare).unwrap();
-        assert!(!serialized.contains("max_tokens"));
-        assert!(!serialized.contains("extra_body"));
+        let entry = config.providers.get("nvidia").unwrap();
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("https://integrate.api.nvidia.com/v1")
+        );
+        assert_eq!(entry.models.len(), 6);
+        // Fully specified model keeps every parameter.
+        match &entry.models[0] {
+            ModelRef::Detailed(detailed) => {
+                assert_eq!(detailed.id, "deepseek-ai/deepseek-v4-flash-0731");
+                assert_eq!(detailed.max_tokens, Some(16384));
+                assert_eq!(detailed.temperature, Some(1.0));
+                assert_eq!(detailed.top_p, Some(0.95));
+                let extra = detailed.extra_body.as_ref().unwrap();
+                assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
+                assert_eq!(
+                    extra["chat_template_kwargs"]["reasoning_effort"],
+                    "high"
+                );
+            }
+            ModelRef::Simple(_) => panic!("expected detailed model object"),
+        }
+        // Bare id stays bare.
+        assert_eq!(entry.models[1].id(), "z-ai/glm4.7");
+        // Partial objects: set fields parse, the rest stay None.
+        match &entry.models[2] {
+            ModelRef::Detailed(detailed) => {
+                assert_eq!(detailed.max_tokens, Some(16384));
+                assert_eq!(detailed.temperature, None);
+                assert_eq!(detailed.top_p, None);
+                assert_eq!(detailed.extra_body, None);
+            }
+            ModelRef::Simple(_) => panic!("expected detailed model object"),
+        }
+        assert_eq!(entry.models[5].id(), "nex-agi/nex-n2-pro");
     }
 
     #[test]

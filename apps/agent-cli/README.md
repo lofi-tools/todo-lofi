@@ -203,6 +203,13 @@ the shape and edit from there.
 
 Overriding `models` takes full control of the list.
 
+Each `models` entry is either a bare id string or a detailed object that
+pins request parameters (`max_tokens`, `temperature`, `top_p`, `extra_body`)
+to that model only. There are no provider-level sampling parameters — tuning
+is per model, so one model's settings can never leak into another model on
+the same provider. Unset fields leave the request untouched (the agent
+default applies):
+
 #### API keys
 
 The `api_key` field accepts three forms:

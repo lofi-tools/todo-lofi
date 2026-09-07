@@ -102,8 +102,14 @@ mod copy_feedback_tests {
             error: None,
         };
         // Within the window the message shows; afterwards it returns None.
-        assert_eq!(fb.message(100), Some("✓ Copied selection to clipboard".into()));
-        assert_eq!(fb.message(189), Some("✓ Copied selection to clipboard".into()));
+        assert_eq!(
+            fb.message(100),
+            Some("✓ Copied selection to clipboard".into())
+        );
+        assert_eq!(
+            fb.message(189),
+            Some("✓ Copied selection to clipboard".into())
+        );
         assert_eq!(fb.message(190), None);
         assert_eq!(fb.message(u64::MAX), None);
     }
@@ -284,10 +290,13 @@ pub fn filter_commands(query: &str) -> Vec<CommandMatch> {
         .iter()
         .filter_map(|(name, description)| {
             fuzzy_score(query, name).map(|score| {
-                (score, CommandMatch {
-                    name: name.to_string(),
-                    description,
-                })
+                (
+                    score,
+                    CommandMatch {
+                        name: name.to_string(),
+                        description,
+                    },
+                )
             })
         })
         .collect();
@@ -317,7 +326,7 @@ impl PartialEq for Overlay {
                 | (Self::Help, Self::Help)
                 | (Self::Permission(_), Self::Permission(_))
                 | (Self::Recovery(_), Self::Recovery(_))
-                |            (Self::ModelPicker(_), Self::ModelPicker(_))
+                | (Self::ModelPicker(_), Self::ModelPicker(_))
                 | (Self::ComboPicker(_), Self::ComboPicker(_))
                 | (Self::ProviderExplorer(_), Self::ProviderExplorer(_))
                 | (Self::Graph(_), Self::Graph(_))
@@ -328,8 +337,7 @@ impl PartialEq for Overlay {
 
 /// Result channel for a `/provider` model-list fetch: the provider name plus
 /// the fetched model ids (or an error string).
-pub type ProviderFetchRx =
-    tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>;
+pub type ProviderFetchRx = tokio::sync::oneshot::Receiver<(String, Result<Vec<String>, String>)>;
 
 /// Which list the `/provider` explorer is currently fuzzy-picking from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -729,7 +737,8 @@ impl AppState {
         if sel.target != SelectionTarget::Input {
             return None;
         }
-        let (SelectionPoint::Input(anchor), SelectionPoint::Input(active)) = (sel.anchor, sel.active)
+        let (SelectionPoint::Input(anchor), SelectionPoint::Input(active)) =
+            (sel.anchor, sel.active)
         else {
             return None;
         };
@@ -742,7 +751,8 @@ impl AppState {
         if sel.target != SelectionTarget::Output {
             return None;
         }
-        let (SelectionPoint::Output(ar, ac), SelectionPoint::Output(br, bc)) = (sel.anchor, sel.active)
+        let (SelectionPoint::Output(ar, ac), SelectionPoint::Output(br, bc)) =
+            (sel.anchor, sel.active)
         else {
             return None;
         };
@@ -794,17 +804,21 @@ impl AppState {
                 // Selection columns are grapheme indices; slice by grapheme
                 // so combining-mark clusters and multi-byte chars never split.
                 if range.start_row == range.end_row {
-                    let text = self
-                        .virtual_list
-                        .row_slice_by_graphemes(start_row, range.start_col, range.end_col);
+                    let text = self.virtual_list.row_slice_by_graphemes(
+                        start_row,
+                        range.start_col,
+                        range.end_col,
+                    );
                     if text.is_empty() {
                         return None;
                     }
                     return Some(text);
                 }
-                let mut parts = vec![self
-                    .virtual_list
-                    .row_slice_by_graphemes(start_row, range.start_col, usize::MAX)];
+                let mut parts = vec![self.virtual_list.row_slice_by_graphemes(
+                    start_row,
+                    range.start_col,
+                    usize::MAX,
+                )];
                 for row in (range.start_row + 1)..range.end_row {
                     parts.push(self.virtual_list.row_text(row as usize));
                 }
@@ -835,7 +849,9 @@ impl AppState {
     pub fn append_thinking(&mut self, text: &str) {
         match self.active_blocks.last_mut() {
             Some(OutputBlock::Thinking(t)) => t.push_str(text),
-            _ => self.active_blocks.push(OutputBlock::Thinking(text.to_string())),
+            _ => self
+                .active_blocks
+                .push(OutputBlock::Thinking(text.to_string())),
         }
     }
 
@@ -846,7 +862,9 @@ impl AppState {
 
     /// Mutable access to the active (streaming) tool calls, in order.
     pub fn active_tools_mut(&mut self) -> impl Iterator<Item = &mut ToolCall> {
-        self.active_blocks.iter_mut().filter_map(OutputBlock::as_tool_mut)
+        self.active_blocks
+            .iter_mut()
+            .filter_map(OutputBlock::as_tool_mut)
     }
 
     /// Commit the current streaming blocks into a completed turn.
@@ -1058,7 +1076,12 @@ mod tests {
         });
         let range = s.output_selection().expect("range");
         assert_eq!(
-            (range.start_row, range.start_col, range.end_row, range.end_col),
+            (
+                range.start_row,
+                range.start_col,
+                range.end_row,
+                range.end_col
+            ),
             (0, 2, 1, 3)
         );
         assert_eq!(s.selection_text().as_deref(), Some("w one\nrow"));
@@ -1110,10 +1133,6 @@ mod tests {
             base_url: "http://x".into(),
             api_key: "k".into(),
             models: Vec::new(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         };
         ProviderExplorerState {
             phase: ProviderExplorerPhase::Models,
@@ -1132,7 +1151,12 @@ mod tests {
     fn provider_explorer_filter_narrows_by_subsequence() {
         let p = model_explorer(
             "groq",
-            vec!["llama-3.3-70b", "llama-3.1-8b-instant", "compound", "gpt-oss-20b"],
+            vec![
+                "llama-3.3-70b",
+                "llama-3.1-8b-instant",
+                "compound",
+                "gpt-oss-20b",
+            ],
         );
         let p = ProviderExplorerState {
             query: "ll".into(),
@@ -1167,23 +1191,27 @@ mod tests {
             base_url: String::new(),
             api_key: String::new(),
             models: Vec::new(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         };
         let p = ProviderExplorerState {
             phase: ProviderExplorerPhase::Providers,
             query: "gro".into(),
             selected: 0,
-            providers: vec![provider("groq"), provider("poolside"), provider("openrouter")],
+            providers: vec![
+                provider("groq"),
+                provider("poolside"),
+                provider("openrouter"),
+            ],
             provider: None,
             current_provider: Some("poolside".into()),
             all_models: Vec::new(),
             loading: false,
             error: String::new(),
         };
-        let names: Vec<&str> = p.filtered_providers().iter().map(|pp| pp.name.as_str()).collect();
+        let names: Vec<&str> = p
+            .filtered_providers()
+            .iter()
+            .map(|pp| pp.name.as_str())
+            .collect();
         assert_eq!(names, vec!["groq"]);
     }
 }

@@ -25,23 +25,81 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 /// A configured provider (built-in defaults merged with the config file).
+/// Sampling parameters (`max_tokens`, `temperature`, `top_p`, `extra_body`)
+/// live on each [`ConfiguredModel`], not here: they vary per model.
 #[derive(Debug, Clone)]
 pub struct Provider {
     pub name: String,
     pub base_url: String,
     /// API key spec: `!command`, `env:VAR`, or a literal key.
     pub api_key: String,
-    pub models: Vec<String>,
-    /// Maximum output tokens per response for this provider. When `None`, the
-    /// agent's default max tokens is used.
+    pub models: Vec<ConfiguredModel>,
+}
+
+/// One model on a provider, with optional per-model request parameters.
+/// An unset parameter leaves the request untouched (the agent default
+/// applies).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfiguredModel {
+    pub id: String,
     pub max_tokens: Option<u32>,
-    /// Sampling temperature for this provider. When `Some`, overrides the
-    /// agent's temperature.
     pub temperature: Option<f32>,
-    /// Nucleus sampling cutoff. When `Some`, passed as `top_p` on the wire.
     pub top_p: Option<f32>,
-    /// Extra JSON body fields merged into every request to this provider.
     pub extra_body: Option<serde_json::Value>,
+}
+
+impl ConfiguredModel {
+    /// A bare model id with no per-model parameters.
+    pub fn bare(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
+        }
+    }
+}
+
+impl From<&str> for ConfiguredModel {
+    fn from(id: &str) -> Self {
+        Self::bare(id)
+    }
+}
+
+impl From<String> for ConfiguredModel {
+    fn from(id: String) -> Self {
+        Self::bare(id)
+    }
+}
+
+impl From<crate::config::ModelRef> for ConfiguredModel {
+    fn from(model_ref: crate::config::ModelRef) -> Self {
+        match model_ref {
+            crate::config::ModelRef::Simple(id) => Self::bare(id),
+            crate::config::ModelRef::Detailed(entry) => Self {
+                id: entry.id,
+                max_tokens: entry.max_tokens,
+                temperature: entry.temperature,
+                top_p: entry.top_p,
+                extra_body: entry.extra_body,
+            },
+        }
+    }
+}
+
+/// The wire-level ids of a provider's models, in order.
+pub fn model_ids(provider: &Provider) -> Vec<String> {
+    provider.models.iter().map(|m| m.id.clone()).collect()
+}
+
+/// Find a model on a provider by wire id (bare or `provider/`-prefixed).
+fn find_model<'a>(provider: &'a Provider, model: &str) -> Option<&'a ConfiguredModel> {
+    provider.models.iter().find(|m| {
+        m.id == model
+            || m.id == format!("{}/{}", provider.name, model)
+            || format!("{}/{}", provider.name, m.id) == model
+    })
 }
 
 /// The full tool set for the agent: cersei's coding tools (file
@@ -114,7 +172,7 @@ pub fn agent_tools(
 /// Build the OpenAI-compatible provider for a resolved selection, carrying the
 /// model family's reasoning field so the SSE reader captures `delta.reasoning`
 /// (see `response_format::reasoning_field_for`), and wrapping it so the
-/// provider's configured request parameters (`max_tokens`, `temperature`,
+/// model's configured request parameters (`max_tokens`, `temperature`,
 /// `top_p`, `extra_body`) are applied to every completion request.
 pub fn openai_provider(
     resolved: &Resolved,
@@ -136,10 +194,10 @@ pub fn openai_provider(
     })
 }
 
-/// An OpenAI-compatible provider with per-provider request parameters applied
-/// on top of every completion request. The parameters come from the config
-/// file's `providers.NAME` entry (`max_tokens`, `temperature`, `top_p`,
-/// `extra_body`); unset parameters leave the request untouched.
+/// An OpenAI-compatible provider with per-model request parameters applied
+/// on top of every completion request. The parameters come from the model's
+/// own `models` entry (`max_tokens`, `temperature`, `top_p`, `extra_body`);
+/// unset parameters leave the request untouched.
 ///
 /// `top_p` and `extra_body` ride in the request's `ProviderOptions` and are
 /// emitted by cersei's OpenAi provider on the wire (`top_p` as a top-level
@@ -190,20 +248,20 @@ impl cersei::provider::Provider for ConfiguredProvider {
 }
 
 /// A provider/model selection with the API key already resolved, plus the
-/// provider's configured request parameters (None = use the agent defaults).
+/// model's configured request parameters (None = use the agent defaults).
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub provider: String,
     pub model: String,
     pub base_url: String,
     pub api_key: String,
-    /// Per-provider max output tokens; `None` falls back to the agent default.
+    /// Per-model max output tokens; `None` falls back to the agent default.
     pub max_tokens: Option<u32>,
-    /// Per-provider sampling temperature; `None` leaves the agent default.
+    /// Per-model sampling temperature; `None` leaves the agent default.
     pub temperature: Option<f32>,
-    /// Per-provider nucleus sampling cutoff; `None` leaves the server default.
+    /// Per-model nucleus sampling cutoff; `None` leaves the server default.
     pub top_p: Option<f32>,
-    /// Extra JSON body fields merged into every request to this provider.
+    /// Extra JSON body fields merged into every request for this model.
     pub extra_body: Option<serde_json::Value>,
 }
 
@@ -250,10 +308,6 @@ fn builtin_providers() -> Vec<Provider> {
                 "poolside/laguna-xs-2.1".into(),
                 "poolside/laguna-s-2.1".into(),
             ],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "openrouter".into(),
@@ -269,10 +323,6 @@ fn builtin_providers() -> Vec<Provider> {
                 "cohere/north-mini-code:free".into(),
                 "poolside/laguna-xs-2.1:free".into(),
             ],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "groq".into(),
@@ -284,10 +334,6 @@ fn builtin_providers() -> Vec<Provider> {
                 "openai/gpt-oss-120b".into(),
                 "openai/gpt-oss-20b".into(),
             ],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "nvidia".into(),
@@ -299,10 +345,6 @@ fn builtin_providers() -> Vec<Provider> {
                 "deepseek-ai/deepseek-r1".into(),
                 "qwen/qwen2.5-72b-instruct".into(),
             ],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "tokenrouter".into(),
@@ -324,10 +366,6 @@ fn builtin_providers() -> Vec<Provider> {
                 "z-ai/glm-5.2".into(),
                 "x-ai/grok-4.5".into(),
             ],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "kiosapi".into(),
@@ -336,10 +374,6 @@ fn builtin_providers() -> Vec<Provider> {
             // KiosAPI is a New API-style OpenAI-compatible gateway; the
             // default model is qwen3.8-flash.
             models: vec!["kiosapi/qwen3.8-flash".into()],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "ollama".into(),
@@ -349,10 +383,6 @@ fn builtin_providers() -> Vec<Provider> {
             // endpoint the local server exposes, backed by the hosted model
             // catalog. Default is gpt-oss:120b.
             models: vec!["ollama/gpt-oss:120b".into()],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "opencode-zen".into(),
@@ -362,10 +392,6 @@ fn builtin_providers() -> Vec<Provider> {
             // frontier model providers (Anthropic, Google, OpenAI, …). The
             // default model is gemini-3.8-flash.
             models: vec!["opencode-zen/gemini-3.8-flash".into()],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
         Provider {
             name: "google".into(),
@@ -375,10 +401,6 @@ fn builtin_providers() -> Vec<Provider> {
             // maps `reasoning_effort` to Gemini's thinking level; this entry
             // is gemini-3.8-flash at low thinking.
             models: vec!["google/gemini-3.8-flash".into()],
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         },
     ]
 }
@@ -391,17 +413,18 @@ pub(crate) fn builtin_provider_entries() -> Vec<(String, crate::config::Provider
     builtin_providers()
         .into_iter()
         .map(|p| {
-            let models = p.models.into_iter().take(1).collect();
+            let models = p
+                .models
+                .into_iter()
+                .take(1)
+                .map(|m| crate::config::ModelRef::Simple(m.id))
+                .collect();
             (
                 p.name,
                 crate::config::ProviderConfigEntry {
                     base_url: Some(p.base_url),
                     api_key: Some(p.api_key),
                     models,
-                    max_tokens: p.max_tokens,
-                    temperature: p.temperature,
-                    top_p: p.top_p,
-                    extra_body: p.extra_body,
                 },
             )
         })
@@ -523,11 +546,10 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
                 name: "combos".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                models: combo_names.into_iter().map(|c| c.name).collect(),
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
+                models: combo_names
+                    .into_iter()
+                    .map(|c| ConfiguredModel::bare(c.name))
+                    .collect(),
             },
         );
     }
@@ -538,10 +560,6 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
             base_url: String::new(),
             api_key: String::new(),
             models: Vec::new(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            extra_body: None,
         });
         if let Some(base_url) = &entry.base_url {
             provider.base_url = base_url.clone();
@@ -551,19 +569,8 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
         }
         if !entry.models.is_empty() {
             // An explicit `models` override takes full control of the list.
-            provider.models = entry.models.clone();
-        }
-        if let Some(max_tokens) = entry.max_tokens {
-            provider.max_tokens = Some(max_tokens);
-        }
-        if let Some(temperature) = entry.temperature {
-            provider.temperature = Some(temperature);
-        }
-        if let Some(top_p) = entry.top_p {
-            provider.top_p = Some(top_p);
-        }
-        if let Some(extra_body) = &entry.extra_body {
-            provider.extra_body = Some(extra_body.clone());
+            // Entries are bare ids or detailed objects with per-model params.
+            provider.models = entry.models.clone().into_iter().map(ConfiguredModel::from).collect();
         }
     }
 
@@ -626,7 +633,7 @@ pub fn default_model(config: &AppConfig, provider_name: &str) -> anyhow::Result<
         .ok_or_else(|| anyhow::anyhow!("unknown provider: {provider_name}"))?;
     p.models
         .first()
-        .cloned()
+        .map(|m| m.id.clone())
         .ok_or_else(|| anyhow::anyhow!("provider '{provider_name}' has no models configured"))
 }
 
@@ -649,7 +656,7 @@ pub fn entries(config: &AppConfig) -> Vec<(String, String)> {
         .flat_map(|p| {
             p.models
                 .into_iter()
-                .map(move |model| (p.name.clone(), model))
+                .map(move |model| (p.name.clone(), model.id))
         })
         .collect()
 }
@@ -737,6 +744,8 @@ pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
 
 /// Resolve a provider + model into concrete base URL and API key. The virtual
 /// `combos` provider resolves to the first entry of the named combo.
+/// Request parameters come from the model's own `models` entry; a model
+/// without its own entry uses the agent defaults.
 pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::Result<Resolved> {
     if provider_name == "combos" {
         let entry = combo_first_entry(config, model)
@@ -753,15 +762,25 @@ pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::
     })?;
     let api_key = resolve_api_key(&p.api_key)
         .with_context(|| format!("resolving api_key for provider '{provider_name}'"))?;
+    let (max_tokens, temperature, top_p, extra_body) = find_model(&p, model)
+        .map(|m| {
+            (
+                m.max_tokens,
+                m.temperature,
+                m.top_p,
+                m.extra_body.clone(),
+            )
+        })
+        .unwrap_or((None, None, None, None));
     Ok(Resolved {
-        provider: p.name,
+        provider: p.name.clone(),
         model: model.to_string(),
-        base_url: p.base_url,
+        base_url: p.base_url.clone(),
         api_key,
-        max_tokens: p.max_tokens,
-        temperature: p.temperature,
-        top_p: p.top_p,
-        extra_body: p.extra_body.clone(),
+        max_tokens,
+        temperature,
+        top_p,
+        extra_body,
     })
 }
 
@@ -951,7 +970,7 @@ pub fn resolve_selection(
         let model = p
             .models
             .first()
-            .cloned()
+            .map(|m| m.id.clone())
             .ok_or_else(|| anyhow::anyhow!("provider '{text}' has no models configured"))?;
         return Ok((p.name.clone(), model));
     }
@@ -960,14 +979,14 @@ pub fn resolve_selection(
     for p in &all {
         if let Some(rest) = text.strip_prefix(&format!("{}/", p.name)) {
             for m in &p.models {
-                if m == rest || m == text {
-                    return Ok((p.name.clone(), m.clone()));
+                if m.id == rest || m.id == text {
+                    return Ok((p.name.clone(), m.id.clone()));
                 }
             }
             return Err(anyhow::anyhow!(
                 "unknown model '{rest}' for provider '{}' (available: {})",
                 p.name,
-                p.models.join(", "),
+                model_ids(p).join(", "),
             ));
         }
     }
@@ -975,11 +994,12 @@ pub fn resolve_selection(
     // Bare model name — match against every provider's models.
     for p in &all {
         for m in &p.models {
-            if m == text
-                || m.strip_prefix(&format!("{}/", p.name))
+            if m.id == text
+                || m.id
+                    .strip_prefix(&format!("{}/", p.name))
                     .is_some_and(|rest| rest == text)
             {
-                return Ok((p.name.clone(), m.clone()));
+                return Ok((p.name.clone(), m.id.clone()));
             }
         }
     }
@@ -1203,7 +1223,7 @@ impl AgentRuntime {
             .into_iter()
             .find(|p| p.name == eff_provider)
             .with_context(|| format!("unknown provider '{eff_provider}'"))?;
-        let model = prov.models.first().cloned().unwrap_or_default();
+        let model = prov.models.first().map(|m| m.id.clone()).unwrap_or_default();
         let resolved = resolve(config, &eff_provider, &model)?;
         Ok((resolved.base_url, resolved.api_key))
     }
@@ -1464,11 +1484,10 @@ mod tests {
             ProviderConfigEntry {
                 base_url: Some("https://acme.example/v1".into()),
                 api_key: Some("!echo acme-key".into()),
-                models: vec!["acme/big".into(), "acme/small".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
+                models: vec![
+                    crate::config::ModelRef::Simple("acme/big".into()),
+                    crate::config::ModelRef::Simple("acme/small".into()),
+                ],
             },
         );
         // Custom provider is listed and resolved.
@@ -1481,17 +1500,61 @@ mod tests {
     }
 
     #[test]
+    fn per_model_params_apply_to_their_model_only() {
+        use crate::config::{ModelConfigEntry, ModelRef};
+        let mut config = AppConfig::default();
+        config.providers.insert(
+            "nvidia".to_string(),
+            ProviderConfigEntry {
+                base_url: None,
+                api_key: None,
+                models: vec![
+                    ModelRef::Detailed(ModelConfigEntry {
+                        id: "deepseek-ai/deepseek-v4-flash-0731".into(),
+                        max_tokens: Some(16384),
+                        temperature: Some(1.0),
+                        top_p: Some(0.95),
+                        extra_body: Some(serde_json::json!({
+                            "chat_template_kwargs": {
+                                "thinking": true,
+                                "reasoning_effort": "high"
+                            }
+                        })),
+                    }),
+                    ModelRef::Simple("z-ai/glm4.7".into()),
+                ],
+            },
+        );
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("NVIDIA_API_KEY", "nvidia-test-key") };
+        // The detailed model carries its own parameters.
+        let resolved = resolve(&config, "nvidia", "deepseek-ai/deepseek-v4-flash-0731").unwrap();
+        assert_eq!(resolved.max_tokens, Some(16384));
+        assert_eq!(resolved.temperature, Some(1.0));
+        assert_eq!(resolved.top_p, Some(0.95));
+        let extra = resolved.extra_body.unwrap();
+        assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
+        assert_eq!(extra["chat_template_kwargs"]["reasoning_effort"], "high");
+        // The bare model sets no parameters (agent defaults apply).
+        let bare = resolve(&config, "nvidia", "z-ai/glm4.7").unwrap();
+        assert_eq!(bare.max_tokens, None);
+        assert_eq!(bare.temperature, None);
+        assert_eq!(bare.top_p, None);
+        assert_eq!(bare.extra_body, None);
+        // Display-prefixed ids resolve to the same per-model params.
+        let prefixed = resolve(&config, "nvidia", "nvidia/deepseek-ai/deepseek-v4-flash-0731").unwrap();
+        assert_eq!(prefixed.max_tokens, Some(16384));
+    }
+
+    #[test]
     fn tokenrouter_builtin_provider() {
         let config = AppConfig::default();
         let tr = provider(&config, "tokenrouter").unwrap();
         assert_eq!(tr.base_url, "https://api.tokenrouter.com/v1");
         assert_eq!(tr.api_key, "env:TOKENROUTER_API_KEY");
-        assert!(
-            tr.models
-                .contains(&"deepseek/deepseek-v4-pro-0813".to_string())
-        );
-        assert!(tr.models.contains(&"qwen/qwen3-coder-next".to_string()));
-        assert!(tr.models.contains(&"openai/gpt-oss-120b".to_string()));
+        assert!(model_ids(&tr).contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
+        assert!(model_ids(&tr).contains(&"qwen/qwen3-coder-next".to_string()));
+        assert!(model_ids(&tr).contains(&"openai/gpt-oss-120b".to_string()));
         // Resolution wires up the gateway base URL.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("TOKENROUTER_API_KEY", "tr-test-key") };
@@ -1507,7 +1570,7 @@ mod tests {
         let ki = provider(&config, "kiosapi").unwrap();
         assert_eq!(ki.base_url, "https://kiosapi.com/v1");
         assert_eq!(ki.api_key, "env:KIOSAPI_API_KEY");
-        assert_eq!(ki.models, vec!["kiosapi/qwen3.8-flash"]);
+        assert_eq!(model_ids(&ki), vec!["kiosapi/qwen3.8-flash"]);
         // Resolution wires up the gateway base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("KIOSAPI_API_KEY", "kiosapi-test-key") };
@@ -1526,7 +1589,7 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta/openai/"
         );
         assert_eq!(g.api_key, "env:GEMINI_API_KEY");
-        assert_eq!(g.models, vec!["google/gemini-3.8-flash"]);
+        assert_eq!(model_ids(&g), vec!["google/gemini-3.8-flash"]);
         // Resolution wires up the AI Studio base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("GEMINI_API_KEY", "google-test-key") };
@@ -1545,7 +1608,7 @@ mod tests {
         let o = provider(&config, "ollama").unwrap();
         assert_eq!(o.base_url, "https://ollama.com/v1");
         assert_eq!(o.api_key, "env:OLLAMA_CLOUD_API_KEY");
-        assert_eq!(o.models, vec!["ollama/gpt-oss:120b"]);
+        assert_eq!(model_ids(&o), vec!["ollama/gpt-oss:120b"]);
         // Resolution wires up the hosted cloud base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("OLLAMA_CLOUD_API_KEY", "ollama-test-key") };
@@ -1561,7 +1624,7 @@ mod tests {
         let oz = provider(&config, "opencode-zen").unwrap();
         assert_eq!(oz.base_url, "https://opencode.ai/zen/v1");
         assert_eq!(oz.api_key, "env:OPENCODE_API_KEY");
-        assert_eq!(oz.models, vec!["opencode-zen/gemini-3.8-flash"]);
+        assert_eq!(model_ids(&oz), vec!["opencode-zen/gemini-3.8-flash"]);
         // Resolution wires up the Zen gateway base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("OPENCODE_API_KEY", "opencode-test-key") };
@@ -1796,7 +1859,7 @@ mod tests {
         );
         // The virtual provider shows up with one model per combo.
         let combos_provider = provider(&config, "combos").unwrap();
-        assert_eq!(combos_provider.models, vec!["coding"]);
+        assert_eq!(model_ids(&combos_provider), vec!["coding"]);
         // Resolution maps the combo to its first entry.
         let resolved = resolve(&config, "combos", "coding").unwrap();
         assert_eq!(resolved.provider, "groq");
@@ -1885,17 +1948,13 @@ mod tests {
             ProviderConfigEntry {
                 base_url: None,
                 api_key: None,
-                models: vec!["openrouter/auto".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
+                models: vec![crate::config::ModelRef::Simple("openrouter/auto".into())],
             },
         );
         // A config-file `models` list is shown verbatim, even when the free
         // filter is on.
         let openrouter = provider(&config, "openrouter").unwrap();
-        assert_eq!(openrouter.models, vec!["openrouter/auto"]);
+        assert_eq!(model_ids(&openrouter), vec!["openrouter/auto"]);
     }
 
     // ─── End-to-end agent run against a mock provider ────────────────────
@@ -2180,10 +2239,6 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
             },
         );
 
@@ -2244,10 +2299,6 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
-                max_tokens: None,
-                temperature: None,
-                top_p: None,
-                extra_body: None,
             },
         );
 
