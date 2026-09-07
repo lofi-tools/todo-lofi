@@ -127,29 +127,68 @@ pub fn default_config_jsonc() -> String {
     let mut out = String::from("{\n");
     // (field, possible values). Order mirrors the struct declaration.
     let fields: &[(&str, &str)] = &[
-        ("model", "Model id or alias (\"auto\", \"opus\", \"sonnet\", \"haiku\", \"gpt4o\", \"gemini\", \"llama\", \"deepseek\", \"grok\", \"mistral\", or \"provider/model\")"),
-        ("provider", "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"ollama\", \"opencode-zen\", \"combos\", or a name from `providers`)"),
+        (
+            "model",
+            "Model id or alias (\"auto\", \"opus\", \"sonnet\", \"haiku\", \"gpt4o\", \"gemini\", \"llama\", \"deepseek\", \"grok\", \"mistral\", or \"provider/model\")",
+        ),
+        (
+            "provider",
+            "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"ollama\", \"opencode-zen\", \"combos\", or a name from `providers`)",
+        ),
         ("max_turns", "Maximum agent turns per run (u32)"),
         ("max_tokens", "Maximum output tokens per response (u32)"),
-        ("effort", "Thinking effort: \"low\", \"medium\", \"high\", \"max\""),
+        (
+            "effort",
+            "Thinking effort: \"low\", \"medium\", \"high\", \"max\"",
+        ),
         ("output_style", "Answer style: \"default\""),
-        ("theme", "TUI theme: \"enterprise\", \"light\", \"solarized\""),
-        ("auto_compact", "Auto-compact context near the limit (true/false)"),
+        (
+            "theme",
+            "TUI theme: \"enterprise\", \"light\", \"solarized\"",
+        ),
+        (
+            "auto_compact",
+            "Auto-compact context near the limit (true/false)",
+        ),
         ("graph_memory", "Enable memory graph (true/false)"),
-        ("permissions_mode", "Tool permission mode: \"interactive\", \"allow_all\""),
+        (
+            "permissions_mode",
+            "Tool permission mode: \"interactive\", \"allow_all\"",
+        ),
         ("working_dir", "Working directory (path)"),
-        ("mcp_servers", "MCP servers: [{ \"name\", \"command\", \"args\", \"env\" }]"),
+        (
+            "mcp_servers",
+            "MCP servers: [{ \"name\", \"command\", \"args\", \"env\" }]",
+        ),
         ("hooks", "Lifecycle hooks: [{ \"event\", \"command\" }]"),
         ("proxy", "Proxy routing (VibeProxy or compatible)"),
         ("fallback", "Combo fallback tuning"),
-        ("providers", "Per-provider overrides (base_url, api_key, models)"),
-        ("combos", "Named fallback combos: { name: [[\"provider\", \"model\"], ...] }"),
-        ("model_families", "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\""),
+        (
+            "providers",
+            "Per-provider overrides (base_url, api_key, models)",
+        ),
+        (
+            "combos",
+            "Named fallback combos: { name: [[\"provider\", \"model\"], ...] }",
+        ),
+        (
+            "model_families",
+            "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\"",
+        ),
         ("benchmark_mode", "Benchmark/headless mode (true/false)"),
-        ("embedding_api", "Enable embedding API for semantic search (true/false)"),
+        (
+            "embedding_api",
+            "Enable embedding API for semantic search (true/false)",
+        ),
         ("output_format", "Output format: \"text\", \"stream-json\""),
-        ("compression_level", "Tool output compression: \"off\", \"minimal\", \"aggressive\""),
-        ("env", "Extra environment variables for agent tools: { name: \"!cmd | env:VAR | literal\" }"),
+        (
+            "compression_level",
+            "Tool output compression: \"off\", \"minimal\", \"aggressive\"",
+        ),
+        (
+            "env",
+            "Extra environment variables for agent tools: { name: \"!cmd | env:VAR | literal\" }",
+        ),
     ];
     for (i, (key, comment)) in fields.iter().enumerate() {
         let field_value = obj.get(*key).expect("serialized config has every field");
@@ -161,7 +200,10 @@ pub fn default_config_jsonc() -> String {
                 field_value,
                 &[
                     ("enabled", "Auto-detect the proxy (true/false)"),
-                    ("force", "Force the proxy even when API keys are present (true/false)"),
+                    (
+                        "force",
+                        "Force the proxy even when API keys are present (true/false)",
+                    ),
                     ("url", "Proxy base URL (default http://localhost:8317/v1)"),
                 ],
             ),
@@ -170,8 +212,14 @@ pub fn default_config_jsonc() -> String {
                 field_value,
                 &[
                     ("enabled", "Enable combo fallback (true/false)"),
-                    ("cooldown_seconds", "Cooldown after a failed entry, in seconds (u64)"),
-                    ("cooldowns_file", "Cooldown persistence path, or null to disable (path | null)"),
+                    (
+                        "cooldown_seconds",
+                        "Cooldown after a failed entry, in seconds (u64)",
+                    ),
+                    (
+                        "cooldowns_file",
+                        "Cooldown persistence path, or null to disable (path | null)",
+                    ),
                 ],
             ),
             "providers" => append_providers_jsonc(&mut out),
@@ -240,7 +288,7 @@ fn append_env_jsonc(out: &mut String) {
     out.push_str("    \"TOKENROUTER_API_KEY\": \"!echo TOKENROUTER_API_KEY\",\n");
     out.push_str("    \"KIOSAPI_API_KEY\": \"!echo KIOSAPI_API_KEY\",\n");
     out.push_str("    \"GEMINI_API_KEY\": \"!echo GEMINI_API_KEY\",\n");
-    out.push_str("    \"OLLAMA_API_KEY\": \"!echo OLLAMA_API_KEY\",\n");
+    out.push_str("    \"OLLAMA_CLOUD_API_KEY\": \"!echo OLLAMA_CLOUD_API_KEY\",\n");
     out.push_str("    \"OPENCODE_API_KEY\": \"!echo OPENCODE_API_KEY\",\n");
     out.push_str("    // WebSearch keys (Parallel Search via MCP needs no key).\n");
     out.push_str("    \"TINYFISH_API_KEY\": \"!echo TINYFISH_API_KEY\",\n");
@@ -439,15 +487,15 @@ pub fn load() -> AppConfig {
     let mut config = AppConfig::default();
 
     // Layer 2: global config (~/.abstract/config.json, legacy .toml fallback)
-    if let Some(loaded) =
-        load_json_file(&global_config_path()).or_else(|| load_toml_file(&legacy_global_config_path()))
+    if let Some(loaded) = load_json_file(&global_config_path())
+        .or_else(|| load_toml_file(&legacy_global_config_path()))
     {
         merge(&mut config, loaded);
     }
 
     // Layer 3: project config (.abstract/config.json, legacy .toml fallback)
-    if let Some(loaded) =
-        load_json_file(&project_config_path()).or_else(|| load_toml_file(&legacy_project_config_path()))
+    if let Some(loaded) = load_json_file(&project_config_path())
+        .or_else(|| load_toml_file(&legacy_project_config_path()))
     {
         merge(&mut config, loaded);
     }
@@ -682,15 +730,24 @@ mod tests {
         .unwrap();
         merge(&mut config, overlay);
         assert_eq!(
-            config.model_families.get("stealth/ox-alpha").map(String::as_str),
+            config
+                .model_families
+                .get("stealth/ox-alpha")
+                .map(String::as_str),
             Some("reasoning")
         );
         assert_eq!(
-            config.model_families.get("deepseek/deepseek-chat").map(String::as_str),
+            config
+                .model_families
+                .get("deepseek/deepseek-chat")
+                .map(String::as_str),
             Some("reasoning_content")
         );
         assert_eq!(
-            config.model_families.get("nvidia/nemotron-3-ultra-550b-a55b").map(String::as_str),
+            config
+                .model_families
+                .get("nvidia/nemotron-3-ultra-550b-a55b")
+                .map(String::as_str),
             Some("reasoning_content")
         );
         // An empty map leaves existing families untouched.
@@ -741,7 +798,10 @@ mod tests {
         assert_eq!(parsed.effort, defaults.effort);
         assert_eq!(parsed.proxy.enabled, defaults.proxy.enabled);
         assert_eq!(parsed.proxy.url, defaults.proxy.url);
-        assert_eq!(parsed.fallback.cooldown_seconds, defaults.fallback.cooldown_seconds);
+        assert_eq!(
+            parsed.fallback.cooldown_seconds,
+            defaults.fallback.cooldown_seconds
+        );
         // The providers/env sections are template content (the runtime
         // defaults keep empty maps), so assert the rendered entries parse
         // back: the nine default providers and eleven necessary env vars.
@@ -763,7 +823,7 @@ mod tests {
             ("tokenrouter", "TOKENROUTER_API_KEY"),
             ("kiosapi", "KIOSAPI_API_KEY"),
             ("google", "GEMINI_API_KEY"),
-            ("ollama", "OLLAMA_API_KEY"),
+            ("ollama", "OLLAMA_CLOUD_API_KEY"),
             ("opencode-zen", "OPENCODE_API_KEY"),
         ] {
             assert!(
@@ -785,7 +845,7 @@ mod tests {
             "TOKENROUTER_API_KEY",
             "KIOSAPI_API_KEY",
             "GEMINI_API_KEY",
-            "OLLAMA_API_KEY",
+            "OLLAMA_CLOUD_API_KEY",
             "OPENCODE_API_KEY",
             "TINYFISH_API_KEY",
             "LANGSEARCH_API_KEY",
@@ -811,9 +871,18 @@ mod tests {
         )
         .unwrap();
         merge(&mut config, overlay);
-        assert_eq!(config.env.get("TINYFISH_API_KEY").map(String::as_str), Some("!cat ~/.tinyfish_key"));
-        assert_eq!(config.env.get("LANGSEARCH_API_KEY").map(String::as_str), Some("!cat ~/.langsearch_key"));
-        assert_eq!(config.env.get("MY_LITERAL").map(String::as_str), Some("literal-value"));
+        assert_eq!(
+            config.env.get("TINYFISH_API_KEY").map(String::as_str),
+            Some("!cat ~/.tinyfish_key")
+        );
+        assert_eq!(
+            config.env.get("LANGSEARCH_API_KEY").map(String::as_str),
+            Some("!cat ~/.langsearch_key")
+        );
+        assert_eq!(
+            config.env.get("MY_LITERAL").map(String::as_str),
+            Some("literal-value")
+        );
         // An empty map leaves existing entries untouched.
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
@@ -844,16 +913,20 @@ mod tests {
         )
         .unwrap();
         apply_config_env(&config).unwrap();
-        assert_eq!(std::env::var("TEST_ABSTRACT_LITERAL").unwrap(), "literal-value");
+        assert_eq!(
+            std::env::var("TEST_ABSTRACT_LITERAL").unwrap(),
+            "literal-value"
+        );
         assert_eq!(std::env::var("TEST_ABSTRACT_CMD").unwrap(), "cmd-value");
         assert_eq!(std::env::var("TEST_ABSTRACT_COPY").unwrap(), "source-value");
         // Real env var beats the config fallback.
-        assert_eq!(std::env::var("TEST_ABSTRACT_PRECEDENCE").unwrap(), "from-env");
+        assert_eq!(
+            std::env::var("TEST_ABSTRACT_PRECEDENCE").unwrap(),
+            "from-env"
+        );
         // A failing spec surfaces as an error instead of being swallowed.
-        let bad: AppConfig = serde_json::from_str(
-            r#"{ "env": { "TEST_ABSTRACT_BAD": "!exit 1" } }"#,
-        )
-        .unwrap();
+        let bad: AppConfig =
+            serde_json::from_str(r#"{ "env": { "TEST_ABSTRACT_BAD": "!exit 1" } }"#).unwrap();
         assert!(apply_config_env(&bad).is_err());
         let missing: AppConfig = serde_json::from_str(
             r#"{ "env": { "TEST_ABSTRACT_MISSING": "env:TEST_ABSTRACT_DOES_NOT_EXIST_XYZ" } }"#,
@@ -876,6 +949,9 @@ mod tests {
         )
         .unwrap();
         assert!(!config.fallback.enabled);
-        assert_eq!(config.fallback.cooldown_seconds, default_fallback_cooldown());
+        assert_eq!(
+            config.fallback.cooldown_seconds,
+            default_fallback_cooldown()
+        );
     }
 }

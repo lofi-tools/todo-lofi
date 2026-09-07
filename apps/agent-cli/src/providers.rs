@@ -64,9 +64,13 @@ pub fn agent_tools(
     // built-in Read/Write/Edit tools are left in place.
     if fs_reader.is_some() {
         tools.retain(|t| t.name() != "Read");
-        tools.push(Box::new(crate::tools::ClientReadTool::new(fs_reader.clone())));
+        tools.push(Box::new(crate::tools::ClientReadTool::new(
+            fs_reader.clone(),
+        )));
         tools.retain(|t| t.name() != "Write" && t.name() != "Edit");
-        tools.push(Box::new(crate::tools::ClientWriteTool::new(fs_reader.clone())));
+        tools.push(Box::new(crate::tools::ClientWriteTool::new(
+            fs_reader.clone(),
+        )));
         tools.push(Box::new(crate::tools::ClientEditTool::new(fs_reader)));
     }
     tools.push(Box::new(crate::tools::RgSearchTool));
@@ -76,10 +80,14 @@ pub fn agent_tools(
     } else {
         tools.push(Box::new(crate::tools::AskUserTool::new()));
     }
-    tools.push(Box::new(cersei::tools::synthetic_output::SyntheticOutputTool));
+    tools.push(Box::new(
+        cersei::tools::synthetic_output::SyntheticOutputTool,
+    ));
     // write_todos tracking, used by the phase workflow in the system prompt.
     tools.push(Box::new(cersei::tools::todo_write::TodoWriteTool));
-    tools.push(Box::new(crate::subagents::SuggestFollowupsTool::new(followups)));
+    tools.push(Box::new(crate::subagents::SuggestFollowupsTool::new(
+        followups,
+    )));
     // Read-only sessions (ACP readonly mode) can't spawn sub-agents: the
     // sub-agents run with AllowAll and could modify files.
     if !readonly {
@@ -231,7 +239,7 @@ fn builtin_providers() -> Vec<Provider> {
         Provider {
             name: "ollama".into(),
             base_url: "https://ollama.com/v1".into(),
-            api_key: "env:OLLAMA_API_KEY".into(),
+            api_key: "env:OLLAMA_CLOUD_API_KEY".into(),
             // ollama.com's hosted cloud API — the same OpenAI-compatible
             // endpoint the local server exposes, backed by the hosted model
             // catalog. Default is gpt-oss:120b.
@@ -453,7 +461,11 @@ pub fn default_selection(config: &AppConfig) -> anyhow::Result<(String, String)>
     let mut model = config.model.trim().to_string();
 
     if provider.is_empty() || provider == "auto" {
-        provider = match model.split('/').next().filter(|prefix| known.contains(prefix)) {
+        provider = match model
+            .split('/')
+            .next()
+            .filter(|prefix| known.contains(prefix))
+        {
             Some(prefix) => prefix.to_string(),
             None => all
                 .first()
@@ -506,10 +518,7 @@ pub fn entries(config: &AppConfig) -> Vec<(String, String)> {
 /// config doesn't list (so the user can discover and switch live). The
 /// endpoint shape is `{base_url}/models` returning `{ "data": [{"id": ...}] }`.
 /// Returns model ids sorted and de-duplicated.
-pub async fn fetch_models(
-    base_url: &str,
-    api_key: &str,
-) -> anyhow::Result<Vec<String>> {
+pub async fn fetch_models(base_url: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
@@ -706,11 +715,13 @@ impl FallbackManager {
         let now = SystemTime::now();
         let mut failures = self.state.failures.lock();
         failures.retain(|_, until| *until > now);
-        self.priority.iter().find(|e| {
-            (e.provider != provider || e.model != model)
-                && !failures.contains_key(&Self::key(&e.provider, &e.model))
-        })
-        .cloned()
+        self.priority
+            .iter()
+            .find(|e| {
+                (e.provider != provider || e.model != model)
+                    && !failures.contains_key(&Self::key(&e.provider, &e.model))
+            })
+            .cloned()
     }
 }
 
@@ -738,8 +749,7 @@ fn load_persisted_failures(path: &Path) -> HashMap<String, SystemTime> {
     parsed
         .into_iter()
         .filter_map(|(key, expires_at)| {
-            (expires_at > now_ms)
-                .then(|| (key, UNIX_EPOCH + Duration::from_millis(expires_at)))
+            (expires_at > now_ms).then(|| (key, UNIX_EPOCH + Duration::from_millis(expires_at)))
         })
         .collect()
 }
@@ -821,7 +831,8 @@ pub fn resolve_selection(
     for p in &all {
         for m in &p.models {
             if m == text
-                || m.strip_prefix(&format!("{}/", p.name)).is_some_and(|rest| rest == text)
+                || m.strip_prefix(&format!("{}/", p.name))
+                    .is_some_and(|rest| rest == text)
             {
                 return Ok((p.name.clone(), m.clone()));
             }
@@ -952,10 +963,9 @@ impl AgentRuntime {
         let (ask_user_tx, ask_user_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserRequest>();
         // Channel from runtime -> tool for ask_user answers.
         let (answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserAnswer>();
-        let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> = Some(Box::new(crate::tools::AskUserTool::with_channel(
-            ask_user_tx.clone(),
-            answer_rx,
-        )));
+        let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> = Some(Box::new(
+            crate::tools::AskUserTool::with_channel(ask_user_tx.clone(), answer_rx),
+        ));
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -973,24 +983,25 @@ impl AgentRuntime {
                 ask_user_tool,
             },
         )?;
-        let fallback = fallback_for(config, &provider, &model);            Ok(Self {
-                inner: Mutex::new(AgentRuntimeInner {
-                    agent,
-                    provider,
-                    model,
-                    effective_provider,
-                    effective_model,
-                    config: config.clone(),
-                    parent,
-                    followups,
-                    subagent_tx,
-                    fallback,
-                    model_cache: Mutex::new(HashMap::new()),
-                    ask_user_tx,
-                    ask_user_rx,
-                    answer_tx,
-                }),
-            })
+        let fallback = fallback_for(config, &provider, &model);
+        Ok(Self {
+            inner: Mutex::new(AgentRuntimeInner {
+                agent,
+                provider,
+                model,
+                effective_provider,
+                effective_model,
+                config: config.clone(),
+                parent,
+                followups,
+                subagent_tx,
+                fallback,
+                model_cache: Mutex::new(HashMap::new()),
+                ask_user_tx,
+                ask_user_rx,
+                answer_tx,
+            }),
+        })
     }
 
     pub fn agent(&self) -> Arc<Agent> {
@@ -1056,10 +1067,7 @@ impl AgentRuntime {
     /// (built-ins + virtual combos + config additions).
     pub fn provider_names(&self) -> Vec<String> {
         let config = &self.inner.lock().config;
-        providers(config)
-            .into_iter()
-            .map(|p| p.name)
-            .collect()
+        providers(config).into_iter().map(|p| p.name).collect()
     }
 
     /// All concrete providers for the `/provider` explorer (built-ins +
@@ -1204,8 +1212,7 @@ impl AgentRuntime {
                 g.subagent_tx.clone(),
             )
         };
-        let (effective_provider, effective_model) =
-            effective_selection(&config, provider, model)?;
+        let (effective_provider, effective_model) = effective_selection(&config, provider, model)?;
         let resolved = resolve(&config, &effective_provider, &effective_model)?;
         let agent = build_agent(
             &resolved,
@@ -1288,7 +1295,10 @@ mod tests {
         );
         assert_eq!(
             resolve_selection(&config, "", "openrouter/openai/gpt-oss-20b:free").unwrap(),
-            ("openrouter".to_string(), "openai/gpt-oss-20b:free".to_string())
+            (
+                "openrouter".to_string(),
+                "openai/gpt-oss-20b:free".to_string()
+            )
         );
         assert_eq!(
             resolve_selection(&config, "", "groq/groq/compound").unwrap(),
@@ -1327,7 +1337,10 @@ mod tests {
         let tr = provider(&config, "tokenrouter").unwrap();
         assert_eq!(tr.base_url, "https://api.tokenrouter.com/v1");
         assert_eq!(tr.api_key, "env:TOKENROUTER_API_KEY");
-        assert!(tr.models.contains(&"deepseek/deepseek-v4-pro-0813".to_string()));
+        assert!(
+            tr.models
+                .contains(&"deepseek/deepseek-v4-pro-0813".to_string())
+        );
         assert!(tr.models.contains(&"qwen/qwen3-coder-next".to_string()));
         assert!(tr.models.contains(&"openai/gpt-oss-120b".to_string()));
         // Resolution wires up the gateway base URL.
@@ -1359,14 +1372,20 @@ mod tests {
     fn google_builtin_provider() {
         let config = AppConfig::default();
         let g = provider(&config, "google").unwrap();
-        assert_eq!(g.base_url, "https://generativelanguage.googleapis.com/v1beta/openai/");
+        assert_eq!(
+            g.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
+        );
         assert_eq!(g.api_key, "env:GEMINI_API_KEY");
         assert_eq!(g.models, vec!["google/gemini-3.8-flash"]);
         // Resolution wires up the AI Studio base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("GEMINI_API_KEY", "google-test-key") };
         let resolved = resolve(&config, "google", "google/gemini-3.8-flash").unwrap();
-        assert_eq!(resolved.base_url, "https://generativelanguage.googleapis.com/v1beta/openai/");
+        assert_eq!(
+            resolved.base_url,
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
+        );
         assert_eq!(resolved.model, "google/gemini-3.8-flash");
         assert_eq!(resolved.api_key, "google-test-key");
     }
@@ -1376,11 +1395,11 @@ mod tests {
         let config = AppConfig::default();
         let o = provider(&config, "ollama").unwrap();
         assert_eq!(o.base_url, "https://ollama.com/v1");
-        assert_eq!(o.api_key, "env:OLLAMA_API_KEY");
+        assert_eq!(o.api_key, "env:OLLAMA_CLOUD_API_KEY");
         assert_eq!(o.models, vec!["ollama/gpt-oss:120b"]);
         // Resolution wires up the hosted cloud base URL and key.
         // SAFETY: test-only mutation of a dedicated env var.
-        unsafe { std::env::set_var("OLLAMA_API_KEY", "ollama-test-key") };
+        unsafe { std::env::set_var("OLLAMA_CLOUD_API_KEY", "ollama-test-key") };
         let resolved = resolve(&config, "ollama", "ollama/gpt-oss:120b").unwrap();
         assert_eq!(resolved.base_url, "https://ollama.com/v1");
         assert_eq!(resolved.model, "ollama/gpt-oss:120b");
@@ -1434,13 +1453,22 @@ mod tests {
         assert!(fb.enabled());
         // Priority is the entry list order, current entry excluded.
         let next = fb.next_entry("poolside", "poolside/laguna-xs-2.1").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("openrouter", "openrouter/free"));
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("openrouter", "openrouter/free")
+        );
         fb.record_failure("openrouter", "openrouter/free");
         let next = fb.next_entry("poolside", "poolside/laguna-xs-2.1").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("groq", "groq/compound")
+        );
         fb.record_failure("groq", "groq/compound");
         // All alternates cooling down → nothing left to fall back to.
-        assert!(fb.next_entry("poolside", "poolside/laguna-xs-2.1").is_none());
+        assert!(
+            fb.next_entry("poolside", "poolside/laguna-xs-2.1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1471,13 +1499,24 @@ mod tests {
         let fb = FallbackManager::new(&config, entries);
         // The current entry itself is never re-selected, even if preferred.
         let next = fb.next_entry("groq", "groq/compound").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"));
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+        );
         // After nvidia fails too, groq is tried again (it never cooled down).
-        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+        let next = fb
+            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+            .unwrap();
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("groq", "groq/compound")
+        );
         // With groq cooling down and nvidia current, nothing is left.
         fb.record_failure("groq", "groq/compound");
-        assert!(fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").is_none());
+        assert!(
+            fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1523,8 +1562,13 @@ mod tests {
         // A fresh manager (simulating a restart) still skips groq: starting
         // from nvidia, the next candidate skips groq (cooling down) → poolside.
         let fb2 = FallbackManager::new(&config, entries);
-        let next = fb2.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("poolside", "poolside/laguna-xs-2.1"));
+        let next = fb2
+            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+            .unwrap();
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("poolside", "poolside/laguna-xs-2.1")
+        );
     }
 
     #[test]
@@ -1552,8 +1596,13 @@ mod tests {
         ];
         let fb = FallbackManager::new(&config, entries);
         // groq is no longer cooling down, so it's picked again.
-        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1").unwrap();
-        assert_eq!((next.provider.as_str(), next.model.as_str()), ("groq", "groq/compound"));
+        let next = fb
+            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+            .unwrap();
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("groq", "groq/compound")
+        );
     }
 
     #[test]
@@ -1758,7 +1807,8 @@ mod tests {
 
                     let body = if first_request {
                         // Turn 1: ask the agent to Write the file.
-                        let args = serde_json::json!({ "file_path": file_path, "content": content });
+                        let args =
+                            serde_json::json!({ "file_path": file_path, "content": content });
                         format!(
                             "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
                             serde_json::json!({
@@ -1814,9 +1864,8 @@ mod tests {
                             }),
                         )
                     };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
-                    );
+                    let response =
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     // Closing the connection terminates the SSE body.
                     let _ = socket.shutdown().await;
@@ -1934,9 +1983,8 @@ mod tests {
                             }),
                         )
                     };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
-                    );
+                    let response =
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 });
@@ -2006,11 +2054,10 @@ mod tests {
         let written = std::fs::read_to_string(&file_path);
         let _ = std::fs::remove_dir_all(&dir);
 
-        outcome.expect("agent run did not complete in time").unwrap();
-        assert!(
-            saw_final_text,
-            "agent never produced the final reply text"
-        );
+        outcome
+            .expect("agent run did not complete in time")
+            .unwrap();
+        assert!(saw_final_text, "agent never produced the final reply text");
         assert_eq!(
             written.expect("agent did not write the test file"),
             "hello from the agent",
@@ -2171,9 +2218,8 @@ mod tests {
                         body.push_str(&format!("data: {}\n\n", part));
                     }
                     body.push_str("data: [DONE]\n\n");
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
-                    );
+                    let response =
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 });
@@ -2229,7 +2275,9 @@ mod tests {
         })
         .await;
 
-        outcome.expect("agent run did not complete in time").unwrap();
+        outcome
+            .expect("agent run did not complete in time")
+            .unwrap();
         assert_eq!(
             thinking, "Let me think about it.",
             "thinking deltas must stream in order and be kept separate"
@@ -2271,11 +2319,17 @@ mod tests {
 
         // ...an unlisted model auto-detects...
         let provider = openai_provider(&resolved, cersei::provider::ReasoningField::Auto).unwrap();
-        assert_eq!(provider.reasoning_field(), cersei::provider::ReasoningField::Auto);
+        assert_eq!(
+            provider.reasoning_field(),
+            cersei::provider::ReasoningField::Auto
+        );
 
         // ...and `plain` opts out.
         let provider = openai_provider(&resolved, cersei::provider::ReasoningField::Off).unwrap();
-        assert_eq!(provider.reasoning_field(), cersei::provider::ReasoningField::Off);
+        assert_eq!(
+            provider.reasoning_field(),
+            cersei::provider::ReasoningField::Off
+        );
     }
 
     /// The sink handles `agent_tools` needs (parent/followups/events).
@@ -2309,7 +2363,10 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"Read"), "built-in Read should be present");
-        assert!(names.contains(&"ask_user"), "ask_user tool should be present");
+        assert!(
+            names.contains(&"ask_user"),
+            "ask_user tool should be present"
+        );
         assert!(names.contains(&"Write"), "built-in Write should be present");
         assert!(names.contains(&"Edit"), "built-in Edit should be present");
         // The Client* wrappers must not be registered in TUI mode.

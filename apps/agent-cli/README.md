@@ -217,7 +217,7 @@ The `!command` form is resolved each time a provider is used (opencode/pi
 convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 `env:OPENROUTER_API_KEY`, `env:GROQ_API_KEY`, `env:NVIDIA_API_KEY`,
 `env:TOKENROUTER_API_KEY`, `env:KIOSAPI_API_KEY`, `env:GEMINI_API_KEY`,
-`env:OLLAMA_API_KEY`, `env:OPENCODE_API_KEY`.
+`env:OLLAMA_CLOUD_API_KEY`, `env:OPENCODE_API_KEY`.
 
 #### Environment variables for tools
 
