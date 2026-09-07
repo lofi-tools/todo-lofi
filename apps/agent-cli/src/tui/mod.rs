@@ -18,6 +18,7 @@ use crate::config::AppConfig;
 // use tokio_util::sync::CancellationToken;
 
 pub mod app;
+pub mod copy_button;
 pub mod event_loop;
 pub mod layout;
 pub mod markdown;
