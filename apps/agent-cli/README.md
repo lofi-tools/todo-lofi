@@ -82,8 +82,6 @@ mkdir -p .abstract
     ]
   },
 
-  "fallback_models": ["poolside/laguna-xs-2.1"],
-
   "mcp_servers": [
     {
       "name": "my-tools",
@@ -255,7 +253,6 @@ zero-priced `:free` variants of coding models. To see paid models too, set
 | `ABSTRACT_PROVIDER`          | `provider`                                 |
 | `ABSTRACT_EFFORT`            | `effort`                                   |
 | `ABSTRACT_THEME`             | `theme`                                    |
-| `ABSTRACT_FALLBACK_MODELS`   | `fallback_models` (comma-separated)        |
 | `ABSTRACT_MAX_TURNS`         | `max_turns`                                |
 | `ABSTRACT_COMPRESSION`       | `compression_level`                        |
 | `ABSTRACT_FREE_MODELS_ONLY`  | `free_models_only` (`true`/`false`/`1`/`0`) |

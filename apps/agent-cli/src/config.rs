@@ -33,8 +33,6 @@ pub struct AppConfig {
     pub permissions_mode: String,
     pub working_dir: PathBuf,
     #[serde(default)]
-    pub fallback_models: Vec<String>,
-    #[serde(default)]
     pub mcp_servers: Vec<McpServerEntry>,
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
@@ -104,7 +102,6 @@ impl Default for AppConfig {
             graph_memory: true,
             permissions_mode: "interactive".into(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            fallback_models: Vec::new(),
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
             proxy: ProxyConfig::default(),
@@ -146,7 +143,6 @@ pub fn default_config_jsonc() -> String {
         ("graph_memory", "Enable memory graph (true/false)"),
         ("permissions_mode", "Tool permission mode: \"interactive\", \"allow_all\""),
         ("working_dir", "Working directory (path)"),
-        ("fallback_models", "Fallback model ids (\"provider/model\") tried on error"),
         ("mcp_servers", "MCP servers: [{ \"name\", \"command\", \"args\", \"env\" }]"),
         ("hooks", "Lifecycle hooks: [{ \"event\", \"command\" }]"),
         ("proxy", "Proxy routing (VibeProxy or compatible)"),
@@ -469,9 +465,6 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     copy_if_set!(embedding_api);
     copy_if_set!(benchmark_mode);
     copy_if_set!(proxy);
-    if !overlay.fallback_models.is_empty() {
-        base.fallback_models = overlay.fallback_models;
-    }
     if !overlay.mcp_servers.is_empty() {
         base.mcp_servers = overlay.mcp_servers;
     }
@@ -504,13 +497,6 @@ fn apply_env(config: &mut AppConfig) {
     }
     if let Ok(v) = std::env::var("ABSTRACT_THEME") {
         config.theme = v;
-    }
-    if let Ok(v) = std::env::var("ABSTRACT_FALLBACK_MODELS") {
-        config.fallback_models = v
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
     }
     if let Ok(v) = std::env::var("ABSTRACT_MAX_TURNS")
         && let Ok(n) = v.parse()
@@ -574,9 +560,6 @@ pub fn apply_cli_overrides(cli: &Cli, config: &mut AppConfig) {
     }
     if let Some(dir) = &cli.directory {
         config.working_dir = std::path::PathBuf::from(dir);
-    }
-    if !cli.fallback.is_empty() {
-        config.fallback_models = cli.fallback.clone();
     }
     if cli.proxy {
         config.proxy.enabled = true;

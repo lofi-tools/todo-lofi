@@ -34,10 +34,6 @@ pub struct Cli {
     #[arg(long, conflicts_with = "fast")]
     pub max: bool,
 
-    /// Fallback models (comma-separated) for provider switching on error
-    #[arg(long, value_delimiter = ',', value_name = "MODELS")]
-    pub fallback: Vec<String>,
-
     /// Auto-approve all tool permissions (CI/headless mode)
     #[arg(long)]
     pub no_permissions: bool,
