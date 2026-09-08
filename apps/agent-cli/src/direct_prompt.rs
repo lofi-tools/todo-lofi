@@ -312,6 +312,58 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
             }
         }
 
+        /// Prompt hy3 on b.ai (built-in family, reasoning_content format) and
+        /// capture fixtures. The `short_answer` case is a clean thinking →
+        /// answer → `stop` stream; `thinking_length` uses a small max_tokens
+        /// so the stream is cut off by `length` while still thinking, which
+        /// is exactly the adaptive-thinking behavior that motivated the hy3
+        /// family. Run with:
+        /// `cargo test -p agent-cli --features live-tests -- --ignored`
+        #[tokio::test]
+        #[ignore]
+        async fn capture_hy3_response_examples() {
+            let config = crate::config::load();
+            let cases = [
+                (
+                    "short_answer",
+                    "What is 23 times 17? Answer in one short line.",
+                    1024,
+                    true,
+                ),
+                (
+                    "thinking_length",
+                    "Think step by step, then answer in one line.",
+                    512,
+                    false,
+                ),
+            ];
+            for (name, prompt, max_tokens, expect_answer) in cases {
+                let body = prompt_raw(&config, "b.ai", "hy3", prompt, max_tokens)
+                    .await
+                    .unwrap_or_else(|e| panic!("{name}: direct prompt failed: {e}"));
+                assert!(
+                    body.contains("data:"),
+                    "{name}: expected an SSE body, got: {body}"
+                );
+                let segments = parse_sse(
+                    &crate::response_format::family("reasoning_content").unwrap(),
+                    &body,
+                );
+                assert!(
+                    segments.iter().any(|s| s.kind == SegmentKind::Thinking),
+                    "{name}: expected thinking segments, got {segments:?}"
+                );
+                if expect_answer {
+                    assert!(
+                        segments.iter().any(|s| s.kind == SegmentKind::Text),
+                        "{name}: expected answer text, got {segments:?}"
+                    );
+                }
+                let path = save_fixture("reasoning_content", "hy3", name, &body).unwrap();
+                eprintln!("captured {name} -> {}", path.display());
+            }
+        }
+
         /// Prompt nvidia/nemotron-3-ultra (reasoning_content format) and
         /// capture fixtures. Run with:
         /// `cargo test -p agent-cli --features live-tests -- --ignored`
