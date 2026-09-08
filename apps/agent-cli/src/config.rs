@@ -67,8 +67,9 @@ pub struct AppConfig {
     #[serde(default = "default_compression")]
     pub compression_level: String,
     /// Extra environment variables made available to agent tools (e.g. the
-    /// WebSearch tool's `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY` — its
-    /// first provider, Parallel Search via MCP, needs no key). Keys are env
+    /// WebSearch tool's `EXA_API_KEY` / `TINYFISH_API_KEY` /
+    /// `LANGSEARCH_API_KEY`; its Parallel Search via MCP backend needs no
+    /// key). Keys are env
     /// var names; values use the same spec format as `providers.*.api_key`:
     /// `!command` (run shell, trimmed stdout), `env:VAR` (copy another
     /// variable), or a literal value. An env var already set in the
@@ -290,7 +291,8 @@ fn append_env_jsonc(out: &mut String) {
     out.push_str("    \"GEMINI_API_KEY\": \"!echo GEMINI_API_KEY\",\n");
     out.push_str("    \"OLLAMA_CLOUD_API_KEY\": \"!echo OLLAMA_CLOUD_API_KEY\",\n");
     out.push_str("    \"OPENCODE_API_KEY\": \"!echo OPENCODE_API_KEY\",\n");
-    out.push_str("    // WebSearch keys (Parallel Search via MCP needs no key).\n");
+    out.push_str("    // WebSearch keys (Exa and the keyed providers; Parallel Search via MCP needs no key).\n");
+    out.push_str("    \"EXA_API_KEY\": \"!echo EXA_API_KEY\",\n");
     out.push_str("    \"TINYFISH_API_KEY\": \"!echo TINYFISH_API_KEY\",\n");
     out.push_str("    \"LANGSEARCH_API_KEY\": \"!echo LANGSEARCH_API_KEY\"\n");
     out.push_str("  }");
@@ -653,7 +655,7 @@ fn apply_env(config: &mut AppConfig) {
 /// Resolve each entry of the config `env` map (spec format like api_key:
 /// `!command`, `env:VAR`, or a literal) and set it in the process
 /// environment, so agent tools that read env vars (e.g. the WebSearch tool's
-/// `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY`) can find them.
+/// `EXA_API_KEY` / `TINYFISH_API_KEY` / `LANGSEARCH_API_KEY`) can find them.
 ///
 /// Precedence: a variable already set in the environment wins as-is; the
 /// config value only fills in when the variable is not already set.
@@ -865,9 +867,9 @@ mod tests {
         );
         // The providers/env sections are template content (the runtime
         // defaults keep empty maps), so assert the rendered entries parse
-        // back: the nine default providers and eleven necessary env vars.
+        // back: the nine default providers and twelve necessary env vars.
         assert_eq!(parsed.providers.len(), 9);
-        assert_eq!(parsed.env.len(), 11);
+        assert_eq!(parsed.env.len(), 12);
         assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
     }
 
@@ -908,6 +910,7 @@ mod tests {
             "GEMINI_API_KEY",
             "OLLAMA_CLOUD_API_KEY",
             "OPENCODE_API_KEY",
+            "EXA_API_KEY",
             "TINYFISH_API_KEY",
             "LANGSEARCH_API_KEY",
         ] {
@@ -948,8 +951,9 @@ mod tests {
         let mut config2 = config.clone();
         merge(&mut config2, AppConfig::default());
         assert_eq!(config2.env.len(), 3);
-        // The default config template shows both web search key examples.
+        // The default config template shows every web search key example.
         let jsonc = default_config_jsonc();
+        assert!(jsonc.contains("EXA_API_KEY"));
         assert!(jsonc.contains("TINYFISH_API_KEY"));
         assert!(jsonc.contains("LANGSEARCH_API_KEY"));
     }

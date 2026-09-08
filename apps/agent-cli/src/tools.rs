@@ -957,6 +957,13 @@ const LANGSEARCH_API_URL_ENV: &str = "LANGSEARCH_API_URL";
 /// Default LangSearch endpoint (LangSearch Web Search API).
 const DEFAULT_LANGSEARCH_URL: &str = "https://api.langsearch.com/v1/web-search";
 
+/// Environment variable for the Exa Search API key (highest-priority backend).
+const EXA_API_KEY_ENV: &str = "EXA_API_KEY";
+/// Environment variable for the Exa Search API endpoint.
+const EXA_API_URL_ENV: &str = "EXA_API_URL";
+/// Default Exa Search endpoint.
+const DEFAULT_EXA_URL: &str = "https://api.exa.ai/search";
+
 /// One formatted web search result.
 struct SearchResult {
     title: String,
@@ -1049,6 +1056,57 @@ async fn langsearch_search(
                 title: item["name"].as_str().unwrap_or("(no title)").to_string(),
                 url: item["url"].as_str().unwrap_or("").to_string(),
                 snippet: item["snippet"].as_str().unwrap_or("").to_string(),
+            });
+        }
+    }
+    Ok(results)
+}
+
+/// Exa Search: POST the `/search` endpoint with `x-api-key` auth; the
+/// response carries results in `results[]` with `title`/`url` and, when
+/// `contents.highlights` is requested, query-relevant `highlights[]`
+/// excerpts.
+async fn exa_search(
+    query: &str,
+    num_results: usize,
+    api_key: &str,
+) -> anyhow::Result<Vec<SearchResult>> {
+    let search_url = std::env::var(EXA_API_URL_ENV).unwrap_or_else(|_| DEFAULT_EXA_URL.to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let response = client
+        .post(&search_url)
+        .header("x-api-key", api_key)
+        .json(&serde_json::json!({
+            "query": query,
+            "numResults": num_results,
+            "contents": { "highlights": true },
+        }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Exa search API error ({status}): {body}");
+    }
+    let json: Value = response.json().await?;
+    let mut results = Vec::new();
+    if let Some(items) = json["results"].as_array() {
+        for item in items.iter().take(num_results) {
+            results.push(SearchResult {
+                title: item["title"].as_str().unwrap_or("(no title)").to_string(),
+                url: item["url"].as_str().unwrap_or("").to_string(),
+                snippet: item["highlights"]
+                    .as_array()
+                    .map(|highlights| {
+                        highlights
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
             });
         }
     }
@@ -1222,10 +1280,10 @@ async fn parallel_mcp_search(query: &str, num_results: usize) -> anyhow::Result<
 /// Web search registered under the `WebSearch` name so it replaces cersei's
 /// built-in WebSearchTool (which reads the legacy `CERSEI_SEARCH_API_KEY`
 /// env var). Provider precedence is handled in the background so the model
-/// still only sees one tool: Parallel Search via MCP (anonymous, no key)
-/// first, then TinyFish (`TINYFISH_API_KEY`), then LangSearch
-/// (`LANGSEARCH_API_KEY`). The keyed providers fall back to the config `env`
-/// map when the vars aren't already set.
+/// still only sees one tool: Exa (`EXA_API_KEY`) first, then Parallel Search
+/// via MCP (anonymous, no key), then TinyFish (`TINYFISH_API_KEY`), then
+/// LangSearch (`LANGSEARCH_API_KEY`). The keyed providers fall back to the
+/// config `env` map when the vars aren't already set.
 pub struct WebSearchTool;
 
 #[async_trait]
@@ -1235,7 +1293,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web and return relevant results. Tries Parallel Search (free, no key), then TinyFish (TINYFISH_API_KEY), then LangSearch (LANGSEARCH_API_KEY)."
+        "Search the web and return relevant results. Tries Exa (EXA_API_KEY), then Parallel Search (free, no key), then TinyFish (TINYFISH_API_KEY), then LangSearch (LANGSEARCH_API_KEY)."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -1272,7 +1330,19 @@ impl Tool for WebSearchTool {
         let query = input.query;
         let mut failures = Vec::new();
 
-        // Parallel via MCP first — anonymous, no API key.
+        // Exa first — highest-priority backend, used when its key is set.
+        match std::env::var(EXA_API_KEY_ENV) {
+            Ok(key) if !key.is_empty() => match exa_search(&query, num_results, &key).await {
+                Ok(results) if results.is_empty() => {
+                    return ToolResult::success(format!("No results found for: {query}"))
+                }
+                Ok(results) => return ToolResult::success(format_search_results(&results)),
+                Err(e) => failures.push(format!("Exa: {e}")),
+            },
+            _ => failures.push(format!("{} is not set", EXA_API_KEY_ENV)),
+        }
+
+        // Parallel via MCP next — anonymous, no API key.
         match parallel_mcp_search(&query, num_results).await {
             Ok(results) if results.is_empty() => {
                 return ToolResult::success(format!("No results found for: {query}"))
@@ -1306,7 +1376,7 @@ impl Tool for WebSearchTool {
         }
 
         ToolResult::error(format!(
-            "Web search failed. Parallel Search (no key needed), TINYFISH_API_KEY, and LANGSEARCH_API_KEY were all unavailable.\n{}",
+            "Web search failed. EXA_API_KEY, Parallel Search (no key needed), TINYFISH_API_KEY, and LANGSEARCH_API_KEY were all unavailable.\n{}",
             failures.join("\n")
         ))
     }
@@ -1359,7 +1429,8 @@ mod tests {
         // Unset in case a previous test set them. The Parallel MCP endpoint
         // is pointed at a closed local port so the fallback chain completes
         // without touching the network (connection refused fails fast); the
-        // other two providers fail on their missing keys.
+        // other three providers fail on their missing keys.
+        unsafe { std::env::remove_var(EXA_API_KEY_ENV) };
         unsafe { std::env::remove_var(TINYFISH_API_KEY_ENV) };
         unsafe { std::env::remove_var(LANGSEARCH_API_KEY_ENV) };
         unsafe { std::env::set_var(PARALLEL_MCP_URL_ENV, "http://127.0.0.1:1/mcp") };
@@ -1368,6 +1439,7 @@ mod tests {
             .execute(input, &test_context(std::env::temp_dir()))
             .await;
         assert!(result.is_error);
+        assert!(result.content.contains(EXA_API_KEY_ENV));
         assert!(result.content.contains("Parallel"));
         assert!(result.content.contains(TINYFISH_API_KEY_ENV));
         assert!(result.content.contains(LANGSEARCH_API_KEY_ENV));

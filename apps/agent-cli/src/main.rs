@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     config::apply_cli_overrides(&cli, &mut config);
 
     // Apply the config file's `env` map to the process environment so agent
-    // tools (e.g. WebSearch's TINYFISH_API_KEY / LANGSEARCH_API_KEY) can read them.
+    // tools (e.g. WebSearch's EXA_API_KEY / TINYFISH_API_KEY / LANGSEARCH_API_KEY) can read them.
     config::apply_config_env(&config)?;
 
     // `config` subcommand: print the current (merged) or default config.

@@ -230,13 +230,14 @@ convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 
 The top-level `env` object sets environment variables that agent tools read
 at runtime. `WebSearch` is a single tool whose provider precedence is
-resolved in the background: Parallel Search via MCP first (anonymous free
-tier — no API key), then TinyFish (key in `TINYFISH_API_KEY`), then
-LangSearch (key in `LANGSEARCH_API_KEY`). Each value uses the same three
-forms as `api_key`:
+resolved in the background: Exa first (key in `EXA_API_KEY`), then Parallel
+Search via MCP (anonymous free tier — no API key), then TinyFish (key in
+`TINYFISH_API_KEY`), then LangSearch (key in `LANGSEARCH_API_KEY`). Each
+value uses the same three forms as `api_key`:
 
 ```json
 "env": {
+  "EXA_API_KEY": "!kubectl get secret exa-key -o jsonpath='{.data.key}' | base64 -d",
   "TINYFISH_API_KEY": "!kubectl get secret tinyfish-key -o jsonpath='{.data.key}' | base64 -d",
   "LANGSEARCH_API_KEY": "!kubectl get secret langsearch-key -o jsonpath='{.data.key}' | base64 -d",
   "SOME_LITERAL": "literal-value"
@@ -254,7 +255,7 @@ them. Precedence: a variable already set in your shell environment always
 wins — the config value only fills in when the variable is not already set.
 
 The default config (`/default-config`) lists every env var the agent needs
-— the nine provider API keys plus `TINYFISH_API_KEY` and
+— the nine provider API keys plus `EXA_API_KEY`, `TINYFISH_API_KEY` and
 `LANGSEARCH_API_KEY` — as explicit fields, each defaulting to a `!echo <VAR>`
 placeholder. Replace the placeholders with real sources (e.g. `!cat ~/.key`)
 or set the variables in your shell; a shell-set variable always wins over the

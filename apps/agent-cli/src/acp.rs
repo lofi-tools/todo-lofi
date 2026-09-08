@@ -1917,7 +1917,7 @@ fn tool_kind(name: &str) -> &'static str {
     match name {
         "Bash" | "PowerShell" => "execute",
         "Write" | "Edit" | "ApplyPatch" | "NotebookEdit" => "edit",
-        "Read" | "Grep" | "Glob" | "CodeSearch" | "WebFetch" | "WebSearch" | "ExaSearch" => {
+        "Read" | "Grep" | "Glob" | "CodeSearch" | "WebFetch" | "WebSearch" => {
             "read"
         }
         _ => "other",

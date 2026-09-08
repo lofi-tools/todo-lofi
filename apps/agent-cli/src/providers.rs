@@ -122,9 +122,13 @@ pub fn agent_tools(
     // passthrough, per-file and global result caps — freebuff-style).
     tools.retain(|t| t.name() != "Grep");
     // Replace the built-in WebSearch (reads the legacy CERSEI_SEARCH_API_KEY
-    // env var) with our Parallel-first / TinyFish / LangSearch version.
+    // env var) with our Exa-first / Parallel / TinyFish / LangSearch version.
     tools.retain(|t| t.name() != "WebSearch");
     tools.push(Box::new(crate::tools::WebSearchTool));
+    // Drop cersei's built-in ExaSearch tool: Exa is reached through the
+    // WebSearch backend chain above, so the model must not see a second,
+    // standalone search tool that reads the same EXA_API_KEY.
+    tools.retain(|t| t.name() != "ExaSearch");
     // The ACP client-aware Read/Write/Edit overrides (which consult the
     // editor's unsaved buffers and mirror edits back via `fs/write_text_file`)
     // are only wired when an ACP fs bridge is present — i.e. when the binary
@@ -2597,6 +2601,17 @@ mod tests {
                 "{name} should appear exactly once in TUI mode"
             );
         }
+        // Exa is only reachable through the WebSearch backend chain — the
+        // standalone ExaSearch tool must never reach the model.
+        assert!(
+            !names.contains(&"ExaSearch"),
+            "standalone ExaSearch tool leaked into TUI mode: {names:?}"
+        );
+        assert_eq!(
+            names.iter().filter(|&&n| n == "WebSearch").count(),
+            1,
+            "WebSearch should appear exactly once in TUI mode"
+        );
     }
 
     #[test]
@@ -2667,6 +2682,17 @@ mod tests {
             names.iter().filter(|&&n| n == "Grep").count(),
             1,
             "built-in Grep replaced by RgSearchTool (same name) in both modes"
+        );
+        // Same for search: cersei's built-in ExaSearch is dropped and our
+        // WebSearch replacement is the only search tool the model sees.
+        assert!(
+            !names.contains(&"ExaSearch"),
+            "standalone ExaSearch tool leaked into ACP mode: {names:?}"
+        );
+        assert_eq!(
+            names.iter().filter(|&&n| n == "WebSearch").count(),
+            1,
+            "WebSearch should appear exactly once in ACP mode"
         );
     }
 
