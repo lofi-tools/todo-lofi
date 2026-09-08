@@ -867,22 +867,41 @@ fn is_copy_shortcut(modifiers: KeyModifiers, code: KeyCode) -> bool {
         || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
 }
 
-/// Copy the current selection to the clipboard, if there is one.
+/// Max bytes of a selection echoed in the `selected:`/`copied:` feedback line
+/// (the renderer further elides it to the actual strip width).
+const COPY_PREVIEW_BYTES: usize = 240;
+
+/// Copy the current selection to the clipboard, if there is one. On success
+/// the selection is cleared, so the transient `copied:` line is not
+/// immediately shadowed by the `selected:` line again once it expires.
 fn copy_selection(state: &mut AppState) {
-    use crate::tui::app::CopyFeedback;
+    perform_copy(state, copy_to_clipboard);
+}
+
+/// Drive one copy attempt: extract the selection text, hand it to `write`
+/// (the real clipboard, or a fake in tests), and record the transient
+/// feedback. Always paints a feedback line — success is green, failure and
+/// "nothing selected" are amber — so a copy attempt is never silent.
+fn perform_copy(state: &mut AppState, write: impl FnOnce(&str) -> Result<(), String>) {
+    use crate::tui::app::{CopyFeedback, preview_line};
     let feedback = match state.selection_text() {
-        Some(text) => match copy_to_clipboard(&text) {
-            Ok(()) => CopyFeedback {
-                frame: Some(state.frame_count),
-                copied: true,
-                nothing_selected: false,
-                error: None,
-            },
+        Some(text) => match write(&text) {
+            Ok(()) => {
+                state.selection = None;
+                CopyFeedback {
+                    frame: Some(state.frame_count),
+                    copied: true,
+                    nothing_selected: false,
+                    error: None,
+                    snippet: Some(preview_line(&text, COPY_PREVIEW_BYTES)),
+                }
+            }
             Err(err) => CopyFeedback {
                 frame: Some(state.frame_count),
                 copied: false,
                 nothing_selected: false,
                 error: Some(err),
+                snippet: None,
             },
         },
         None => CopyFeedback {
@@ -890,16 +909,28 @@ fn copy_selection(state: &mut AppState) {
             copied: false,
             nothing_selected: true,
             error: None,
+            snippet: None,
         },
     };
     state.copy_feedback = feedback;
 }
 
+/// Why a native clipboard tool failed, so the fallback logic can tell a tool
+/// that is simply not installed (use OSC 52) from one that was found but
+/// failed (report the real error).
+struct ClipboardError {
+    /// The tool binary was not found on PATH.
+    missing: bool,
+    reason: String,
+}
+
 /// Copy `text` to the system clipboard. Prefers the platform clipboard tool
 /// (`pbcopy` / `wl-copy` / `xclip` / `clip`), which works in every terminal,
-/// and falls back to the OSC 52 terminal sequence when no tool is available
-/// (some terminals ignore OSC 52 entirely). Returns an error string when no
-/// clipboard route succeeded, so the UI can tell the user why the copy failed.
+/// and falls back to the OSC 52 terminal sequence when none of the native
+/// tools is installed (common over SSH, where the clipboard lives in the
+/// terminal host). A native tool that is present but fails is reported as an
+/// error after the OSC 52 last resort fires, so a terminal that ignores OSC 52
+/// never looks like a successful copy.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
@@ -917,37 +948,67 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
             ("xsel", &["--clipboard", "--input"]),
         ]
     };
+    let mut found_failure = None;
     for (command, args) in commands {
-        if copy_via_command(command, args, text) {
-            return Ok(());
+        match copy_via_command(command, args, text) {
+            Ok(()) => return Ok(()),
+            Err(err) if !err.missing && found_failure.is_none() => {
+                found_failure = Some(format!("{command}: {}", err.reason));
+            }
+            Err(_) => {}
         }
     }
-    // OSC 52 has no success/failure signal the terminal reports back, so any
-    // command that at least wrote the sequence counts as the last resort.
+    // OSC 52 fires as the last resort in both cases below; terminals cannot
+    // confirm receipt of it (iTerm2/kitty/WezTerm/tmux accept it, some others
+    // ignore it silently).
     write_osc52_clipboard(text);
-    Ok(())
+    if let Some(failure) = found_failure {
+        // A tool was found but failed — surface the real error rather than
+        // pretending the copy worked.
+        Err(failure)
+    } else {
+        // No tool was installed at all (e.g. a bare remote box); the OSC 52
+        // sequence is the intended transport there, so count it as a success.
+        Ok(())
+    }
 }
 
-/// Write `text` to the system clipboard through `command`'s stdin, returning
-/// true when the process exited successfully.
-fn copy_via_command(command: &str, args: &[&str], text: &str) -> bool {
+/// Write `text` to the system clipboard through `command`'s stdin.
+fn copy_via_command(command: &str, args: &[&str], text: &str) -> Result<(), ClipboardError> {
     use std::io::Write;
-    let Ok(mut child) = std::process::Command::new(command)
+    let mut child = std::process::Command::new(command)
         .args(args)
         .stdin(std::process::Stdio::piped())
         .spawn()
-    else {
-        return false;
-    };
-    let Some(mut stdin) = child.stdin.take() else {
-        return false;
-    };
-    if stdin.write_all(text.as_bytes()).is_err() {
-        return false;
-    }
+        .map_err(|err| ClipboardError {
+            missing: err.kind() == std::io::ErrorKind::NotFound,
+            reason: err.to_string(),
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ClipboardError {
+            missing: false,
+            reason: "could not open stdin".into(),
+        })?;
+    stdin.write_all(text.as_bytes()).map_err(|err| ClipboardError {
+        missing: false,
+        reason: err.to_string(),
+    })?;
     // Closing stdin sends EOF so the tool finishes writing.
     drop(stdin);
-    child.wait().map(|status| status.success()).unwrap_or(false)
+    let status = child.wait().map_err(|err| ClipboardError {
+        missing: false,
+        reason: err.to_string(),
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(ClipboardError {
+            missing: false,
+            reason: format!("exited with {status}"),
+        })
+    }
 }
 
 /// Write `text` to the terminal clipboard via the OSC 52 escape sequence
@@ -1048,6 +1109,22 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     match mouse.kind {
         // Left button down — start a selection in the widget under the cursor.
         MouseEventKind::Down(MouseButton::Left) => {
+            // A click on the feedback strip copies the active selection. This
+            // is the mouse path for copying: it works in every terminal, even
+            // ones that intercept Cmd+C (macOS terminals, the Zed terminal)
+            // before the TUI ever sees the key.
+            if let Some((x, y, w, h)) = state.feedback_area {
+                if mouse.row >= y
+                    && mouse.row < y + h
+                    && mouse.column >= x
+                    && mouse.column < x + w
+                    && state.has_copyable_selection()
+                {
+                    copy_selection(state);
+                    state.dirty = true;
+                    return;
+                }
+            }
             if let Some(pos) = output_click_pos(state, mouse.row, mouse.column) {
                 state.selection = Some(Selection {
                     target: SelectionTarget::Output,
@@ -1103,10 +1180,13 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         }
         // Release — the selection stays (until the next click) so it can be copied.
         // Any-button match: some terminals encode releases without the button.
+        // Marking the frame dirty here lets the "selected: …" feedback strip
+        // appear as soon as the drag ends.
         MouseEventKind::Up(_) => {
             if let Some(sel) = state.selection.as_mut() {
                 sel.dragging = false;
             }
+            state.dirty = true;
         }
         _ => {}
     }
@@ -3112,6 +3192,120 @@ mod tests {
         assert!(!is_copy_shortcut(M::CONTROL, KeyCode::Char('c')));
         assert!(!is_copy_shortcut(M::SUPER, KeyCode::Char('v')));
         assert!(!is_copy_shortcut(KeyModifiers::NONE, KeyCode::Char('c')));
+    }
+
+    #[test]
+    fn perform_copy_success_copies_and_clears_selection() {
+        let mut s = state();
+        s.input = "copy me".into();
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(0),
+            active: SelectionPoint::Input(7),
+            dragging: false,
+        });
+
+        perform_copy(&mut s, |text| {
+            assert_eq!(text, "copy me");
+            Ok(())
+        });
+
+        assert!(s.copy_feedback.copied);
+        assert!(!s.copy_feedback.nothing_selected);
+        assert_eq!(s.copy_feedback.snippet.as_deref(), Some("copy me"));
+        // The successful copy clears the selection so the feedback strip can
+        // revert to its normal status once the `copied:` line expires.
+        assert!(s.selection.is_none());
+        assert_eq!(
+            s.copy_feedback_message().as_deref(),
+            Some("copied: copy me")
+        );
+    }
+
+    #[test]
+    fn perform_copy_failure_keeps_selection_and_reports_error() {
+        let mut s = state();
+        s.input = "abcdef".into();
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(1),
+            active: SelectionPoint::Input(4),
+            dragging: false,
+        });
+
+        perform_copy(&mut s, |_| Err("pbcopy: boom".into()));
+
+        assert!(!s.copy_feedback.copied);
+        assert!(s.copy_feedback.error.is_some());
+        // A failed copy leaves the selection in place so the user can retry.
+        assert!(s.selection.is_some());
+        let msg = s.copy_feedback_message().expect("feedback shown");
+        assert!(msg.starts_with("copy failed: "), "got {msg:?}");
+    }
+
+    #[test]
+    fn perform_copy_without_selection_reports_nothing_selected() {
+        let mut s = state();
+        perform_copy(&mut s, |_| unreachable!("no text to write"));
+        assert!(s.copy_feedback.nothing_selected);
+        assert!(!s.copy_feedback.copied);
+        assert_eq!(s.copy_feedback.snippet, None);
+        assert!(s
+            .copy_feedback_message()
+            .is_some_and(|m| m.starts_with("nothing selected")));
+    }
+
+    #[test]
+    fn feedback_strip_shows_selected_then_copied_then_restores() {
+        use crate::tui::app::COPY_FEEDBACK_FRAMES;
+        use ratatui::backend::TestBackend;
+
+        fn row_text(terminal: &ratatui::Terminal<TestBackend>, x: u16, y: u16, w: u16) -> String {
+            let buf = terminal.backend().buffer();
+            let mut out = String::new();
+            for col in x..x + w {
+                out.push_str(&buf.cell((col, y)).unwrap().symbol());
+            }
+            out
+        }
+
+        let theme = Theme::enterprise();
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut s = state();
+
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let (x, y, w, _) = s.feedback_area.expect("feedback strip drawn");
+        assert!(row_text(&terminal, x, y, w).contains("ready"));
+
+        // Selecting text shows `selected: …` on the strip.
+        s.input = "copy me".into();
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(0),
+            active: SelectionPoint::Input(7),
+            dragging: false,
+        });
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let selected = row_text(&terminal, x, y, w);
+        assert!(
+            selected.starts_with("selected: copy me"),
+            "strip shows {selected:?}"
+        );
+
+        // A successful copy replaces it with the `copied:` confirmation.
+        perform_copy(&mut s, |_| Ok(()));
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let copied = row_text(&terminal, x, y, w);
+        assert!(copied.starts_with("copied: copy me"), "strip shows {copied:?}");
+
+        // 2.5 s later the strip reverts to its normal status text.
+        s.frame_count += COPY_FEEDBACK_FRAMES;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let restored = row_text(&terminal, x, y, w);
+        assert!(restored.contains("ready"), "strip shows {restored:?}");
     }
 
     /// A runtime that builds offline (dummy provider, literal key).

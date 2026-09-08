@@ -1687,6 +1687,8 @@ pub mod overlay {
             Line::default(),
             Line::from("  Enter        Send message"),
             Line::from("  Ctrl+C       Cancel / clear / quit"),
+            Line::from("  Cmd+C / Ctrl+Shift+C  Copy selection"),
+            Line::from("  Click line above input  Copy selection (any terminal)"),
             Line::from("  Ctrl+D       Exit"),
             Line::from("  Ctrl+B       Toggle side panel"),
             Line::from("  Shift+Tab    Cycle permission mode"),
@@ -2695,49 +2697,90 @@ pub mod side_panel {
     }
 }
 pub mod status {
-    //! Status bar: streaming indicator, tool count, elapsed time
+    //! The one-line strip above the input box. Normally shows streaming / turn
+    //! stats; while text is selected it echoes `selected: …`, and right after a
+    //! copy attempt it briefly shows a green `copied: …` (or an amber failure),
+    //! reverting to the normal text once the feedback expires. Clicking the
+    //! strip copies the active selection (see `handle_mouse` in event_loop.rs).
 
     use crate::tui::{app::AppState, theme::Theme};
     use ratatui::{prelude::*, widgets::Paragraph};
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
 
-    pub fn render(f: &mut Frame, area: Rect, state: &AppState, theme: &Theme) {
-        // A transient copy result (set by Ctrl+Shift+C / Cmd+C) briefly
-        // replaces the status line so the user gets confirmation.
-        let feedback_text = state.copy_feedback_message();
-        let text = if let Some(feedback) = feedback_text {
-            feedback
+    /// Cap on the selection text echoed in the feedback line before it is
+    /// clipped to the actual strip width (keeps per-frame previews cheap).
+    const SELECTION_PREVIEW_BYTES: usize = 240;
+
+    /// Clip `text` to fit `max_width` terminal cells, appending a one-cell
+    /// ellipsis when truncated. Wide glyphs count by display width and whole
+    /// grapheme clusters are kept, so nothing splits mid-character.
+    fn clip_to_width(text: &str, max_width: u16) -> String {
+        let max_width = max_width as usize;
+        if text.width() <= max_width {
+            return text.to_string();
+        }
+        let content_max = max_width.saturating_sub(1);
+        if content_max == 0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        let mut width = 0usize;
+        for grapheme in text.graphemes(true) {
+            let grapheme_width = grapheme.width();
+            if width + grapheme_width > content_max {
+                break;
+            }
+            out.push_str(grapheme);
+            width += grapheme_width;
+        }
+        format!("{out}…")
+    }
+
+    pub fn render(f: &mut Frame, area: Rect, state: &mut AppState, theme: &Theme) {
+        // Remember where this strip is so a click on it can copy the active
+        // selection (a mouse path that works even when the terminal intercepts
+        // the copy key before it reaches the app).
+        state.feedback_area = Some((area.x, area.y, area.width, area.height));
+
+        // Feedback priority: a live copy result first (it replaces the
+        // `selected:` line), then a `selected:` echo while a selection exists,
+        // then the usual status text.
+        let (text, style) = if let Some(feedback) = state.copy_feedback_message() {
+            // A successful copy is green; a failure or empty selection amber.
+            let style = if state.copy_feedback.copied {
+                theme.success_style()
+            } else {
+                theme.warning_style()
+            };
+            (feedback, style)
+        } else if let Some(preview) = state.selection_preview(SELECTION_PREVIEW_BYTES) {
+            (format!("selected: {preview}"), Style::default().fg(theme.info))
         } else if state.is_streaming {
             let elapsed = state.elapsed_ms();
             let secs = elapsed as f64 / 1000.0;
             let tools = state.active_tools().count();
             let tokens = state.input_tokens + state.output_tokens;
-            format!(
-                " streaming... | {} tool(s) | {:.1}s | {} tokens",
-                tools, secs, tokens
+            (
+                format!(
+                    " streaming... | {} tool(s) | {:.1}s | {} tokens",
+                    tools, secs, tokens
+                ),
+                theme.accent_style(),
             )
         } else if state.turn_count > 0 {
-            format!(
-                " {} turn(s) | {} tool call(s) | {} in / {} out tokens",
-                state.turn_count, state.tool_count, state.input_tokens, state.output_tokens
+            (
+                format!(
+                    " {} turn(s) | {} tool call(s) | {} in / {} out tokens",
+                    state.turn_count, state.tool_count, state.input_tokens, state.output_tokens
+                ),
+                theme.dimmed(),
             )
         } else {
-            " ready".into()
+            (" ready".into(), theme.dimmed())
         };
 
-        // A successful copy is green; a failure or empty selection is amber.
-        let style = if state.copy_feedback_active() {
-            if state.copy_feedback.copied {
-                theme.success_style()
-            } else {
-                theme.warning_style()
-            }
-        } else if state.is_streaming {
-            theme.accent_style()
-        } else {
-            theme.dimmed()
-        };
-
-        let status = Paragraph::new(text).style(style);
+        let status = Paragraph::new(clip_to_width(&text, area.width)).style(style);
         f.render_widget(status, area);
     }
 }

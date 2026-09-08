@@ -104,20 +104,31 @@ pub struct Turn {
     pub content: String,
 }
 
-/// Transient feedback after a copy attempt, shown in the status bar until it
-/// times out (see [`CopyFeedback::expired`]). Set on a copy attempt; the draw
-/// loop reads it via [`AppState::copy_feedback_message`] and it self-expires
-/// after a few frames.
+/// Transient feedback after a copy attempt, shown in the one-line strip above
+/// the input box until it times out (see [`CopyFeedback::expired`]). Set on a
+/// copy attempt; the draw loop reads it via [`AppState::copy_feedback_message`]
+/// and it self-expires after [`COPY_FEEDBACK_FRAMES`] (~2.5 s at the 16 ms
+/// tick rate used by the draw loop).
 #[derive(Debug, Clone)]
 pub struct CopyFeedback {
     /// The frame (`state.frame_count`) the feedback was set on. None before the
     /// first copy attempt (never shown).
     pub frame: Option<u64>,
+    /// Whether the clipboard write succeeded.
     pub copied: bool,
+    /// True when the copy shortcut was pressed with no active selection.
     pub nothing_selected: bool,
     /// A clipboard error message, when the copy tool failed.
     pub error: Option<String>,
+    /// A one-line preview of the copied text, echoed back as `copied: …`
+    /// (elided to the strip width by the renderer). None when nothing was
+    /// selected.
+    pub snippet: Option<String>,
 }
+
+/// How many frames the copy feedback stays visible: 2.5 s at the 16 ms draw
+/// tick (157 frames ≈ 2.51 s).
+pub const COPY_FEEDBACK_FRAMES: u64 = 157;
 
 impl CopyFeedback {
     /// An empty feedback: never shown (expired immediately), used before the
@@ -128,65 +139,152 @@ impl CopyFeedback {
             copied: false,
             nothing_selected: false,
             error: None,
+            snippet: None,
         }
     }
 
-    /// Whether this feedback should no longer be displayed, given the current
-    /// frame. Shown for ~1.5 s (TICK_RATE is 16 ms ⇒ 90 frames).
+    /// Whether the feedback is past its display window at `now` and should no
+    /// longer be drawn.
     pub fn expired(&self, now: u64) -> bool {
         match self.frame {
             None => true,
-            Some(frame) => now.wrapping_sub(frame) >= 90,
+            Some(frame) => now.wrapping_sub(frame) >= COPY_FEEDBACK_FRAMES,
         }
     }
 
-    /// The status-bar line for this feedback (None once expired).
+    /// Whether the draw loop should paint this frame: true during the display
+    /// window *and* on the frame the feedback expires, so the strip is redrawn
+    /// with its normal content before rendering stops (otherwise the last
+    /// feedback frame would linger on screen indefinitely).
+    pub fn needs_redraw(&self, now: u64) -> bool {
+        match self.frame {
+            None => false,
+            Some(frame) => now.wrapping_sub(frame) <= COPY_FEEDBACK_FRAMES,
+        }
+    }
+
+    /// The feedback strip line for this attempt (None once expired): a green
+    /// `copied: {text}`, an amber failure line, or an amber hint when there
+    /// was no selection to copy.
     pub fn message(&self, now: u64) -> Option<String> {
         if self.expired(now) {
             return None;
         }
+        let snippet = self.snippet.as_deref().unwrap_or_default();
         if self.copied {
-            Some("✓ Copied selection to clipboard".into())
+            Some(format!("copied: {snippet}"))
         } else if let Some(err) = &self.error {
-            Some(format!("✗ Copy failed: {err}"))
+            Some(format!("copy failed: {err}"))
         } else {
-            Some("Nothing selected — drag or Shift+arrows to select first".into())
+            Some("nothing selected — drag over text to select it first".into())
         }
     }
 }
 
 #[cfg(test)]
 mod copy_feedback_tests {
-    use super::CopyFeedback;
+    use super::{CopyFeedback, COPY_FEEDBACK_FRAMES};
 
     #[test]
-    fn feedback_expires_after_90_frames() {
+    fn feedback_expires_after_window_frames() {
         let fb = CopyFeedback {
             frame: Some(100),
             copied: true,
             nothing_selected: false,
             error: None,
+            snippet: Some("hello".into()),
         };
-        // Within the window the message shows; afterwards it returns None.
+        // Within the window the message shows (echoing the snippet); on the
+        // frame right after the window it is gone.
+        assert_eq!(fb.message(100), Some("copied: hello".into()));
         assert_eq!(
-            fb.message(100),
-            Some("✓ Copied selection to clipboard".into())
+            fb.message(100 + COPY_FEEDBACK_FRAMES - 1),
+            Some("copied: hello".into())
         );
-        assert_eq!(
-            fb.message(189),
-            Some("✓ Copied selection to clipboard".into())
-        );
-        assert_eq!(fb.message(190), None);
+        assert_eq!(fb.message(100 + COPY_FEEDBACK_FRAMES), None);
         assert_eq!(fb.message(u64::MAX), None);
+    }
+
+    #[test]
+    fn feedback_repaints_once_on_the_expiry_frame() {
+        let fb = CopyFeedback {
+            frame: Some(100),
+            copied: true,
+            nothing_selected: false,
+            error: None,
+            snippet: Some("x".into()),
+        };
+        // The expiry frame still needs one repaint so the strip reverts to its
+        // normal status text; only afterwards can rendering stop.
+        assert!(fb.needs_redraw(100 + COPY_FEEDBACK_FRAMES));
+        assert!(!fb.needs_redraw(100 + COPY_FEEDBACK_FRAMES + 1));
+        assert!(!fb.expired(100 + COPY_FEEDBACK_FRAMES - 1));
+        assert!(fb.expired(100 + COPY_FEEDBACK_FRAMES));
+    }
+
+    #[test]
+    fn failure_and_no_selection_messages() {
+        let failed = CopyFeedback {
+            frame: Some(5),
+            copied: false,
+            nothing_selected: false,
+            error: Some("pbcopy is not installed".into()),
+            snippet: None,
+        };
+        assert_eq!(
+            failed.message(5),
+            Some("copy failed: pbcopy is not installed".into())
+        );
+        let empty = CopyFeedback {
+            frame: Some(5),
+            copied: false,
+            nothing_selected: true,
+            error: None,
+            snippet: None,
+        };
+        assert_eq!(
+            empty.message(5),
+            Some("nothing selected — drag over text to select it first".into())
+        );
     }
 
     #[test]
     fn empty_feedback_is_never_shown() {
         let fb = CopyFeedback::none();
         assert_eq!(fb.message(0), None);
+        assert!(!fb.needs_redraw(0));
         assert!(fb.expired(0));
         assert!(fb.expired(u64::MAX));
     }
+}
+
+/// Append `text` to `out` for a single-line preview: control characters and
+/// runs of whitespace collapse to a single space, and appending stops once
+/// `out` reaches `cap` bytes. Callers that only show a few dozen characters
+/// never pay for scanning content beyond the cap.
+fn append_preview(out: &mut String, text: &str, cap: usize) {
+    for ch in text.chars() {
+        if out.len() >= cap {
+            return;
+        }
+        if ch.is_whitespace() || ch.is_control() {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+}
+
+/// Flatten `text` into a single trimmed line of at most `cap` bytes, used for
+/// the `selected:`/`copied:` feedback snippets. Multi-line selections become
+/// one line (newlines and indentation collapse to spaces).
+pub(crate) fn preview_line(text: &str, cap: usize) -> String {
+    let mut out = String::new();
+    append_preview(&mut out, text, cap);
+    let trimmed = out.trim_end();
+    trimmed.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -601,6 +699,11 @@ pub struct AppState {
     pub input_area: Option<(u16, u16, u16, u16)>,
     /// Last drawn messages (output) rect as (x, y, width, height) — for mouse hit-testing.
     pub messages_area: Option<(u16, u16, u16, u16)>,
+    /// Last drawn feedback/status strip rect as (x, y, width, height). The
+    /// strip sits directly above the input box; clicking it copies the active
+    /// selection (a mouse path that works even in terminals that intercept
+    /// Cmd+C).
+    pub feedback_area: Option<(u16, u16, u16, u16)>,
     /// Vertical scroll of the input content from the last frame — for mouse hit-testing.
     pub input_scroll: u16,
     /// Cursor position the input scroll was last aligned to. When the cursor
@@ -692,9 +795,11 @@ impl AppState {
     }
 
     /// Whether the draw loop should keep re-rendering so the copy feedback can
-    /// disappear on its own once its window elapses.
+    /// disappear on its own once its window elapses. True during the feedback
+    /// window and for one extra frame after it, so the final repaint restores
+    /// the normal status line before rendering stops.
     pub fn copy_feedback_active(&self) -> bool {
-        !self.copy_feedback.expired(self.frame_count)
+        self.copy_feedback.needs_redraw(self.frame_count)
     }
 
     pub fn new(
@@ -715,6 +820,7 @@ impl AppState {
             history_index: None,
             input_area: None,
             messages_area: None,
+            feedback_area: None,
             input_scroll: 0,
             input_scroll_cursor: 0,
             selection: None,
@@ -896,6 +1002,110 @@ impl AppState {
                     parts.push(end_text);
                 }
                 Some(parts.join("\n"))
+            }
+        }
+    }
+
+    /// Whether a completed, non-empty selection exists and can be copied. Used
+    /// to decide whether the feedback strip shows `selected: …` and whether a
+    /// click on the strip should copy. Checks only the selection geometry, so
+    /// it never materializes the selected text.
+    pub fn has_copyable_selection(&self) -> bool {
+        let Some(sel) = self.selection.as_ref() else {
+            return false;
+        };
+        if sel.dragging {
+            return false;
+        }
+        match sel.target {
+            SelectionTarget::Input => self
+                .input_selection()
+                .is_some_and(|(start, end)| start != end),
+            SelectionTarget::Output => self.output_selection().is_some_and(|range| {
+                range.start_row != range.end_row || range.start_col != range.end_col
+            }),
+        }
+    }
+
+    /// A short, single-line preview of the current selection for the feedback
+    /// strip (`selected: {text}`), flattened to one line and capped at
+    /// `max_bytes` so huge selections stay cheap to render every frame.
+    pub fn selection_preview(&self, max_bytes: usize) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        if sel.dragging {
+            return None;
+        }
+        match sel.target {
+            SelectionTarget::Input => {
+                let (start, end) = self.input_selection()?;
+                if start == end {
+                    return None;
+                }
+                // The input may have shifted since the selection was made;
+                // snap to char boundaries so we never panic mid-character.
+                let start = self.input.floor_char_boundary(start.min(self.input.len()));
+                let end = self.input.floor_char_boundary(end.min(self.input.len()));
+                if start == end {
+                    return None;
+                }
+                Some(preview_line(&self.input[start..end], max_bytes))
+            }
+            SelectionTarget::Output => {
+                let range = self.output_selection()?;
+                if range.start_row == range.end_row && range.start_col == range.end_col {
+                    return None;
+                }
+                // Walk only the rows needed to fill the preview cap; rows are
+                // single visual lines, so this stops after a handful of rows
+                // even for a whole-document selection.
+                let mut out = String::new();
+                if range.start_row == range.end_row {
+                    let text = self.virtual_list.row_slice_by_graphemes(
+                        range.start_row as usize,
+                        range.start_col,
+                        range.end_col,
+                    );
+                    return if text.is_empty() {
+                        None
+                    } else {
+                        Some(preview_line(&text, max_bytes))
+                    };
+                }
+                append_preview(
+                    &mut out,
+                    &self.virtual_list.row_slice_by_graphemes(
+                        range.start_row as usize,
+                        range.start_col,
+                        usize::MAX,
+                    ),
+                    max_bytes,
+                );
+                // Row boundaries are newlines in the copied text; feed them
+                // through the same flattener so they become single spaces.
+                for row in (range.start_row + 1)..range.end_row {
+                    if out.len() >= max_bytes {
+                        break;
+                    }
+                    append_preview(&mut out, "\n", max_bytes);
+                    append_preview(&mut out, &self.virtual_list.row_text(row as usize), max_bytes);
+                }
+                if out.len() < max_bytes {
+                    append_preview(&mut out, "\n", max_bytes);
+                    append_preview(
+                        &mut out,
+                        &self.virtual_list.row_slice_by_graphemes(
+                            range.end_row as usize,
+                            0,
+                            range.end_col,
+                        ),
+                        max_bytes,
+                    );
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
             }
         }
     }
@@ -1160,6 +1370,88 @@ mod tests {
             dragging: false,
         });
         assert_eq!(s.selection_text().as_deref(), Some("ow tw"));
+    }
+
+    #[test]
+    fn copyable_selection_reflects_geometry() {
+        let mut s = AppState::new("test-model", None);
+        s.input = "abc def".into();
+
+        // A normal input selection is copyable.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(0),
+            active: SelectionPoint::Input(3),
+            dragging: false,
+        });
+        assert!(s.has_copyable_selection());
+
+        // Still dragging (button held): nothing is copyable yet.
+        s.selection.as_mut().unwrap().dragging = true;
+        assert!(!s.has_copyable_selection());
+        s.selection.as_mut().unwrap().dragging = false;
+
+        // Zero-width selection copies nothing.
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(3),
+            active: SelectionPoint::Input(3),
+            dragging: false,
+        });
+        assert!(!s.has_copyable_selection());
+        assert_eq!(s.selection_preview(200), None);
+
+        s.virtual_list.set_committed(vec![
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("row one")),
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("row two")),
+        ]);
+        s.selection = Some(Selection {
+            target: SelectionTarget::Output,
+            anchor: SelectionPoint::Output(1, 5),
+            active: SelectionPoint::Output(0, 1),
+            dragging: false,
+        });
+        assert!(s.has_copyable_selection());
+    }
+
+    #[test]
+    fn selection_preview_flattens_and_caps() {
+        let mut s = AppState::new("test-model", None);
+
+        // Input containing newlines previews as a single space-joined line.
+        s.input = "line one\n  line two  ".into();
+        s.selection = Some(Selection {
+            target: SelectionTarget::Input,
+            anchor: SelectionPoint::Input(0),
+            active: SelectionPoint::Input(s.input.len()),
+            dragging: false,
+        });
+        assert_eq!(s.selection_preview(200).as_deref(), Some("line one line two"));
+
+        // Multi-row output selection flattens to one line too.
+        s.virtual_list.set_committed(vec![
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("fn main() {")),
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("    let x = 1;")),
+            crate::tui::virtual_list::VItem::new(ratatui::prelude::Line::from("}")),
+        ]);
+        s.selection = Some(Selection {
+            target: SelectionTarget::Output,
+            anchor: SelectionPoint::Output(0, 0),
+            active: SelectionPoint::Output(2, 1),
+            dragging: false,
+        });
+        assert_eq!(
+            s.selection_preview(200).as_deref(),
+            Some("fn main() { let x = 1; }")
+        );
+
+        // The cap bounds the preview length (in bytes).
+        let preview = s.selection_preview(12).expect("preview");
+        assert!(preview.len() <= 16, "preview too long: {preview:?}");
+
+        // Plain-text helper keeps leading whitespace off and collapses runs.
+        assert_eq!(preview_line("  a\n\n\tb  ", 100), "a b");
+        assert_eq!(preview_line("hello world", 5), "hello");
     }
 
     #[test]
