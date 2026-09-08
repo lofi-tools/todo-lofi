@@ -174,7 +174,7 @@ pub fn default_config_jsonc() -> String {
         ),
         (
             "model_families",
-            "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\"",
+            "Model id → response format family: \"reasoning\", \"reasoning_content\", \"plain\", or a built-in family like \"hy3\" (built-in families also apply automatically by model-id pattern — see model_families.rs)",
         ),
         ("benchmark_mode", "Benchmark/headless mode (true/false)"),
         (

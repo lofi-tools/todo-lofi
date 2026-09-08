@@ -43,7 +43,9 @@ pub enum ResponseFormat {
 }
 
 /// All known response formats, keyed by the family name used in
-/// `config.model_families` (e.g. `"stealth/ox-alpha": "reasoning"`).
+/// `config.model_families` (e.g. `"stealth/ox-alpha": "reasoning"`). Built-in
+/// family names (see [`crate::model_families`]) resolve through the registry
+/// so a config value can name a built-in family.
 pub fn family(name: &str) -> Option<ResponseFormat> {
     match name {
         "plain" => Some(ResponseFormat::Plain),
@@ -53,17 +55,23 @@ pub fn family(name: &str) -> Option<ResponseFormat> {
         "reasoning_content" => Some(ResponseFormat::ReasoningField {
             field: "reasoning_content".into(),
         }),
-        _ => None,
+        _ => crate::model_families::family_by_name(name)
+            .and_then(|f| f.reasoning_field)
+            .map(|field| ResponseFormat::ReasoningField {
+                field: field.into(),
+            }),
     }
 }
 
-/// Resolve the response format for a model id from `config.model_families`,
-/// defaulting to [`ResponseFormat::Plain`] when the model is unlisted or the
-/// family name is unknown (an unknown name logs a warning so config typos are
-/// visible instead of silently changing behavior).
+/// Resolve the response format for a model id: an explicit
+/// `config.model_families` entry wins, then the built-in family matching the
+/// model id ([`crate::model_families::family_for_model`]). Defaults to
+/// [`ResponseFormat::Plain`] when nothing matches; an unknown configured
+/// family name logs a warning so config typos are visible instead of silently
+/// changing behavior.
 pub fn format_for(config: &crate::config::AppConfig, model: &str) -> ResponseFormat {
-    match config.model_families.get(model) {
-        Some(name) => match family(name) {
+    if let Some(name) = config.model_families.get(model) {
+        return match family(name) {
             Some(format) => format,
             None => {
                 eprintln!(
@@ -72,6 +80,14 @@ pub fn format_for(config: &crate::config::AppConfig, model: &str) -> ResponseFor
                 );
                 ResponseFormat::Plain
             }
+        };
+    }
+    match crate::model_families::family_for_model(model) {
+        Some(family) => match family.reasoning_field {
+            Some(field) => ResponseFormat::ReasoningField {
+                field: field.into(),
+            },
+            None => ResponseFormat::Plain,
         },
         None => ResponseFormat::Plain,
     }
@@ -93,18 +109,30 @@ pub fn reasoning_field_for(
     model: &str,
 ) -> cersei::provider::ReasoningField {
     use cersei::provider::ReasoningField;
-    match config.model_families.get(model) {
-        Some(name) => match name.as_str() {
+    if let Some(name) = config.model_families.get(model) {
+        return match name.as_str() {
             "reasoning" => ReasoningField::Field("reasoning"),
             "reasoning_content" => ReasoningField::Field("reasoning_content"),
             "plain" => ReasoningField::Off,
-            other => {
-                eprintln!(
-                    "warning: unknown response format family '{other}' for model '{model}' — \
-                     auto-detecting reasoning fields"
-                );
-                ReasoningField::Auto
-            }
+            other => match crate::model_families::family_by_name(other) {
+                Some(family) => match family.reasoning_field {
+                    Some(field) => ReasoningField::Field(field),
+                    None => ReasoningField::Off,
+                },
+                None => {
+                    eprintln!(
+                        "warning: unknown response format family '{other}' for model '{model}' — \
+                         auto-detecting reasoning fields"
+                    );
+                    ReasoningField::Auto
+                }
+            },
+        };
+    }
+    match crate::model_families::family_for_model(model) {
+        Some(family) => match family.reasoning_field {
+            Some(field) => ReasoningField::Field(field),
+            None => ReasoningField::Off,
         },
         None => ReasoningField::Auto,
     }
@@ -303,5 +331,53 @@ data: [DONE]\n";
         // fields only when they think, so auto is the safe default for the
         // live path).
         assert_eq!(reasoning_field_for(&config, "some/other-model"), ReasoningField::Auto);
+    }
+
+    #[test]
+    fn builtin_hy3_family_applies_without_config() {
+        use cersei::provider::ReasoningField;
+        let config = AppConfig::default();
+
+        // The built-in family kicks in with zero config — for the bare wire
+        // id AND the same model served by any provider.
+        assert_eq!(
+            format_for(&config, "hy3"),
+            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+        );
+        assert_eq!(
+            format_for(&config, "b.ai/hy3"),
+            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+        );
+        assert_eq!(
+            reasoning_field_for(&config, "hy3"),
+            ReasoningField::Field("reasoning_content")
+        );
+        assert_eq!(
+            reasoning_field_for(&config, "b.ai/hy3"),
+            ReasoningField::Field("reasoning_content")
+        );
+
+        // An explicit config entry still wins over the built-in default.
+        let mut config = AppConfig::default();
+        config.model_families.insert("hy3".into(), "plain".into());
+        assert_eq!(format_for(&config, "hy3"), ResponseFormat::Plain);
+        assert_eq!(reasoning_field_for(&config, "hy3"), ReasoningField::Off);
+    }
+
+    #[test]
+    fn config_can_name_a_builtin_family() {
+        use cersei::provider::ReasoningField;
+        let mut config = AppConfig::default();
+        // `model_families` values may name a built-in family directly, so a
+        // provider's hy3 id that doesn't contain the marker can still opt in.
+        config.model_families.insert("b.ai/hunyuan-3-pro".into(), "hy3".into());
+        assert_eq!(
+            format_for(&config, "b.ai/hunyuan-3-pro"),
+            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+        );
+        assert_eq!(
+            reasoning_field_for(&config, "b.ai/hunyuan-3-pro"),
+            ReasoningField::Field("reasoning_content")
+        );
     }
 }

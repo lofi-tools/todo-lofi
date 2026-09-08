@@ -11,6 +11,7 @@ pub mod cli_commands;
 pub mod config;
 pub mod direct_prompt;
 pub mod interview;
+pub mod model_families;
 pub mod providers;
 pub mod response_format;
 pub mod signals;

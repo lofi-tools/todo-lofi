@@ -1034,6 +1034,14 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         .cancel_token(params.cancel_token)
         .with_messages(params.messages)
         .tools(tools);
+    // Model-family quirks: chat-style families (e.g. hy3) answer without
+    // tools, so the runner must not force a tool-use round after a complete
+    // answer (that is the "agent won't stop" symptom).
+    builder = builder.no_tool_nudge(
+        crate::model_families::family_for_model(&resolved.model)
+            .map(|f| f.no_tool_nudge)
+            .unwrap_or(true),
+    );
     if let Some(session_id) = params.session_id {
         builder = builder.session_id(session_id);
     }

@@ -131,5 +131,11 @@ ctrlc = { path = "./patched/ctrlc" }
 # models like stealth/ox-alpha stream their thinking there), which the ACP
 # server streams out as `agent_thought_chunk`. Keep its version + the rev
 # below in sync with patched/cersei-provider/Cargo.toml.
+#
+# cersei-agent is vendored the same way so the agent runner's F-08 "answered
+# without tools" nudge can be disabled per agent (AgentBuilder::no_tool_nudge);
+# agent-cli sets it from the model family's quirks so chat-style families
+# (e.g. hy3) stop after answering instead of being forced into a second turn.
 [patch."https://github.com/pacifio/cersei"]
 cersei-provider = { path = "patched/cersei-provider" }
+cersei-agent = { path = "patched/cersei-agent" }

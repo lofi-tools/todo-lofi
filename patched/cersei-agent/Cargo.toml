@@ -1,0 +1,44 @@
+# Standalone crate: keep it out of the root workspace so its own `cargo
+# test` runs here, mirroring how the repo's other patched dep is isolated.
+[workspace]
+
+[package]
+name = "cersei-agent"
+version = "0.2.6"
+edition = "2021"
+authors = ["Adib Mohsin"]
+license = "MIT"
+repository = "https://github.com/pacifio/cersei"
+description = "Agent builder, agentic loop, streaming, and reporters for the Cersei SDK"
+
+# Vendored from upstream cersei (rev 708c5055845ba6c682d92960cec99e3adbcca3e1)
+# and patched so the agent runner's F-08 "no-tool-call" nudge can be turned
+# off per agent (see `AgentBuilder::no_tool_nudge`). The nudge forces a
+# second turn whenever a model answers without calling a tool — wrong for
+# chat-style prompts, and very visible on adaptive-thinking models like hy3.
+# agent-cli sets the flag from the model family's quirks.
+#
+# Keep in sync with upstream: bump version + rev here and in the workspace
+# `[patch."https://github.com/pacifio/cersei"]` when updating.
+
+[dependencies]
+cersei-types = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-provider = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-tools = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-hooks = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-memory = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-mcp = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+cersei-compression = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+async-trait = "0.1"
+tokio = { version = "1.44", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+tempfile = "3"

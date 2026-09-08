@@ -164,6 +164,53 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
         }
     }
 
+    // ─── hy3 (built-in family, reasoning_content format) ────────────────
+
+    #[test]
+    fn hy3_thinking_precedes_answer_and_is_split() {
+        let segments = replay("reasoning_content", "hy3", "short_answer");
+        assert_eq!(segments[0].kind, SegmentKind::Thinking);
+        let thinking = segments[0].text.trim();
+        assert!(!thinking.is_empty());
+        let text_segments: Vec<&str> = segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Text)
+            .map(|s| s.text.as_str())
+            .collect();
+        let answer = text_segments.concat();
+        // The prompt asked for 23 × 17; the answer is the product, not the
+        // thinking.
+        assert!(answer.contains("391"), "answer should contain the product: {answer:?}");
+        assert_ne!(thinking, answer.trim());
+    }
+
+    #[test]
+    fn hy3_fixture_reasoning_content_never_leaks_into_answer() {
+        let segments = replay("reasoning_content", "hy3", "short_answer");
+        let answer: String = segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Text)
+            .map(|s| s.text.as_str())
+            .collect();
+        for marker in ["Compute", "The user asks", "one short line", "Need ensure"] {
+            assert!(
+                !answer.contains(marker),
+                "thinking marker {marker:?} leaked into the answer: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hy3_all_fixtures_have_thinking() {
+        for name in ["short_answer", "thinking_length"] {
+            let segments = replay("reasoning_content", "hy3", name);
+            assert!(
+                segments.iter().any(|s| s.kind == SegmentKind::Thinking),
+                "{name}: expected thinking segments"
+            );
+        }
+    }
+
     // ─── nvidia/nemotron-3-ultra (reasoning_content format) ─────────────
 
     #[test]

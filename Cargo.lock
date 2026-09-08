@@ -1369,7 +1369,6 @@ dependencies = [
 [[package]]
 name = "cersei-agent"
 version = "0.2.6"
-source = "git+https://github.com/pacifio/cersei?rev=708c5055845ba6c682d92960cec99e3adbcca3e1#708c5055845ba6c682d92960cec99e3adbcca3e1"
 dependencies = [
  "anyhow",
  "async-trait",
