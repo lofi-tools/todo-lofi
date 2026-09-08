@@ -1938,21 +1938,52 @@ impl AcpServer {
 
 // ─── Ask-user elicitation (ACP Elicitation standard) ────────────────────────
 
+/// Format an options list for a property `description`, e.g.
+/// `Options: JWT (Stateless tokens); Cookies (Server-side sessions)`. This is
+/// how single-select choices stay visible on clients that render enum
+/// properties as a strict picker with no freeform escape (see below).
+fn options_hint(options: &[Value]) -> String {
+    let listed: Vec<String> = options
+        .iter()
+        .filter_map(|o| {
+            let label = o.get("label").and_then(Value::as_str)?;
+            let desc = o
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|d| !d.is_empty());
+            Some(match desc {
+                Some(desc) => format!("{label} ({desc})"),
+                None => label.to_string(),
+            })
+        })
+        .collect();
+    format!("Options: {} — pick one, or type your own answer.", listed.join("; "))
+}
+
 /// Build the `elicitation/create` (form mode) params for an `ask_user`
 /// request. Each question becomes one property in `requestedSchema`:
-/// single-select options become a string enum (with titled `oneOf` options
-/// when descriptions are present), multi-select options become a string-array
-/// enum, and free-text becomes a validated string. Answer values are the
-/// option labels, which [`answer_from_elicitation`] maps back to indices.
+///
+/// - No options: a plain `string` property (freeform text), optionally with
+///   `minLength`/`maxLength`/`pattern` from the question's validation.
+/// - Options, single-select: also a plain `string` property, with the options
+///   listed in the property `description`. This is deliberate: the TUI always
+///   offers a `[custom]` free-text row for options questions, and ACP clients
+///   like Zed render an `enum`/`oneOf` property as a strict picker whose
+///   validation rejects any value outside the list (no custom escape). A plain
+///   string is the only spec-valid way to let the user type a custom answer,
+///   and the description keeps the suggested choices visible.
+/// - Options, multi-select: a string-array `enum` (checkbox picker; a custom
+///   escape is not representable for arrays).
+///
+/// Answer values are free text; [`answer_value_for_question`] maps a value
+/// that equals an option label back to that option's index, and anything else
+/// to `OtherText`.
 fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &str) -> Value {
     let mut properties = serde_json::Map::new();
     for (i, q) in request.questions.iter().enumerate() {
         let mut prop = serde_json::Map::new();
         let question = q.get("question").and_then(Value::as_str).unwrap_or("?");
         prop.insert("title".into(), json!(question));
-        if let Some(header) = q.get("header").and_then(Value::as_str).filter(|h| !h.is_empty()) {
-            prop.insert("description".into(), json!(header));
-        }
         let options = q.get("options").and_then(Value::as_array);
         let multi_select = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
         if let Some(options) = options {
@@ -1965,41 +1996,11 @@ fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &s
                     Value::Array(options.iter().filter_map(|o| o.get("label").cloned()).collect()),
                 );
                 prop.insert("items".into(), Value::Object(items));
-            } else if options
-                .iter()
-                .any(|o| o.get("description").and_then(Value::as_str).is_some_and(|d| !d.is_empty()))
-            {
-                // Titled single-select: keeps option descriptions visible.
-                prop.insert("type".into(), json!("string"));
-                prop.insert(
-                    "oneOf".into(),
-                    Value::Array(
-                        options
-                            .iter()
-                            .map(|o| {
-                                let mut opt = serde_json::Map::new();
-                                if let Some(label) = o.get("label").and_then(Value::as_str) {
-                                    opt.insert("const".into(), json!(label));
-                                    opt.insert("title".into(), json!(label));
-                                }
-                                if let Some(desc) = o
-                                    .get("description")
-                                    .and_then(Value::as_str)
-                                    .filter(|d| !d.is_empty())
-                                {
-                                    opt.insert("description".into(), json!(desc));
-                                }
-                                Value::Object(opt)
-                            })
-                            .collect(),
-                    ),
-                );
             } else {
+                // Single-select: freeform string with the choices as a hint,
+                // so the user can pick a listed option or type their own.
                 prop.insert("type".into(), json!("string"));
-                prop.insert(
-                    "enum".into(),
-                    Value::Array(options.iter().filter_map(|o| o.get("label").cloned()).collect()),
-                );
+                prop.insert("description".into(), json!(options_hint(options)));
             }
         } else {
             prop.insert("type".into(), json!("string"));
@@ -2013,6 +2014,18 @@ fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &s
                     prop.insert("pattern".into(), json!(p));
                 }
             }
+        }
+        // The header (freebuff's short chip label) rides along in the
+        // description before any options hint, matching the TUI's `header`.
+        if let Some(header) = q.get("header").and_then(Value::as_str).filter(|h| !h.is_empty()) {
+            let existing = prop.get("description").and_then(Value::as_str);
+            prop.insert(
+                "description".into(),
+                json!(match existing {
+                    Some(existing) => format!("{header}\n{existing}"),
+                    None => header.to_string(),
+                }),
+            );
         }
         properties.insert(format!("q{i}"), Value::Object(prop));
     }
@@ -2505,7 +2518,9 @@ mod tests {
             request_id: 7,
             session_id: Some("s1".into()),
             questions: vec![
-                // Single-select with descriptions: titled oneOf options.
+                // Single-select with descriptions: freeform string, options
+                // listed in the description (a strict enum picker has no
+                // freeform escape, so this is what lets users type their own).
                 json!({
                     "question": "Auth method?",
                     "header": "Auth",
@@ -2514,12 +2529,13 @@ mod tests {
                         { "label": "Cookies", "description": "Server-side sessions" },
                     ],
                 }),
-                // Single-select without descriptions: plain enum.
+                // Single-select without descriptions: same freeform string.
                 json!({
                     "question": "Pick one",
                     "options": [{ "label": "A" }, { "label": "B" }],
                 }),
-                // Multi-select: string-array enum.
+                // Multi-select: string-array enum (no freeform escape for
+                // arrays).
                 json!({
                     "question": "Pick many",
                     "multiSelect": true,
@@ -2540,20 +2556,23 @@ mod tests {
         let props = &params["requestedSchema"]["properties"];
         assert_eq!(params["requestedSchema"]["type"], "object");
 
-        // Titled single-select.
+        // Single-select with descriptions: freeform string, header + options
+        // hint in the description, no enum/oneOf constraint.
         let q0 = &props["q0"];
         assert_eq!(q0["type"], "string");
         assert_eq!(q0["title"], "Auth method?");
-        assert_eq!(q0["description"], "Auth");
-        assert_eq!(q0["oneOf"][0]["const"], "JWT");
-        assert_eq!(q0["oneOf"][0]["title"], "JWT");
-        assert_eq!(q0["oneOf"][0]["description"], "Stateless tokens");
+        assert_eq!(
+            q0["description"],
+            "Auth\nOptions: JWT (Stateless tokens); Cookies (Server-side sessions) — pick one, or type your own answer."
+        );
         assert!(q0.get("enum").is_none());
+        assert!(q0.get("oneOf").is_none());
 
-        // Plain enum single-select.
+        // Single-select without descriptions: same freeform shape.
         let q1 = &props["q1"];
         assert_eq!(q1["type"], "string");
-        assert_eq!(q1["enum"], json!(["A", "B"]));
+        assert_eq!(q1["description"], "Options: A; B — pick one, or type your own answer.");
+        assert!(q1.get("enum").is_none());
         assert!(q1.get("oneOf").is_none());
 
         // Multi-select array enum.
