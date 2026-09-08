@@ -102,6 +102,9 @@ pub struct Turn {
     pub blocks: Vec<OutputBlock>,
     /// Plain text for User/System turns.
     pub content: String,
+    /// Suggested next steps from the `suggest_followups` tool, rendered as
+    /// clickable rows at the end of a System turn. Empty for all other turns.
+    pub followups: Vec<crate::subagents::Followup>,
 }
 
 /// Transient feedback after a copy attempt, shown in the one-line strip above
@@ -748,6 +751,18 @@ pub struct AppState {
     pub virtual_list: crate::tui::virtual_list::VirtualList,
     pub messages_dirty: bool,
 
+    // ── Followups (next steps) ──
+    /// Parallel to the committed virtual-list rows: which followup
+    /// `(turn index, followup index)` each row belongs to, if any. Rebuilt
+    /// together with the committed lines so clicks and hovers can map a row
+    /// back to the followup that produced it.
+    pub followup_rows: Vec<Option<(usize, usize)>>,
+    /// The followup the mouse is currently hovering, if any.
+    pub hovered_followup: Option<(usize, usize)>,
+    /// A followup prompt awaiting submission: set when a followup row is
+    /// clicked, drained by the run loop like the Enter key's returned prompt.
+    pub pending_prompt: Option<String>,
+
     // ── Status ──
     pub model: String,
     /// Display id ("provider/model") of the concrete model the agent runs on.
@@ -857,6 +872,9 @@ impl AppState {
             scroll: ScrollState::new(),
             virtual_list: crate::tui::virtual_list::VirtualList::new(),
             messages_dirty: true,
+            followup_rows: Vec::new(),
+            hovered_followup: None,
+            pending_prompt: None,
             model: model.to_string(),
             effective_model: None,
             // session_id: if session_id.len() > 8 {
@@ -1180,6 +1198,7 @@ impl AppState {
                 role: TurnRole::Assistant,
                 blocks: std::mem::take(&mut self.active_blocks),
                 content: String::new(),
+                followups: Vec::new(),
             });
             self.turn_count += 1;
         }
@@ -1195,6 +1214,7 @@ impl AppState {
             role: TurnRole::User,
             content: text.to_string(),
             blocks: Vec::new(),
+            followups: Vec::new(),
         });
         self.messages_dirty = true;
         self.dirty = true;
@@ -1206,6 +1226,24 @@ impl AppState {
             role: TurnRole::System,
             content: text.into(),
             blocks: Vec::new(),
+            followups: Vec::new(),
+        });
+        self.messages_dirty = true;
+        self.dirty = true;
+    }
+
+    /// Add a system turn carrying suggested next steps. Each followup is
+    /// rendered as a clickable row; clicking one sends its prompt to the
+    /// model (see `handle_mouse` in event_loop.rs).
+    pub fn push_followups(&mut self, followups: Vec<crate::subagents::Followup>) {
+        if followups.is_empty() {
+            return;
+        }
+        self.turns.push(Turn {
+            role: TurnRole::System,
+            content: "Suggested next steps".into(),
+            blocks: Vec::new(),
+            followups,
         });
         self.messages_dirty = true;
         self.dirty = true;

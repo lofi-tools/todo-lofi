@@ -195,6 +195,7 @@ pub async fn run(
                             {
                                 state.is_streaming = true;
                                 state.stream_start = Some(Instant::now());
+                                state.hovered_followup = None;
                                 state.scroll.scroll_to_bottom();
                                 let (effective_provider, effective_model) = runtime.effective();
                                 agent_run = Some(AgentRun {
@@ -209,6 +210,22 @@ pub async fn run(
                         }
                         Event::Mouse(mouse) => {
                             handle_mouse(&mut state, mouse);
+                            // A followup-row click sets a pending prompt;
+                            // launch it exactly like a submitted input line.
+                            if let Some(prompt) = state.pending_prompt.take() {
+                                state.is_streaming = true;
+                                state.stream_start = Some(Instant::now());
+                                state.scroll.scroll_to_bottom();
+                                let (effective_provider, effective_model) = runtime.effective();
+                                agent_run = Some(AgentRun {
+                                    stream: runtime.agent().run_stream(&prompt),
+                                    prompt: prompt.clone(),
+                                    provider: effective_provider,
+                                    model: effective_model,
+                                    produced_output: false,
+                                });
+                            }
+                            state.dirty = true;
                         }
                         Event::Paste(text) if !state.is_streaming => {
                             state.input.insert_str(state.cursor_pos, &text);
@@ -1053,9 +1070,28 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Which followup (turn index, followup index) the virtual-list row at the
+/// given terminal position belongs to, if the row is a followup row.
+fn followup_at_pos(state: &AppState, row: u16, col: u16) -> Option<(usize, usize)> {
+    let (x, y, w, h) = state.messages_area?;
+    if row < y || row >= y + h || col < x || col >= x + w {
+        return None;
+    }
+    let total = state.virtual_list.total_height();
+    if total == 0 {
+        return None;
+    }
+    let offset = state.virtual_list.effective_offset();
+    let idx = ((offset as u32 + (row - y) as u32).min(total as u32 - 1)) as usize;
+    state.followup_rows.get(idx).copied().flatten()
+}
+
 /// Handle mouse events: the scroll wheel scrolls the focused area; a left
 /// click-drag selects text in the output or input box (a plain click in the
-/// input box also moves the cursor to the clicked character).
+/// input box also moves the cursor to the clicked character). A click on a
+/// suggested-next-steps row sends that followup's prompt to the model (via
+/// `state.pending_prompt`, drained by the run loop) and hovering a row
+/// highlights it with a light green background.
 fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -1106,9 +1142,49 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
         return;
     }
 
+    // Mouse moved — update the hovered followup row (highlighted with a light
+    // green background). Only when not dragging so an active text selection
+    // never gets cleared by the committed-lines rebuild below.
+    if let MouseEventKind::Moved = mouse.kind {
+        let dragging = state
+            .selection
+            .as_ref()
+            .is_some_and(|s| s.dragging);
+        if !dragging {
+            let hovered = followup_at_pos(state, mouse.row, mouse.column);
+            if hovered != state.hovered_followup {
+                state.hovered_followup = hovered;
+                // Hover styling is baked into the committed rows, so a hover
+                // change requires rebuilding them (like a width change).
+                state.messages_dirty = true;
+                state.dirty = true;
+            }
+        }
+        return;
+    }
+
     match mouse.kind {
         // Left button down — start a selection in the widget under the cursor.
         MouseEventKind::Down(MouseButton::Left) => {
+            // A click on a suggested-next-steps row sends that followup's
+            // prompt to the model (mirroring the freebuff card click). It
+            // takes priority over text selection on the same row, and only
+            // fires while idle — same as the Enter key's submit guard.
+            if !state.is_streaming
+                && let Some((turn_idx, fu_idx)) =
+                    followup_at_pos(state, mouse.row, mouse.column)
+                && let Some(followup) = state
+                    .turns
+                    .get(turn_idx)
+                    .and_then(|t| t.followups.get(fu_idx))
+            {
+                let prompt = followup.prompt.clone();
+                state.hovered_followup = None;
+                state.pending_prompt = Some(prompt.clone());
+                state.push_user(&prompt);
+                state.dirty = true;
+                return;
+            }
             // A click on the feedback strip copies the active selection. This
             // is the mouse path for copying: it works in every terminal, even
             // ones that intercept Cmd+C (macOS terminals, the Zed terminal)
@@ -2318,22 +2394,16 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 role: crate::tui::app::TurnRole::System,
                 content: format!("Error: {msg}"),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             });
         }
         AgentEvent::Complete(_) => {
             state.commit_turn();
             state.is_streaming = false;
             // Render the followup suggestions the agent proposed via the
-            // suggest_followups tool.
-            let followups = runtime.take_followups();
-            if !followups.is_empty() {
-                let body = followups
-                    .iter()
-                    .map(|f| format!("• {} — {}", f.label, f.prompt))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                state.push_system(format!("Suggested next steps:\n{body}"));
-            }
+            // suggest_followups tool as clickable rows; clicking one sends
+            // its prompt to the model (see `handle_mouse`).
+            state.push_followups(runtime.take_followups());
         }
         _ => {}
     }
@@ -2631,12 +2701,14 @@ fn handle_slash_command(
                         "Rewound {removed} turn(s). You can now re-send your last message."
                     ),
                     blocks: Vec::new(),
+                    followups: Vec::new(),
                 });
             } else {
                 state.turns.push(crate::tui::app::Turn {
                     role: crate::tui::app::TurnRole::System,
                     content: "Nothing to rewind.".into(),
                     blocks: Vec::new(),
+                    followups: Vec::new(),
                 });
             }
         }
@@ -2676,6 +2748,7 @@ fn handle_slash_command(
                 role: crate::tui::app::TurnRole::System,
                 content: "Memory is injected into the system prompt automatically.\nUse AGENTS.md or .abstract/instructions.md in your project for persistent instructions.".into(),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             });
         }
         // "sessions" | "session" | "ls" => {
@@ -2796,6 +2869,7 @@ fn handle_slash_command(
                 role: crate::tui::app::TurnRole::System,
                 content: "Compaction will run automatically at 90% context usage.".into(),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             });
         }
         "proxy" => {
@@ -2838,6 +2912,7 @@ fn handle_slash_command(
                     "Proxy: {status}\nURL: {proxy_url}\nAccounts:\n{accounts_str}\n\nConfigure in .abstract/config.toml:\n[proxy]\nenabled = true\nurl = \"http://localhost:8317/v1\""
                 ),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             });
         }
         "provider" => {
@@ -2851,6 +2926,7 @@ fn handle_slash_command(
                 role: crate::tui::app::TurnRole::System,
                 content: format!("Unknown command: /{cmd}. Type /help for commands."),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             });
         }
     }
@@ -3735,6 +3811,101 @@ mod tests {
         // A click outside both boxes clears the selection.
         handle_mouse(&mut s, left_down(5, 30));
         assert!(s.selection.is_none());
+    }
+
+    fn moved(row: u16, col: u16) -> MouseEvent {
+        use crossterm::event::MouseEventKind;
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn state_with_followups() -> AppState {
+        use crate::tui::{app::Turn, virtual_list::VItem};
+        use ratatui::prelude::*;
+        let mut s = state();
+        s.messages_area = Some((2, 0, 40, 10));
+        s.virtual_list.set_viewport(10);
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("  ╭╌ Suggested next steps")),
+            VItem::new(Line::from("  ╎ • Add tests — Add tests for the picker")),
+            VItem::new(Line::from("  ╎ • Run checks — Run cargo check")),
+            VItem::new(Line::from("  ╰╌")),
+            VItem::new(Line::default()),
+        ]);
+        s.followup_rows = vec![None, Some((0, 0)), Some((0, 1)), None, None];
+        s.turns.push(Turn {
+            role: crate::tui::app::TurnRole::System,
+            content: "Suggested next steps".into(),
+            blocks: Vec::new(),
+            followups: vec![
+                crate::subagents::Followup {
+                    label: "Add tests".into(),
+                    prompt: "Add tests for the picker".into(),
+                },
+                crate::subagents::Followup {
+                    label: "Run checks".into(),
+                    prompt: "Run cargo check".into(),
+                },
+            ],
+        });
+        s
+    }
+
+    #[test]
+    fn mouse_move_over_followup_sets_hover_and_leaving_clears_it() {
+        let mut s = state_with_followups();
+
+        // Moving over the first followup row (index 1; row 0 is the header)
+        // highlights it.
+        handle_mouse(&mut s, moved(1, 10));
+        assert_eq!(s.hovered_followup, Some((0, 0)));
+        assert!(s.messages_dirty, "hover change should rebuild committed rows");
+
+        // Moving onto the second followup row moves the highlight.
+        handle_mouse(&mut s, moved(2, 10));
+        assert_eq!(s.hovered_followup, Some((0, 1)));
+
+        // Moving off the followup block clears it.
+        handle_mouse(&mut s, moved(3, 10));
+        assert_eq!(s.hovered_followup, None);
+    }
+
+    #[test]
+    fn clicking_followup_sends_prompt_and_skips_selection() {
+        let mut s = state_with_followups();
+
+        // A click on the second followup row (index 2) sends its prompt and
+        // shows a user turn, without starting a text selection.
+        handle_mouse(&mut s, left_down(2, 20));
+        assert_eq!(s.pending_prompt.as_deref(), Some("Run cargo check"));
+        assert!(s.selection.is_none());
+        let last = s.turns.last().unwrap();
+        assert_eq!(last.role, crate::tui::app::TurnRole::User);
+        assert_eq!(last.content, "Run cargo check");
+    }
+
+    #[test]
+    fn click_outside_followup_block_still_selects_text() {
+        use crate::tui::virtual_list::VItem;
+        use ratatui::prelude::*;
+
+        let mut s = state();
+        s.messages_area = Some((2, 0, 20, 10));
+        s.virtual_list.set_viewport(10);
+        s.virtual_list.set_committed(vec![
+            VItem::new(Line::from("line one")),
+            VItem::new(Line::from("line two")),
+        ]);
+
+        // No followup rows: a plain click starts an output selection as before.
+        handle_mouse(&mut s, left_down(0, 3));
+        let sel = s.selection.expect("selection started");
+        assert_eq!(sel.target, SelectionTarget::Output);
+        assert_eq!(s.pending_prompt, None);
     }
 
     fn scroll_up(row: u16, col: u16) -> MouseEvent {

@@ -1190,7 +1190,8 @@ pub mod messages {
         // to a text position.
         state.messages_area = Some((area.x, area.y, area.width, area.height));
 
-        // Rebuild committed items only when dirty or width changed
+        // Rebuild committed items only when dirty or width changed (or the
+        // hovered followup changed — hover styling is baked into the rows).
         if state.messages_dirty || state.virtual_list.width_changed(width) {
             // Rebuilding shifts rows — a stale output selection would highlight
             // the wrong text.
@@ -1203,8 +1204,15 @@ pub mod messages {
             ) {
                 state.selection = None;
             }
-            let committed = build_committed_lines(&state.turns, theme, width, state.frame_count);
+            let (committed, followup_rows) = build_committed_lines(
+                &state.turns,
+                theme,
+                width,
+                state.frame_count,
+                state.hovered_followup,
+            );
             state.virtual_list.set_committed(committed);
+            state.followup_rows = followup_rows;
             state.virtual_list.set_width(width);
             state.messages_dirty = false;
         }
@@ -1229,62 +1237,154 @@ pub mod messages {
     }
 
     /// Build lines for all committed turns (cached, not rebuilt per frame).
+    /// Build committed rows for all turns, plus a parallel map telling which
+    /// followup `(turn index, followup index)` each row belongs to (None for
+    /// every non-followup row). The map lets mouse clicks and hovers translate
+    /// a virtual-list row back into a `Followup` to act on.
     fn build_committed_lines(
         turns: &[crate::tui::app::Turn],
         theme: &Theme,
         width: u16,
         frame_count: u64,
-    ) -> Vec<VItem> {
+        hovered_followup: Option<(usize, usize)>,
+    ) -> (Vec<VItem>, Vec<Option<(usize, usize)>>) {
         let mut items = Vec::new();
+        let mut followup_rows = Vec::new();
+        // Push one row, recording which followup it belongs to (None for
+        // ordinary rows). Keeps `items` and `followup_rows` in lockstep.
+        let push = |items: &mut Vec<VItem>,
+                        followup_rows: &mut Vec<Option<(usize, usize)>>,
+                        line: Line<'static>,
+                        followup: Option<(usize, usize)>| {
+            items.push(VItem::new(line));
+            followup_rows.push(followup);
+        };
 
-        for turn in turns {
+        for (turn_idx, turn) in turns.iter().enumerate() {
             match turn.role {
                 TurnRole::User => {
                     // Freebuff MessageWithAgents: a 1px colored vertical rule
                     // beside user messages rather than a full border.
                     let wrapped = wrap_text(&turn.content, width as usize);
                     for wline in &wrapped {
-                        items.push(VItem::new(Line::from(vec![
-                            Span::styled(BORDER_V, theme.accent_style()),
-                            Span::styled(wline.clone(), Style::default().fg(theme.user_msg)),
-                        ])));
+                        push(
+                            &mut items,
+                            &mut followup_rows,
+                            Line::from(vec![
+                                Span::styled(BORDER_V, theme.accent_style()),
+                                Span::styled(wline.clone(), Style::default().fg(theme.user_msg)),
+                            ]),
+                            None,
+                        );
                     }
-                    items.push(VItem::new(Line::default()));
+                    push(
+                        &mut items,
+                        &mut followup_rows,
+                        Line::default(),
+                        None,
+                    );
                 }
                 TurnRole::Assistant => {
                     // Render the turn's blocks in arrival order: text,
                     // thinking, and tool calls interleaved as they happened.
                     for block in &turn.blocks {
-                        items.extend(render_block_lines(block, theme, width, frame_count));
+                        let block_items = render_block_lines(block, theme, width, frame_count);
+                        for item in block_items {
+                            push(&mut items, &mut followup_rows, item.line, None);
+                        }
                     }
-                    items.push(VItem::new(Line::default()));
+                    push(
+                        &mut items,
+                        &mut followup_rows,
+                        Line::default(),
+                        None,
+                    );
                 }
                 TurnRole::System => {
                     // Freebuff ghost/ephemeral elements: dashed rounded border
                     // (DASHED_BORDER_CHARS) — system turns are transient.
                     let border = Style::default().fg(theme.border);
-                    items.push(VItem::new(Line::from(Span::styled(
-                        format!("  {DASHED_TL} system"),
-                        border,
-                    ))));
-                    // Leave room for the left border prefix so wrapped rows fit.
-                    let wrapped = wrap_text(&turn.content, (width as usize).saturating_sub(7));
-                    for wline in &wrapped {
-                        items.push(VItem::new(Line::from(vec![
-                            Span::styled(format!("  {DASHED_V}"), border),
-                            Span::styled(wline.clone(), theme.dimmed()),
-                        ])));
+                    if turn.followups.is_empty() {
+                        push(
+                            &mut items,
+                            &mut followup_rows,
+                            Line::from(Span::styled(
+                                format!("  {DASHED_TL} system"),
+                                border,
+                            )),
+                            None,
+                        );
+                        // Leave room for the left border prefix so wrapped rows fit.
+                        let wrapped = wrap_text(&turn.content, (width as usize).saturating_sub(7));
+                        for wline in &wrapped {
+                            push(
+                                &mut items,
+                                &mut followup_rows,
+                                Line::from(vec![
+                                    Span::styled(format!("  {DASHED_V}"), border),
+                                    Span::styled(wline.clone(), theme.dimmed()),
+                                ]),
+                                None,
+                            );
+                        }
+                    } else {
+                        // Suggested next steps: one clickable row per followup.
+                        // The label is the row's title; the prompt (sent when
+                        // clicked) follows it dimmed so the whole row reads as
+                        // a chip. Hovering swaps in success-green on a light
+                        // green background (see `followup_hover_style`).
+                        push(
+                            &mut items,
+                            &mut followup_rows,
+                            Line::from(Span::styled(
+                                format!("  {DASHED_TL} Suggested next steps"),
+                                border,
+                            )),
+                            None,
+                        );
+                        for (fu_idx, followup) in turn.followups.iter().enumerate() {
+                            let hovered = hovered_followup == Some((turn_idx, fu_idx));
+                            let style = if hovered {
+                                theme.followup_hover_style()
+                            } else {
+                                theme.dimmed()
+                            };
+                            let row_text = format!("• {} — {}", followup.label, followup.prompt);
+                            let wrapped =
+                                wrap_text(&row_text, (width as usize).saturating_sub(7));
+                            for wline in wrapped {
+                                push(
+                                    &mut items,
+                                    &mut followup_rows,
+                                    Line::from(vec![
+                                        Span::styled(format!("  {DASHED_V}"), border),
+                                        Span::styled(wline, style),
+                                    ]),
+                                    Some((turn_idx, fu_idx)),
+                                );
+                            }
+                        }
                     }
-                    items.push(VItem::new(Line::from(Span::styled(
-                        format!("  {DASHED_BL}"),
-                        border,
-                    ))));
-                    items.push(VItem::new(Line::default()));
+                    push(
+                        &mut items,
+                        &mut followup_rows,
+                        Line::from(Span::styled(
+                            format!("  {DASHED_BL}"),
+                            border,
+                        )),
+                        None,
+                    );
+                    push(
+                        &mut items,
+                        &mut followup_rows,
+                        Line::default(),
+                        None,
+                    );
                 }
             }
         }
 
-        items
+        (items, followup_rows)
     }
 
     /// Build lines for active streaming content (rebuilt every frame — cheap).
@@ -1455,6 +1555,7 @@ pub mod messages {
             let turn = Turn {
                 role: TurnRole::Assistant,
                 content: String::new(),
+                followups: Vec::new(),
                 blocks: vec![
                     OutputBlock::Text("leading words".into()),
                     OutputBlock::Tool(ToolCall {
@@ -1471,7 +1572,7 @@ pub mod messages {
                     OutputBlock::Text("trailing words".into()),
                 ],
             };
-            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let (lines, _) = build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
             let joined: String = lines
                 .iter()
                 .map(|item| {
@@ -1505,8 +1606,9 @@ pub mod messages {
                 role: TurnRole::Assistant,
                 content: String::new(),
                 blocks: vec![OutputBlock::Thinking("step by step reasoning".into())],
+                followups: Vec::new(),
             };
-            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let (lines, _) = build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
             let texts: Vec<String> = lines
                 .iter()
                 .map(|item| {
@@ -1545,8 +1647,9 @@ pub mod messages {
                 role: TurnRole::Assistant,
                 content: String::new(),
                 blocks: vec![OutputBlock::Thinking(text)],
+                followups: Vec::new(),
             };
-            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let (lines, _) = build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
             let texts: Vec<String> = lines
                 .iter()
                 .map(|item| {
@@ -1579,8 +1682,9 @@ pub mod messages {
                 role: TurnRole::System,
                 content: "model a failed — falling back to model b".into(),
                 blocks: Vec::new(),
+                followups: Vec::new(),
             };
-            let lines = build_committed_lines(&[turn], &Theme::dark(), 80, 0);
+            let (lines, _) = build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
             let texts: Vec<String> = lines
                 .iter()
                 .map(|item| {
@@ -1600,6 +1704,118 @@ pub mod messages {
                     ""
                 ]
             );
+        }
+
+        #[test]
+        fn followup_turn_renders_clickable_rows_with_row_map() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{Turn, TurnRole},
+                theme::Theme,
+            };
+
+            let turn = Turn {
+                role: TurnRole::System,
+                content: "Suggested next steps".into(),
+                blocks: Vec::new(),
+                followups: vec![
+                    crate::subagents::Followup {
+                        label: "Add tests".into(),
+                        prompt: "Add tests for the new picker".into(),
+                    },
+                    crate::subagents::Followup {
+                        label: "Run checks".into(),
+                        prompt: "Run cargo check and the test suite".into(),
+                    },
+                ],
+            };
+            let (lines, row_map) =
+                build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|item| {
+                    item.line
+                        .spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect();
+            assert_eq!(texts[0], "  ╭╌ Suggested next steps");
+            assert!(texts[1].contains("• Add tests — Add tests for the new picker"));
+            assert!(texts[2].contains("• Run checks — Run cargo check and the test suite"));
+            assert_eq!(texts[3], "  ╰╌");
+
+            // Every followup row maps back to its followup; non-followup rows
+            // (header, footer, blank) map to None.
+            assert_eq!(row_map[0], None);
+            assert_eq!(row_map[1], Some((0, 0)));
+            assert_eq!(row_map[2], Some((0, 1)));
+            assert_eq!(row_map[3], None);
+            assert_eq!(row_map[4], None);
+        }
+
+        #[test]
+        fn followup_row_wraps_and_each_wrapped_line_stays_clickable() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{Turn, TurnRole},
+                theme::Theme,
+            };
+
+            // A prompt long enough to wrap onto a second row at 24 cols.
+            let turn = Turn {
+                role: TurnRole::System,
+                content: "Suggested next steps".into(),
+                blocks: Vec::new(),
+                followups: vec![crate::subagents::Followup {
+                    label: "Long".into(),
+                    prompt: "a very long prompt that definitely wraps onto two rows".into(),
+                }],
+            };
+            let (lines, row_map) =
+                build_committed_lines(&[turn], &Theme::dark(), 24, 0, None);
+            assert!(lines.len() > 3, "expected the row to wrap: {} lines", lines.len());
+            // All wrapped lines of the followup map to the same followup.
+            let fu_rows: Vec<_> = row_map
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| m.map(|f| (i, f)))
+                .collect();
+            assert!(fu_rows.len() >= 2, "{fu_rows:?}");
+            assert!(fu_rows.iter().all(|(_, f)| *f == (0, 0)), "{fu_rows:?}");
+        }
+
+        #[test]
+        fn hovered_followup_row_uses_success_green_on_light_green() {
+            use super::build_committed_lines;
+            use crate::tui::{
+                app::{Turn, TurnRole},
+                theme::Theme,
+            };
+
+            let theme = Theme::dark();
+            let turn = Turn {
+                role: TurnRole::System,
+                content: "Suggested next steps".into(),
+                blocks: Vec::new(),
+                followups: vec![crate::subagents::Followup {
+                    label: "Add tests".into(),
+                    prompt: "Add tests for the new picker".into(),
+                }],
+            };
+            // Hovering followup (0, 0) styles its row with success-green text
+            // on the light-green hover background.
+            let (lines, _) =
+                build_committed_lines(&[turn.clone()], &theme, 80, 0, Some((0, 0)));
+            let row_style = lines[1].line.spans[1].style;
+            assert_eq!(row_style.fg, Some(theme.success));
+            assert_eq!(row_style.bg, Some(theme.followup_hover_bg));
+
+            // The same turn without hover keeps the dimmed style.
+            let (lines, _) = build_committed_lines(&[turn], &theme, 80, 0, None);
+            let row_style = lines[1].line.spans[1].style;
+            assert_ne!(row_style.bg, Some(theme.followup_hover_bg));
         }
     }
 }

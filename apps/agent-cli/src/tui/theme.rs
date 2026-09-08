@@ -35,6 +35,9 @@ pub struct Theme {
     pub diff_added: Color,
     pub diff_removed: Color,
     pub diff_modified: Color,
+    /// Background of a hovered followup row: a light green tint behind the
+    /// success-green text (freebuff's followup-chip hover).
+    pub followup_hover_bg: Color,
 }
 
 impl Theme {
@@ -72,6 +75,7 @@ impl Theme {
             diff_added: Color::Rgb(77, 77, 77),      // #4d4d4d
             diff_removed: Color::Rgb(119, 119, 119), // #777777
             diff_modified: Color::Rgb(192, 192, 192), // #c0c0c0
+            followup_hover_bg: Color::Rgb(0x14, 0x2e, 0x1e), // light green tint on black
         }
     }
 
@@ -109,6 +113,7 @@ impl Theme {
             diff_added: Color::Rgb(0, 150, 50),
             diff_removed: Color::Rgb(200, 30, 30),
             diff_modified: Color::Rgb(0, 100, 200),
+            followup_hover_bg: Color::Rgb(0xdc, 0xfc, 0xe7), // freebuff light success green
         }
     }
 
@@ -142,6 +147,7 @@ impl Theme {
             diff_added: Color::Rgb(133, 153, 0),
             diff_removed: Color::Rgb(220, 50, 47),
             diff_modified: Color::Rgb(38, 139, 210),
+            followup_hover_bg: Color::Rgb(0x0b, 0x2e, 0x1e),
         }
     }
 
@@ -176,6 +182,11 @@ impl Theme {
 
     pub fn success_style(&self) -> Style {
         Style::default().fg(self.success)
+    }
+
+    /// A hovered followup row: success-green text on a light green background.
+    pub fn followup_hover_style(&self) -> Style {
+        Style::default().fg(self.success).bg(self.followup_hover_bg)
     }
 
     pub fn error_style(&self) -> Style {
