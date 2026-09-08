@@ -99,6 +99,20 @@ pub struct Agent {
     /// nudge may fire. Off for model families that answer chat-style prompts
     /// without tool use (agent-cli sets it from the model family's quirks).
     pub no_tool_nudge: bool,
+    /// Whether the provider accepts a request whose message history ends on an
+    /// assistant message (the "assistant prefill" capability). When false, the
+    /// runner injects `<system>Continue from where you left off.</system>`
+    /// before any request that would otherwise end on an assistant turn
+    /// (freebuff's assistant-prefill continuation).
+    pub(crate) supports_assistant_prefill: bool,
+    /// Optional JSON-schema contract for the agent's final output. When set,
+    /// the runner registers a `set_output` tool and refuses to end a turn that
+    /// never set an output (freebuff's missing-required-output nudge).
+    pub(crate) output_schema: Option<serde_json::Value>,
+    /// Cap on consecutive same-source stream-error recoveries before the run
+    /// gives up with a terminal error (freebuff's
+    /// `MAX_CONSECUTIVE_STREAM_RECOVERIES`).
+    pub(crate) max_consecutive_stream_recoveries: u32,
     messages: Arc<parking_lot::Mutex<Vec<Message>>>,
     cumulative_usage: Arc<parking_lot::Mutex<Usage>>,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -241,6 +255,9 @@ pub struct AgentBuilder {
     initial_messages: Option<Vec<Message>>,
     benchmark_mode: bool,
     no_tool_nudge: bool,
+    supports_assistant_prefill: bool,
+    output_schema: Option<serde_json::Value>,
+    max_consecutive_stream_recoveries: u32,
     extensions: cersei_tools::Extensions,
 }
 
@@ -276,6 +293,9 @@ impl Default for AgentBuilder {
             initial_messages: None,
             benchmark_mode: false,
             no_tool_nudge: true,
+            supports_assistant_prefill: true,
+            output_schema: None,
+            max_consecutive_stream_recoveries: 3,
             extensions: cersei_tools::Extensions::default(),
         }
     }
@@ -454,6 +474,35 @@ impl AgentBuilder {
         self
     }
 
+    /// Whether the provider accepts a request whose history ends on an
+    /// assistant message. Default `true` (the OpenAI-compatible providers
+    /// agent-cli uses accept trailing assistant messages). Set `false` for
+    /// providers that reject assistant-ending histories; the runner then
+    /// injects a `<system>Continue from where you left off.</system>` user
+    /// message before such a request.
+    pub fn assistant_prefill(mut self, enabled: bool) -> Self {
+        self.supports_assistant_prefill = enabled;
+        self
+    }
+
+    /// Require the agent to produce a structured output matching this
+    /// JSON-schema before ending its turn. When set, the runner registers a
+    /// `set_output` tool and, on a turn that tries to end without an output,
+    /// injects the freebuff missing-required-output nudge once and forces the
+    /// loop to continue.
+    pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    /// Maximum number of consecutive same-source stream-error recoveries
+    /// before the run fails with a terminal error (freebuff's
+    /// `MAX_CONSECUTIVE_STREAM_RECOVERIES`). Default `3`.
+    pub fn max_consecutive_stream_recoveries(mut self, n: u32) -> Self {
+        self.max_consecutive_stream_recoveries = n;
+        self
+    }
+
     /// Inject a type-map that is cloned into every `ToolContext` this agent
     /// builds, letting tools retrieve runtime-injected handles (dynamic tool
     /// registry, sandbox, Mailbox/KvStore) via `ctx.extensions.get::<T>()`.
@@ -476,9 +525,17 @@ impl AgentBuilder {
             tx
         });
 
+        // A declared output schema is enforced with the `set_output` tool:
+        // register it at build time so it is part of the tool surface (and
+        // reachable by the runner's tool dispatch).
+        let mut tools = self.tools;
+        if self.output_schema.is_some() && !tools.iter().any(|t| t.name() == "set_output") {
+            tools.push(Box::new(runner::SetOutputTool));
+        }
+
         Ok(Agent {
             provider,
-            tools: self.tools,
+            tools,
             system_prompt: self.system_prompt,
             append_system_prompt: self.append_system_prompt,
             model: self.model,
@@ -508,6 +565,9 @@ impl AgentBuilder {
             compression_level: Arc::new(parking_lot::Mutex::new(self.compression_level)),
             benchmark_mode: self.benchmark_mode,
             no_tool_nudge: self.no_tool_nudge,
+            supports_assistant_prefill: self.supports_assistant_prefill,
+            output_schema: self.output_schema,
+            max_consecutive_stream_recoveries: self.max_consecutive_stream_recoveries,
             messages: Arc::new(parking_lot::Mutex::new(
                 self.initial_messages.unwrap_or_default(),
             )),
@@ -571,6 +631,34 @@ mod tests {
             .build()
             .unwrap();
         assert!(!agent.no_tool_nudge);
+    }
+
+    #[test]
+    fn freebuff_flags_have_safe_defaults_and_setters() {
+        // Defaults: assistant prefill assumed (OpenAI-compatible providers
+        // accept trailing assistant messages), no output contract, and a
+        // small stream-recovery cap.
+        let agent = Agent::builder().provider(StubProvider).build().unwrap();
+        assert!(agent.supports_assistant_prefill);
+        assert!(agent.output_schema.is_none());
+        assert_eq!(agent.max_consecutive_stream_recoveries, 3);
+        assert!(
+            !agent.tools.iter().any(|t| t.name() == "set_output"),
+            "no output schema means no set_output tool"
+        );
+
+        // Opting into the output contract registers the set_output tool.
+        let agent = Agent::builder()
+            .provider(StubProvider)
+            .assistant_prefill(false)
+            .output_schema(serde_json::json!({ "type": "object" }))
+            .max_consecutive_stream_recoveries(2)
+            .build()
+            .unwrap();
+        assert!(!agent.supports_assistant_prefill);
+        assert!(agent.output_schema.is_some());
+        assert_eq!(agent.max_consecutive_stream_recoveries, 2);
+        assert!(agent.tools.iter().any(|t| t.name() == "set_output"));
     }
 
     #[test]

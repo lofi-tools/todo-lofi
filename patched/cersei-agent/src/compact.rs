@@ -291,7 +291,10 @@ fn carries_tool_result(msg: &Message) -> bool {
 /// reject. It only ever keeps *more* context than asked, never less.
 pub fn pair_aware_split(msgs: &[Message], keep_n: usize) -> usize {
     let mut split = msgs.len().saturating_sub(keep_n);
-    while split > 0 && carries_tool_result(&msgs[split]) {
+    // `msgs[split]` is the first *kept* message; the guard `split < msgs.len()`
+    // matters when keep_n is 0 (a full-history compaction), where split starts
+    // at len and would otherwise index out of bounds.
+    while split > 0 && split < msgs.len() && carries_tool_result(&msgs[split]) {
         split -= 1;
     }
     split

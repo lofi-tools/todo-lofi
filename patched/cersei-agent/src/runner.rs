@@ -302,6 +302,319 @@ pub fn apply_tool_result_budget(messages: &mut [Message], budget_chars: usize) {
     }
 }
 
+// ─── Freebuff-style injected messages ───────────────────────────────────────
+
+/// Wrap text in `<system>...</system>` tags — the freebuff convention for
+/// auto-injected notes. These are pushed as *user-role* messages whose text
+/// carries the tags, not real system-role messages, so the model reads them
+/// as authoritative-but-clearly-injected context. Every runner injection goes
+/// through here for consistency and easy future search/removal.
+fn with_system_tags(text: impl AsRef<str>) -> String {
+    format!("<system>{}</system>", text.as_ref())
+}
+
+/// Strip freebuff-style thinking scaffolding from a text blob: paired
+/// `thinking.../thinking`, a trailing unclosed `thinking...`, and stray
+/// `response` / `/response` tags some native-reasoning providers leak.
+fn strip_think_tags(text: &str) -> String {
+    let mut out = text.to_string();
+    // Paired <thinking>...</thinking> (and <response>...</response>).
+    for (open, close) in [("<thinking>", "</thinking>"), ("<response>", "</response>")] {
+        while let (Some(start), Some(end)) = (out.find(open), out.find(close)) {
+            if end < start {
+                break;
+            }
+            let end = end + close.len();
+            out.replace_range(start..end, "");
+        }
+    }
+    // Trailing unclosed <thinking> (the provider was cut off mid-tag).
+    if let Some(start) = out.find("<thinking>") {
+        out.truncate(start);
+    }
+    // Stray orphan closing tags.
+    out = out.replace("</thinking>", "").replace("</response>", "");
+    out.trim().to_string()
+}
+
+/// True when a message is non-empty but contains only thinking scaffolding:
+/// no tool calls and no final text after stripping think tags.
+fn is_think_only_message(message: &Message) -> bool {
+    let blocks = message.content_blocks();
+    if blocks.is_empty() {
+        return false;
+    }
+    if blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. })) {
+        return false;
+    }
+    let raw_text: String = blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Real final text (or tool calls) means the turn has content — not
+    // think-only.
+    if !strip_think_tags(&raw_text).is_empty() {
+        return false;
+    }
+    // Think-only when something was produced but it all stripped away:
+    // thinking blocks, or raw text that was entirely scaffolding tags. A
+    // truly empty response does not count.
+    blocks.iter().any(|b| match b {
+        ContentBlock::Thinking { thinking, .. } => !thinking.is_empty(),
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        _ => false,
+    })
+}
+
+// ─── Structured output contract (freebuff missing-required-output) ──────────
+
+/// Per-run handle for the agent's structured output: the schema it must
+/// satisfy and the cell `set_output` writes into. Injected into the tool
+/// context's extension map so the `set_output` tool can reach it.
+struct OutputContract {
+    schema: serde_json::Value,
+    value: std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+}
+
+/// Lightweight JSON-schema validation for `set_output`: checks `type` and, for
+/// objects, that all `required` properties are present. Not a full JSON-Schema
+/// validator, but enough to catch a wrong-shaped output before it is recorded.
+fn validate_output(schema: &serde_json::Value, output: &serde_json::Value) -> Option<String> {
+    let expected = schema.get("type").and_then(serde_json::Value::as_str);
+    let matches_type = match expected {
+        Some("object") => output.is_object(),
+        Some("array") => output.is_array(),
+        Some("string") => output.is_string(),
+        Some("number") => output.is_number(),
+        Some("boolean") => output.is_boolean(),
+        Some("integer") => output.is_i64() || output.is_u64(),
+        _ => true,
+    };
+    if !matches_type {
+        return Some(format!(
+            "output must be of type '{}'",
+            expected.unwrap_or("unknown")
+        ));
+    }
+    if expected == Some("object") {
+        if let (Some(obj), Some(required)) = (output.as_object(), schema.get("required").and_then(serde_json::Value::as_array)) {
+            for key in required.iter().filter_map(serde_json::Value::as_str) {
+                if !obj.contains_key(key) {
+                    return Some(format!("output is missing required property '{key}'"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The `set_output` tool, registered when the agent declares an output
+/// schema. Records the value into the run's `OutputContract` cell so the
+/// runner knows the required output was satisfied.
+pub(crate) struct SetOutputTool;
+
+#[async_trait::async_trait]
+impl cersei_tools::Tool for SetOutputTool {
+    fn name(&self) -> &str {
+        "set_output"
+    }
+
+    fn description(&self) -> &str {
+        "Record the agent's structured final output so the turn may end. The \
+         output schema is required for this agent: the turn cannot end until \
+         this tool has been called with a matching output."
+    }
+
+    fn permission_level(&self) -> cersei_tools::PermissionLevel {
+        cersei_tools::PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> cersei_tools::ToolCategory {
+        cersei_tools::ToolCategory::Custom
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "output": {
+                    "description": "The structured output value, matching the agent's output schema.",
+                }
+            },
+            "required": ["output"],
+        })
+    }
+
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        let Some(contract) = ctx.extensions.get::<OutputContract>() else {
+            return ToolResult::error(
+                "set_output: no output contract in this session".to_string(),
+            );
+        };
+        let Some(output) = input.get("output") else {
+            return ToolResult::error(
+                "set_output requires an \"output\" field".to_string(),
+            );
+        };
+        if let Some(err) = validate_output(&contract.schema, output) {
+            return ToolResult::error(format!("set_output rejected: {err}"));
+        }
+        *contract.value.lock().await = Some(output.clone());
+        ToolResult::success("Output recorded. You may end your turn now.")
+    }
+}
+
+// ─── Stream-error recovery (freebuff) ───────────────────────────────────────
+
+/// Broad classification of a stream-level provider error, used to pick a
+/// source-specific recovery message and to track consecutive streaks of the
+/// same failure before giving up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamErrorSource {
+    RateLimit,
+    Timeout,
+    Network,
+    Other,
+}
+
+fn classify_stream_error(message: &str) -> StreamErrorSource {
+    let lower = message.to_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+    {
+        StreamErrorSource::RateLimit
+    } else if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline")
+    {
+        StreamErrorSource::Timeout
+    } else if lower.contains("network")
+        || lower.contains("connection")
+        || lower.contains("dns")
+        || lower.contains("reset")
+    {
+        StreamErrorSource::Network
+    } else {
+        StreamErrorSource::Other
+    }
+}
+
+/// Source-specific recovery message, mirroring freebuff's `RECOVERY_BY_SOURCE`.
+fn recovery_message_for(source: StreamErrorSource) -> &'static str {
+    match source {
+        StreamErrorSource::RateLimit => {
+            "The provider is rate limiting requests. Wait a moment, then try again."
+        }
+        StreamErrorSource::Timeout => {
+            "The provider request timed out. Try again — perhaps with a smaller request."
+        }
+        StreamErrorSource::Network => {
+            "A network error interrupted the request. Try the operation again."
+        }
+        StreamErrorSource::Other => {
+            "The provider stream ended with an error. Please try again."
+        }
+    }
+}
+
+enum RecoveryDecision {
+    Continue,
+    GiveUp(String),
+}
+
+/// Freebuff stream-error retry: surface the failure to the model as an
+/// injected recovery message instead of silently re-sending the same request,
+/// and give up once consecutive same-source failures pass the cap.
+fn recover_from_stream_error(
+    agent: &Agent,
+    message: &str,
+    last_source: &mut Option<StreamErrorSource>,
+    streak: &mut u32,
+) -> RecoveryDecision {
+    let source = classify_stream_error(message);
+    if *last_source == Some(source) {
+        *streak += 1;
+    } else {
+        *last_source = Some(source);
+        *streak = 1;
+    }
+    if *streak > agent.max_consecutive_stream_recoveries {
+        RecoveryDecision::GiveUp(format!(
+            "Provider stream failed {streak} consecutive times ({source:?}). Giving up."
+        ))
+    } else {
+        agent
+            .messages
+            .lock()
+            .push(Message::user(with_system_tags(recovery_message_for(source))));
+        RecoveryDecision::Continue
+    }
+}
+
+// ─── Cancellation bookkeeping (freebuff) ────────────────────────────────────
+
+/// Before surfacing a cancellation, leave the shared history structurally
+/// valid for a later resume: drop a trailing assistant turn whose tool calls
+/// were never answered, then append a system-tagged note explaining the turn
+/// was interrupted. (freebuff re-adds the user prompt if the runtime never
+/// recorded it; this runner always records the prompt before the loop, so that
+/// step is a no-op here.)
+fn cancelled_with_cleanup(agent: &Agent) -> CerseiError {
+    let mut msgs = agent.messages.lock();
+    while msgs.last().is_some_and(|m| m.role == Role::Assistant && m.has_tool_use()) {
+        msgs.pop();
+    }
+    msgs.push(Message::user(with_system_tags(
+        "The session ended before this response completed. Partial progress has been preserved.",
+    )));
+    CerseiError::Cancelled
+}
+
+/// Persist the session to memory (if configured) and emit the saved event.
+async fn persist_session(
+    agent: &Agent,
+    event_tx: &mpsc::Sender<AgentEvent>,
+) -> cersei_types::Result<()> {
+    if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
+        let messages = agent.messages.lock().clone();
+        memory.store(session_id, &messages).await?;
+        let _ = event_tx
+            .send(AgentEvent::SessionSaved {
+                session_id: session_id.clone(),
+            })
+            .await;
+        agent.emit(AgentEvent::SessionSaved {
+            session_id: session_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Build the run's output and notify reporters, then return it.
+async fn finish_run(
+    agent: &Agent,
+    message: Message,
+    stop_reason: StopReason,
+    turns: u32,
+    tool_calls: Vec<ToolCallRecord>,
+) -> cersei_types::Result<AgentOutput> {
+    let output = AgentOutput {
+        message,
+        usage: agent.cumulative_usage.lock().clone(),
+        stop_reason,
+        turns,
+        tool_calls,
+    };
+    for reporter in &agent.reporters {
+        reporter.on_complete(&output).await;
+    }
+    Ok(output)
+}
+
 /// Run the agent without streaming (blocking until complete).
 pub async fn run_agent(agent: &Agent, prompt: &str) -> Result<AgentOutput> {
     let (event_tx, _event_rx) = mpsc::channel(512);
@@ -352,6 +665,68 @@ pub async fn run_agent_streaming(
         }
     } // end session load guard
 
+    // ── /compact command (freebuff) ──
+    // A prompt that is exactly `/compact` or `compact` (case-insensitive)
+    // summarizes the whole conversation and replaces history with a single
+    // system-tagged summary message, resetting context while preserving
+    // continuity.
+    let trimmed_prompt = prompt.trim();
+    if trimmed_prompt.eq_ignore_ascii_case("/compact")
+        || trimmed_prompt.eq_ignore_ascii_case("compact")
+    {
+        let msgs = agent.messages.lock().clone();
+        let model = agent
+            .model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        match compact::compact_conversation(
+            agent.provider.as_ref(),
+            &msgs,
+            &model,
+            0, // replace the entire history, not just the oldest part
+            None,
+        )
+        .await
+        {
+            Ok(result) if !result.summary.is_empty() => {
+                let summary_text = format!(
+                    "The following is a summary of the conversation between you and the user. \
+                     The conversation continues after this summary:\n\n{}",
+                    result.summary
+                );
+                *agent.messages.lock() =
+                    vec![Message::user(with_system_tags(&summary_text))];
+                let status = "Conversation compacted — history replaced with a summary";
+                let _ = event_tx.send(AgentEvent::Status(status.into())).await;
+                agent.emit(AgentEvent::Status(status.into()));
+                persist_session(agent, &event_tx).await?;
+                return finish_run(
+                    agent,
+                    Message::assistant(&result.summary),
+                    StopReason::EndTurn,
+                    0,
+                    Vec::new(),
+                )
+                .await;
+            }
+            _ => {
+                // Summarization failed (or there was nothing to summarize);
+                // leave history untouched and report rather than destroying it.
+                let status = "Failed to compact conversation — history left unchanged";
+                let _ = event_tx.send(AgentEvent::Status(status.into())).await;
+                agent.emit(AgentEvent::Status(status.into()));
+                return finish_run(
+                    agent,
+                    Message::assistant(""),
+                    StopReason::EndTurn,
+                    0,
+                    Vec::new(),
+                )
+                .await;
+            }
+        }
+    }
+
     // Add user prompt (with exploration hint for analysis tasks)
     let is_analysis = prompt.contains("index")
         || prompt.contains("analyze")
@@ -378,15 +753,17 @@ pub async fn run_agent_streaming(
     let mut max_tokens_retries: u32 = 0;
     const MAX_TOKENS_RETRY_LIMIT: u32 = 3;
     let mut had_tool_use = false;
-    let mut depth_nudge_sent = false;
     // F-08: the no-tool-call nudge fires at most once per session, and its
     // retry turn carries a one-shot forced tool choice.
     let mut no_tool_nudge_sent = false;
     let mut force_tool_choice = false;
     let mut benchmark_retries: u32 = 0;
     const BENCHMARK_MAX_RETRIES: u32 = 4;
-    let mut doom_loop_warned = false;
     let mut completion_verified = false;
+    // Freebuff loop-coherence state.
+    let mut missing_output_nudged = false;
+    let mut last_stream_error_source: Option<StreamErrorSource> = None;
+    let mut stream_recovery_streak: u32 = 0;
 
     // Runtime guards
     let mut files_read: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -406,6 +783,21 @@ pub async fn run_agent_streaming(
         extensions: agent.extensions.clone(),
     };
 
+    // Freebuff missing-required-output contract: when the agent declares an
+    // output schema (the `set_output` tool is registered at build time), hand
+    // the tool and the runner a shared cell for the recorded output.
+    let output_value: Option<std::sync::Arc<tokio::sync::Mutex<Option<serde_json::Value>>>> =
+        if let Some(schema) = &agent.output_schema {
+            let cell = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+            tool_ctx.extensions.insert(OutputContract {
+                schema: schema.clone(),
+                value: cell.clone(),
+            });
+            Some(cell)
+        } else {
+            None
+        };
+
     // Agentic loop
     loop {
         turn += 1;
@@ -415,7 +807,7 @@ pub async fn run_agent_streaming(
 
         // Check cancellation
         if agent.cancel_token.is_cancelled() {
-            return Err(CerseiError::Cancelled);
+            return Err(cancelled_with_cleanup(agent));
         }
 
         let _ = event_tx.send(AgentEvent::TurnStart { turn }).await;
@@ -425,6 +817,17 @@ pub async fn run_agent_streaming(
         {
             let mut msgs = agent.messages.lock();
             apply_tool_result_budget(&mut msgs, agent.tool_result_budget);
+            // Assistant-prefill continuation (freebuff): a request whose
+            // history ends on an assistant message (e.g. after a think-only
+            // turn) needs a synthetic user turn before it when the provider
+            // can't prefill an assistant message.
+            if !agent.supports_assistant_prefill
+                && msgs.last().is_some_and(|m| m.role == Role::Assistant)
+            {
+                msgs.push(Message::user(with_system_tags(
+                    "Continue from where you left off.",
+                )));
+            }
         }
 
         // Build completion request
@@ -541,7 +944,7 @@ pub async fn run_agent_streaming(
             // accepts the connection and then goes quiet.
             let outcome = tokio::select! {
                 result = agent.provider.complete(req_clone) => result,
-                _ = agent.cancel_token.cancelled() => return Err(CerseiError::Cancelled),
+                _ = agent.cancel_token.cancelled() => return Err(cancelled_with_cleanup(agent)),
             };
             match outcome {
                 Ok(stream) => {
@@ -579,7 +982,7 @@ pub async fn run_agent_streaming(
                     // ~31s of it.
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_millis(actual_delay)) => {}
-                        _ = agent.cancel_token.cancelled() => return Err(CerseiError::Cancelled),
+                        _ = agent.cancel_token.cancelled() => return Err(cancelled_with_cleanup(agent)),
                     }
                     continue;
                 }
@@ -594,8 +997,10 @@ pub async fn run_agent_streaming(
             })
             .await;
 
-        // Process stream events (with cancellation support)
-        loop {
+        // Process stream events (with cancellation support). A mid-stream
+        // provider error breaks out with the message instead of aborting the
+        // run — it is handled below via freebuff's stream-error recovery.
+        let stream_error: Option<String> = loop {
             tokio::select! {
                 event = rx.recv() => {
                     match event {
@@ -611,24 +1016,51 @@ pub async fn run_agent_streaming(
                                         .await;
                                     agent.emit(AgentEvent::ThinkingDelta(thinking.clone()));
                                 }
-                                StreamEvent::Error { message } => {
-                                    return Err(CerseiError::Provider(message.clone()));
-                                }
+                                StreamEvent::Error { message } => break Some(message.clone()),
                                 _ => {}
                             }
                             accumulator.process_event(event);
                         }
-                        None => break, // Stream ended
+                        None => break None, // Stream ended
                     }
                 }
                 _ = agent.cancel_token.cancelled() => {
-                    return Err(CerseiError::Cancelled);
+                    return Err(cancelled_with_cleanup(agent));
                 }
             }
-        }
+        };
 
         // Convert accumulated response
-        let response = accumulator.into_response()?;
+        let response = if let Some(message) = stream_error {
+            match recover_from_stream_error(
+                agent,
+                &message,
+                &mut last_stream_error_source,
+                &mut stream_recovery_streak,
+            ) {
+                RecoveryDecision::Continue => continue,
+                RecoveryDecision::GiveUp(terminal) => return Err(CerseiError::Provider(terminal)),
+            }
+        } else {
+            match accumulator.into_response() {
+                Ok(response) => response,
+                Err(e) => {
+                    // Accumulator errors (e.g. a stream that ended without a
+                    // terminal event) are treated like other stream errors.
+                    match recover_from_stream_error(
+                        agent,
+                        &e.to_string(),
+                        &mut last_stream_error_source,
+                        &mut stream_recovery_streak,
+                    ) {
+                        RecoveryDecision::Continue => continue,
+                        RecoveryDecision::GiveUp(terminal) => {
+                            return Err(CerseiError::Provider(terminal))
+                        }
+                    }
+                }
+            }
+        };
         last_stop_reason = response.stop_reason.clone();
         _last_usage = response.usage.clone();
 
@@ -709,6 +1141,15 @@ pub async fn run_agent_streaming(
         // Handle stop reason
         match &response.stop_reason {
             StopReason::EndTurn => {
+                // Think-only continuation (freebuff): a response that is
+                // entirely thinking (no final text, no tool calls) does not
+                // end the turn — loop again without injecting anything. The
+                // next request may then start with assistant-ending history,
+                // which the assistant-prefill continuation handles.
+                if is_think_only_message(&response.message) {
+                    continue;
+                }
+
                 // ── Completion verification nudge ──
                 // If agent is finishing but hasn't verified its output, nudge once.
                 if agent.benchmark_mode && !completion_verified && turn >= 3 {
@@ -728,12 +1169,12 @@ pub async fn run_agent_streaming(
                     });
                     if !recent_has_verify {
                         completion_verified = true;
-                        agent.messages.lock().push(Message::user(
-                            "[system] Before finishing, verify your solution is correct:\n\
+                        agent.messages.lock().push(Message::user(with_system_tags(
+                            "Before finishing, verify your solution is correct:\n\
                              1. Check that all expected output files exist and have correct content\n\
                              2. Run your solution to confirm it produces the right output\n\
-                             3. Re-read the original instruction — did you satisfy EVERY requirement?"
-                        ));
+                             3. Re-read the original instruction — did you satisfy EVERY requirement?",
+                        )));
                         let _ = event_tx
                             .send(AgentEvent::Status(
                                 "Nudging agent to verify before completion".into(),
@@ -769,11 +1210,11 @@ pub async fn run_agent_streaming(
                             BenchmarkVerification::TestsNotRun => {
                                 if benchmark_retries == 0 {
                                     benchmark_retries += 1;
-                                    agent.messages.lock().push(Message::user(
-                                        "[system] The task instruction mentions a verification command. \
+                                    agent.messages.lock().push(Message::user(with_system_tags(
+                                        "The task instruction mentions a verification command. \
                                          Run it now to check your solution. Look at the instruction again \
-                                         for the exact command."
-                                    ));
+                                         for the exact command.",
+                                    )));
                                     let _ = event_tx
                                         .send(AgentEvent::Status(
                                             "Benchmark: nudge to run instruction's test command"
@@ -787,14 +1228,14 @@ pub async fn run_agent_streaming(
                             BenchmarkVerification::TestsFailed(ref test_output) => {
                                 benchmark_retries += 1;
                                 let truncated: String = test_output.chars().take(3000).collect();
-                                agent.messages.lock().push(Message::user(
-                                    &format!(
-                                        "[system] Verification FAILED (attempt {}/{}).\n\n\
+                                agent.messages.lock().push(Message::user(with_system_tags(
+                                    format!(
+                                        "Verification FAILED (attempt {}/{}).\n\n\
                                          Output:\n```\n{}\n```\n\n\
                                          Try a COMPLETELY DIFFERENT approach. Do NOT patch — rewrite.",
                                         benchmark_retries, BENCHMARK_MAX_RETRIES, truncated
-                                    )
-                                ));
+                                    ),
+                                )));
                                 let _ = event_tx
                                     .send(AgentEvent::Status(format!(
                                         "Benchmark: retry {}/{}",
@@ -826,12 +1267,12 @@ pub async fn run_agent_streaming(
                 if agent.no_tool_nudge && !had_tool_use && tools_available && !no_tool_nudge_sent {
                     no_tool_nudge_sent = true;
                     force_tool_choice = true;
-                    agent.messages.lock().push(Message::user(
-                        "[system] You answered without using any tools. Claims about \
+                    agent.messages.lock().push(Message::user(with_system_tags(
+                        "You answered without using any tools. Claims about \
                          the codebase must be verified with tools before answering. \
                          Gather evidence first (Read, Grep, Glob, Bash, ...), then \
-                         give your final answer grounded in what the tools returned."
-                    ));
+                         give your final answer grounded in what the tools returned.",
+                    )));
                     let _ = event_tx
                         .send(AgentEvent::Status(
                             "Nudging agent to use tools before answering".into(),
@@ -840,15 +1281,25 @@ pub async fn run_agent_streaming(
                     continue; // Don't break — force another round
                 }
 
-                // Depth nudge: if we had tool calls but ended very early (turn <= 3),
-                // push the model to explore deeper before giving final answer.
-                // This prevents shallow 1-round analysis. Only nudge once.
-                if had_tool_use && turn <= 4 && !depth_nudge_sent {
-                    depth_nudge_sent = true;
-                    agent.messages.lock().push(Message::user(
-                        "[system] Your analysis is not deep enough yet. You MUST read actual source code files before writing a summary. Use Read to examine at least 8-10 source files (stores, components, commands, types, configs). Use parallel Read calls. Do NOT write the final output until you have read enough source files to provide specific details about implementations, not just file names."
-                    ));
-                    continue; // Don't break — force another round
+                // Missing required output (freebuff): when the agent declares an
+                // output schema and tries to end without ever setting an output,
+                // nudge once and force the loop to continue.
+                if let Some(cell) = &output_value {
+                    if cell.lock().await.is_none() && !missing_output_nudged {
+                        missing_output_nudged = true;
+                        agent.messages.lock().push(Message::user(with_system_tags(
+                            "You must use the \"set_output\" tool to provide a result that matches the output schema before ending your turn. The output schema is required for this agent.",
+                        )));
+                        let _ = event_tx
+                            .send(AgentEvent::Status(
+                                "Output schema not satisfied — nudging to call set_output".into(),
+                            ))
+                            .await;
+                        agent.emit(AgentEvent::Status(
+                            "Output schema not satisfied — nudging to call set_output".into(),
+                        ));
+                        continue; // Don't break — force one more round
+                    }
                 }
                 break;
             }
@@ -991,6 +1442,10 @@ pub async fn run_agent_streaming(
 
                 // Phase 3: Process results sequentially (emit events, build result blocks)
                 let mut result_blocks: Vec<ContentBlock> = Vec::new();
+                // Freebuff tool-call error retry: one injected message per
+                // failed call, appended after the tool results so the model
+                // sees the standard "check the tool name and arguments" note.
+                let mut tool_error_messages: Vec<String> = Vec::new();
 
                 for (tool_id, tool_name, tool_input, mut result, duration) in results {
                     // ── Bookkeeping for the read-before-edit guard ──
@@ -1026,6 +1481,13 @@ pub async fn run_agent_streaming(
                         *count += 1;
                         result.content =
                             format!("{}\n\n{}", result.content, error_budget_note(&tool_name, *count));
+                        // Keep the injected message compact; the full error is
+                        // already in the tool result block the model sees.
+                        let error = cap_tool_result(&result.content);
+                        let error: String = error.chars().take(600).collect();
+                        tool_error_messages.push(format!(
+                            "Error during tool call: {error}. Please check the tool name and arguments and try again."
+                        ));
                     } else {
                         tool_error_counts.remove(&tool_name);
                     }
@@ -1092,54 +1554,14 @@ pub async fn run_agent_streaming(
                     .lock()
                     .push(Message::user_blocks(result_blocks));
 
-                // ── Doom loop detection ──
-                // Detects two patterns:
-                // 1. 3+ consecutive identical tool calls that all error
-                // 2. Repeating 2-call pattern [A,B][A,B][A,B] (alternating failures)
-                if !doom_loop_warned && tool_calls.len() >= 6 {
-                    let names: Vec<&str> = tool_calls
-                        .iter()
-                        .rev()
-                        .take(6)
-                        .map(|tc| tc.name.as_str())
-                        .collect();
-                    let errors: Vec<bool> = tool_calls
-                        .iter()
-                        .rev()
-                        .take(6)
-                        .map(|tc| tc.is_error)
-                        .collect();
-
-                    // Pattern 1: 3+ identical consecutive failing calls
-                    let is_3_identical = names.len() >= 3
-                        && names[0] == names[1]
-                        && names[1] == names[2]
-                        && errors[0]
-                        && errors[1]
-                        && errors[2];
-
-                    // Pattern 2: [A,B][A,B][A,B] alternating pattern
-                    let is_2_pattern = names.len() >= 6
-                        && names[0] == names[2]
-                        && names[2] == names[4]
-                        && names[1] == names[3]
-                        && names[3] == names[5];
-
-                    if is_3_identical || is_2_pattern {
-                        doom_loop_warned = true;
-                        agent.messages.lock().push(Message::user(
-                            "[system] You are stuck in a repetitive loop. Your recent tool calls \
-                             are repeating the same pattern. STOP and reconsider:\n\
-                             1. What exactly is going wrong? Read the error messages carefully.\n\
-                             2. Is there a COMPLETELY different approach to this problem?\n\
-                             3. Try a different tool, different arguments, or a different algorithm.\n\
-                             Do NOT repeat the same commands."
-                        ));
-                        let _ = event_tx
-                            .send(AgentEvent::Status(
-                                "Doom loop detected — forcing new approach".into(),
-                            ))
-                            .await;
+                // Freebuff tool-call error retry: surface each failure as an
+                // injected system-tagged user message after the results. The
+                // loop inherently continues after a tool-use turn, so no
+                // separate "force another step" flag is needed here.
+                if !tool_error_messages.is_empty() {
+                    let mut msgs = agent.messages.lock();
+                    for message in tool_error_messages {
+                        msgs.push(Message::user(with_system_tags(message)));
                     }
                 }
             }
@@ -1241,21 +1663,8 @@ pub async fn run_agent_streaming(
         }
     }
 
-    // Persist session
-    if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
-        let messages = agent.messages.lock().clone();
-        memory.store(session_id, &messages).await?;
-        let _ = event_tx
-            .send(AgentEvent::SessionSaved {
-                session_id: session_id.clone(),
-            })
-            .await;
-        agent.emit(AgentEvent::SessionSaved {
-            session_id: session_id.clone(),
-        });
-    }
-
-    // Build output
+    // Persist session, then build and return the output.
+    persist_session(agent, &event_tx).await?;
     let last_message = agent
         .messages
         .lock()
@@ -1264,21 +1673,7 @@ pub async fn run_agent_streaming(
         .find(|m| m.role == Role::Assistant)
         .cloned()
         .unwrap_or_else(|| Message::assistant(""));
-
-    let output = AgentOutput {
-        message: last_message,
-        usage: agent.cumulative_usage.lock().clone(),
-        stop_reason: last_stop_reason,
-        turns: turn,
-        tool_calls,
-    };
-
-    // Notify reporters
-    for reporter in &agent.reporters {
-        reporter.on_complete(&output).await;
-    }
-
-    Ok(output)
+    finish_run(agent, last_message, last_stop_reason, turn, tool_calls).await
 }
 
 // ─── Benchmark self-verification helpers ────────────────────────────────────
@@ -1673,5 +2068,547 @@ mod guard_tests {
             "a 5000-line failure must not enter history whole"
         );
         assert!(capped.contains("lines omitted"), "{capped}");
+    }
+}
+
+// ─── Freebuff-injection behavior tests ───────────────────────────────────────
+
+#[cfg(test)]
+mod freebuff_tests {
+    use super::*;
+    use crate::AgentBuilder;
+    use cersei_provider::{CompletionRequest, CompletionStream, Provider};
+    use serde_json::json;
+    use std::collections::VecDeque;
+
+    /// One scripted response the mock provider returns per `complete()` call.
+    enum ScriptedTurn {
+        /// A plain text answer that ends the turn.
+        Text(&'static str),
+        /// An answer made only of thinking blocks (EndTurn).
+        ThinkOnly(&'static str),
+        /// A single tool call the runner will dispatch.
+        ToolUse(&'static str, serde_json::Value),
+        /// A mid-stream provider error.
+        StreamError(&'static str),
+    }
+
+    /// Mock provider that pops the next scripted turn for every completion
+    /// request (the /compact summarizer request included).
+    struct ScriptedProvider {
+        turns: parking_lot::Mutex<VecDeque<ScriptedTurn>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(turns: Vec<ScriptedTurn>) -> Self {
+            Self {
+                turns: parking_lot::Mutex::new(turns.into()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn context_window(&self, _model: &str) -> u64 {
+            100_000
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> cersei_types::Result<CompletionStream> {
+            let turn = self
+                .turns
+                .lock()
+                .pop_front()
+                .unwrap_or(ScriptedTurn::Text("done"));
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            let send = |event: StreamEvent| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(event).await;
+                }
+            };
+            match turn {
+                ScriptedTurn::Text(text) => {
+                    send(StreamEvent::MessageStart {
+                        id: "m1".into(),
+                        model: "m".into(),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block_type: "text".into(),
+                        id: None,
+                        name: None,
+                    })
+                    .await;
+                    send(StreamEvent::TextDelta {
+                        index: 0,
+                        text: text.to_string(),
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                    send(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::MessageStop).await;
+                }
+                ScriptedTurn::ThinkOnly(thinking) => {
+                    send(StreamEvent::MessageStart {
+                        id: "m1".into(),
+                        model: "m".into(),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block_type: "thinking".into(),
+                        id: None,
+                        name: None,
+                    })
+                    .await;
+                    send(StreamEvent::ThinkingDelta {
+                        index: 0,
+                        thinking: thinking.to_string(),
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                    send(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::MessageStop).await;
+                }
+                ScriptedTurn::ToolUse(name, input) => {
+                    send(StreamEvent::MessageStart {
+                        id: "m1".into(),
+                        model: "m".into(),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block_type: "tool_use".into(),
+                        id: Some("tool-1".into()),
+                        name: Some(name.to_string()),
+                    })
+                    .await;
+                    send(StreamEvent::InputJsonDelta {
+                        index: 0,
+                        partial_json: input.to_string(),
+                    })
+                    .await;
+                    send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                    send(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: None,
+                    })
+                    .await;
+                    send(StreamEvent::MessageStop).await;
+                }
+                ScriptedTurn::StreamError(message) => {
+                    send(StreamEvent::Error {
+                        message: message.to_string(),
+                    })
+                    .await;
+                }
+            }
+            Ok(CompletionStream::new(rx))
+        }
+    }
+
+    /// A tool that always fails, for the tool-call-error injection test.
+    struct FailingTool;
+
+    #[async_trait::async_trait]
+    impl cersei_tools::Tool for FailingTool {
+        fn name(&self) -> &str {
+            "failing_tool"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> ToolResult {
+            ToolResult::error("deliberate failure".to_string())
+        }
+    }
+
+    /// Run the loop over a scripted turn sequence and return the agent (so
+    /// tests can inspect the resulting message history).
+    async fn run_script(
+        turns: Vec<ScriptedTurn>,
+        configure: impl Fn(AgentBuilder) -> AgentBuilder,
+    ) -> (cersei_types::Result<AgentOutput>, Agent) {
+        let provider = ScriptedProvider::new(turns);
+        let agent = configure(Agent::builder().provider(provider))
+            .build()
+            .unwrap();
+        let result =
+            run_agent(&agent, "What is the answer? Give a short reply.").await;
+        (result, agent)
+    }
+
+    #[test]
+    fn with_system_tags_wraps_text() {
+        assert_eq!(with_system_tags("hi"), "<system>hi</system>");
+    }
+
+    #[test]
+    fn strip_think_tags_handles_paired_unclosed_and_stray() {
+        // Removal leaves the surrounding whitespace behind.
+        assert_eq!(strip_think_tags("A <thinking>secret</thinking> B"), "A  B");
+        assert_eq!(strip_think_tags("Before <thinking>partial"), "Before");
+        assert_eq!(strip_think_tags("plain"), "plain");
+        assert_eq!(strip_think_tags("<response>wrapped</response>"), "");
+        assert_eq!(strip_think_tags("left </thinking> right"), "left  right");
+    }
+
+    #[test]
+    fn is_think_only_detects_scaffolding_only() {
+        let thinking_only = Message::assistant_blocks(vec![ContentBlock::Thinking {
+            thinking: "hmm".into(),
+            signature: String::new(),
+        }]);
+        assert!(is_think_only_message(&thinking_only));
+
+        let text_with_tags = Message::assistant("<thinking>hmm</thinking>");
+        assert!(is_think_only_message(&text_with_tags));
+
+        let real = Message::assistant("The answer is 42.");
+        assert!(!is_think_only_message(&real));
+
+        let tool = Message::assistant_blocks(vec![ContentBlock::ToolUse {
+            id: "t".into(),
+            name: "Read".into(),
+            input: json!({}),
+        }]);
+        assert!(!is_think_only_message(&tool));
+
+        let empty = Message::assistant("");
+        assert!(!is_think_only_message(&empty));
+
+        let thinking_plus_text = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "hmm".into(),
+                signature: String::new(),
+            },
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+        ]);
+        assert!(!is_think_only_message(&thinking_plus_text));
+    }
+
+    #[test]
+    fn classify_stream_error_by_source() {
+        assert_eq!(
+            classify_stream_error("Rate limit exceeded: 429"),
+            StreamErrorSource::RateLimit
+        );
+        assert_eq!(
+            classify_stream_error("request timed out"),
+            StreamErrorSource::Timeout
+        );
+        assert_eq!(
+            classify_stream_error("connection reset by peer"),
+            StreamErrorSource::Network
+        );
+        assert_eq!(
+            classify_stream_error("model blew up"),
+            StreamErrorSource::Other
+        );
+    }
+
+    #[test]
+    fn validate_output_checks_type_and_required() {
+        let schema = json!({ "type": "object", "required": ["name"] });
+        assert!(validate_output(&schema, &json!({ "name": "x" })).is_none());
+        assert!(validate_output(&schema, &json!({ "name": 1 })).is_none());
+        assert!(
+            validate_output(&schema, &json!({}))
+                .unwrap()
+                .contains("missing required property 'name'")
+        );
+        assert!(
+            validate_output(&schema, &json!("nope"))
+                .unwrap()
+                .contains("must be of type 'object'")
+        );
+        assert!(validate_output(&json!({"type": "integer"}), &json!(3)).is_none());
+    }
+
+    #[tokio::test]
+    async fn think_only_turn_does_not_end_and_injects_nothing() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::ThinkOnly("Let me think carefully."),
+                ScriptedTurn::Text("The answer is 42."),
+            ],
+            |b| b.max_turns(5),
+        )
+        .await;
+        let output = result.unwrap();
+        assert_eq!(output.text(), "The answer is 42.");
+        let msgs = agent.messages();
+        // [user prompt, assistant thinking, assistant answer] — no injected
+        // user message between the thinking turn and the answer.
+        assert_eq!(msgs.len(), 3, "history: {msgs:?}");
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert!(matches!(
+            msgs[1].content_blocks()[0],
+            ContentBlock::Thinking { .. }
+        ));
+        assert_eq!(msgs[2].role, Role::Assistant);
+        assert!(msgs.iter().all(|m| !m.get_all_text().contains("<system>")));
+    }
+
+    #[tokio::test]
+    async fn assistant_prefill_continuation_injected_when_disabled() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::ThinkOnly("Thinking."),
+                ScriptedTurn::Text("Done."),
+            ],
+            |b| b.assistant_prefill(false).max_turns(5),
+        )
+        .await;
+        result.unwrap();
+        let msgs = agent.messages();
+        // [user, assistant thinking, user <system>Continue…</system>, assistant]
+        assert_eq!(msgs.len(), 4, "history: {msgs:?}");
+        assert_eq!(msgs[2].role, Role::User);
+        assert!(msgs[2]
+            .get_all_text()
+            .contains("<system>Continue from where you left off.</system>"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_error_injects_standard_message() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::ToolUse("failing_tool", json!({})),
+                ScriptedTurn::Text("Recovered."),
+            ],
+            |b| b.tool(FailingTool).max_turns(5),
+        )
+        .await;
+        result.unwrap();
+        let msgs = agent.messages();
+        assert!(
+            msgs.iter().any(|m| {
+                let text = m.get_all_text();
+                text.contains("Error during tool call:")
+                    && text.contains("deliberate failure")
+                    && text.contains("Please check the tool name and arguments and try again.")
+            }),
+            "history: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_recovers_with_source_specific_message() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::StreamError("Rate limit exceeded: 429"),
+                ScriptedTurn::Text("Retried and done."),
+            ],
+            |b| b.max_turns(5),
+        )
+        .await;
+        let output = result.unwrap();
+        assert_eq!(output.text(), "Retried and done.");
+        let msgs = agent.messages();
+        assert!(
+            msgs.iter()
+                .any(|m| m.get_all_text().contains("The provider is rate limiting requests")),
+            "history: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_gives_up_after_consecutive_cap() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::StreamError("request timed out"),
+                ScriptedTurn::StreamError("request timed out"),
+                ScriptedTurn::StreamError("request timed out"),
+            ],
+            |b| b.max_consecutive_stream_recoveries(2).max_turns(5),
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Giving up"), "{err}");
+        // Two recoveries were injected (streaks 1 and 2); the third failure
+        // gave up without a third injection.
+        let msgs = agent.messages();
+        let recoveries = msgs
+            .iter()
+            .filter(|m| m.get_all_text().contains("provider request timed out"))
+            .count();
+        assert_eq!(recoveries, 2, "history: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_output_nudge_fires_once_and_forces_continue() {
+        let (result, agent) = run_script(
+            vec![ScriptedTurn::Text("Done.")],
+            |b| {
+                b.output_schema(json!({ "type": "object", "required": ["name"] }))
+                    .max_turns(5)
+            },
+        )
+        .await;
+        result.unwrap();
+        let msgs = agent.messages();
+        let nudges = msgs
+            .iter()
+            .filter(|m| m.get_all_text().contains("You must use the"))
+            .count();
+        assert_eq!(nudges, 1, "one-shot nudge must fire exactly once: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn set_output_satisfies_contract_without_nudge() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::ToolUse("set_output", json!({ "output": { "name": "widget" } })),
+                ScriptedTurn::Text("Done."),
+            ],
+            |b| {
+                b.output_schema(json!({ "type": "object", "required": ["name"] }))
+                    .max_turns(5)
+            },
+        )
+        .await;
+        result.unwrap();
+        let msgs = agent.messages();
+        assert!(
+            msgs.iter().all(|m| !m.get_all_text().contains("You must use the")),
+            "history: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_output_rejects_output_that_misses_the_schema() {
+        let (result, agent) = run_script(
+            vec![
+                ScriptedTurn::ToolUse("set_output", json!({ "output": "not-an-object" })),
+                ScriptedTurn::Text("Done."),
+            ],
+            |b| b.output_schema(json!({ "type": "object" })).max_turns(5),
+        )
+        .await;
+        result.unwrap();
+        let msgs = agent.messages();
+        assert!(
+            msgs.iter()
+                .any(|m| m.get_all_text().contains("set_output rejected")),
+            "history: {msgs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_unanswered_tool_call_and_appends_note() {
+        let agent = Agent::builder()
+            .provider(ScriptedProvider::new(vec![]))
+            .build()
+            .unwrap();
+        {
+            let mut msgs = agent.messages.lock();
+            msgs.push(Message::user("prompt"));
+            msgs.push(Message::assistant_blocks(vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            }]));
+        }
+        let err = cancelled_with_cleanup(&agent);
+        assert!(matches!(err, CerseiError::Cancelled));
+        let msgs = agent.messages();
+        // The unanswered tool-call turn is dropped; the interruption note
+        // takes its place after the user prompt.
+        assert_eq!(msgs.len(), 2, "history: {msgs:?}");
+        assert_eq!(msgs[0].role, Role::User);
+        assert!(msgs[1]
+            .get_all_text()
+            .contains("The session ended before this response completed"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_keeps_finished_text_turn() {
+        let agent = Agent::builder()
+            .provider(ScriptedProvider::new(vec![]))
+            .build()
+            .unwrap();
+        {
+            let mut msgs = agent.messages.lock();
+            msgs.push(Message::user("prompt"));
+            msgs.push(Message::assistant("partial answer"));
+        }
+        let _ = cancelled_with_cleanup(&agent);
+        let msgs = agent.messages();
+        assert_eq!(msgs.len(), 3, "history: {msgs:?}");
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert!(msgs[2]
+            .get_all_text()
+            .contains("The session ended before this response completed"));
+    }
+
+    #[tokio::test]
+    async fn compact_command_replaces_history_with_summary() {
+        let provider = ScriptedProvider::new(vec![ScriptedTurn::Text(
+            "The conversation covered build setup.",
+        )]);
+        let agent = Agent::builder()
+            .provider(provider)
+            .with_messages(vec![
+                Message::user("hello"),
+                Message::assistant("hi there"),
+            ])
+            .build()
+            .unwrap();
+        let output = run_agent(&agent, "/compact").await.unwrap();
+        assert!(
+            output.text().contains("The conversation covered build setup."),
+            "output: {}",
+            output.text()
+        );
+        let msgs = agent.messages();
+        assert_eq!(msgs.len(), 1, "history: {msgs:?}");
+        let text = msgs[0].get_all_text();
+        assert!(
+            text.contains("The following is a summary of the conversation between you and the user"),
+            "history: {text}"
+        );
+        assert!(text.contains("The conversation covered build setup."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn compact_command_case_insensitive_and_plain() {
+        let provider = ScriptedProvider::new(vec![ScriptedTurn::Text("Summary.")]);
+        let agent = Agent::builder()
+            .provider(provider)
+            .with_messages(vec![Message::user("hello")])
+            .build()
+            .unwrap();
+        let output = run_agent(&agent, "  COMPACT  ").await.unwrap();
+        assert!(output.text().contains("Summary."));
+        let msgs = agent.messages();
+        assert_eq!(msgs.len(), 1);
     }
 }
