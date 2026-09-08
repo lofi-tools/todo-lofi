@@ -1777,15 +1777,73 @@ pub mod overlay {
         f.render_widget(widget, area);
     }
 
+    /// Render the `/model` fuzzy picker: a full-width query box at the top
+    /// and the matching provider/model entries below. Combos (the virtual
+    /// `combos` provider) rank at the top; typing filters by name.
     fn render_model_picker(f: &mut Frame, p: &ModelPickerState, theme: &Theme) {
-        let area = centered_rect(f.area(), 60, 70);
+        // Full width so long provider/model ids stay readable.
+        let area = centered_rect(f.area(), 100, 70);
         f.render_widget(Clear, area);
 
-        let mut list_state = ListState::default();
-        list_state.select(Some(p.selected.min(p.entries.len().saturating_sub(1))));
+        // ── Query box (top row) ──
+        let query_area = Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: 3,
+        };
+        let query_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme.border_style())
+            .style(Style::default().bg(theme.bg));
+        f.render_widget(
+            Paragraph::new(format!("filter: {}▌", p.query))
+                .style(Style::default().fg(theme.fg))
+                .block(query_block),
+            query_area,
+        );
 
-        let items: Vec<ListItem> = p
-            .entries
+        // ── List area (below the query box) ──
+        let list_area = Rect {
+            x: area.x,
+            y: area.y + 3,
+            width: area.width,
+            height: area.height.saturating_sub(3),
+        };
+
+        let filtered = p.filtered();
+        let title = format!(
+            " Provider / Model ({} shown) — type to filter, ↑↓ select, Enter switch, Esc close ",
+            filtered.len(),
+        );
+
+        if filtered.is_empty() {
+            let msg = if p.entries.is_empty() {
+                "No providers configured."
+            } else {
+                "No provider/model matches the filter."
+            };
+            f.render_widget(
+                Paragraph::new(msg)
+                    .style(theme.dimmed())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .title(title)
+                            .border_style(theme.border_style())
+                            .style(Style::default().bg(theme.bg)),
+                    ),
+                list_area,
+            );
+            return;
+        }
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(p.selected.min(filtered.len() - 1)));
+
+        let items: Vec<ListItem> = filtered
             .iter()
             .map(|(provider, model)| {
                 let id = crate::providers::display_model_id(provider, model);
@@ -1798,9 +1856,9 @@ pub mod overlay {
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(" Provider / Model (↑↓ select, Enter switch, Esc close) ")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
+                    .title(title)
                     .border_style(theme.border_style())
                     .style(Style::default().bg(theme.bg)),
             )
@@ -1811,7 +1869,7 @@ pub mod overlay {
             )
             .highlight_symbol(">");
 
-        f.render_stateful_widget(list, area, &mut list_state);
+        f.render_stateful_widget(list, list_area, &mut list_state);
     }
 
     /// Render the `/combos` fuzzy picker: a query box at the top and the

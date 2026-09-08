@@ -353,9 +353,39 @@ impl OutputBlock {
 pub struct ModelPickerState {
     /// (provider, model) entries in display order.
     pub entries: Vec<(String, String)>,
+    /// Fuzzy query typed in the filter box.
+    pub query: String,
     pub selected: usize,
     /// Joined "provider/model" id of the current selection (for the marker).
     pub current: String,
+}
+
+impl ModelPickerState {
+    /// Entries matching the query, best matches first. Virtual combos rank
+    /// above concrete models so the fallback chains are always at the top;
+    /// within each group the fuzzy score orders matches.
+    pub fn filtered(&self) -> Vec<&(String, String)> {
+        let mut scored: Vec<(u32, &(String, String))> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let id = crate::providers::display_model_id(&entry.0, &entry.1);
+                fuzzy_score(&self.query, &id).map(|score| (score, entry))
+            })
+            .collect();
+        scored.sort_by(|(score_a, entry_a), (score_b, entry_b)| {
+            let a_combo = entry_a.0 == "combos";
+            let b_combo = entry_b.0 == "combos";
+            b_combo
+                .cmp(&a_combo)
+                .then_with(|| score_a.cmp(score_b))
+                .then_with(|| {
+                    crate::providers::display_model_id(&entry_a.0, &entry_a.1)
+                        .cmp(&crate::providers::display_model_id(&entry_b.0, &entry_b.1))
+                })
+        });
+        scored.into_iter().map(|(_, entry)| entry).collect()
+    }
 }
 
 /// Fuzzy combo picker shown by `/combos`: one row per configured combo

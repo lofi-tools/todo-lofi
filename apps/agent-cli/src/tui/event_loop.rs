@@ -1638,7 +1638,8 @@ fn handle_command_selector_key(
     }
 }
 
-/// Handle keys while the provider/model picker is open.
+/// Handle keys while the provider/model picker is open: typing filters the
+/// list live, Enter switches the runtime to the selected entry, Esc closes.
 fn handle_model_picker_key(
     state: &mut AppState,
     key: KeyEvent,
@@ -1648,12 +1649,24 @@ fn handle_model_picker_key(
         return None;
     };
     match key.code {
+        // Typing filters the list (live fuzzy).
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            picker.query.push(c);
+            picker.selected = 0;
+            state.dirty = true;
+        }
+        KeyCode::Backspace => {
+            picker.query.pop();
+            picker.selected = 0;
+            state.dirty = true;
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             picker.selected = picker.selected.saturating_sub(1);
             state.dirty = true;
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if picker.selected + 1 < picker.entries.len() {
+            let len = picker.filtered().len();
+            if picker.selected + 1 < len {
                 picker.selected += 1;
             }
             state.dirty = true;
@@ -1664,8 +1677,12 @@ fn handle_model_picker_key(
                 state.dirty = true;
                 return None;
             }
-            let idx = picker.selected.min(picker.entries.len() - 1);
-            let (provider, model) = picker.entries[idx].clone();
+            let filtered = picker.filtered();
+            if filtered.is_empty() {
+                return None;
+            }
+            let idx = picker.selected.min(filtered.len() - 1);
+            let (provider, model) = filtered[idx].clone();
             let label = crate::providers::display_model_id(&provider, &model);
             state.overlay = Overlay::None;
             match runtime.switch(&provider, &model) {
@@ -1680,7 +1697,7 @@ fn handle_model_picker_key(
                 Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
             }
         }
-        KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Esc => {
             state.overlay = Overlay::None;
             state.dirty = true;
         }
@@ -2680,15 +2697,25 @@ fn handle_slash_command(
                 let (provider, model) = runtime.current();
                 let current = crate::providers::display_model_id(&provider, &model);
                 let entries = runtime.entries();
-                let selected = entries
+                let picker = ModelPickerState {
+                    entries,
+                    query: String::new(),
+                    selected: 0,
+                    current,
+                };
+                // Preselect the current model under the picker's ordering
+                // (combos ranked first), so it starts highlighted.
+                let current_id = picker.current.clone();
+                let selected = picker
+                    .filtered()
                     .iter()
-                    .position(|(p, m)| crate::providers::display_model_id(p, m) == current)
+                    .position(|(p, m)| crate::providers::display_model_id(p, m) == current_id)
                     .unwrap_or(0);
                 state.overlay = Overlay::ModelPicker(ModelPickerState {
-                    entries,
                     selected,
-                    current,
+                    ..picker
                 });
+                state.dirty = true;
             } else {
                 match runtime.select_text(rest) {
                     Ok((provider, model)) => {
@@ -3426,6 +3453,74 @@ mod tests {
         let mut s = state();
         handle_slash_command(&mut s, "/combos", &config, &runtime);
         handle_combo_picker_key(&mut s, key_for(KeyCode::Esc, KeyModifiers::NONE), &runtime);
+        assert!(matches!(s.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn model_command_opens_picker_with_combos_first() {
+        let (config, runtime) = runtime_with_combos();
+        let mut s = state();
+        handle_slash_command(&mut s, "/model", &config, &runtime);
+        let Overlay::ModelPicker(picker) = &s.overlay else {
+            panic!("expected ModelPicker overlay, got {:?}", s.overlay);
+        };
+        // With an empty query everything shows, but combos rank above every
+        // concrete model even though they sit mid-list in `entries()` order.
+        let ids: Vec<String> = picker
+            .filtered()
+            .iter()
+            .map(|(p, m)| crate::providers::display_model_id(p, m))
+            .collect();
+        assert!(ids.len() > 2);
+        assert_eq!(
+            &ids[..2],
+            &["combos/coding".to_string(), "combos/writing".to_string()]
+        );
+        // The runtime's current model (test/test-model) starts highlighted.
+        let selected = picker.selected.min(picker.filtered().len() - 1);
+        assert_eq!(picker.filtered()[selected].1, "test/test-model");
+    }
+
+    #[test]
+    fn model_picker_filters_and_switches_on_enter() {
+        let (config, runtime) = runtime_with_combos();
+        let mut s = state();
+        handle_slash_command(&mut s, "/model", &config, &runtime);
+
+        // Typing narrows the list live.
+        for c in "test-2".chars() {
+            handle_model_picker_key(
+                &mut s,
+                key_for(KeyCode::Char(c), KeyModifiers::NONE),
+                &runtime,
+            );
+        }
+        let Overlay::ModelPicker(picker) = &s.overlay else {
+            panic!("expected ModelPicker overlay, got {:?}", s.overlay);
+        };
+        assert_eq!(picker.query, "test-2");
+        let ids: Vec<String> = picker
+            .filtered()
+            .iter()
+            .map(|(p, m)| crate::providers::display_model_id(p, m))
+            .collect();
+        // Typing narrowed the list and the best match ranks first.
+        assert!(ids.len() > 1, "{ids:?}");
+        assert_eq!(ids[0], "test/test-2");
+
+        // Enter switches the runtime to the filtered match.
+        handle_model_picker_key(&mut s, key_for(KeyCode::Enter, KeyModifiers::NONE), &runtime);
+        assert!(matches!(s.overlay, Overlay::None));
+        let (provider, model) = runtime.current();
+        assert_eq!((provider.as_str(), model.as_str()), ("test", "test/test-2"));
+        assert_eq!(s.model, "test/test-2");
+        let last = s.turns.last().unwrap();
+        assert!(last.content.contains("Switched to test/test-2"), "{}", last.content);
+
+        // Esc closes without switching.
+        let mut s = state();
+        handle_slash_command(&mut s, "/model", &config, &runtime);
+        handle_model_picker_key(&mut s, key_for(KeyCode::Esc, KeyModifiers::NONE), &runtime);
         assert!(matches!(s.overlay, Overlay::None));
     }
 
