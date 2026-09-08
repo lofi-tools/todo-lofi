@@ -23,6 +23,72 @@ pub struct AskUserPending {
     pub current_input: String,
     /// Cursor position in `current_input`.
     pub cursor_pos: usize,
+    /// Selected option index per question (options.len() == "Custom").
+    pub selected_options: Vec<usize>,
+    /// Per-question multi-select state (for multiSelect questions).
+    pub multi_selected: Vec<Vec<bool>>,
+    /// Custom free-text per question (used when "Custom" is selected).
+    pub custom_inputs: Vec<String>,
+    /// Whether the focused question is currently editing its custom text.
+    pub custom_editing: bool,
+    /// Cursor position within the focused custom input.
+    pub custom_cursor: usize,
+    /// Whether each question has been answered (shows elided Q+A summary).
+    pub answered: Vec<bool>,
+}
+
+impl AskUserPending {
+    pub fn new(
+        request_id: u64,
+        questions: Vec<serde_json::Value>,
+        question_summaries: Vec<String>,
+    ) -> Self {
+        let count = questions.len();
+        let mut multi_selected = Vec::with_capacity(count);
+        for q in &questions {
+            let option_count = q
+                .get("options")
+                .and_then(|o| o.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            multi_selected.push(vec![false; option_count]);
+        }
+        Self {
+            request_id,
+            questions,
+            question_summaries,
+            answers: vec![String::new(); count],
+            focused_question: 0,
+            current_input: String::new(),
+            cursor_pos: 0,
+            selected_options: vec![0; count],
+            multi_selected,
+            custom_inputs: vec![String::new(); count],
+            custom_editing: false,
+            custom_cursor: 0,
+            answered: vec![false; count],
+        }
+    }
+
+    /// Number of selectable rows for question `idx` (options + Custom).
+    pub fn option_count(&self, idx: usize) -> usize {
+        let base = self
+            .questions
+            .get(idx)
+            .and_then(|q| q.get("options"))
+            .and_then(|o| o.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        base + 1
+    }
+
+    pub fn is_multi(&self, idx: usize) -> bool {
+        self.questions
+            .get(idx)
+            .and_then(|q| q.get("multiSelect"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
 }
 
 /// A single message turn in the conversation.

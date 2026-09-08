@@ -2118,20 +2118,28 @@ pub mod overlay {
         }
     }
 
-    /// Render the AskUser overlay: shows questions with text input areas.
+    /// Render the AskUser overlay: selectable suggestions + Custom input.
+    /// Answered questions collapse to an elided Q+A summary line.
     fn render_ask_user(f: &mut Frame, p: &crate::tui::app::AskUserPending, theme: &Theme) {
         use ratatui::widgets::{Block, Borders, Paragraph};
         use ratatui::text::{Line, Span};
 
-        let area = centered_rect(f.area(), 80, 70);
+        fn elide(text: &str, max: usize) -> String {
+            let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat.chars().count() <= max {
+                return flat;
+            }
+            flat.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+        }
+
+        let area = centered_rect(f.area(), 80, 80);
         f.render_widget(Clear, area);
 
-        // Freebuff AskUserBranch: rounded single border in the secondary color.
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .title(Span::styled(
-                "Clarifying Questions — type answers, press Enter to submit, Esc to skip",
+                "Clarifying Questions — ↑/↓ select, Enter confirm, Tab next, Esc skip",
                 theme.accent_style().add_modifier(Modifier::BOLD),
             ))
             .border_style(Style::default().fg(theme.text_secondary))
@@ -2140,68 +2148,120 @@ pub mod overlay {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Layout: each question gets a row with the question text and an input line.
-        let row_height = 3; // question line + answer line + blank
-        let total_height = p.questions.len() * row_height + 2; // +2 for padding
-        let visible_height = inner.height.min(total_height as u16);
-
-        let mut y = inner.y;
-        for (i, (question, answer)) in p.questions.iter().zip(p.answers.iter()).enumerate() {
-            if y >= inner.y + visible_height {
-                break;
-            }
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, question) in p.questions.iter().enumerate() {
             let is_focused = i == p.focused_question;
-
-            // Question line
             let q_text = question["question"].as_str().unwrap_or("?");
-            let q_line = Line::from(Span::styled(
-                format!("Q{}): {}", i + 1, q_text),
+            if p.answered[i] {
+                let summary = if p.is_multi(i) {
+                    let picked: Vec<String> = p.multi_selected[i]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, on)| {
+                            on.then(|| {
+                                question["options"][idx]["label"]
+                                    .as_str()
+                                    .unwrap_or("?")
+                                    .to_string()
+                            })
+                        })
+                        .collect();
+                    if picked.is_empty() {
+                        elide(&p.custom_inputs[i], 60)
+                    } else {
+                        elide(&picked.join(", "), 60)
+                    }
+                } else {
+                    let sel = p.selected_options[i];
+                    let base = p.multi_selected[i].len();
+                    if sel < base {
+                        question["options"][sel]["label"]
+                            .as_str()
+                            .unwrap_or("?")
+                            .to_string()
+                    } else {
+                        elide(&p.custom_inputs[i], 60)
+                    }
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("Q{}: {} → {}", i + 1, elide(q_text, 60), summary),
+                    Style::default().fg(theme.dim),
+                )));
+                lines.push(Line::default());
+                continue;
+            }
+            lines.push(Line::from(Span::styled(
+                format!("Q{}: {}", i + 1, q_text),
                 if is_focused {
-                    theme.accent_style()
+                    theme.accent_style().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.fg)
                 },
-            ));
-            f.render_widget(
-                Paragraph::new(q_line).block(Block::default().style(Style::default())),
-                Rect { x: inner.x, y: y as u16, width: inner.width, height: 1 },
-            );
-            y += 1;
-
-            // Answer line (input or filled)
-            let answer_text = if i == p.focused_question {
-                // Show the current input being typed
-                let input = &p.current_input;
-                let cursor_marker = if p.cursor_pos <= input.len() {
-                    let mut s = input.clone();
-                    if p.cursor_pos < s.len() {
-                        s.insert(p.cursor_pos, '│');
+            )));
+            if let Some(options) = question["options"].as_array() {
+                for (idx, opt) in options.iter().enumerate() {
+                    let selected = is_focused && p.selected_options[i] == idx && !p.custom_editing;
+                    let checked = if p.is_multi(i) {
+                        if p.multi_selected[i][idx] { "[x]" } else { "[ ]" }
+                    } else if selected {
+                        "(•)"
                     } else {
-                        s.push('│');
-                    }
-                    s
+                        "( )"
+                    };
+                    let label = opt["label"].as_str().unwrap_or("?");
+                    let desc = opt["description"].as_str().unwrap_or("");
+                    let text = if desc.is_empty() {
+                        format!("  {checked} {label}")
+                    } else {
+                        format!("  {checked} {label} — {}", elide(desc, 60))
+                    };
+                    lines.push(Line::from(Span::styled(
+                        text,
+                        if selected {
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            theme.text()
+                        },
+                    )));
+                }
+            }
+            // Extra "Custom" row with inline input box.
+            let option_count = p.option_count(i);
+            let custom_selected = is_focused && p.selected_options[i] + 1 == option_count;
+            let custom_text = &p.custom_inputs[i];
+            let shown = if is_focused && p.custom_editing {
+                let mut s = custom_text.clone();
+                let cursor = p.custom_cursor.min(s.len());
+                if cursor < s.len() {
+                    s.insert(cursor, '│');
                 } else {
-                    input.clone()
-                };
-                format!("A{}): {}", i + 1, cursor_marker)
+                    s.push('│');
+                }
+                s
             } else {
-                format!("A{}): {}", i + 1, answer.as_str())
+                custom_text.clone()
             };
-            let a_style = if is_focused {
-                Style::default().fg(theme.accent)
-            } else {
-                Style::default().fg(theme.dim)
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(answer_text, a_style)))
-                    .block(Block::default().style(Style::default())),
-                Rect { x: inner.x, y: y as u16, width: inner.width, height: 1 },
-            );
-            y += 1;
-
-            // Blank separator line
-            y += 1;
+            lines.push(Line::from(Span::styled(
+                format!("  [custom] {shown}"),
+                if custom_selected {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.dim)
+                },
+            )));
+            lines.push(Line::default());
         }
+        let height = (inner.height as usize).max(1);
+        let start = lines.len().saturating_sub(height);
+        let visible = lines.into_iter().skip(start).collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(visible).block(Block::default()),
+            Rect { x: inner.x, y: inner.y, width: inner.width, height: inner.height },
+        );
     }
 
     fn render_recovery(f: &mut Frame, r: &RecoveryOverlay, theme: &Theme) {

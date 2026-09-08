@@ -175,16 +175,11 @@ pub async fn run(
                         .iter()
                         .map(|q| q["question"].as_str().unwrap_or("?").to_string())
                         .collect();
-                    let answers: Vec<String> = (0..req.questions.len()).map(|_| String::new()).collect();
-                    state.overlay = Overlay::AskUser(crate::tui::app::AskUserPending {
-                        request_id: req.request_id,
-                        questions: req.questions,
-                        question_summaries: summaries,
-                        answers,
-                        focused_question: 0,
-                        current_input: String::new(),
-                        cursor_pos: 0,
-                    });
+                    state.overlay = Overlay::AskUser(crate::tui::app::AskUserPending::new(
+                        req.request_id,
+                        req.questions,
+                        summaries,
+                    ));
                     state.dirty = true;
                 }
                 // Drain a completed `/provider` fetch (if one arrived).
@@ -1903,6 +1898,12 @@ fn handle_provider_explorer_key(
 }
 
 /// Handle key events while the AskUser overlay is showing.
+///
+/// Special input mode: Up/Down (or j/k) moves between suggestions,
+/// Enter selects / confirms, Space toggles multi-select, Tab moves between
+/// questions, typing edits the "Custom" box. Answered questions collapse to
+/// an elided Q+A line. Never returns a prompt — the agent run is already
+/// streaming and blocked on the answer channel.
 fn handle_ask_user_key(
     state: &mut AppState,
     key: KeyEvent,
@@ -1911,84 +1912,216 @@ fn handle_ask_user_key(
     let Overlay::AskUser(p) = &mut state.overlay else {
         return None;
     };
+    let save_custom = |p: &mut crate::tui::app::AskUserPending| {
+        let focus = p.focused_question;
+        if focus < p.custom_inputs.len() {
+            // Keep cursor in bounds after edits.
+            p.custom_cursor = p.custom_cursor.min(p.custom_inputs[focus].len());
+        }
+    };
     match key.code {
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            p.current_input.push(c);
-            p.cursor_pos = p.current_input.len();
+        KeyCode::Esc => {
+            let request_id = p.request_id;
+            let answers: Vec<Option<crate::providers::AskUserAnswerValue>> =
+                vec![None; p.questions.len()];
+            runtime.send_ask_user_answer(crate::providers::AskUserAnswer {
+                request_id,
+                answers,
+            });
+            state.overlay = Overlay::None;
             state.dirty = true;
+            return None;
         }
-        KeyCode::Backspace if !p.current_input.is_empty() => {
-            p.current_input.pop();
-            p.cursor_pos = p.current_input.len();
-            state.dirty = true;
-        }
-        KeyCode::Left if p.cursor_pos > 0 => {
-            p.cursor_pos -= 1;
-            state.dirty = true;
-        }
-        KeyCode::Right if p.cursor_pos < p.current_input.len() => {
-            p.cursor_pos += 1;
-            state.dirty = true;
-        }
-        KeyCode::Up if p.focused_question > 0 => {
-            // Save current answer before moving up.
-            if p.focused_question < p.answers.len() {
-                p.answers[p.focused_question] = p.current_input.clone();
+        KeyCode::Tab | KeyCode::BackTab => {
+            let forward = !key.modifiers.contains(KeyModifiers::SHIFT);
+            save_custom(p);
+            p.custom_editing = false;
+            let count = p.questions.len();
+            if forward {
+                p.focused_question = (p.focused_question + 1) % count.max(1);
+            } else if p.focused_question > 0 {
+                p.focused_question -= 1;
+            } else {
+                p.focused_question = count.saturating_sub(1);
             }
-            p.focused_question -= 1;
-            p.current_input = p.answers[p.focused_question].clone();
-            p.cursor_pos = p.current_input.len();
             state.dirty = true;
         }
-        KeyCode::Down if p.focused_question + 1 < p.questions.len() => {
-            // Save current answer before moving down.
-            p.answers[p.focused_question] = p.current_input.clone();
-            p.focused_question += 1;
-            p.current_input = p.answers[p.focused_question].clone();
-            p.cursor_pos = p.current_input.len();
+        KeyCode::Up | KeyCode::Down => {
+            let option_count = p.option_count(p.focused_question);
+            if p.custom_editing {
+                p.custom_editing = false;
+            } else if key.code == KeyCode::Up {
+                if p.selected_options[p.focused_question] > 0 {
+                    p.selected_options[p.focused_question] -= 1;
+                }
+            } else if p.selected_options[p.focused_question] + 1 < option_count {
+                p.selected_options[p.focused_question] += 1;
+            }
+            // Entering the Custom row opens the inline input box.
+            let focus = p.focused_question;
+            if p.selected_options[focus] + 1 == option_count {
+                p.custom_editing = true;
+                p.custom_cursor = p.custom_inputs[focus].len();
+            }
+            state.dirty = true;
+        }
+        KeyCode::Char(' ') if !p.custom_editing => {
+            let focus = p.focused_question;
+            if p.is_multi(focus) {
+                let sel = p.selected_options[focus];
+                if sel < p.multi_selected[focus].len() {
+                    p.multi_selected[focus][sel] = !p.multi_selected[focus][sel];
+                    p.answered[focus] = true;
+                }
+            }
+            state.dirty = true;
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && p.custom_editing =>
+        {
+            let focus = p.focused_question;
+            let cursor = p.custom_cursor.min(p.custom_inputs[focus].len());
+            p.custom_inputs[focus].insert(cursor, c);
+            p.custom_cursor = cursor + c.len_utf8();
+            state.dirty = true;
+        }
+        KeyCode::Backspace if p.custom_editing => {
+            let focus = p.focused_question;
+            let cursor = p.custom_cursor.min(p.custom_inputs[focus].len());
+            if cursor > 0 {
+                // Remove the previous char (ASCII fast path, unicode-safe).
+                let mut new_cursor = cursor - 1;
+                while new_cursor > 0
+                    && !p.custom_inputs[focus].is_char_boundary(new_cursor)
+                {
+                    new_cursor -= 1;
+                }
+                p.custom_inputs[focus].remove(new_cursor);
+                p.custom_cursor = new_cursor;
+            }
+            state.dirty = true;
+        }
+        KeyCode::Left | KeyCode::Right if p.custom_editing => {
+            let focus = p.focused_question;
+            let len = p.custom_inputs[focus].len();
+            if key.code == KeyCode::Left && p.custom_cursor > 0 {
+                let mut next = p.custom_cursor - 1;
+                while next > 0 && !p.custom_inputs[focus].is_char_boundary(next) {
+                    next -= 1;
+                }
+                p.custom_cursor = next;
+            } else if key.code == KeyCode::Right && p.custom_cursor < len {
+                let mut next = p.custom_cursor + 1;
+                while next < len && !p.custom_inputs[focus].is_char_boundary(next) {
+                    next += 1;
+                }
+                p.custom_cursor = next.min(len);
+            }
             state.dirty = true;
         }
         KeyCode::Enter => {
-            // Save current answer and submit all answers.
-            p.answers[p.focused_question] = p.current_input.clone();
-            let request_id = p.request_id;
-            let answers: Vec<Option<crate::providers::AskUserAnswerValue>> = p
-                .answers
-                .iter()
-                .map(|a| {
-                    if a.is_empty() {
-                        None // Skipped
-                    } else {
-                        Some(crate::providers::AskUserAnswerValue::OtherText(a.clone()))
+            save_custom(p);
+            let focus = p.focused_question;
+            let option_count = p.option_count(focus);
+            let sel = p.selected_options[focus];
+            let is_custom = sel + 1 == option_count;
+            if p.is_multi(focus) {
+                if !is_custom && sel < p.multi_selected[focus].len() {
+                    p.multi_selected[focus][sel] = !p.multi_selected[focus][sel];
+                }
+                p.answered[focus] = true;
+                // Advance to next unanswered question, else submit.
+                if let Some(next) = p.answered.iter().position(|a| !a) {
+                    p.focused_question = next;
+                    p.custom_editing = false;
+                    state.dirty = true;
+                    return None;
+                }
+            } else {
+                p.answered[focus] = true;
+                if focus + 1 < p.questions.len() && p.answered[focus + 1..].contains(&false) {
+                    // Jump to next unanswered question.
+                    if let Some(offset) =
+                        p.answered[focus + 1..].iter().position(|a| !a)
+                    {
+                        p.focused_question = focus + 1 + offset;
+                        p.custom_editing = false;
+                        state.dirty = true;
+                        return None;
                     }
-                })
-                .collect();
-            let answer = crate::providers::AskUserAnswer {
-                request_id,
-                answers,
-            };
-            runtime.send_ask_user_answer(answer);
-            state.overlay = Overlay::None;
-            state.dirty = true;
-            // Return a placeholder prompt so the event loop doesn't try to
-            // send a chat message — the agent run is already streaming.
-            return Some(String::new());
-        }
-        KeyCode::Esc => {
-            // Cancel the interview: send all-skipped answers.
+                }
+            }
+            // All answered (or last Enter): build answers and submit.
             let request_id = p.request_id;
-            let answers: Vec<Option<crate::providers::AskUserAnswerValue>> = vec![
-                None;
-                p.questions.len()
-            ];
-            let answer = crate::providers::AskUserAnswer {
+            let mut answers: Vec<Option<crate::providers::AskUserAnswerValue>> =
+                Vec::with_capacity(p.questions.len());
+            for i in 0..p.questions.len() {
+                if !p.answered[i] {
+                    answers.push(None);
+                    continue;
+                }
+                if p.is_multi(i) {
+                    let indices: Vec<usize> = p.multi_selected[i]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, on)| on.then_some(idx))
+                        .collect();
+                    if indices.is_empty() {
+                        let custom = p.custom_inputs[i].trim();
+                        if !custom.is_empty() {
+                            answers.push(Some(
+                                crate::providers::AskUserAnswerValue::OtherText(
+                                    custom.to_string(),
+                                ),
+                            ));
+                        } else {
+                            answers.push(None);
+                        }
+                    } else {
+                        answers.push(Some(
+                            crate::providers::AskUserAnswerValue::SelectedIndices(indices),
+                        ));
+                    }
+                } else {
+                    let sel = p.selected_options[i];
+                    let base = p.multi_selected[i].len();
+                    if sel < base {
+                        answers.push(Some(
+                            crate::providers::AskUserAnswerValue::SelectedIndex(sel),
+                        ));
+                    } else {
+                        let custom = p.custom_inputs[i].trim();
+                        if custom.is_empty() {
+                            // Fall back to legacy free-text answer if present.
+                            let legacy = p.answers[i].trim();
+                            if legacy.is_empty() {
+                                answers.push(None);
+                            } else {
+                                answers.push(Some(
+                                    crate::providers::AskUserAnswerValue::OtherText(
+                                        legacy.to_string(),
+                                    ),
+                                ));
+                            }
+                        } else {
+                            answers.push(Some(
+                                crate::providers::AskUserAnswerValue::OtherText(
+                                    custom.to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            runtime.send_ask_user_answer(crate::providers::AskUserAnswer {
                 request_id,
                 answers,
-            };
-            runtime.send_ask_user_answer(answer);
+            });
             state.overlay = Overlay::None;
             state.dirty = true;
-            return Some(String::new());
+            return None;
         }
         _ => {}
     }
