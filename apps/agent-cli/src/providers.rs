@@ -1069,6 +1069,10 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
 pub struct AskUserRequest {
     /// Unique id for this question set, so the TUI can match answers to requests.
     pub request_id: u64,
+    /// The ACP session the question was asked in, when the tool ran under an
+    /// ACP server. The TUI ignores it; the ACP elicitation path uses it to
+    /// scope the `elicitation/create` request to the right session.
+    pub session_id: Option<String>,
     /// The questions to display.
     pub questions: Vec<serde_json::Value>,
 }
@@ -1084,7 +1088,7 @@ pub struct AskUserAnswer {
 
 /// A single answer value: either a selected option index, a set of selected
 /// option indices (multi-select), or free-text input.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AskUserAnswerValue {
     /// Single-select: index of the chosen option (0-based).
     SelectedIndex(usize),
@@ -1141,7 +1145,10 @@ impl AgentRuntime {
         // Channel from runtime -> tool for ask_user answers.
         let (answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserAnswer>();
         let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> = Some(Box::new(
-            crate::tools::AskUserTool::with_channel(ask_user_tx.clone(), answer_rx),
+            crate::tools::AskUserTool::with_channel(
+                ask_user_tx.clone(),
+                Arc::new(tokio::sync::Mutex::new(answer_rx)),
+            ),
         ));
         let agent = build_agent(
             &resolved,

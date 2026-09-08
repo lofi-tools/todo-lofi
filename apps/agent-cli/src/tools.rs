@@ -16,8 +16,12 @@ pub struct AskUserTool {
     /// Sender for piping questions to the TUI. When `None`, the tool operates
     /// in non-interactive mode (ACP/headless) and returns a structured result.
     ask_user_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>>,
-    /// Receiver for answers from the TUI (wrapped in Tokio Mutex for async access).
-    answer_rx: Option<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
+    /// Receiver for answers (wrapped in Tokio Mutex for async access, Arc so
+    /// multiple concurrently-built agents can share one channel; answers are
+    /// matched to the right caller by `request_id`).
+    answer_rx: Option<
+        std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
+    >,
     /// Monotonic counter for request ids.
     request_counter: std::sync::atomic::AtomicU64,
 }
@@ -33,11 +37,11 @@ impl AskUserTool {
 
     pub fn with_channel(
         tx: tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
-        rx: tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>,
+        rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
     ) -> Self {
         Self {
             ask_user_tx: Some(tx),
-            answer_rx: Some(tokio::sync::Mutex::new(rx)),
+            answer_rx: Some(rx),
             request_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -108,7 +112,7 @@ impl Tool for AskUserTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(serde::Deserialize, serde::Serialize, Clone)]
         struct Question {
             question: String,
@@ -164,6 +168,8 @@ impl Tool for AskUserTool {
 
             let request = crate::providers::AskUserRequest {
                 request_id,
+                // The ACP elicitation path needs to know which session asked.
+                session_id: Some(ctx.session_id.clone()),
                 questions: questions_json.clone(),
             };
 
@@ -199,8 +205,9 @@ impl Tool for AskUserTool {
             }
         }
 
-        // No TUI channel: return the questions as a structured result for
-        // non-interactive modes (ACP clients handle ask_user themselves).
+        // No channel: return the questions as a structured result for
+        // non-interactive modes (headless runs, and ACP clients that did not
+        // advertise elicitation form support).
         ToolResult::success(format!(
             "[ask_user: {q_count} question{qs}]\n{q_labels}",
             qs = if q_count == 1 { "" } else { "s" },

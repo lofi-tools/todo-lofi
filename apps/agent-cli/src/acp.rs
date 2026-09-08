@@ -472,7 +472,8 @@ struct InterviewCompletedParams {
 // ─── Request params ─────────────────────────────────────────────────────────
 
 /// `initialize` request params. The client advertises capabilities here; we
-/// only act on `clientCapabilities.fs` (read/write text file support).
+/// act on `clientCapabilities.fs` (read/write text file support) and
+/// `clientCapabilities.elicitation` (structured user input forms).
 #[derive(Deserialize, Default)]
 struct InitializeParams {
     #[serde(default, rename = "protocolVersion")]
@@ -486,6 +487,22 @@ struct InitializeParams {
 struct ClientCapabilities {
     #[serde(default)]
     fs: Option<FileSystemCapabilities>,
+    #[serde(default)]
+    elicitation: Option<ElicitationCapabilities>,
+}
+
+/// `clientCapabilities.elicitation`. Per the spec, `"form": {}` advertises
+/// form-based elicitation (the agent can ask the user structured questions
+/// via `elicitation/create`); omitted/`null` means unsupported.
+#[derive(Deserialize, Default, Clone)]
+struct ElicitationCapabilities {
+    #[serde(default)]
+    form: Option<Value>,
+    // URL-mode elicitation isn't used (we always send form mode), but it's
+    // part of the initialize wire format.
+    #[serde(default)]
+    #[allow(dead_code)]
+    url: Option<Value>,
 }
 
 /// Which `fs/*` methods the client supports. Per the spec, omitted/`null`
@@ -649,6 +666,22 @@ struct AcpServer {
     /// Filesystem methods the client advertised during `initialize`. Defaults
     /// to none until the client tells us otherwise.
     client_fs: Mutex<FileSystemCapabilities>,
+    /// Whether the client advertised `clientCapabilities.elicitation.form`
+    /// during `initialize`. When set, `ask_user` tool calls are forwarded to
+    /// the client as `elicitation/create` requests so the user actually gets
+    /// asked; otherwise the tool falls back to a non-interactive result.
+    client_elicitation: Mutex<bool>,
+    /// Channel from the agent's `ask_user` tool to the elicitation drainer
+    /// (which turns them into `elicitation/create` client requests).
+    ask_user_tx: tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
+    /// Channel from the elicitation drainer back to the waiting `ask_user`
+    /// tool. One shared channel; callers are matched by `request_id`.
+    ask_user_answer_tx: tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserAnswer>,
+    /// Receiver half of the answer channel, cloned into every agent built by
+    /// this server (a receiver is not itself cloneable, the Arc is).
+    ask_user_answer_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>,
+    >,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
@@ -664,6 +697,10 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
     let max_turns = config.max_turns;
 
     let (connection, writer_task) = AcpConnection::new();
+    let (ask_user_tx, ask_user_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
+    let (ask_user_answer_tx, ask_user_answer_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
     let server = Arc::new(AcpServer {
         connection,
         sessions: Mutex::new(HashMap::new()),
@@ -672,6 +709,18 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         default_model,
         max_turns,
         client_fs: Mutex::new(FileSystemCapabilities::default()),
+        client_elicitation: Mutex::new(false),
+        ask_user_tx: ask_user_tx.clone(),
+        ask_user_answer_tx: ask_user_answer_tx.clone(),
+        ask_user_answer_rx: std::sync::Arc::new(tokio::sync::Mutex::new(ask_user_answer_rx)),
+    });
+
+    // Drain `ask_user` tool calls: forward each question set to the client via
+    // the ACP Elicitation standard and route the user's answers back to the
+    // waiting tool. Only does work when the client advertised elicitation.
+    let drainer = Arc::clone(&server);
+    tokio::spawn(async move {
+        drainer.drain_ask_user(ask_user_rx).await;
     });
 
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -730,6 +779,12 @@ impl AcpServer {
                 if let Some(fs) = init_params.client_capabilities.as_ref().and_then(|c| c.fs) {
                     *self.client_fs.lock() = fs;
                 }
+                let elicitation = init_params
+                    .client_capabilities
+                    .as_ref()
+                    .and_then(|c| c.elicitation.as_ref())
+                    .is_some_and(|e| e.form.is_some());
+                *self.client_elicitation.lock() = elicitation;
                 self.connection.response(id, self.initialize());
             }
             "authenticate" | "logout" => {
@@ -1284,7 +1339,18 @@ impl AcpServer {
                     &self.config,
                     &resolved.model,
                 ),
-                ask_user_tool: None,
+                // When the client advertises elicitation form support, wire
+                // the ask_user tool to the elicitation drainer so the user is
+                // actually asked (via `elicitation/create`). Otherwise the
+                // tool runs non-interactive and returns the questions as text.
+                ask_user_tool: if *self.client_elicitation.lock() {
+                    Some(Box::new(crate::tools::AskUserTool::with_channel(
+                        self.ask_user_tx.clone(),
+                        self.ask_user_answer_rx.clone(),
+                    )))
+                } else {
+                    None
+                },
             },
         )
     }
@@ -1293,6 +1359,62 @@ impl AcpServer {
     /// may be slow (e.g. prompting the user for a write), but an unbounded
     /// wait would hang the agent run that triggered it.
     const FS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Maximum wait for a client's `elicitation/create` response before
+    /// treating the question set as skipped. Slightly under the ask_user
+    /// tool's own 300s wait, so the tool sees a real answer rather than
+    /// timing out on its own.
+    const ELICITATION_TIMEOUT: Duration = Duration::from_secs(290);
+
+    /// Forward `ask_user` tool calls to the client via the ACP Elicitation
+    /// standard and route the user's answers back to the waiting tool.
+    async fn drain_ask_user(
+        self: &Arc<Self>,
+        mut ask_user_rx: tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserRequest>,
+    ) {
+        while let Some(request) = ask_user_rx.recv().await {
+            let Some(session_id) = request.session_id.clone() else {
+                // No session context: nothing to scope the elicitation to.
+                // Report the questions as skipped so the tool doesn't hang.
+                self.send_skipped_answer(&request);
+                continue;
+            };
+            let params = elicitation_params(&request, &session_id);
+            let (id, rx) = self.connection.request("elicitation/create", params);
+            match tokio::time::timeout(Self::ELICITATION_TIMEOUT, rx).await {
+                Ok(Ok(RpcResponse::Result(result))) => {
+                    let answer = answer_from_elicitation(&request, &result);
+                    let _ = self.ask_user_answer_tx.send(answer);
+                }
+                Ok(Ok(RpcResponse::Error(err))) => {
+                    // The client rejected the request (e.g. it doesn't
+                    // actually implement elicitation despite advertising it);
+                    // report skipped so the run can continue.
+                    eprintln!(
+                        "acp: elicitation/create failed: [{}] {}",
+                        err.code, err.message
+                    );
+                    self.send_skipped_answer(&request);
+                }
+                Ok(Err(_)) => {
+                    // Connection torn down; the tool will notice the closed
+                    // channel itself, but answer anyway to be safe.
+                    self.send_skipped_answer(&request);
+                }
+                Err(_) => {
+                    self.connection.forget_request(id);
+                    self.send_skipped_answer(&request);
+                }
+            }
+        }
+    }
+
+    fn send_skipped_answer(&self, request: &crate::providers::AskUserRequest) {
+        let _ = self.ask_user_answer_tx.send(crate::providers::AskUserAnswer {
+            request_id: request.request_id,
+            answers: vec![None; request.questions.len()],
+        });
+    }
 
     /// Read a text file from the client's environment (including unsaved
     /// editor state) via `fs/read_text_file`. Requires the client to have
@@ -1814,6 +1936,179 @@ impl AcpServer {
     }
 }
 
+// ─── Ask-user elicitation (ACP Elicitation standard) ────────────────────────
+
+/// Build the `elicitation/create` (form mode) params for an `ask_user`
+/// request. Each question becomes one property in `requestedSchema`:
+/// single-select options become a string enum (with titled `oneOf` options
+/// when descriptions are present), multi-select options become a string-array
+/// enum, and free-text becomes a validated string. Answer values are the
+/// option labels, which [`answer_from_elicitation`] maps back to indices.
+fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &str) -> Value {
+    let mut properties = serde_json::Map::new();
+    for (i, q) in request.questions.iter().enumerate() {
+        let mut prop = serde_json::Map::new();
+        let question = q.get("question").and_then(Value::as_str).unwrap_or("?");
+        prop.insert("title".into(), json!(question));
+        if let Some(header) = q.get("header").and_then(Value::as_str).filter(|h| !h.is_empty()) {
+            prop.insert("description".into(), json!(header));
+        }
+        let options = q.get("options").and_then(Value::as_array);
+        let multi_select = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
+        if let Some(options) = options {
+            if multi_select {
+                prop.insert("type".into(), json!("array"));
+                let mut items = serde_json::Map::new();
+                items.insert("type".into(), json!("string"));
+                items.insert(
+                    "enum".into(),
+                    Value::Array(options.iter().filter_map(|o| o.get("label").cloned()).collect()),
+                );
+                prop.insert("items".into(), Value::Object(items));
+            } else if options
+                .iter()
+                .any(|o| o.get("description").and_then(Value::as_str).is_some_and(|d| !d.is_empty()))
+            {
+                // Titled single-select: keeps option descriptions visible.
+                prop.insert("type".into(), json!("string"));
+                prop.insert(
+                    "oneOf".into(),
+                    Value::Array(
+                        options
+                            .iter()
+                            .map(|o| {
+                                let mut opt = serde_json::Map::new();
+                                if let Some(label) = o.get("label").and_then(Value::as_str) {
+                                    opt.insert("const".into(), json!(label));
+                                    opt.insert("title".into(), json!(label));
+                                }
+                                if let Some(desc) = o
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .filter(|d| !d.is_empty())
+                                {
+                                    opt.insert("description".into(), json!(desc));
+                                }
+                                Value::Object(opt)
+                            })
+                            .collect(),
+                    ),
+                );
+            } else {
+                prop.insert("type".into(), json!("string"));
+                prop.insert(
+                    "enum".into(),
+                    Value::Array(options.iter().filter_map(|o| o.get("label").cloned()).collect()),
+                );
+            }
+        } else {
+            prop.insert("type".into(), json!("string"));
+            if let Some(validation) = q.get("validation").and_then(Value::as_object) {
+                for (key, wire) in [("maxLength", "maxLength"), ("minLength", "minLength")] {
+                    if let Some(n) = validation.get(key).and_then(Value::as_u64) {
+                        prop.insert(wire.into(), json!(n));
+                    }
+                }
+                if let Some(p) = validation.get("pattern").and_then(Value::as_str) {
+                    prop.insert("pattern".into(), json!(p));
+                }
+            }
+        }
+        properties.insert(format!("q{i}"), Value::Object(prop));
+    }
+    let message = if request.questions.len() == 1 {
+        request.questions[0]
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or("Please answer the following question.")
+            .to_string()
+    } else {
+        format!("Answer the {} clarifying questions below.", request.questions.len())
+    };
+    json!({
+        "sessionId": session_id,
+        "message": message,
+        "mode": "form",
+        "requestedSchema": {
+            "type": "object",
+            "properties": properties,
+        },
+    })
+}
+
+/// Convert an `elicitation/create` response into an `AskUserAnswer` for the
+/// waiting tool. `accept` maps each `q<i>` content value back to an answer
+/// (option labels to indices); `decline`/`cancel` (and unknown actions)
+/// produce all-`None` (skipped) answers, matching the TUI's skip behavior.
+fn answer_from_elicitation(
+    request: &crate::providers::AskUserRequest,
+    result: &Value,
+) -> crate::providers::AskUserAnswer {
+    let answers = if result.get("action").and_then(Value::as_str) == Some("accept") {
+        let content = result.get("content").and_then(Value::as_object);
+        request
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let value = content.and_then(|c| c.get(&format!("q{i}")));
+                answer_value_for_question(q, value)
+            })
+            .collect()
+    } else {
+        vec![None; request.questions.len()]
+    };
+    crate::providers::AskUserAnswer {
+        request_id: request.request_id,
+        answers,
+    }
+}
+
+/// Map one elicited content value back to an `AskUserAnswerValue`, based on
+/// the original question's shape (options + multiSelect vs free text).
+fn answer_value_for_question(
+    q: &Value,
+    value: Option<&Value>,
+) -> Option<crate::providers::AskUserAnswerValue> {
+    let options = q.get("options").and_then(Value::as_array);
+    let multi_select = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
+    let value = value?;
+    if let Some(options) = options {
+        if multi_select {
+            let labels: Vec<String> = value
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let indices: Vec<usize> = labels
+                .iter()
+                .filter_map(|label| {
+                    options
+                        .iter()
+                        .position(|o| o.get("label").and_then(Value::as_str) == Some(label.as_str()))
+                })
+                .collect();
+            Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices))
+        } else {
+            let label = value.as_str().unwrap_or_default();
+            match options.iter().position(|o| o.get("label").and_then(Value::as_str) == Some(label)) {
+                Some(index) => Some(crate::providers::AskUserAnswerValue::SelectedIndex(index)),
+                // The client allowed a value outside the declared options
+                // (free-text "other"); keep it verbatim.
+                None => Some(crate::providers::AskUserAnswerValue::OtherText(label.to_string())),
+            }
+        }
+    } else {
+        value
+            .as_str()
+            .map(|s| crate::providers::AskUserAnswerValue::OtherText(s.to_string()))
+    }
+}
+
 /// Lets the agent's Read tool reach the ACP client's filesystem (unsaved
 /// editor buffers) via the same `fs/read_text_file` request path. The session
 /// id is supplied by the `ToolContext` at execute time.
@@ -1941,6 +2236,7 @@ fn tool_title(name: &str, input: &Value) -> String {
 mod tests {
     use super::*;
     use crate::config::{ComboEntry, ProviderConfigEntry};
+    use cersei::tools::Tool;
 
     /// A config with a `test` provider and one combo referencing it; builds
     /// offline (literal key, loopback base URL).
@@ -2019,10 +2315,33 @@ mod tests {
         );
     }
 
+    /// Unused-but-alive ask_user channels for test servers. Keeping the
+    /// receiver halves alive in the returned tuple mirrors a real server;
+    /// otherwise sends from tools would fail on a closed channel.
+    fn ask_user_channels(
+    ) -> (
+        tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
+        tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserAnswer>,
+        std::sync::Arc<
+            tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>,
+        >,
+    ) {
+        let (ask_user_tx, _ask_user_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
+        let (ask_user_answer_tx, ask_user_answer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
+        (
+            ask_user_tx,
+            ask_user_answer_tx,
+            std::sync::Arc::new(tokio::sync::Mutex::new(ask_user_answer_rx)),
+        )
+    }
+
     #[tokio::test]
     async fn models_value_exposes_effective_model_id_only_when_different() {
         let config = config_with_combo();
         let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_answer_tx, ask_user_answer_rx) = ask_user_channels();
         let server = AcpServer {
             connection,
             sessions: Mutex::new(HashMap::new()),
@@ -2031,6 +2350,10 @@ mod tests {
             default_model: "test/test-model".into(),
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
+            client_elicitation: Mutex::new(false),
+            ask_user_tx,
+            ask_user_answer_tx,
+            ask_user_answer_rx,
         };
 
         // Plain selection: no effectiveModelId (it equals currentModelId).
@@ -2119,10 +2442,267 @@ mod tests {
         assert!(params.client_capabilities.is_none());
     }
 
+    fn test_tool_context() -> cersei::tools::ToolContext {
+        cersei::tools::ToolContext {
+            working_dir: std::env::current_dir().unwrap(),
+            session_id: "s1".into(),
+            permissions: std::sync::Arc::new(cersei::tools::permissions::AllowAll),
+            cost_tracker: std::sync::Arc::new(cersei::tools::CostTracker::new()),
+            mcp_manager: None,
+            extensions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn initialize_params_parse_elicitation_capability() {
+        // A client advertising form elicitation (the capability that lets us
+        // ask the user structured questions).
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "elicitation": { "form": {} }
+            }
+        }))
+        .unwrap();
+        let elicitation = params.client_capabilities.unwrap().elicitation.unwrap();
+        assert!(elicitation.form.is_some());
+        assert!(elicitation.url.is_none());
+
+        // URL-only: form support is not advertised.
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "elicitation": { "url": {} }
+            }
+        }))
+        .unwrap();
+        let elicitation = params.client_capabilities.unwrap().elicitation.unwrap();
+        assert!(elicitation.form.is_none());
+
+        // Explicit null is equivalent to omitted (unsupported).
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "elicitation": { "form": null }
+            }
+        }))
+        .unwrap();
+        let elicitation = params.client_capabilities.unwrap().elicitation.unwrap();
+        assert!(elicitation.form.is_none());
+
+        // No elicitation capabilities at all: defaults.
+        let params: InitializeParams = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {}
+        }))
+        .unwrap();
+        assert!(params.client_capabilities.unwrap().elicitation.is_none());
+    }
+
+    #[test]
+    fn elicitation_params_builds_form_schema() {
+        let request = crate::providers::AskUserRequest {
+            request_id: 7,
+            session_id: Some("s1".into()),
+            questions: vec![
+                // Single-select with descriptions: titled oneOf options.
+                json!({
+                    "question": "Auth method?",
+                    "header": "Auth",
+                    "options": [
+                        { "label": "JWT", "description": "Stateless tokens" },
+                        { "label": "Cookies", "description": "Server-side sessions" },
+                    ],
+                }),
+                // Single-select without descriptions: plain enum.
+                json!({
+                    "question": "Pick one",
+                    "options": [{ "label": "A" }, { "label": "B" }],
+                }),
+                // Multi-select: string-array enum.
+                json!({
+                    "question": "Pick many",
+                    "multiSelect": true,
+                    "options": [{ "label": "A" }, { "label": "B" }, { "label": "C" }],
+                }),
+                // Free text with validation.
+                json!({
+                    "question": "Name",
+                    "validation": { "maxLength": 10, "minLength": 2, "pattern": "^[a-z]+$" },
+                }),
+            ],
+        };
+
+        let params = elicitation_params(&request, "s1");
+        assert_eq!(params["sessionId"], "s1");
+        assert_eq!(params["mode"], "form");
+        assert_eq!(params["message"], "Answer the 4 clarifying questions below.");
+        let props = &params["requestedSchema"]["properties"];
+        assert_eq!(params["requestedSchema"]["type"], "object");
+
+        // Titled single-select.
+        let q0 = &props["q0"];
+        assert_eq!(q0["type"], "string");
+        assert_eq!(q0["title"], "Auth method?");
+        assert_eq!(q0["description"], "Auth");
+        assert_eq!(q0["oneOf"][0]["const"], "JWT");
+        assert_eq!(q0["oneOf"][0]["title"], "JWT");
+        assert_eq!(q0["oneOf"][0]["description"], "Stateless tokens");
+        assert!(q0.get("enum").is_none());
+
+        // Plain enum single-select.
+        let q1 = &props["q1"];
+        assert_eq!(q1["type"], "string");
+        assert_eq!(q1["enum"], json!(["A", "B"]));
+        assert!(q1.get("oneOf").is_none());
+
+        // Multi-select array enum.
+        let q2 = &props["q2"];
+        assert_eq!(q2["type"], "array");
+        assert_eq!(q2["items"]["type"], "string");
+        assert_eq!(q2["items"]["enum"], json!(["A", "B", "C"]));
+
+        // Free text with validation.
+        let q3 = &props["q3"];
+        assert_eq!(q3["type"], "string");
+        assert_eq!(q3["maxLength"], 10);
+        assert_eq!(q3["minLength"], 2);
+        assert_eq!(q3["pattern"], "^[a-z]+$");
+    }
+
+    #[test]
+    fn elicitation_params_single_question_uses_its_text_as_message() {
+        let request = crate::providers::AskUserRequest {
+            request_id: 1,
+            session_id: Some("s1".into()),
+            questions: vec![json!({ "question": "Proceed?" })],
+        };
+        let params = elicitation_params(&request, "s1");
+        assert_eq!(params["message"], "Proceed?");
+        assert_eq!(params["requestedSchema"]["properties"]["q0"]["title"], "Proceed?");
+    }
+
+    #[test]
+    fn answer_from_elicitation_maps_accept_content() {
+        let request = crate::providers::AskUserRequest {
+            request_id: 7,
+            session_id: Some("s1".into()),
+            questions: vec![
+                json!({
+                    "question": "Auth method?",
+                    "options": [{ "label": "JWT" }, { "label": "Cookies" }],
+                }),
+                // A select whose value came back outside the declared options.
+                json!({
+                    "question": "Pick one",
+                    "options": [{ "label": "A" }, { "label": "B" }],
+                }),
+                json!({ "question": "Pick many", "multiSelect": true, "options": [{ "label": "A" }, { "label": "B" }, { "label": "C" }] }),
+                json!({ "question": "Name" }),
+            ],
+        };
+        let result = json!({
+            "action": "accept",
+            "content": { "q0": "Cookies", "q1": "Free text", "q2": ["A", "C"], "q3": "Ada" },
+        });
+        let answer = answer_from_elicitation(&request, &result);
+        assert_eq!(answer.request_id, 7);
+        use crate::providers::AskUserAnswerValue as V;
+        assert_eq!(
+            answer.answers,
+            vec![
+                Some(V::SelectedIndex(1)),
+                Some(V::OtherText("Free text".into())),
+                Some(V::SelectedIndices(vec![0, 2])),
+                Some(V::OtherText("Ada".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn answer_from_elicitation_skips_missing_and_non_accepted() {
+        let request = crate::providers::AskUserRequest {
+            request_id: 2,
+            session_id: Some("s1".into()),
+            questions: vec![
+                json!({ "question": "Q1", "options": [{ "label": "A" }, { "label": "B" }] }),
+                json!({ "question": "Q2" }),
+            ],
+        };
+
+        // Accept with an unanswered field: that question is skipped.
+        let result = json!({ "action": "accept", "content": { "q1": "x" } });
+        let answer = answer_from_elicitation(&request, &result);
+        assert_eq!(answer.answers, vec![None, Some(crate::providers::AskUserAnswerValue::OtherText("x".into()))]);
+
+        // Decline / cancel / unknown action: everything is skipped.
+        for action in ["decline", "cancel", "bogus"] {
+            let answer = answer_from_elicitation(&request, &json!({ "action": action }));
+            assert_eq!(answer.answers, vec![None, None], "action {action}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_user_round_trips_through_elicitation() {
+        let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
+        let (ask_user_answer_tx, ask_user_answer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
+        let ask_user_answer_rx = Arc::new(tokio::sync::Mutex::new(ask_user_answer_rx));
+        let server = Arc::new(AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities::default()),
+            client_elicitation: Mutex::new(true),
+            ask_user_tx: ask_user_tx.clone(),
+            ask_user_answer_tx: ask_user_answer_tx.clone(),
+            ask_user_answer_rx: ask_user_answer_rx.clone(),
+        });
+
+        // Simulated client: once the elicitation/create request (the first
+        // minted id) is registered, answer as if the user picked an option.
+        let client = Arc::clone(&server);
+        let _sim = tokio::spawn(async move {
+            for _ in 0..400 {
+                if client.connection.pending.lock().contains_key(&1) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            client.connection.deliver_response(
+                &json!(1),
+                Some(json!({ "action": "accept", "content": { "q0": "Cookies" } })),
+                None,
+            );
+        });
+
+        // The drainer forwards tool questions to the client.
+        let drainer = Arc::clone(&server);
+        tokio::spawn(async move { drainer.drain_ask_user(ask_user_rx).await });
+
+        let tool = crate::tools::AskUserTool::with_channel(ask_user_tx, ask_user_answer_rx);
+        let input = json!({
+            "questions": [{
+                "question": "Auth method?",
+                "options": [{ "label": "JWT" }, { "label": "Cookies" }],
+            }]
+        });
+        let result = tool.execute(input, &test_tool_context()).await;
+        writer.abort();
+        assert!(!result.is_error, "tool failed: {}", result.content);
+        assert!(result.content.contains("Cookies"), "got: {}", result.content);
+    }
+
     #[tokio::test]
     async fn read_text_file_round_trip_through_client() {
         // Server whose client advertised fs.readTextFile support.
         let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_answer_tx, ask_user_answer_rx) = ask_user_channels();
         let server = Arc::new(AcpServer {
             connection,
             sessions: Mutex::new(HashMap::new()),
@@ -2134,6 +2714,10 @@ mod tests {
                 read_text_file: true,
                 write_text_file: false,
             }),
+            client_elicitation: Mutex::new(false),
+            ask_user_tx,
+            ask_user_answer_tx,
+            ask_user_answer_rx,
         });
 
         // Simulated client: once read_text_file has registered its outbound
@@ -2156,6 +2740,7 @@ mod tests {
     #[tokio::test]
     async fn read_text_file_rejected_without_capability() {
         let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_answer_tx, ask_user_answer_rx) = ask_user_channels();
         let server = AcpServer {
             connection,
             sessions: Mutex::new(HashMap::new()),
@@ -2164,6 +2749,10 @@ mod tests {
             default_model: "test/test-model".into(),
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
+            client_elicitation: Mutex::new(false),
+            ask_user_tx,
+            ask_user_answer_tx,
+            ask_user_answer_rx,
         };
         let err = server.read_text_file("sess", "/abs/path", None, None).await;
         assert!(err.is_err());
@@ -2174,6 +2763,7 @@ mod tests {
     #[tokio::test]
     async fn write_text_file_rejected_without_capability() {
         let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_answer_tx, ask_user_answer_rx) = ask_user_channels();
         let server = AcpServer {
             connection,
             sessions: Mutex::new(HashMap::new()),
@@ -2182,6 +2772,10 @@ mod tests {
             default_model: "test/test-model".into(),
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
+            client_elicitation: Mutex::new(false),
+            ask_user_tx,
+            ask_user_answer_tx,
+            ask_user_answer_rx,
         };
         let err = server.write_text_file("sess", "/abs/path", "contents").await;
         assert!(err.is_err());
@@ -2192,6 +2786,7 @@ mod tests {
     #[tokio::test]
     async fn fs_request_propagates_client_error() {
         let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_answer_tx, ask_user_answer_rx) = ask_user_channels();
         let server = Arc::new(AcpServer {
             connection,
             sessions: Mutex::new(HashMap::new()),
@@ -2203,6 +2798,10 @@ mod tests {
                 read_text_file: true,
                 write_text_file: true,
             }),
+            client_elicitation: Mutex::new(false),
+            ask_user_tx,
+            ask_user_answer_tx,
+            ask_user_answer_rx,
         });
         // Simulate a client that rejects the first fs/read_text_file request.
         let server_for_client = Arc::clone(&server);
