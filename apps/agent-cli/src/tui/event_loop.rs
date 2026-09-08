@@ -287,7 +287,11 @@ async fn poll_subagent(
     }
 }
 
-fn draw(terminal: &mut Terminal, state: &mut AppState, theme: &Theme) -> anyhow::Result<()> {
+fn draw<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    state: &mut AppState,
+    theme: &Theme,
+) -> anyhow::Result<()> {
     terminal.draw(|f| {
         let area = f.area();
         // Measure the input box against its true width: with the side panel
@@ -3771,5 +3775,115 @@ mod tests {
         assert_eq!(word_end_after(input, 0), 5);
         // From the space, the next word ends at byte 9.
         assert_eq!(word_end_after(input, 5), 9);
+    }
+
+    /// A committed Read-tool turn must render as a single, stable block: an
+    /// idle frame changes nothing (no flicker) and scrolling away and back
+    /// restores the identical screen (no duplicated/overlapping rows).
+    #[test]
+    fn committed_read_tool_renders_once_and_is_stable() {
+        use ratatui::backend::TestBackend;
+
+        let theme = Theme::enterprise();
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 36)).unwrap();
+        let mut s = state();
+
+        fn frame_text(terminal: &ratatui::Terminal<TestBackend>) -> String {
+            let buf = terminal.backend().buffer();
+            let mut out = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let cell = buf.cell((x, y)).unwrap();
+                    out.push_str(&cell.symbol());
+                }
+                out.push('\n');
+            }
+            out
+        }
+
+        fn count_occurrences(haystack: &str, needle: &str) -> usize {
+            haystack.match_indices(needle).count()
+        }
+
+        // User submits a prompt and the turn starts streaming.
+        s.push_user("read apps/agent-cli/src/main.rs");
+        s.is_streaming = true;
+        s.stream_start = Some(Instant::now());
+        s.scroll.scroll_to_bottom();
+
+        // Agent intro text + Read tool call starts.
+        s.append_text("Let me look at it.\n");
+        push_tool(
+            &mut s,
+            ToolCall {
+                name: "Read".into(),
+                input_summary: "apps/agent-cli/src/main.rs".into(),
+                status: ToolStatus::Running,
+                output_preview: None,
+                started_at: Instant::now(),
+                duration_ms: None,
+                children: Vec::new(),
+                run_id: None,
+            },
+        );
+        s.dirty = true;
+        for _ in 0..3 {
+            s.frame_count += 1;
+            draw(&mut terminal, &mut s, &theme).unwrap();
+        }
+
+        // Read completes with a long, file-like preview.
+        let mut preview = String::new();
+        for i in 1..=40 {
+            preview.push_str(&format!("line {i}: {i} the quick brown fox jumps over the lazy dog\n"));
+        }
+        for b in s.active_blocks.iter_mut().rev() {
+            if let crate::tui::app::OutputBlock::Tool(t) = b
+                && t.name == "Read"
+            {
+                t.status = ToolStatus::Done;
+                t.duration_ms = Some(3);
+                t.output_preview = Some(preview.chars().take(200).collect());
+            }
+        }
+        // Model keeps streaming afterwards.
+        s.append_text("I read the file. Here is its content:\n");
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+
+        // Turn completes and commits into the scrollback.
+        s.commit_turn();
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let committed = frame_text(&terminal);
+
+        // The committed Read block appears exactly once.
+        assert_eq!(
+            count_occurrences(&committed, "Read apps/agent-cli/src/main.rs"),
+            1,
+            "Read block duplicated in the committed scrollback:\n{committed}"
+        );
+
+        // One more idle frame must not change anything (no flicker source).
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let idle = frame_text(&terminal);
+        assert_eq!(
+            committed, idle,
+            "idle frame changed the screen (flicker):\n{committed}"
+        );
+
+        // Scrolling up and back down must not duplicate rows.
+        s.scroll.scroll_up(3);
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        s.scroll.scroll_to_bottom();
+        s.frame_count += 1;
+        draw(&mut terminal, &mut s, &theme).unwrap();
+        let back_bottom = frame_text(&terminal);
+        assert_eq!(
+            committed, back_bottom,
+            "scroll to bottom did not restore the frame:\n{back_bottom}"
+        );
     }
 }

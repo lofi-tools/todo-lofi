@@ -5,6 +5,80 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+/// Strip terminal escape sequences and control bytes from display text.
+///
+/// Rows can carry arbitrary bytes — a `Read` tool result is raw file content,
+/// and model text can quote anything. Printing an ESC sequence, carriage
+/// return, tab, or backspace verbatim makes the terminal *move its cursor* in
+/// the middle of a cell run, so later glyphs land on top of earlier rows and
+/// columns (output looks like several writes competing for the same spots).
+/// This guarantees the symbols we hand to the terminal can never reposition
+/// the cursor: ESC sequences are removed whole, and remaining control bytes
+/// are replaced with a space so column math stays stable.
+fn sanitize_for_display(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Consume the whole escape sequence so no leftover parameter
+            // bytes leak into the visible text.
+            match chars.peek() {
+                // CSI: `ESC [ params final` — final byte is 0x40..=0x7e.
+                Some('[') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        let code = next as u32;
+                        if (0x40..=0x7e).contains(&code) {
+                            break;
+                        }
+                    }
+                }
+                // OSC / DCS / SOS / PM / APC: run until BEL or ST (`ESC \`).
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' {
+                            // Skip the `\` of the ST terminator, if present.
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                // Any other two-byte escape: drop its one parameter char.
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            let code = c as u32;
+            if c == '\r' || c == '\u{7}' || c == '\u{8}' || c == '\u{b}' || c == '\u{c}' {
+                // Carriage return / BEL / backspace / vertical tab / form
+                // feed would all move the terminal cursor.
+                continue;
+            } else if c == '\t' {
+                // Tabs advance to the next tab stop mid-print; render as a
+                // plain space so alignment is predictable.
+                out.push(' ');
+            } else if c == '\n' {
+                // A row must stay one line; a stray newline would push the
+                // rest of the run onto the next terminal row.
+                out.push(' ');
+            } else if code < 0x20 || code == 0x7f {
+                // Remaining C0 controls / DEL: invisible, drop them.
+                continue;
+            } else {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
 /// A single pre-built line in the virtual list.
 #[derive(Clone)]
 pub struct VItem {
@@ -265,8 +339,17 @@ impl VirtualList {
                 item.line.clone()
             };
 
-            // Render line directly to buffer
-            let para = Paragraph::new(vec![line]);
+            // Render line directly to buffer. Content can be arbitrary tool/
+            // file bytes, so scrub terminal controls first — printing them
+            // verbatim would move the terminal cursor and let later glyphs
+            // overwrite earlier rows/columns.
+            let safe_line = Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| Span::styled(sanitize_for_display(&span.content), span.style))
+                    .collect::<Vec<_>>(),
+            );
+            let para = Paragraph::new(vec![safe_line]);
             para.render(line_area, buf);
 
             screen_y += 1;
@@ -449,5 +532,77 @@ mod tests {
         assert_eq!(texts, vec!["ab", "▊cd"]);
         assert!(out.spans[0].style.add_modifier.contains(Modifier::REVERSED));
         assert!(!out.spans[1].style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn sanitize_removes_escape_sequences_and_control_bytes() {
+        // CSI color codes are dropped whole.
+        assert_eq!(sanitize_for_display("\x1b[31mred\x1b[0m"), "red");
+        // Cursor-movement escapes (the ones that make later glyphs overwrite
+        // earlier rows) are removed entirely.
+        assert_eq!(sanitize_for_display("a\x1b[1Ab"), "ab");
+        assert_eq!(sanitize_for_display("a\x1b[Hb"), "ab");
+        // OSC (terminal title, clipboard) runs to BEL or ST.
+        assert_eq!(sanitize_for_display("a\x1b]0;title\x07b"), "ab");
+        assert_eq!(sanitize_for_display("a\x1b]52;c,abc\x1b\\b"), "ab");
+        // Carriage returns and other cursor movers disappear.
+        assert_eq!(sanitize_for_display("a\rb"), "ab");
+        assert_eq!(sanitize_for_display("ab\u{8}c"), "abc");
+        // Tabs become a plain space so they can't jump the cursor mid-run.
+        assert_eq!(sanitize_for_display("a\tb"), "a b");
+        // A stray newline (which would push the rest onto the next terminal
+        // row) is flattened too.
+        assert_eq!(sanitize_for_display("a\nb"), "a b");
+        // Remaining C0 / DEL bytes are dropped; normal text is untouched.
+        assert_eq!(sanitize_for_display("a\u{0}\u{3}b\u{7f}"), "ab");
+        assert_eq!(sanitize_for_display("plain text"), "plain text");
+    }
+
+    #[test]
+    fn poisoned_rows_never_write_cursor_movers_or_displace_neighbors() {
+        // Two rows that carry terminal control bytes: an ESC sequence and a
+        // carriage return. Before sanitizing, printing those raw would move
+        // the terminal cursor and the rest of the run would land on earlier
+        // rows/columns ("multiple writes competing for the same char spots").
+        let mut list = VirtualList::new();
+        list.set_committed(vec![
+            VItem::new(Line::from("AB\x1b[31mCD")),
+            VItem::new(Line::from("a\x1b[1Ab")),
+            VItem::new(Line::from("END")),
+        ]);
+        list.set_viewport(3);
+        list.sticky_bottom = true;
+        let mut buf = Buffer::empty(Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 3,
+        });
+        list.render(buf.area, &mut buf, None);
+
+        // No cell anywhere may hold a control/escape glyph.
+        for y in 0..3 {
+            for x in 0..10 {
+                let symbol = buf.cell((x, y)).unwrap().symbol();
+                for ch in symbol.chars() {
+                    let code = ch as u32;
+                    assert!(
+                        ch != '\u{1b}' && code >= 0x20 || ch == ' ',
+                        "control byte {ch:?} leaked at ({x},{y})"
+                    );
+                }
+            }
+        }
+
+        let row = |y: u16| {
+            (0..10)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        };
+        // Row 0 lost the ESC sequence, keeping both visible parts inline.
+        assert_eq!(&row(0)[..4], "ABCD");
+        // Row 1 kept its own line — nothing was displaced by the cursor-up.
+        assert_eq!(&row(1)[..2], "ab");
+        assert_eq!(&row(2)[..3], "END");
     }
 }
