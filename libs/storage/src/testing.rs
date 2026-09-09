@@ -194,7 +194,7 @@ fn seed_assignments() -> Vec<SeedAssignment> {
         },
         SeedAssignment {
             task_title: "feed dorito".to_string(),
-            tag_name: "health".to_string(),
+            tag_name: "personal".to_string(),
         },
     ]
 }
