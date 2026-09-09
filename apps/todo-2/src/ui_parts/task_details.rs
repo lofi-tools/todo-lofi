@@ -46,22 +46,32 @@ fn field(label: &str, value: String) -> impl IntoElement {
 }
 
 fn format_deadline(deadline: u64) -> String {
-    let now = std::time::SystemTime::now()
+    let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let diff = deadline.saturating_sub(now);
-    let days = diff / 86400;
-    if deadline <= now {
-        "overdue".to_string()
-    } else if days == 0 {
-        "today".to_string()
-    } else if days == 1 {
-        "tomorrow".to_string()
-    } else if days < 7 {
-        format!("in {days} days")
+        .unwrap_or(0) as i64;
+    let dl_secs = deadline as i64;
+    let time = jiff::Timestamp::from_second(dl_secs)
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()))
+        .map(|t| t.strftime("%-I:%M %p").to_string())
+        .unwrap_or_default();
+    if dl_secs <= now_secs {
+        if time.is_empty() {
+            "overdue".to_string()
+        } else {
+            format!("overdue ({time})")
+        }
     } else {
-        format!("in {} weeks", days / 7)
+        let days = (dl_secs - now_secs) as u64 / 86400;
+        if days == 0 {
+            format!("today, {time}")
+        } else if days == 1 {
+            format!("tomorrow, {time}")
+        } else if days < 7 {
+            format!("in {days} days")
+        } else {
+            format!("in {} weeks", days / 7)
+        }
     }
 }
 
@@ -81,7 +91,26 @@ impl Render for TaskDetails {
                 ),
             Some(task) => {
                 let mut details = div().v_flex().gap_3();
-                details = details.child(field("Title", task.title.clone()));
+                if !task.leaf_tags.is_empty() {
+                    details = details.child(div().h_flex().gap_1().flex_wrap().children(
+                        task.leaf_tags.iter().map(|tag| {
+                            div()
+                                .text_size(px(10.))
+                                .px(px(4.))
+                                .rounded(px(2.))
+                                .bg(rgb(0x2a2a2a))
+                                .text_color(rgb(0xa3a3a3))
+                                .child(format!("#{tag}"))
+                        }),
+                    ));
+                }
+                details = details.child(
+                    div()
+                        .text_xl()
+                        .font_bold()
+                        .text_color(rgb(0xe5e5e5))
+                        .child(task.title.clone()),
+                );
                 details = details.child(field(
                     "Status",
                     if task.done { "Done".to_string() } else { "Open".to_string() },
@@ -93,21 +122,6 @@ impl Render for TaskDetails {
                 }
                 if let Some(deadline) = task.deadline {
                     details = details.child(field("Deadline", format_deadline(deadline)));
-                }
-                if !task.leaf_tags.is_empty() {
-                    let chips = div().h_flex().gap_1().flex_wrap().children(
-                        task.leaf_tags.iter().map(|tag| {
-                            div()
-                                .text_size(px(10.))
-                                .px(px(4.))
-                                .rounded(px(2.))
-                                .bg(rgb(0x2a2a2a))
-                                .text_color(rgb(0xa3a3a3))
-                                .child(format!("#{tag}"))
-                        }),
-                    );
-                    details = details
-                        .child(div().v_flex().gap_1().child(field_label("Tags")).child(chips));
                 }
                 if let Some(branch) = &task.branch_name
                     && !branch.is_empty()
