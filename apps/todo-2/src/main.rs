@@ -14,7 +14,7 @@ use projects::Project;
 use store::Store;
 use ui_parts::navbar::{NavBar, NavBarEvent};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
-use ui_parts::task_details::TaskDetails;
+use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
 
 mod components;
@@ -117,7 +117,7 @@ impl Layout {
             },
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
-        let details = cx.new(TaskDetails::new);
+        let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
         let details_for_list = details.clone();
         let list_for_deselect = task_list.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
@@ -131,6 +131,12 @@ impl Layout {
                 list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
                 cx.notify();
             }
+        })
+        .detach();
+        let list_for_toggle = task_list.clone();
+        cx.subscribe(&details, move |_this, _details, event, cx| {
+            let TaskDetailsEvent::Toggled { task_id, done } = *event;
+            list_for_toggle.update(cx, |list, cx| list.set_task_done(task_id, done, cx));
         })
         .detach();
 

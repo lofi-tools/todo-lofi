@@ -1,17 +1,30 @@
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Window, div, px, rgb,
+    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
 };
+use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use storage::TaskWithMeta;
 
+use crate::components::Checkbox;
+use crate::store::Store;
+
+#[derive(Clone)]
+pub enum TaskDetailsEvent {
+    Toggled { task_id: u64, done: bool },
+}
+
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
+    store: Store,
 }
 
 impl TaskDetails {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
-        Self { selected: None }
+    pub fn new(store: Store, _cx: &mut Context<Self>) -> Self {
+        Self {
+            selected: None,
+            store,
+        }
     }
 
     pub fn set_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
@@ -75,6 +88,8 @@ fn format_deadline(deadline: u64) -> String {
     }
 }
 
+impl EventEmitter<TaskDetailsEvent> for TaskDetails {}
+
 impl Render for TaskDetails {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
@@ -90,9 +105,15 @@ impl Render for TaskDetails {
                         .child("Select a task to see details"),
                 ),
             Some(task) => {
+                let task_id = task.id;
+                let done = task.done;
+                let store = self.store.clone();
+                let entity = cx.entity().clone();
+
                 let mut details = div().v_flex().gap_3();
+                let mut header = div().v_flex().gap_1();
                 if !task.leaf_tags.is_empty() {
-                    details = details.child(div().h_flex().gap_1().flex_wrap().children(
+                    header = header.child(div().h_flex().gap_1().flex_wrap().children(
                         task.leaf_tags.iter().map(|tag| {
                             div()
                                 .text_size(px(10.))
@@ -104,17 +125,50 @@ impl Render for TaskDetails {
                         }),
                     ));
                 }
-                details = details.child(
+                header = header.child(
                     div()
-                        .text_xl()
-                        .font_bold()
-                        .text_color(rgb(0xe5e5e5))
-                        .child(task.title.clone()),
+                        .h_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            Checkbox::new(("details-checkbox", task_id))
+                                .with_size(px(22.))
+                                .checked(done)
+                                .on_click(move |new_done, _window, cx| {
+                                    let store = store.clone();
+                                    let entity = entity.clone();
+                                    let new_done = *new_done;
+                                    cx.spawn(async move |cx| {
+                                        if let Err(e) =
+                                            store.toggle_task_done(task_id, new_done, cx).await
+                                        {
+                                            tracing::error!(?e, "Failed toggle_task_done");
+                                        }
+                                        entity.update(cx, |this, cx| {
+                                            if let Some(selected) = &mut this.selected {
+                                                selected.task.done = new_done;
+                                            }
+                                            cx.emit(TaskDetailsEvent::Toggled {
+                                                task_id,
+                                                done: new_done,
+                                            });
+                                            cx.notify();
+                                        });
+                                    })
+                                    .detach();
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xl()
+                                .font_bold()
+                                .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                                .when(done, |this| this.line_through())
+                                .child(task.title.clone()),
+                        ),
                 );
-                details = details.child(field(
-                    "Status",
-                    if task.done { "Done".to_string() } else { "Open".to_string() },
-                ));
+                details = details.child(header);
                 if let Some(desc) = &task.description
                     && !desc.is_empty()
                 {
@@ -143,13 +197,6 @@ impl Render for TaskDetails {
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
             }))
-            .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("Details"),
-            )
             .child(body)
     }
 }

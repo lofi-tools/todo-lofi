@@ -50,6 +50,13 @@ impl TaskRow {
     pub fn task_id(&self) -> u64 {
         self.task.id
     }
+
+    pub fn set_done(&mut self, done: bool, cx: &mut Context<Self>) {
+        if self.task.done != done {
+            self.task.task.done = done;
+            cx.notify();
+        }
+    }
 }
 
 impl EventEmitter<TaskRowEvent> for TaskRow {}
