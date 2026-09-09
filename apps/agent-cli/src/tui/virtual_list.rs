@@ -380,8 +380,14 @@ fn highlight_line(line: &Line<'static>, start_g: usize, end_g: usize) -> Line<'s
         byte += grapheme.len();
     }
     let total_g = grapheme_bytes.len();
-    let start_byte = grapheme_bytes.get(start_g.min(total_g)).copied().unwrap_or(joined.len());
-    let end_byte = grapheme_bytes.get(end_g.min(total_g)).copied().unwrap_or(joined.len());
+    let start_byte = grapheme_bytes
+        .get(start_g.min(total_g))
+        .copied()
+        .unwrap_or(joined.len());
+    let end_byte = grapheme_bytes
+        .get(end_g.min(total_g))
+        .copied()
+        .unwrap_or(joined.len());
     let (start_byte, end_byte) = (start_byte.min(end_byte), end_byte.max(start_byte));
 
     let mut spans_out = Vec::new();
@@ -461,10 +467,11 @@ mod tests {
         assert_eq!(texts, vec!["hello", " world"]);
         // Whole-line selection marks every span.
         let all = highlight_line(&line, 0, 11);
-        assert!(all
-            .spans
-            .iter()
-            .all(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+        assert!(
+            all.spans
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+        );
     }
 
     #[test]

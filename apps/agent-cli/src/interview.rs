@@ -41,17 +41,12 @@ Request to interview: ";
 
 /// Shared error wording for empty/whitespace-only interview targets, used
 /// identically by the TUI and the ACP server.
-pub const EMPTY_TARGET_MESSAGE: &str = "Nothing to interview — give /interview a request to clarify.";
+pub const EMPTY_TARGET_MESSAGE: &str =
+    "Nothing to interview — give /interview a request to clarify.";
 
 /// Build the full interview prompt from the user's raw request text.
 pub fn build_interview_prompt(target: &str) -> String {
     format!("{INTERVIEW_BASE_PROMPT}{target}")
 }
 
-
-
-
-
-
-
-// Interview me to better understand my request and then create a spec file. First, gather any relevant context (read files, do research, etc.). Then, use several rounds of the ask_user tool to ask non-obvious clarifying questions — things you cannot easily infer from the codebase or my initial message. Ask about edge cases, preferences, constraints, and design decisions. All questions should be directed through the ask_user tool -- not written out as text. Keep coming up with new questions that get at unique aspects of the request. Aim for at least 3 rounds with multiple questions each round. When satisfied, write a [INSERT_REQUEST_SHORT_NAME]-spec.md file with all the information you have gathered about the request. Aim for as much detail as possible...  
+// Interview me to better understand my request and then create a spec file. First, gather any relevant context (read files, do research, etc.). Then, use several rounds of the ask_user tool to ask non-obvious clarifying questions — things you cannot easily infer from the codebase or my initial message. Ask about edge cases, preferences, constraints, and design decisions. All questions should be directed through the ask_user tool -- not written out as text. Keep coming up with new questions that get at unique aspects of the request. Aim for at least 3 rounds with multiple questions each round. When satisfied, write a [INSERT_REQUEST_SHORT_NAME]-spec.md file with all the information you have gathered about the request. Aim for as much detail as possible...

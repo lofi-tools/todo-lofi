@@ -56,16 +56,14 @@ impl TodoStore {
     }
 
     pub async fn get_tag_by_name(&mut self, name: &str) -> QueryResult<Option<Tag>> {
-        let rows = toasty::sql::query(
-            r#"SELECT id, name FROM tags WHERE LOWER(name) = LOWER(?1)"#,
-        )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
-        .bind(name)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::FindTagByNameSnafu {
-            name: name.to_string(),
-        })?;
+        let rows = toasty::sql::query(r#"SELECT id, name FROM tags WHERE LOWER(name) = LOWER(?1)"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .bind(name)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::FindTagByNameSnafu {
+                name: name.to_string(),
+            })?;
 
         Ok(rows.into_iter().next().and_then(|row| parse_tag_row(&row)))
     }

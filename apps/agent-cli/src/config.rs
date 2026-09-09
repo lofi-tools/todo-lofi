@@ -1114,10 +1114,7 @@ mod tests {
                 assert_eq!(detailed.top_p, Some(0.95));
                 let extra = detailed.extra_body.as_ref().unwrap();
                 assert_eq!(extra["chat_template_kwargs"]["thinking"], true);
-                assert_eq!(
-                    extra["chat_template_kwargs"]["reasoning_effort"],
-                    "high"
-                );
+                assert_eq!(extra["chat_template_kwargs"]["reasoning_effort"], "high");
             }
             ModelRef::Simple(_) => panic!("expected detailed model object"),
         }

@@ -193,7 +193,11 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
     Ok(())
 }
 
-pub async fn run_tui_app(_cli: Cli, config: AppConfig, runtime: Arc<AgentRuntime>) -> anyhow::Result<()> {
+pub async fn run_tui_app(
+    _cli: Cli,
+    config: AppConfig,
+    runtime: Arc<AgentRuntime>,
+) -> anyhow::Result<()> {
     // let theme = Theme::from_name(&config.theme);
 
     // Resolve or create session ID

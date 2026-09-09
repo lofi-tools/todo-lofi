@@ -19,9 +19,9 @@ use crate::cli_commands::Cli;
 use crate::config::AppConfig;
 use crate::providers;
 use anyhow::Context as _;
+use cersei::Agent;
 use cersei::events::AgentEvent;
 use cersei::types::{Message, Role, StopReason};
-use cersei::Agent;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -132,7 +132,14 @@ impl AcpConnection {
                 }
             }
         });
-        (Self { tx, pending: Mutex::new(HashMap::new()), next_request_id: AtomicI64::new(1) }, writer)
+        (
+            Self {
+                tx,
+                pending: Mutex::new(HashMap::new()),
+                next_request_id: AtomicI64::new(1),
+            },
+            writer,
+        )
     }
 
     fn send_line(&self, line: String) {
@@ -174,7 +181,10 @@ impl AcpConnection {
     }
 
     fn send_update(&self, session_id: &str, update: SessionUpdate) {
-        self.notification("session/update", json!({ "sessionId": session_id, "update": update }));
+        self.notification(
+            "session/update",
+            json!({ "sessionId": session_id, "update": update }),
+        );
     }
 
     /// Advertise the slash commands available in this session (per the ACP
@@ -185,7 +195,8 @@ impl AcpConnection {
             SessionUpdate::AvailableCommandsUpdate {
                 available_commands: vec![AvailableCommand {
                     name: "interview".into(),
-                    description: "Interview you about a task or spec to produce requirements".into(),
+                    description: "Interview you about a task or spec to produce requirements"
+                        .into(),
                     input: Some(AvailableCommandInput {
                         ty: "text",
                         hint: "what to interview about".into(),
@@ -265,11 +276,25 @@ impl AcpConnection {
 #[allow(dead_code)] // fields are part of the wire format
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PromptContentBlock {
-    Text { text: String },
-    Image { mime_type: String, data: String },
-    Audio { mime_type: String, data: String },
-    Resource { resource: Value },
-    ResourceLink { uri: String, name: Option<String>, mime_type: Option<String> },
+    Text {
+        text: String,
+    },
+    Image {
+        mime_type: String,
+        data: String,
+    },
+    Audio {
+        mime_type: String,
+        data: String,
+    },
+    Resource {
+        resource: Value,
+    },
+    ResourceLink {
+        uri: String,
+        name: Option<String>,
+        mime_type: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -425,29 +450,20 @@ struct AskUserQuestionParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     header: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    options: Option<Vec<AskUserOptionParams>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    multi_select: Option<bool>,
+    suggestions: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     validation: Option<AskUserValidationParams>,
 }
 
 #[derive(Serialize)]
-struct AskUserOptionParams {
-    label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-}
-
-#[derive(Serialize)]
 struct AskUserValidationParams {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
     max_length: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
     min_length: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pattern: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "patternError", skip_serializing_if = "Option::is_none")]
     pattern_error: Option<String>,
 }
 
@@ -732,7 +748,9 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                server.connection.error(Value::Null, -32700, format!("Parse error: {e}"));
+                server
+                    .connection
+                    .error(Value::Null, -32700, format!("Parse error: {e}"));
                 continue;
             }
         };
@@ -753,7 +771,8 @@ impl AcpServer {
             Ok(rpc) => rpc,
             Err(e) => {
                 let id = msg.get("id").cloned().unwrap_or(Value::Null);
-                self.connection.error(id, -32700, format!("Parse error: {e}"));
+                self.connection
+                    .error(id, -32700, format!("Parse error: {e}"));
                 return;
             }
         };
@@ -775,7 +794,8 @@ impl AcpServer {
 
         match method.as_str() {
             "initialize" => {
-                let init_params: InitializeParams = serde_json::from_value(params).unwrap_or_default();
+                let init_params: InitializeParams =
+                    serde_json::from_value(params).unwrap_or_default();
                 if let Some(fs) = init_params.client_capabilities.as_ref().and_then(|c| c.fs) {
                     *self.client_fs.lock() = fs;
                 }
@@ -795,7 +815,8 @@ impl AcpServer {
                 let params: NewSessionParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -805,7 +826,8 @@ impl AcpServer {
                 let params: SessionIdParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -815,7 +837,8 @@ impl AcpServer {
                 let params: PromptParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -835,7 +858,8 @@ impl AcpServer {
                 let params: SessionIdParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -856,7 +880,8 @@ impl AcpServer {
                 let params: SetConfigOptionParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -866,7 +891,8 @@ impl AcpServer {
                 let params: SetModeParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -876,7 +902,8 @@ impl AcpServer {
                 let params: SetModeParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -886,7 +913,8 @@ impl AcpServer {
                 let params: SessionIdParams = match serde_json::from_value(params) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid params: {e}"));
+                        self.connection
+                            .error(id, -32602, format!("Invalid params: {e}"));
                         return;
                     }
                 };
@@ -972,7 +1000,11 @@ impl AcpServer {
     fn config_options(&self, session: &Arc<Mutex<AcpSession>>) -> Value {
         let (session_provider, session_model, session_mode) = {
             let guard = session.lock();
-            (guard.provider.clone(), guard.model.clone(), guard.mode.clone())
+            (
+                guard.provider.clone(),
+                guard.model.clone(),
+                guard.mode.clone(),
+            )
         };
         let provider_names: Vec<Value> = providers::providers(&self.config)
             .into_iter()
@@ -1030,7 +1062,11 @@ impl AcpServer {
                 name: s.name.clone(),
                 command: s.command.clone(),
                 args: s.args.clone(),
-                env: s.env.iter().map(|e| (e.name.clone(), e.value.clone())).collect(),
+                env: s
+                    .env
+                    .iter()
+                    .map(|e| (e.name.clone(), e.value.clone()))
+                    .collect(),
                 url: s.url.clone(),
                 server_type: s.server_type.clone().unwrap_or_else(|| "stdio".to_string()),
             })
@@ -1057,7 +1093,9 @@ impl AcpServer {
         };
         session_state.refresh_effective(&self.config);
         let session = Arc::new(Mutex::new(session_state));
-        self.sessions.lock().insert(session_id.clone(), Arc::clone(&session));
+        self.sessions
+            .lock()
+            .insert(session_id.clone(), Arc::clone(&session));
 
         let guard = session.lock();
         let mode = guard.mode.clone();
@@ -1088,7 +1126,8 @@ impl AcpServer {
         let session = match self.sessions.lock().get(&session_id).cloned() {
             Some(s) => s,
             None => {
-                self.connection.error(id, -32602, format!("Session not found: {session_id}"));
+                self.connection
+                    .error(id, -32602, format!("Session not found: {session_id}"));
                 return;
             }
         };
@@ -1151,7 +1190,8 @@ impl AcpServer {
         let session = match self.sessions.lock().get(&session_id).cloned() {
             Some(s) => s,
             None => {
-                self.connection.error(id, -32602, format!("Session not found: {session_id}"));
+                self.connection
+                    .error(id, -32602, format!("Session not found: {session_id}"));
                 return;
             }
         };
@@ -1173,8 +1213,11 @@ impl AcpServer {
                 let name = match value.as_str() {
                     Some(n) => n,
                     None => {
-                        self.connection
-                            .error(id, -32602, "Invalid value for config option 'provider'");
+                        self.connection.error(
+                            id,
+                            -32602,
+                            "Invalid value for config option 'provider'",
+                        );
                         return;
                     }
                 };
@@ -1188,39 +1231,49 @@ impl AcpServer {
                 };
                 guard.provider = name.to_string();
                 guard.model = model;
-                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.fallback =
+                    providers::fallback_for(&self.config, &guard.provider, &guard.model);
                 guard.refresh_effective(&self.config);
             }
             "model" => {
                 let text = match value.as_str() {
                     Some(t) => t,
                     None => {
-                        self.connection
-                            .error(id, -32602, "Invalid value for config option 'model'");
+                        self.connection.error(
+                            id,
+                            -32602,
+                            "Invalid value for config option 'model'",
+                        );
                         return;
                     }
                 };
-                let (provider, model) = match providers::resolve_selection(&self.config, &guard.provider, text) {
-                    Ok(sel) => sel,
-                    Err(e) => {
-                        self.connection.error(id, -32602, format!("Invalid model: {e}"));
-                        return;
-                    }
-                };
+                let (provider, model) =
+                    match providers::resolve_selection(&self.config, &guard.provider, text) {
+                        Ok(sel) => sel,
+                        Err(e) => {
+                            self.connection
+                                .error(id, -32602, format!("Invalid model: {e}"));
+                            return;
+                        }
+                    };
                 guard.provider = provider;
                 guard.model = model;
-                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.fallback =
+                    providers::fallback_for(&self.config, &guard.provider, &guard.model);
                 guard.refresh_effective(&self.config);
             }
             other => {
-                self.connection.error(id, -32602, format!("Unknown config option: {other}"));
+                self.connection
+                    .error(id, -32602, format!("Unknown config option: {other}"));
                 return;
             }
         }
         drop(guard);
 
-        self.connection
-            .response(id, json!({ "configOptions": self.config_options(&session) }));
+        self.connection.response(
+            id,
+            json!({ "configOptions": self.config_options(&session) }),
+        );
     }
 
     fn handle_set_mode(&self, id: Value, params: SetModeParams) {
@@ -1241,12 +1294,17 @@ impl AcpServer {
         let session = match self.sessions.lock().get(&session_id).cloned() {
             Some(s) => s,
             None => {
-                self.connection.error(id, -32602, format!("Session not found: {session_id}"));
+                self.connection
+                    .error(id, -32602, format!("Session not found: {session_id}"));
                 return;
             }
         };
         if mode_id != "auto" && mode_id != "readonly" {
-            self.connection.error(id, -32602, format!("Invalid or unavailable mode: {mode_id}"));
+            self.connection.error(
+                id,
+                -32602,
+                format!("Invalid or unavailable mode: {mode_id}"),
+            );
             return;
         }
         session.lock().mode = mode_id;
@@ -1271,7 +1329,8 @@ impl AcpServer {
         let session = match self.sessions.lock().get(&session_id).cloned() {
             Some(s) => s,
             None => {
-                self.connection.error(id, -32602, format!("Session not found: {session_id}"));
+                self.connection
+                    .error(id, -32602, format!("Session not found: {session_id}"));
                 return;
             }
         };
@@ -1281,13 +1340,15 @@ impl AcpServer {
                 let mut guard = session.lock();
                 guard.provider = provider;
                 guard.model = model;
-                guard.fallback = providers::fallback_for(&self.config, &guard.provider, &guard.model);
+                guard.fallback =
+                    providers::fallback_for(&self.config, &guard.provider, &guard.model);
                 guard.refresh_effective(&self.config);
                 drop(guard);
                 self.connection.response(id, json!({}));
             }
             Err(e) => {
-                self.connection.error(id, -32602, format!("Invalid or unavailable model: {e}"));
+                self.connection
+                    .error(id, -32602, format!("Invalid or unavailable model: {e}"));
             }
         }
     }
@@ -1410,10 +1471,12 @@ impl AcpServer {
     }
 
     fn send_skipped_answer(&self, request: &crate::providers::AskUserRequest) {
-        let _ = self.ask_user_answer_tx.send(crate::providers::AskUserAnswer {
-            request_id: request.request_id,
-            answers: vec![None; request.questions.len()],
-        });
+        let _ = self
+            .ask_user_answer_tx
+            .send(crate::providers::AskUserAnswer {
+                request_id: request.request_id,
+                answers: vec![None; request.questions.len()],
+            });
     }
 
     /// Read a text file from the client's environment (including unsaved
@@ -1437,8 +1500,8 @@ impl AcpServer {
         })
         .context("failed to serialize fs/read_text_file params")?;
         let result = self.fs_request("fs/read_text_file", params).await?;
-        let parsed: ReadTextFileResult = serde_json::from_value(result)
-            .context("invalid fs/read_text_file response")?;
+        let parsed: ReadTextFileResult =
+            serde_json::from_value(result).context("invalid fs/read_text_file response")?;
         Ok(parsed.content)
     }
 
@@ -1471,14 +1534,19 @@ impl AcpServer {
         let (id, rx) = self.connection.request(method, params);
         match tokio::time::timeout(Self::FS_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(RpcResponse::Result(value))) => Ok(value),
-            Ok(Ok(RpcResponse::Error(err))) => {
-                Err(anyhow::anyhow!("{method} failed: [{code}] {message}", code = err.code, message = err.message))
-            }
+            Ok(Ok(RpcResponse::Error(err))) => Err(anyhow::anyhow!(
+                "{method} failed: [{code}] {message}",
+                code = err.code,
+                message = err.message
+            )),
             // Sender dropped without sending: the connection was torn down.
             Ok(Err(_)) => Err(anyhow::anyhow!("{method} response channel closed")),
             Err(_) => {
                 self.connection.forget_request(id);
-                Err(anyhow::anyhow!("{method} timed out after {FS_REQUEST_TIMEOUT:?}", FS_REQUEST_TIMEOUT = Self::FS_REQUEST_TIMEOUT))
+                Err(anyhow::anyhow!(
+                    "{method} timed out after {FS_REQUEST_TIMEOUT:?}",
+                    FS_REQUEST_TIMEOUT = Self::FS_REQUEST_TIMEOUT
+                ))
             }
         }
     }
@@ -1500,7 +1568,8 @@ impl AcpServer {
 
         let text = prompt_to_text(&prompt);
         if text.is_empty() {
-            self.connection.error(id, -32602, "Prompt must not be empty");
+            self.connection
+                .error(id, -32602, "Prompt must not be empty");
             return;
         }
 
@@ -1516,7 +1585,8 @@ impl AcpServer {
                 String::new()
             };
             if target.is_empty() {
-                self.connection.error(id, -32602, crate::interview::EMPTY_TARGET_MESSAGE);
+                self.connection
+                    .error(id, -32602, crate::interview::EMPTY_TARGET_MESSAGE);
                 return;
             }
             // The model runs the wrapped interview prompt (INTERVIEW_BASE_PROMPT
@@ -1563,21 +1633,26 @@ impl AcpServer {
                 Ok(sel) => sel,
                 Err(e) => {
                     self.clear_pending(&session, run_id);
-                    self.connection.error(id, -32000, format!("Failed to start agent: {e}"));
-                    return;
-                }
-            }
-        };
-        let mut agent =
-            match self.build_agent(&session, cancel_token.clone(), &start_provider, &start_model) {
-                Ok(a) => a,
-                Err(e) => {
-                    self.clear_pending(&session, run_id);
                     self.connection
                         .error(id, -32000, format!("Failed to start agent: {e}"));
                     return;
                 }
-            };
+            }
+        };
+        let mut agent = match self.build_agent(
+            &session,
+            cancel_token.clone(),
+            &start_provider,
+            &start_model,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                self.clear_pending(&session, run_id);
+                self.connection
+                    .error(id, -32000, format!("Failed to start agent: {e}"));
+                return;
+            }
+        };
 
         let mut stream = agent.run_stream(&run_text);
 
@@ -1713,8 +1788,7 @@ impl AcpServer {
                             if name == "ask_user" {
                                 self.send_interview_question_from_input(&session_id, iid, input);
                             } else if name == "Write"
-                                && let Some(path) =
-                                    input.get("file_path").and_then(Value::as_str)
+                                && let Some(path) = input.get("file_path").and_then(Value::as_str)
                             {
                                 spec_file_path = Some(path.to_string());
                             }
@@ -1746,7 +1820,8 @@ impl AcpServer {
                     None => "cancelled",
                 }
             };
-            let final_reply = (!final_reply.trim().is_empty()).then_some(final_reply.trim().to_string());
+            let final_reply =
+                (!final_reply.trim().is_empty()).then_some(final_reply.trim().to_string());
             let params = InterviewCompletedParams {
                 interview_id: iid.clone(),
                 status: status.to_string(),
@@ -1754,7 +1829,8 @@ impl AcpServer {
                 summary: None,
                 final_reply,
             };
-            self.connection.send_interview_completed(&session_id, params);
+            self.connection
+                .send_interview_completed(&session_id, params);
             // Clear the interview ID from the session.
             session.lock().active_interview_id = None;
         }
@@ -1768,14 +1844,19 @@ impl AcpServer {
                 self.connection.error(id, -32000, e);
             }
             _ => {
-                self.connection.response(id, json!({ "stopReason": "cancelled" }));
+                self.connection
+                    .response(id, json!({ "stopReason": "cancelled" }));
             }
         }
     }
 
     fn clear_pending(&self, session: &Arc<Mutex<AcpSession>>, run_id: u64) {
         let mut guard = session.lock();
-        if guard.pending_cancel.as_ref().is_some_and(|(id, _)| *id == run_id) {
+        if guard
+            .pending_cancel
+            .as_ref()
+            .is_some_and(|(id, _)| *id == run_id)
+        {
             guard.pending_cancel = None;
         }
     }
@@ -1875,48 +1956,52 @@ impl AcpServer {
                 arr.iter()
                     .filter_map(|q| {
                         let question = q.get("question")?.as_str()?.to_string();
-                        let header = q.get("header")?.as_str()?.to_string();
-                        let header = if header.is_empty() { None } else { Some(header) };
-                        let options = q.get("options")?.as_array().map(|opts| {
-                            opts.iter()
-                                .filter_map(|o| {
-                                    let label = o.get("label")?.as_str()?.to_string();
-                                    let desc = o.get("description")?.as_str()?.to_string();
-                                    let desc = if desc.is_empty() { None } else { Some(desc) };
-                                    Some(AskUserOptionParams { label, description: desc })
-                                })
-                                .collect()
-                        });
-                        let multi_select = q.get("multiSelect")?.as_bool();
-                        let multi_select = if multi_select == Some(true) { Some(true) } else { None };
-                        let validation = if let Some(v) = q.get("validation").and_then(Value::as_object) {
-                            let max_length = v.get("maxLength")?.as_u64().map(|n| n as u32);
-                            let min_length = v.get("minLength")?.as_u64().map(|n| n as u32);
-                            let pattern = v.get("pattern")?.as_str().map(String::from);
-                            let pattern_error = v.get("patternError")?.as_str().map(String::from);
-                            // Only include if at least one field is present.
-                            if max_length.is_none()
-                                && min_length.is_none()
-                                && pattern.is_none()
-                                && pattern_error.is_none()
-                            {
-                                None
-                            } else {
-                                Some(AskUserValidationParams {
-                                    max_length,
-                                    min_length,
-                                    pattern,
-                                    pattern_error,
-                                })
-                            }
-                        } else {
-                            None
-                        };
+                        let header = q
+                            .get("header")
+                            .and_then(Value::as_str)
+                            .filter(|header| !header.is_empty())
+                            .map(String::from);
+                        let suggestions =
+                            q.get("suggestions").and_then(Value::as_array).map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(String::from)
+                                    .collect()
+                            });
+                        let validation =
+                            q.get("validation")
+                                .and_then(Value::as_object)
+                                .and_then(|v| {
+                                    let max_length = v
+                                        .get("maxLength")
+                                        .and_then(Value::as_u64)
+                                        .map(|n| n as u32);
+                                    let min_length = v
+                                        .get("minLength")
+                                        .and_then(Value::as_u64)
+                                        .map(|n| n as u32);
+                                    let pattern =
+                                        v.get("pattern").and_then(Value::as_str).map(String::from);
+                                    let pattern_error = v
+                                        .get("patternError")
+                                        .and_then(Value::as_str)
+                                        .map(String::from);
+                                    (max_length.is_some()
+                                        || min_length.is_some()
+                                        || pattern.is_some()
+                                        || pattern_error.is_some())
+                                    .then_some(AskUserValidationParams {
+                                        max_length,
+                                        min_length,
+                                        pattern,
+                                        pattern_error,
+                                    })
+                                });
                         Some(AskUserQuestionParams {
                             question,
                             header,
-                            options,
-                            multi_select,
+                            suggestions,
                             validation,
                         })
                     })
@@ -1938,94 +2023,62 @@ impl AcpServer {
 
 // ─── Ask-user elicitation (ACP Elicitation standard) ────────────────────────
 
-/// Format an options list for a property `description`, e.g.
-/// `Options: JWT (Stateless tokens); Cookies (Server-side sessions)`. This is
-/// how single-select choices stay visible on clients that render enum
-/// properties as a strict picker with no freeform escape (see below).
-fn options_hint(options: &[Value]) -> String {
-    let listed: Vec<String> = options
+/// Format answer suggestions as a numbered, newline-separated hint while
+/// keeping the elicitation property itself freeform.
+fn suggestions_hint(suggestions: &[Value]) -> String {
+    let listed: Vec<String> = suggestions
         .iter()
-        .filter_map(|o| {
-            let label = o.get("label").and_then(Value::as_str)?;
-            let desc = o
-                .get("description")
-                .and_then(Value::as_str)
-                .filter(|d| !d.is_empty());
-            Some(match desc {
-                Some(desc) => format!("{label} ({desc})"),
-                None => label.to_string(),
-            })
-        })
+        .filter_map(Value::as_str)
+        .enumerate()
+        .map(|(index, suggestion)| format!("{}. {}", index + 1, suggestion))
         .collect();
-    format!("Options: {} — pick one, or type your own answer.", listed.join("; "))
+    format!(
+        "Suggested answers:\n{}\n\nYou may enter a different answer.",
+        listed.join("\n")
+    )
 }
 
 /// Build the `elicitation/create` (form mode) params for an `ask_user`
-/// request. Each question becomes one property in `requestedSchema`:
-///
-/// - No options: a plain `string` property (freeform text), optionally with
-///   `minLength`/`maxLength`/`pattern` from the question's validation.
-/// - Options, single-select: also a plain `string` property, with the options
-///   listed in the property `description`. This is deliberate: the TUI always
-///   offers a `[custom]` free-text row for options questions, and ACP clients
-///   like Zed render an `enum`/`oneOf` property as a strict picker whose
-///   validation rejects any value outside the list (no custom escape). A plain
-///   string is the only spec-valid way to let the user type a custom answer,
-///   and the description keeps the suggested choices visible.
-/// - Options, multi-select: a string-array `enum` (checkbox picker; a custom
-///   escape is not representable for arrays).
-///
-/// Answer values are free text; [`answer_value_for_question`] maps a value
-/// that equals an option label back to that option's index, and anything else
-/// to `OtherText`.
+/// request. Every question becomes a freeform string property. Suggested
+/// answers are included in the property description as a numbered list so
+/// ACP clients show them on separate lines without constraining the response.
 fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &str) -> Value {
     let mut properties = serde_json::Map::new();
     for (i, q) in request.questions.iter().enumerate() {
         let mut prop = serde_json::Map::new();
         let question = q.get("question").and_then(Value::as_str).unwrap_or("?");
         prop.insert("title".into(), json!(question));
-        let options = q.get("options").and_then(Value::as_array);
-        let multi_select = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
-        if let Some(options) = options {
-            if multi_select {
-                prop.insert("type".into(), json!("array"));
-                let mut items = serde_json::Map::new();
-                items.insert("type".into(), json!("string"));
-                items.insert(
-                    "enum".into(),
-                    Value::Array(options.iter().filter_map(|o| o.get("label").cloned()).collect()),
-                );
-                prop.insert("items".into(), Value::Object(items));
-            } else {
-                // Single-select: freeform string with the choices as a hint,
-                // so the user can pick a listed option or type their own.
-                prop.insert("type".into(), json!("string"));
-                prop.insert("description".into(), json!(options_hint(options)));
+        prop.insert("type".into(), json!("string"));
+        if let Some(validation) = q.get("validation").and_then(Value::as_object) {
+            for key in ["maxLength", "minLength"] {
+                if let Some(number) = validation.get(key).and_then(Value::as_u64) {
+                    prop.insert(key.into(), json!(number));
+                }
             }
-        } else {
-            prop.insert("type".into(), json!("string"));
-            if let Some(validation) = q.get("validation").and_then(Value::as_object) {
-                for (key, wire) in [("maxLength", "maxLength"), ("minLength", "minLength")] {
-                    if let Some(n) = validation.get(key).and_then(Value::as_u64) {
-                        prop.insert(wire.into(), json!(n));
-                    }
-                }
-                if let Some(p) = validation.get("pattern").and_then(Value::as_str) {
-                    prop.insert("pattern".into(), json!(p));
-                }
+            if let Some(pattern) = validation.get("pattern").and_then(Value::as_str) {
+                prop.insert("pattern".into(), json!(pattern));
             }
         }
-        // The header (freebuff's short chip label) rides along in the
-        // description before any options hint, matching the TUI's `header`.
-        if let Some(header) = q.get("header").and_then(Value::as_str).filter(|h| !h.is_empty()) {
-            let existing = prop.get("description").and_then(Value::as_str);
-            prop.insert(
-                "description".into(),
-                json!(match existing {
-                    Some(existing) => format!("{header}\n{existing}"),
-                    None => header.to_string(),
-                }),
-            );
+        let header = q
+            .get("header")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty());
+        let suggestions = q.get("suggestions").and_then(Value::as_array);
+        let hint = suggestions
+            .filter(|items| !items.is_empty())
+            .map(|items| suggestions_hint(items));
+        if header.is_some() || hint.is_some() {
+            let mut description = String::new();
+            if let Some(header) = header {
+                description.push_str(header);
+            }
+            if let Some(hint) = hint {
+                if !description.is_empty() {
+                    description.push('\n');
+                }
+                description.push_str(&hint);
+            }
+            prop.insert("description".into(), json!(description));
         }
         properties.insert(format!("q{i}"), Value::Object(prop));
     }
@@ -2036,7 +2089,10 @@ fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &s
             .unwrap_or("Please answer the following question.")
             .to_string()
     } else {
-        format!("Answer the {} clarifying questions below.", request.questions.len())
+        format!(
+            "Answer the {} clarifying questions below.",
+            request.questions.len()
+        )
     };
     json!({
         "sessionId": session_id,
@@ -2050,9 +2106,8 @@ fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &s
 }
 
 /// Convert an `elicitation/create` response into an `AskUserAnswer` for the
-/// waiting tool. `accept` maps each `q<i>` content value back to an answer
-/// (option labels to indices); `decline`/`cancel` (and unknown actions)
-/// produce all-`None` (skipped) answers, matching the TUI's skip behavior.
+/// waiting tool. Accepted `q<i>` values remain freeform text; decline/cancel
+/// (and unknown actions) produce all-`None` answers.
 fn answer_from_elicitation(
     request: &crate::providers::AskUserRequest,
     result: &Value,
@@ -2077,49 +2132,16 @@ fn answer_from_elicitation(
     }
 }
 
-/// Map one elicited content value back to an `AskUserAnswerValue`, based on
-/// the original question's shape (options + multiSelect vs free text).
+/// Map one elicited content value to the freeform answer expected by the
+/// `ask_user` tool. Suggested answers are hints only and are never used to
+/// reinterpret or constrain the text returned by the client.
 fn answer_value_for_question(
-    q: &Value,
+    _question: &Value,
     value: Option<&Value>,
 ) -> Option<crate::providers::AskUserAnswerValue> {
-    let options = q.get("options").and_then(Value::as_array);
-    let multi_select = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
-    let value = value?;
-    if let Some(options) = options {
-        if multi_select {
-            let labels: Vec<String> = value
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let indices: Vec<usize> = labels
-                .iter()
-                .filter_map(|label| {
-                    options
-                        .iter()
-                        .position(|o| o.get("label").and_then(Value::as_str) == Some(label.as_str()))
-                })
-                .collect();
-            Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices))
-        } else {
-            let label = value.as_str().unwrap_or_default();
-            match options.iter().position(|o| o.get("label").and_then(Value::as_str) == Some(label)) {
-                Some(index) => Some(crate::providers::AskUserAnswerValue::SelectedIndex(index)),
-                // The client allowed a value outside the declared options
-                // (free-text "other"); keep it verbatim.
-                None => Some(crate::providers::AskUserAnswerValue::OtherText(label.to_string())),
-            }
-        }
-    } else {
-        value
-            .as_str()
-            .map(|s| crate::providers::AskUserAnswerValue::OtherText(s.to_string()))
-    }
+    value
+        .and_then(Value::as_str)
+        .map(|answer| crate::providers::AskUserAnswerValue::OtherText(answer.to_string()))
 }
 
 /// Lets the agent's Read tool reach the ACP client's filesystem (unsaved
@@ -2225,9 +2247,7 @@ fn tool_kind(name: &str) -> &'static str {
     match name {
         "Bash" | "PowerShell" => "execute",
         "Write" | "Edit" | "ApplyPatch" | "NotebookEdit" => "edit",
-        "Read" | "Grep" | "Glob" | "CodeSearch" | "WebFetch" | "WebSearch" => {
-            "read"
-        }
+        "Read" | "Grep" | "Glob" | "CodeSearch" | "WebFetch" | "WebSearch" => "read",
         _ => "other",
     }
 }
@@ -2311,9 +2331,15 @@ mod tests {
         let mut session = session_with(&config);
 
         // Plain selection: the effective model is the selection itself.
-        assert_eq!((session.provider.as_str(), session.model.as_str()), ("test", "test/test-model"));
         assert_eq!(
-            (session.effective_provider.as_str(), session.effective_model.as_str()),
+            (session.provider.as_str(), session.model.as_str()),
+            ("test", "test/test-model")
+        );
+        assert_eq!(
+            (
+                session.effective_provider.as_str(),
+                session.effective_model.as_str()
+            ),
             ("test", "test/test-model")
         );
 
@@ -2321,9 +2347,15 @@ mod tests {
         session.provider = "combos".into();
         session.model = "coding".into();
         session.refresh_effective(&config);
-        assert_eq!((session.provider.as_str(), session.model.as_str()), ("combos", "coding"));
         assert_eq!(
-            (session.effective_provider.as_str(), session.effective_model.as_str()),
+            (session.provider.as_str(), session.model.as_str()),
+            ("combos", "coding")
+        );
+        assert_eq!(
+            (
+                session.effective_provider.as_str(),
+                session.effective_model.as_str()
+            ),
             ("test", "test/test-model")
         );
     }
@@ -2331,12 +2363,13 @@ mod tests {
     /// Unused-but-alive ask_user channels for test servers. Keeping the
     /// receiver halves alive in the returned tuple mirrors a real server;
     /// otherwise sends from tools would fail on a closed channel.
-    fn ask_user_channels(
-    ) -> (
+    fn ask_user_channels() -> (
         tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
         tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserAnswer>,
         std::sync::Arc<
-            tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>,
+            tokio::sync::Mutex<
+                tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>,
+            >,
         >,
     ) {
         let (ask_user_tx, _ask_user_rx) =
@@ -2422,7 +2455,10 @@ mod tests {
         assert_eq!(value["sessionUpdate"], "available_commands_update");
         assert_eq!(value["availableCommands"][0]["name"], "interview");
         assert_eq!(value["availableCommands"][0]["input"]["type"], "text");
-        assert_eq!(value["availableCommands"][0]["input"]["hint"], "what to interview about");
+        assert_eq!(
+            value["availableCommands"][0]["input"]["hint"],
+            "what to interview about"
+        );
     }
 
     #[test]
@@ -2450,8 +2486,8 @@ mod tests {
         assert!(!fs.write_text_file);
 
         // Missing clientCapabilities entirely is valid (defaults).
-        let params: InitializeParams = serde_json::from_value(json!({ "protocolVersion": 1 }))
-            .unwrap();
+        let params: InitializeParams =
+            serde_json::from_value(json!({ "protocolVersion": 1 })).unwrap();
         assert!(params.client_capabilities.is_none());
     }
 
@@ -2518,28 +2554,18 @@ mod tests {
             request_id: 7,
             session_id: Some("s1".into()),
             questions: vec![
-                // Single-select with descriptions: freeform string, options
-                // listed in the description (a strict enum picker has no
-                // freeform escape, so this is what lets users type their own).
                 json!({
                     "question": "Auth method?",
                     "header": "Auth",
-                    "options": [
-                        { "label": "JWT", "description": "Stateless tokens" },
-                        { "label": "Cookies", "description": "Server-side sessions" },
-                    ],
+                    "suggestions": ["JWT", "Cookies"],
                 }),
-                // Single-select without descriptions: same freeform string.
                 json!({
                     "question": "Pick one",
-                    "options": [{ "label": "A" }, { "label": "B" }],
+                    "suggestions": ["A", "B"],
                 }),
-                // Multi-select: string-array enum (no freeform escape for
-                // arrays).
                 json!({
                     "question": "Pick many",
-                    "multiSelect": true,
-                    "options": [{ "label": "A" }, { "label": "B" }, { "label": "C" }],
+                    "suggestions": ["A", "B", "C"],
                 }),
                 // Free text with validation.
                 json!({
@@ -2552,34 +2578,40 @@ mod tests {
         let params = elicitation_params(&request, "s1");
         assert_eq!(params["sessionId"], "s1");
         assert_eq!(params["mode"], "form");
-        assert_eq!(params["message"], "Answer the 4 clarifying questions below.");
+        assert_eq!(
+            params["message"],
+            "Answer the 4 clarifying questions below."
+        );
         let props = &params["requestedSchema"]["properties"];
         assert_eq!(params["requestedSchema"]["type"], "object");
 
-        // Single-select with descriptions: freeform string, header + options
-        // hint in the description, no enum/oneOf constraint.
+        // Every question is a freeform string and suggestions are rendered
+        // as a numbered list with one suggestion per line.
         let q0 = &props["q0"];
         assert_eq!(q0["type"], "string");
         assert_eq!(q0["title"], "Auth method?");
         assert_eq!(
             q0["description"],
-            "Auth\nOptions: JWT (Stateless tokens); Cookies (Server-side sessions) — pick one, or type your own answer."
+            "Auth\nSuggested answers:\n1. JWT\n2. Cookies\n\nYou may enter a different answer."
         );
         assert!(q0.get("enum").is_none());
         assert!(q0.get("oneOf").is_none());
 
-        // Single-select without descriptions: same freeform shape.
         let q1 = &props["q1"];
         assert_eq!(q1["type"], "string");
-        assert_eq!(q1["description"], "Options: A; B — pick one, or type your own answer.");
+        assert_eq!(
+            q1["description"],
+            "Suggested answers:\n1. A\n2. B\n\nYou may enter a different answer."
+        );
         assert!(q1.get("enum").is_none());
         assert!(q1.get("oneOf").is_none());
 
-        // Multi-select array enum.
         let q2 = &props["q2"];
-        assert_eq!(q2["type"], "array");
-        assert_eq!(q2["items"]["type"], "string");
-        assert_eq!(q2["items"]["enum"], json!(["A", "B", "C"]));
+        assert_eq!(q2["type"], "string");
+        assert_eq!(
+            q2["description"],
+            "Suggested answers:\n1. A\n2. B\n3. C\n\nYou may enter a different answer."
+        );
 
         // Free text with validation.
         let q3 = &props["q3"];
@@ -2598,7 +2630,10 @@ mod tests {
         };
         let params = elicitation_params(&request, "s1");
         assert_eq!(params["message"], "Proceed?");
-        assert_eq!(params["requestedSchema"]["properties"]["q0"]["title"], "Proceed?");
+        assert_eq!(
+            params["requestedSchema"]["properties"]["q0"]["title"],
+            "Proceed?"
+        );
     }
 
     #[test]
@@ -2609,20 +2644,19 @@ mod tests {
             questions: vec![
                 json!({
                     "question": "Auth method?",
-                    "options": [{ "label": "JWT" }, { "label": "Cookies" }],
+                    "suggestions": ["JWT", "Cookies"],
                 }),
-                // A select whose value came back outside the declared options.
                 json!({
                     "question": "Pick one",
-                    "options": [{ "label": "A" }, { "label": "B" }],
+                    "suggestions": ["A", "B"],
                 }),
-                json!({ "question": "Pick many", "multiSelect": true, "options": [{ "label": "A" }, { "label": "B" }, { "label": "C" }] }),
+                json!({ "question": "Pick many", "suggestions": ["A", "B", "C"] }),
                 json!({ "question": "Name" }),
             ],
         };
         let result = json!({
             "action": "accept",
-            "content": { "q0": "Cookies", "q1": "Free text", "q2": ["A", "C"], "q3": "Ada" },
+            "content": { "q0": "Cookies", "q1": "Free text", "q2": "A, C", "q3": "Ada" },
         });
         let answer = answer_from_elicitation(&request, &result);
         assert_eq!(answer.request_id, 7);
@@ -2630,9 +2664,9 @@ mod tests {
         assert_eq!(
             answer.answers,
             vec![
-                Some(V::SelectedIndex(1)),
+                Some(V::OtherText("Cookies".into())),
                 Some(V::OtherText("Free text".into())),
-                Some(V::SelectedIndices(vec![0, 2])),
+                Some(V::OtherText("A, C".into())),
                 Some(V::OtherText("Ada".into())),
             ]
         );
@@ -2644,7 +2678,7 @@ mod tests {
             request_id: 2,
             session_id: Some("s1".into()),
             questions: vec![
-                json!({ "question": "Q1", "options": [{ "label": "A" }, { "label": "B" }] }),
+                json!({ "question": "Q1", "suggestions": ["A", "B"] }),
                 json!({ "question": "Q2" }),
             ],
         };
@@ -2652,7 +2686,13 @@ mod tests {
         // Accept with an unanswered field: that question is skipped.
         let result = json!({ "action": "accept", "content": { "q1": "x" } });
         let answer = answer_from_elicitation(&request, &result);
-        assert_eq!(answer.answers, vec![None, Some(crate::providers::AskUserAnswerValue::OtherText("x".into()))]);
+        assert_eq!(
+            answer.answers,
+            vec![
+                None,
+                Some(crate::providers::AskUserAnswerValue::OtherText("x".into()))
+            ]
+        );
 
         // Decline / cancel / unknown action: everything is skipped.
         for action in ["decline", "cancel", "bogus"] {
@@ -2708,13 +2748,17 @@ mod tests {
         let input = json!({
             "questions": [{
                 "question": "Auth method?",
-                "options": [{ "label": "JWT" }, { "label": "Cookies" }],
+                "suggestions": ["JWT", "Cookies"],
             }]
         });
         let result = tool.execute(input, &test_tool_context()).await;
         writer.abort();
         assert!(!result.is_error, "tool failed: {}", result.content);
-        assert!(result.content.contains("Cookies"), "got: {}", result.content);
+        assert!(
+            result.content.contains("Cookies"),
+            "got: {}",
+            result.content
+        );
     }
 
     #[tokio::test]
@@ -2746,9 +2790,11 @@ mod tests {
             // read_text_file sends its request synchronously before awaiting,
             // so a single yield is enough for the registration to land.
             tokio::task::yield_now().await;
-            server_for_client
-                .connection
-                .deliver_response(&json!(1), Some(json!({ "content": "hello\n" })), None);
+            server_for_client.connection.deliver_response(
+                &json!(1),
+                Some(json!({ "content": "hello\n" })),
+                None,
+            );
         });
 
         let content = server.read_text_file("sess", "/abs/path", None, None).await;
@@ -2796,7 +2842,9 @@ mod tests {
             ask_user_answer_tx,
             ask_user_answer_rx,
         };
-        let err = server.write_text_file("sess", "/abs/path", "contents").await;
+        let err = server
+            .write_text_file("sess", "/abs/path", "contents")
+            .await;
         assert!(err.is_err());
         assert!(format!("{:?}", err).contains("writeTextFile"));
         writer.abort();
@@ -2829,7 +2877,10 @@ mod tests {
             server_for_client.connection.deliver_response(
                 &json!(1),
                 None,
-                Some(RpcErrorBody { code: -32603, message: "permission denied".into() }),
+                Some(RpcErrorBody {
+                    code: -32603,
+                    message: "permission denied".into(),
+                }),
             );
         });
 

@@ -12,13 +12,13 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 /// Freebuff dark-theme markdown palette.
-const TITLE_YELLOW: Color = Color::Rgb(0xfa, 0xcc, 0x15);   // headingFg
+const TITLE_YELLOW: Color = Color::Rgb(0xfa, 0xcc, 0x15); // headingFg
 const HIGHLIGHT_ORANGE: Color = Color::Rgb(0xff, 0x85, 0x34); // inlineCodeFg
-const CODE_BG: Color = Color::Rgb(0x37, 0x41, 0x51);         // codeBackground
-const SECONDARY: Color = Color::Rgb(0xa3, 0xae, 0xd0);       // listBulletFg
-const QUOTE_BORDER: Color = Color::Rgb(0x33, 0x41, 0x55);    // blockquoteBorderFg
-const QUOTE_TEXT: Color = Color::Rgb(0xe2, 0xe8, 0xf0);      // blockquoteTextFg
-const CODE_HEADER: Color = Color::Rgb(0x5b, 0x64, 0x7a);     // codeHeaderFg
+const CODE_BG: Color = Color::Rgb(0x37, 0x41, 0x51); // codeBackground
+const SECONDARY: Color = Color::Rgb(0xa3, 0xae, 0xd0); // listBulletFg
+const QUOTE_BORDER: Color = Color::Rgb(0x33, 0x41, 0x55); // blockquoteBorderFg
+const QUOTE_TEXT: Color = Color::Rgb(0xe2, 0xe8, 0xf0); // blockquoteTextFg
+const CODE_HEADER: Color = Color::Rgb(0x5b, 0x64, 0x7a); // codeHeaderFg
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -206,7 +206,8 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                         let remaining = max_width.saturating_sub(current_width);
                         if remaining > 0 {
                             let text = span.content.to_string();
-                            let (first, rest) = text.split_at(text.floor_char_boundary(remaining.min(text.len())));
+                            let (first, rest) =
+                                text.split_at(text.floor_char_boundary(remaining.min(text.len())));
                             if !first.is_empty() {
                                 current_spans.push(Span::styled(first.to_string(), span.style));
                             }
@@ -218,10 +219,8 @@ pub fn render_markdown(text: &str, width: u16) -> Vec<Line<'static>> {
                                 if boundary == 0 {
                                     // The first char is wider than the budget:
                                     // emit it alone so the loop makes progress.
-                                    boundary = leftover
-                                        .chars()
-                                        .next()
-                                        .map_or(0, |ch| ch.len_utf8());
+                                    boundary =
+                                        leftover.chars().next().map_or(0, |ch| ch.len_utf8());
                                 }
                                 let (chunk, rem) = leftover.split_at(boundary);
                                 wrapped

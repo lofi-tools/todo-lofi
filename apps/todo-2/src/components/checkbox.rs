@@ -1,11 +1,11 @@
 use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, relative, rgb,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
+    relative, rgb,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Selectable, Sizable, Size, StyleSized,
-    StyledExt as _, text::Text, v_flex,
+    ActiveTheme, Disableable, Selectable, Sizable, Size, StyleSized, StyledExt as _, text::Text,
+    v_flex,
 };
 use std::rc::Rc;
 
@@ -163,10 +163,7 @@ impl RenderOnce for Checkbox {
                         .map(|svg| svg.size_with(self.size))
                         .flex_shrink_0()
                         .rounded_full()
-                        .when(!checked, |this| {
-                            this.border_1()
-                                .border_color(rgb(0xffffff))
-                        })
+                        .when(!checked, |this| this.border_1().border_color(rgb(0xffffff)))
                         .map(|this| match checked {
                             false => this.bg(rgb(0x1a1a1a)),
                             _ => this.bg(rgb(0x666666)),

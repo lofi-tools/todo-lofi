@@ -10,8 +10,9 @@ use crate::subagents::AcpFsSink;
 // ─── AskUser tool ──────────────────────────────────────────────────────────
 
 /// `ask_user` is the first-class tool the interviewing agent calls to pose
-/// clarifying questions during an `/interview` flow. It mirrors the freebuff
-/// `AskUserParams` shape so the same schema works across TUI and ACP.
+/// clarifying questions during an `/interview` flow. Questions are always
+/// answered with freeform text; `suggestions` are optional hints for the user.
+/// The same schema works across TUI and ACP.
 pub struct AskUserTool {
     /// Sender for piping questions to the TUI. When `None`, the tool operates
     /// in non-interactive mode (ACP/headless) and returns a structured result.
@@ -20,7 +21,11 @@ pub struct AskUserTool {
     /// multiple concurrently-built agents can share one channel; answers are
     /// matched to the right caller by `request_id`).
     answer_rx: Option<
-        std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
+        std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>,
+            >,
+        >,
     >,
     /// Monotonic counter for request ids.
     request_counter: std::sync::atomic::AtomicU64,
@@ -37,7 +42,11 @@ impl AskUserTool {
 
     pub fn with_channel(
         tx: tokio::sync::mpsc::UnboundedSender<crate::providers::AskUserRequest>,
-        rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>>,
+        rx: std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>,
+            >,
+        >,
     ) -> Self {
         Self {
             ask_user_tx: Some(tx),
@@ -54,10 +63,10 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user one or more clarifying questions. Each question can be \
-         single-select (radio), multi-select (checkbox), or free-text. Use this \
-         tool when you need clarification before proceeding — never ask questions \
-         as plain text."
+        "Ask the user one or more clarifying questions. Answers are always entered \
+         as freeform text. You may provide a suggestions array with example answers, \
+         but the user can always enter something different. Use this tool when you \
+         need clarification — never ask questions as plain text."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -80,19 +89,11 @@ impl Tool for AskUserTool {
                         "properties": {
                             "question": { "type": "string", "description": "The question text." },
                             "header": { "type": "string", "description": "Short label, <= 12 chars (optional)." },
-                            "options": {
+                            "suggestions": {
                                 "type": "array",
-                                "description": "Answer options for select-style questions.",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "label": { "type": "string" },
-                                        "description": { "type": "string" }
-                                    },
-                                    "required": ["label"]
-                                }
+                                "description": "Optional suggested answers. The user can always enter a different freeform answer.",
+                                "items": { "type": "string" }
                             },
-                            "multiSelect": { "type": "boolean", "description": "Checkbox (multi-select) when true; radio (single-select) when false/omitted." },
                             "validation": {
                                 "type": "object",
                                 "description": "Optional free-text validation constraints.",
@@ -117,15 +118,8 @@ impl Tool for AskUserTool {
         struct Question {
             question: String,
             header: Option<String>,
-            options: Option<Vec<OptionDef>>,
-            #[serde(rename = "multiSelect")]
-            multi_select: Option<bool>,
+            suggestions: Option<Vec<String>>,
             validation: Option<Validation>,
-        }
-        #[derive(serde::Deserialize, serde::Serialize, Clone)]
-        struct OptionDef {
-            label: String,
-            description: Option<String>,
         }
         #[derive(serde::Deserialize, serde::Serialize, Clone)]
         struct Validation {
@@ -155,7 +149,13 @@ impl Tool for AskUserTool {
         let questions_json: Vec<serde_json::Value> = parsed
             .questions
             .iter()
-            .map(|q| serde_json::to_value(q).unwrap())
+            .map(|q| match serde_json::to_value(q) {
+                Ok(value) => value,
+                Err(error) => serde_json::json!({
+                    "question": q.question,
+                    "error": format!("failed to serialize question: {error}"),
+                }),
+            })
             .collect();
 
         let q_count = parsed.questions.len();
@@ -174,21 +174,20 @@ impl Tool for AskUserTool {
             };
 
             if self.ask_user_tx.as_ref().unwrap().send(request).is_err() {
-                return ToolResult::error("ask_user channel closed — cannot await user answer".to_string());
+                return ToolResult::error(
+                    "ask_user channel closed — cannot await user answer".to_string(),
+                );
             }
 
             // Wait for the user's answer. This pauses the agent until the TUI
             // surfaces the question and the user responds.
-            use tokio::time::{timeout, Duration};
+            use tokio::time::{Duration, timeout};
 
             let mut rx_guard = self.answer_rx.as_ref().unwrap().lock().await;
             loop {
                 match timeout(Duration::from_secs(300), rx_guard.recv()).await {
                     Ok(Some(answer)) if answer.request_id == request_id => {
-                        let answer_text = format_ask_user_answer(
-                            &questions_json,
-                            &answer.answers,
-                        );
+                        let answer_text = format_ask_user_answer(&questions_json, &answer.answers);
                         return ToolResult::success(answer_text);
                     }
                     Ok(Some(_)) => {
@@ -199,7 +198,9 @@ impl Tool for AskUserTool {
                         return ToolResult::error("ask_user answer channel closed".to_string());
                     }
                     Err(_) => {
-                        return ToolResult::error("ask_user timed out waiting for user answer".to_string());
+                        return ToolResult::error(
+                            "ask_user timed out waiting for user answer".to_string(),
+                        );
                     }
                 }
             }
@@ -214,7 +215,24 @@ impl Tool for AskUserTool {
             q_labels = questions_json
                 .iter()
                 .enumerate()
-                .map(|(i, q)| format!("{})) {}", i + 1, q["question"].as_str().unwrap_or("?")))
+                .map(|(i, q)| {
+                    let question = q["question"].as_str().unwrap_or("?");
+                    let suggestions = q["suggestions"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item.as_str())
+                                .enumerate()
+                                .map(|(index, suggestion)| format!("{}. {}", index + 1, suggestion))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .filter(|items| !items.is_empty())
+                        .map(|items| format!("\n{items}"))
+                        .unwrap_or_default();
+                    format!("{})) {}{}", i + 1, question, suggestions)
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         ))
@@ -233,23 +251,6 @@ fn format_ask_user_answer(
         out.push_str(&format!("### {}\n", i + 1));
         out.push_str(&format!("**Q:** {}\n", question));
         match a {
-            Some(crate::providers::AskUserAnswerValue::SelectedIndex(idx)) => {
-                if let Some(options) = q["options"].as_array() {
-                    if let Some(opt) = options.get(*idx) {
-                        let label = opt["label"].as_str().unwrap_or("?");
-                        out.push_str(&format!("**A:** {}\n", label));
-                    }
-                }
-            }
-            Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices)) => {
-                if let Some(options) = q["options"].as_array() {
-                    let labels: Vec<&str> = indices
-                        .iter()
-                        .filter_map(|idx| options.get(*idx).and_then(|o| o["label"].as_str()))
-                        .collect();
-                    out.push_str(&format!("**A:** {}\n", labels.join(", ")));
-                }
-            }
             Some(crate::providers::AskUserAnswerValue::OtherText(text)) => {
                 out.push_str(&format!("**A:** {}\n", text));
             }
@@ -343,8 +344,13 @@ impl Tool for RgSearchTool {
 
         // Best-effort fallback to system `grep` when ripgrep isn't installed.
         if !rg_available() {
-            return grep_fallback(&input.pattern, &search_path, per_file, input.flags.as_deref())
-                .await;
+            return grep_fallback(
+                &input.pattern,
+                &search_path,
+                per_file,
+                input.flags.as_deref(),
+            )
+            .await;
         }
 
         let mut cmd = tokio::process::Command::new("rg");
@@ -363,7 +369,7 @@ impl Tool for RgSearchTool {
             Err(e) => {
                 return ToolResult::error(format!(
                     "failed to run ripgrep (rg): {e} — is ripgrep installed?"
-                ))
+                ));
             }
         };
         let stdout = child.stdout.take().expect("stdout was piped");
@@ -441,7 +447,6 @@ impl Tool for RgSearchTool {
     }
 }
 
-
 // ─── Client-buffer-aware Read (replaces the built-in Read tool) ──────────────
 
 /// `Read` tool that consults the ACP client's filesystem first, so unsaved
@@ -500,7 +505,10 @@ impl Tool for ClientReadTool {
         // and has advertised the capability. Everything else — including any
         // client error — falls back to the on-disk read so the tool never
         // fails just because the editor doesn't have the file open.
-        let intercept = self.fs.as_ref().is_some_and(|r| r.supports_read_text_file())
+        let intercept = self
+            .fs
+            .as_ref()
+            .is_some_and(|r| r.supports_read_text_file())
             && input
                 .get("file_path")
                 .and_then(Value::as_str)
@@ -572,13 +580,10 @@ fn format_with_line_numbers(raw: &str, offset: usize, limit: Option<usize>) -> S
 /// editor reconciles its buffer with the agent's write. `path` must be the
 /// same absolute path the underlying tool just wrote to. Returns a short
 /// status string to append to the tool result (empty when nothing mirrored).
-async fn mirror_to_client(
-    fs: &AcpFsSink,
-    session_id: &str,
-    path: &str,
-    content: &str,
-) -> String {
-    let Some(fs) = fs.as_ref() else { return String::new() };
+async fn mirror_to_client(fs: &AcpFsSink, session_id: &str, path: &str, content: &str) -> String {
+    let Some(fs) = fs.as_ref() else {
+        return String::new();
+    };
     if !fs.supports_write_text_file() {
         return String::new();
     }
@@ -638,9 +643,7 @@ impl Tool for ClientWriteTool {
         }
         // The written content is in the input; re-extract it to mirror exactly
         // what was written (the built-in tool writes `content` verbatim).
-        let (file_path, content) = match serde_json::from_value::<
-            struct_write::Input,
-        >(input) {
+        let (file_path, content) = match serde_json::from_value::<struct_write::Input>(input) {
             Ok(i) => (i.file_path, i.content),
             Err(_) => return result, // shouldn't happen — the write already succeeded
         };
@@ -830,10 +833,7 @@ impl Tool for ReadDocsTool {
             Ok(resp) => match resp.text().await {
                 Ok(text) => {
                     if text.trim().is_empty() {
-                        ToolResult::error(format!(
-                            "no docs returned for '{}'",
-                            input.library_title
-                        ))
+                        ToolResult::error(format!("no docs returned for '{}'", input.library_title))
                     } else {
                         ToolResult::success(text)
                     }
@@ -865,7 +865,9 @@ async fn grep_fallback(
     flags: Option<&str>,
 ) -> ToolResult {
     let mut cmd = tokio::process::Command::new("grep");
-    cmd.arg("-rn").arg("--color=never").arg(format!("-m{per_file}"));
+    cmd.arg("-rn")
+        .arg("--color=never")
+        .arg(format!("-m{per_file}"));
     if let Some(flags) = flags {
         let mut iter = flags.split_whitespace();
         while let Some(flag) = iter.next() {
@@ -984,7 +986,10 @@ fn format_search_results(results: &[SearchResult]) -> String {
     for (i, result) in results.iter().enumerate() {
         output.push_str(&format!(
             "{}. **{}**\n {}\n {}\n\n",
-            i + 1, result.title, result.url, result.snippet
+            i + 1,
+            result.title,
+            result.url,
+            result.snippet
         ));
     }
     output
@@ -1243,7 +1248,11 @@ async fn parallel_mcp_search(query: &str, num_results: usize) -> anyhow::Result<
         anyhow::bail!("Parallel MCP web_search error: {}", call_result["error"]);
     }
     let result = &call_result["result"];
-    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+    if result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         anyhow::bail!("Parallel web_search failed: {}", result["content"]);
     }
     let mut output = String::new();
@@ -1341,7 +1350,7 @@ impl Tool for WebSearchTool {
         match std::env::var(EXA_API_KEY_ENV) {
             Ok(key) if !key.is_empty() => match exa_search(&query, num_results, &key).await {
                 Ok(results) if results.is_empty() => {
-                    return ToolResult::success(format!("No results found for: {query}"))
+                    return ToolResult::success(format!("No results found for: {query}"));
                 }
                 Ok(results) => return ToolResult::success(format_search_results(&results)),
                 Err(e) => failures.push(format!("Exa: {e}")),
@@ -1352,7 +1361,7 @@ impl Tool for WebSearchTool {
         // Parallel via MCP next — anonymous, no API key.
         match parallel_mcp_search(&query, num_results).await {
             Ok(results) if results.is_empty() => {
-                return ToolResult::success(format!("No results found for: {query}"))
+                return ToolResult::success(format!("No results found for: {query}"));
             }
             Ok(results) => return ToolResult::success(format_search_results(&results)),
             Err(e) => failures.push(format!("Parallel: {e}")),
@@ -1362,7 +1371,7 @@ impl Tool for WebSearchTool {
         match std::env::var(TINYFISH_API_KEY_ENV) {
             Ok(key) if !key.is_empty() => match tinyfish_search(&query, num_results, &key).await {
                 Ok(results) if results.is_empty() => {
-                    return ToolResult::success(format!("No results found for: {query}"))
+                    return ToolResult::success(format!("No results found for: {query}"));
                 }
                 Ok(results) => return ToolResult::success(format_search_results(&results)),
                 Err(e) => failures.push(format!("TinyFish: {e}")),
@@ -1372,13 +1381,15 @@ impl Tool for WebSearchTool {
 
         // LangSearch last.
         match std::env::var(LANGSEARCH_API_KEY_ENV) {
-            Ok(key) if !key.is_empty() => match langsearch_search(&query, num_results, &key).await {
-                Ok(results) if results.is_empty() => {
-                    return ToolResult::success(format!("No results found for: {query}"))
+            Ok(key) if !key.is_empty() => {
+                match langsearch_search(&query, num_results, &key).await {
+                    Ok(results) if results.is_empty() => {
+                        return ToolResult::success(format!("No results found for: {query}"));
+                    }
+                    Ok(results) => return ToolResult::success(format_search_results(&results)),
+                    Err(e) => failures.push(format!("LangSearch: {e}")),
                 }
-                Ok(results) => return ToolResult::success(format_search_results(&results)),
-                Err(e) => failures.push(format!("LangSearch: {e}")),
-            },
+            }
             _ => failures.push(format!("{} is not set", LANGSEARCH_API_KEY_ENV)),
         }
 
@@ -1392,8 +1403,8 @@ impl Tool for WebSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cersei::tools::permissions::AllowAll;
     use cersei::tools::CostTracker;
+    use cersei::tools::permissions::AllowAll;
     use parking_lot::Mutex;
     use std::sync::Arc;
 
@@ -1428,7 +1439,9 @@ mod tests {
             "pattern": pattern,
             "flags": flags,
         });
-        RgSearchTool.execute(input, &test_context(dir.to_path_buf())).await
+        RgSearchTool
+            .execute(input, &test_context(dir.to_path_buf()))
+            .await
     }
 
     #[tokio::test]
@@ -1467,8 +1480,16 @@ mod tests {
         ]);
         let result = run_search("foo", None, &dir).await;
         assert!(!result.is_error, "search failed: {}", result.content);
-        assert!(result.content.contains("a.rs:1: fn foo()"), "got: {}", result.content);
-        assert!(!result.content.contains("b.rs"), "case-sensitive match leaked: {}", result.content);
+        assert!(
+            result.content.contains("a.rs:1: fn foo()"),
+            "got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("b.rs"),
+            "case-sensitive match leaked: {}",
+            result.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1488,7 +1509,11 @@ mod tests {
         assert!(!result.is_error, "search failed: {}", result.content);
         assert!(result.content.contains("a.rs:1"), "got: {}", result.content);
         assert!(result.content.contains("b.rs:1"), "got: {}", result.content);
-        assert!(!result.content.contains("c.txt"), "glob filter leaked: {}", result.content);
+        assert!(
+            !result.content.contains("c.txt"),
+            "glob filter leaked: {}",
+            result.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1498,7 +1523,10 @@ mod tests {
             eprintln!("skipping: ripgrep not installed");
             return;
         }
-        let dir = scratch_dir(&[("src/lib.rs", "pub fn add(a: i32, b: i32) -> i32 { a + b }\n")]);
+        let dir = scratch_dir(&[(
+            "src/lib.rs",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )]);
         // A relative path must resolve against the tool's working dir, not the
         // process cwd (the rg subprocess inherits the process cwd).
         let input = serde_json::json!({ "pattern": "add", "path": "src" });
@@ -1516,10 +1544,7 @@ mod tests {
 
     #[tokio::test]
     async fn grep_fallback_uses_system_grep() {
-        let dir = scratch_dir(&[
-            ("a.rs", "fn foo() {}\n"),
-            ("b.rs", "fn bar() {}\n"),
-        ]);
+        let dir = scratch_dir(&[("a.rs", "fn foo() {}\n"), ("b.rs", "fn bar() {}\n")]);
         let result = grep_fallback("foo", &dir, DEFAULT_PER_FILE_RESULTS, None).await;
         assert!(!result.is_error, "fallback failed: {}", result.content);
         assert!(result.content.contains("a.rs:1"), "got: {}", result.content);
@@ -1529,14 +1554,15 @@ mod tests {
 
     #[tokio::test]
     async fn grep_fallback_translates_glob_flags() {
-        let dir = scratch_dir(&[
-            ("a.rs", "fn foo() {}\n"),
-            ("b.txt", "foo here\n"),
-        ]);
+        let dir = scratch_dir(&[("a.rs", "fn foo() {}\n"), ("b.txt", "foo here\n")]);
         let result = grep_fallback("foo", &dir, DEFAULT_PER_FILE_RESULTS, Some("-g *.rs")).await;
         assert!(!result.is_error, "fallback failed: {}", result.content);
         assert!(result.content.contains("a.rs:1"), "got: {}", result.content);
-        assert!(!result.content.contains("b.txt"), "glob filter leaked: {}", result.content);
+        assert!(
+            !result.content.contains("b.txt"),
+            "glob filter leaked: {}",
+            result.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1548,8 +1574,16 @@ mod tests {
         }
         let dir = scratch_dir(&[("a.rs", "fn foo() {}\n")]);
         let result = run_search("nonexistent-symbol", None, &dir).await;
-        assert!(!result.is_error, "no-match must not error: {}", result.content);
-        assert!(result.content.contains("No matches"), "got: {}", result.content);
+        assert!(
+            !result.is_error,
+            "no-match must not error: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("No matches"),
+            "got: {}",
+            result.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1597,8 +1631,10 @@ mod tests {
             path: &str,
             content: &str,
         ) -> anyhow::Result<()> {
-            *self.last_write.lock() =
-                Some((session_id.to_string(), (path.to_string(), content.to_string())));
+            *self.last_write.lock() = Some((
+                session_id.to_string(),
+                (path.to_string(), content.to_string()),
+            ));
             Ok(())
         }
     }
@@ -1625,16 +1661,10 @@ mod tests {
     async fn read_uses_client_buffer_when_supported() {
         let dir = scratch_dir(&[("a.rs", "on disk\n")]);
         let disk_path = dir.join("a.rs");
-        let (stub, fs) = fs_arc(
-            Some("unsaved line 1\nunsaved line 2\n"),
-            true,
-            false,
-        );
+        let (stub, fs) = fs_arc(Some("unsaved line 1\nunsaved line 2\n"), true, false);
         let tool = ClientReadTool::new(Some(fs));
         let input = serde_json::json!({ "file_path": disk_path });
-        let result = tool
-            .execute(input, &test_context(dir.clone()))
-            .await;
+        let result = tool.execute(input, &test_context(dir.clone())).await;
         assert!(!result.is_error, "{}", result.content);
         // The client buffer (not the on-disk content) must be returned.
         assert!(result.content.contains("unsaved line 1"));
@@ -1687,9 +1717,16 @@ mod tests {
         let input = serde_json::json!({ "file_path": "rel.rs" });
         let ctx = test_context(dir.clone());
         let result = tool.execute(input, &ctx).await;
-        assert!(stub.last_read.lock().is_none(), "client must not be consulted for relative paths");
+        assert!(
+            stub.last_read.lock().is_none(),
+            "client must not be consulted for relative paths"
+        );
         // Matches the built-in Read tool's behavior for a missing-from-cwd path.
-        assert!(result.is_error, "expected built-in error for relative path: {}", result.content);
+        assert!(
+            result.is_error,
+            "expected built-in error for relative path: {}",
+            result.content
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1721,8 +1758,7 @@ mod tests {
         // Disk got the content.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "fresh content\n");
         // Client was mirrored with the same path + content.
-        let (session_id, (path, content)) =
-            stub.last_write.lock().clone().expect("write captured");
+        let (session_id, (path, content)) = stub.last_write.lock().clone().expect("write captured");
         assert_eq!(session_id, "test");
         assert_eq!(path, target.to_string_lossy());
         assert_eq!(content, "fresh content\n");
@@ -1760,7 +1796,10 @@ mod tests {
         let result = tool.execute(input, &test_context(dir.clone())).await;
         assert!(!result.is_error, "{}", result.content);
         assert!(!result.content.contains("mirrored"));
-        assert!(stub.last_write.lock().is_none(), "must not mirror without capability");
+        assert!(
+            stub.last_write.lock().is_none(),
+            "must not mirror without capability"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1779,7 +1818,10 @@ mod tests {
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("mirrored to client"));
         // Disk reflects the edit.
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "alpha\nBETA\ngamma\n");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "alpha\nBETA\ngamma\n"
+        );
         // Client was mirrored with the final (post-edit) content.
         let (_session_id, (path, content)) =
             stub.last_write.lock().clone().expect("write captured");
@@ -1802,7 +1844,10 @@ mod tests {
         });
         let result = tool.execute(input, &test_context(dir.clone())).await;
         assert!(result.is_error, "expected edit error: {}", result.content);
-        assert!(stub.last_write.lock().is_none(), "must not mirror a failed edit");
+        assert!(
+            stub.last_write.lock().is_none(),
+            "must not mirror a failed edit"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

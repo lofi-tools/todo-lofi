@@ -49,9 +49,9 @@ impl Theme {
             fg: Color::Rgb(179, 179, 179),         // #b3b3b3 (editor.foreground)
             dim: Color::Rgb(88, 88, 88),           // #585858 (text.muted)
             accent: Color::Rgb(0xfa, 0xcc, 0x15),  // #facc15 (freebuff markdown-title yellow)
-            success: Color::Rgb(0x22, 0xc5, 0x5e),  // #22c55e (freebuff success green)
+            success: Color::Rgb(0x22, 0xc5, 0x5e), // #22c55e (freebuff success green)
             error: Color::Rgb(244, 71, 71),        // #F44747
-            warning: Color::Rgb(0xff, 0xa5, 0x00),  // #FFA500 (freebuff warning orange)
+            warning: Color::Rgb(0xff, 0xa5, 0x00), // #FFA500 (freebuff warning orange)
             info: Color::Rgb(103, 150, 230),       // #6796E6
             border: Color::Rgb(30, 30, 30),        // #1e1e1e
             input_bg: Color::Rgb(10, 10, 10),      // #0a0a0a
@@ -89,9 +89,9 @@ impl Theme {
             fg: Color::Rgb(30, 30, 30),
             dim: Color::Rgb(130, 130, 130),
             accent: Color::Rgb(0, 120, 200),
-            success: Color::Rgb(0x05, 0x96, 0x69),   // #059669 (freebuff light success)
+            success: Color::Rgb(0x05, 0x96, 0x69), // #059669 (freebuff light success)
             error: Color::Rgb(200, 30, 30),
-            warning: Color::Rgb(0xf5, 0x9e, 0x0b),   // #F59E0B (freebuff light warning)
+            warning: Color::Rgb(0xf5, 0x9e, 0x0b), // #F59E0B (freebuff light warning)
             info: Color::Rgb(0, 100, 180),
             border: Color::Rgb(200, 200, 200),
             input_bg: Color::Rgb(240, 240, 240),

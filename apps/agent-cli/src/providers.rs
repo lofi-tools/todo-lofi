@@ -574,7 +574,12 @@ pub fn providers(config: &AppConfig) -> Vec<Provider> {
         if !entry.models.is_empty() {
             // An explicit `models` override takes full control of the list.
             // Entries are bare ids or detailed objects with per-model params.
-            provider.models = entry.models.clone().into_iter().map(ConfiguredModel::from).collect();
+            provider.models = entry
+                .models
+                .clone()
+                .into_iter()
+                .map(ConfiguredModel::from)
+                .collect();
         }
     }
 
@@ -767,14 +772,7 @@ pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::
     let api_key = resolve_api_key(&p.api_key)
         .with_context(|| format!("resolving api_key for provider '{provider_name}'"))?;
     let (max_tokens, temperature, top_p, extra_body) = find_model(&p, model)
-        .map(|m| {
-            (
-                m.max_tokens,
-                m.temperature,
-                m.top_p,
-                m.extra_body.clone(),
-            )
-        })
+        .map(|m| (m.max_tokens, m.temperature, m.top_p, m.extra_body.clone()))
         .unwrap_or((None, None, None, None));
     Ok(Resolved {
         provider: p.name.clone(),
@@ -1086,15 +1084,9 @@ pub struct AskUserAnswer {
     pub answers: Vec<Option<AskUserAnswerValue>>,
 }
 
-/// A single answer value: either a selected option index, a set of selected
-/// option indices (multi-select), or free-text input.
+/// A freeform answer to an ask_user question.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AskUserAnswerValue {
-    /// Single-select: index of the chosen option (0-based).
-    SelectedIndex(usize),
-    /// Multi-select: indices of the chosen options.
-    SelectedIndices(Vec<usize>),
-    /// Free-text input (including "Other").
     OtherText(String),
 }
 
@@ -1144,12 +1136,11 @@ impl AgentRuntime {
         let (ask_user_tx, ask_user_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserRequest>();
         // Channel from runtime -> tool for ask_user answers.
         let (answer_tx, answer_rx) = tokio::sync::mpsc::unbounded_channel::<AskUserAnswer>();
-        let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> = Some(Box::new(
-            crate::tools::AskUserTool::with_channel(
+        let ask_user_tool: Option<Box<dyn cersei::tools::Tool>> =
+            Some(Box::new(crate::tools::AskUserTool::with_channel(
                 ask_user_tx.clone(),
                 Arc::new(tokio::sync::Mutex::new(answer_rx)),
-            ),
-        ));
+            )));
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -1242,7 +1233,11 @@ impl AgentRuntime {
             .into_iter()
             .find(|p| p.name == eff_provider)
             .with_context(|| format!("unknown provider '{eff_provider}'"))?;
-        let model = prov.models.first().map(|m| m.id.clone()).unwrap_or_default();
+        let model = prov
+            .models
+            .first()
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
         let resolved = resolve(config, &eff_provider, &model)?;
         Ok((resolved.base_url, resolved.api_key))
     }
@@ -1561,7 +1556,12 @@ mod tests {
         assert_eq!(bare.top_p, None);
         assert_eq!(bare.extra_body, None);
         // Display-prefixed ids resolve to the same per-model params.
-        let prefixed = resolve(&config, "nvidia", "nvidia/deepseek-ai/deepseek-v4-flash-0731").unwrap();
+        let prefixed = resolve(
+            &config,
+            "nvidia",
+            "nvidia/deepseek-ai/deepseek-v4-flash-0731",
+        )
+        .unwrap();
         assert_eq!(prefixed.max_tokens, Some(16384));
     }
 

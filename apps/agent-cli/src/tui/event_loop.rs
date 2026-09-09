@@ -10,7 +10,11 @@ use crate::{
     providers::AgentRuntime,
     tui::{
         Terminal,
-        app::{AppState, ComboPickerState, ModelPickerState, Overlay, ProviderExplorerPhase, ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab, ToolCall, ToolStatus},
+        app::{
+            AppState, ComboPickerState, ModelPickerState, Overlay, ProviderExplorerPhase,
+            ProviderExplorerState, Selection, SelectionPoint, SelectionTarget, SidePanelTab,
+            ToolCall, ToolStatus,
+        },
         layout,
         theme::Theme,
         widgets::{footer, header, input, messages, overlay, side_panel, status},
@@ -107,11 +111,12 @@ pub async fn run(
         Some(runtime.subscribe_subagents()),
     );
     let (eff_provider, eff_model) = runtime.effective();
-    state.effective_model = Some(crate::providers::display_model_id(&eff_provider, &eff_model));
+    state.effective_model = Some(crate::providers::display_model_id(
+        &eff_provider,
+        &eff_model,
+    ));
     // state.set_shared_mode(shared_mode);
     let mut agent_run: Option<AgentRun> = None;
-
-
 
     // Initial render
     draw(terminal, &mut state, &theme)?;
@@ -374,8 +379,7 @@ fn handle_key(
     }
 
     // Fuzzy command selector gets key handling while open.
-    if state.command_selector.is_some()
-        && handle_command_selector_key(state, key, config, runtime)
+    if state.command_selector.is_some() && handle_command_selector_key(state, key, config, runtime)
     {
         return None;
     }
@@ -487,7 +491,9 @@ fn handle_key(
             state.refresh_command_selector();
         }
         // Ctrl+Shift+A — always select all output (exact modifier mask).
-        (_, KeyCode::Char('a')) if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) => {
+        (_, KeyCode::Char('a'))
+            if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+        {
             select_all_output(state);
             state.dirty = true;
         }
@@ -661,7 +667,9 @@ fn handle_key(
         (_, KeyCode::Backspace) if !state.is_streaming && state.cursor_pos > 0 => {
             let cluster_start = prev_grapheme_boundary(&state.input, state.cursor_pos);
             if cluster_start < state.cursor_pos {
-                state.input.replace_range(cluster_start..state.cursor_pos, "");
+                state
+                    .input
+                    .replace_range(cluster_start..state.cursor_pos, "");
                 state.cursor_pos = cluster_start;
             }
             state.selection = None;
@@ -702,7 +710,10 @@ fn handle_key(
         (_, KeyCode::Left)
             if matches!(
                 state.selection,
-                Some(Selection { target: SelectionTarget::Output, .. })
+                Some(Selection {
+                    target: SelectionTarget::Output,
+                    ..
+                })
             ) =>
         {
             let pos = output_pos_backward(state, output_active_pos(state));
@@ -712,7 +723,10 @@ fn handle_key(
         (_, KeyCode::Right)
             if matches!(
                 state.selection,
-                Some(Selection { target: SelectionTarget::Output, .. })
+                Some(Selection {
+                    target: SelectionTarget::Output,
+                    ..
+                })
             ) =>
         {
             let pos = output_pos_forward(state, output_active_pos(state));
@@ -750,7 +764,11 @@ fn handle_key(
                 && (key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::ALT)
                     || key.modifiers == (KeyModifiers::SHIFT | KeyModifiers::CONTROL)) =>
         {
-            apply_input_cursor_move(state, word_start_before(&state.input, state.cursor_pos), true);
+            apply_input_cursor_move(
+                state,
+                word_start_before(&state.input, state.cursor_pos),
+                true,
+            );
         }
         (_, KeyCode::Right)
             if !state.is_streaming
@@ -880,8 +898,7 @@ fn is_copy_shortcut(modifiers: KeyModifiers, code: KeyCode) -> bool {
     }
     // Compare the full modifier bitmask: an or-pattern like
     // `(CONTROL | SHIFT, _)` would match Ctrl+C or Shift+C, not the combo.
-    modifiers == KeyModifiers::SUPER
-        || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+    modifiers == KeyModifiers::SUPER || modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
 }
 
 /// Max bytes of a selection echoed in the `selected:`/`copied:` feedback line
@@ -1001,17 +1018,16 @@ fn copy_via_command(command: &str, args: &[&str], text: &str) -> Result<(), Clip
             missing: err.kind() == std::io::ErrorKind::NotFound,
             reason: err.to_string(),
         })?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| ClipboardError {
-            missing: false,
-            reason: "could not open stdin".into(),
-        })?;
-    stdin.write_all(text.as_bytes()).map_err(|err| ClipboardError {
+    let mut stdin = child.stdin.take().ok_or_else(|| ClipboardError {
         missing: false,
-        reason: err.to_string(),
+        reason: "could not open stdin".into(),
     })?;
+    stdin
+        .write_all(text.as_bytes())
+        .map_err(|err| ClipboardError {
+            missing: false,
+            reason: err.to_string(),
+        })?;
     // Closing stdin sends EOF so the tool finishes writing.
     drop(stdin);
     let status = child.wait().map_err(|err| ClipboardError {
@@ -1044,8 +1060,7 @@ fn write_osc52(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<
 
 /// Minimal standard base64 encoder (RFC 4648) for OSC 52 payloads.
 fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [
@@ -1146,10 +1161,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
     // green background). Only when not dragging so an active text selection
     // never gets cleared by the committed-lines rebuild below.
     if let MouseEventKind::Moved = mouse.kind {
-        let dragging = state
-            .selection
-            .as_ref()
-            .is_some_and(|s| s.dragging);
+        let dragging = state.selection.as_ref().is_some_and(|s| s.dragging);
         if !dragging {
             let hovered = followup_at_pos(state, mouse.row, mouse.column);
             if hovered != state.hovered_followup {
@@ -1171,8 +1183,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             // takes priority over text selection on the same row, and only
             // fires while idle — same as the Enter key's submit guard.
             if !state.is_streaming
-                && let Some((turn_idx, fu_idx)) =
-                    followup_at_pos(state, mouse.row, mouse.column)
+                && let Some((turn_idx, fu_idx)) = followup_at_pos(state, mouse.row, mouse.column)
                 && let Some(followup) = state
                     .turns
                     .get(turn_idx)
@@ -1398,10 +1409,7 @@ fn cluster_is_word_char(cluster: &str) -> bool {
 /// right after the previous `\n`, or 0).
 fn line_start(input: &str, pos: usize) -> usize {
     let pos = input.floor_char_boundary(pos.min(input.len()));
-    input[..pos]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0)
+    input[..pos].rfind('\n').map(|i| i + 1).unwrap_or(0)
 }
 
 /// Byte offset just past the end of the logical line containing `pos` (the
@@ -2076,10 +2084,9 @@ fn handle_provider_explorer_key(
 
 /// Handle key events while the AskUser overlay is showing.
 ///
-/// Special input mode: Up/Down (or j/k) moves between suggestions,
-/// Enter selects / confirms, Space toggles multi-select, Tab moves between
-/// questions, typing edits the "Custom" box. Answered questions collapse to
-/// an elided Q+A line. Never returns a prompt — the agent run is already
+/// Special input mode: Tab moves between questions and typing edits the
+/// freeform answer. Suggestions are display-only. Answered questions collapse
+/// to an elided Q+A line. Never returns a prompt — the agent run is already
 /// streaming and blocked on the answer channel.
 fn handle_ask_user_key(
     state: &mut AppState,
@@ -2112,7 +2119,8 @@ fn handle_ask_user_key(
         KeyCode::Tab | KeyCode::BackTab => {
             let forward = !key.modifiers.contains(KeyModifiers::SHIFT);
             save_custom(p);
-            p.custom_editing = false;
+            p.custom_editing = true;
+            p.custom_cursor = p.custom_inputs[p.focused_question].len();
             let count = p.questions.len();
             if forward {
                 p.focused_question = (p.focused_question + 1) % count.max(1);
@@ -2123,34 +2131,10 @@ fn handle_ask_user_key(
             }
             state.dirty = true;
         }
-        KeyCode::Up | KeyCode::Down => {
-            let option_count = p.option_count(p.focused_question);
-            if p.custom_editing {
-                p.custom_editing = false;
-            } else if key.code == KeyCode::Up {
-                if p.selected_options[p.focused_question] > 0 {
-                    p.selected_options[p.focused_question] -= 1;
-                }
-            } else if p.selected_options[p.focused_question] + 1 < option_count {
-                p.selected_options[p.focused_question] += 1;
-            }
-            // Entering the Custom row opens the inline input box.
-            let focus = p.focused_question;
-            if p.selected_options[focus] + 1 == option_count {
-                p.custom_editing = true;
-                p.custom_cursor = p.custom_inputs[focus].len();
-            }
-            state.dirty = true;
-        }
-        KeyCode::Char(' ') if !p.custom_editing => {
-            let focus = p.focused_question;
-            if p.is_multi(focus) {
-                let sel = p.selected_options[focus];
-                if sel < p.multi_selected[focus].len() {
-                    p.multi_selected[focus][sel] = !p.multi_selected[focus][sel];
-                    p.answered[focus] = true;
-                }
-            }
+        KeyCode::Up | KeyCode::Down | KeyCode::Char(' ') => {
+            // Suggestions are display-only; keep focus in the freeform field.
+            p.custom_editing = true;
+            p.custom_cursor = p.custom_inputs[p.focused_question].len();
             state.dirty = true;
         }
         KeyCode::Char(c)
@@ -2170,9 +2154,7 @@ fn handle_ask_user_key(
             if cursor > 0 {
                 // Remove the previous char (ASCII fast path, unicode-safe).
                 let mut new_cursor = cursor - 1;
-                while new_cursor > 0
-                    && !p.custom_inputs[focus].is_char_boundary(new_cursor)
-                {
+                while new_cursor > 0 && !p.custom_inputs[focus].is_char_boundary(new_cursor) {
                     new_cursor -= 1;
                 }
                 p.custom_inputs[focus].remove(new_cursor);
@@ -2201,33 +2183,15 @@ fn handle_ask_user_key(
         KeyCode::Enter => {
             save_custom(p);
             let focus = p.focused_question;
-            let option_count = p.option_count(focus);
-            let sel = p.selected_options[focus];
-            let is_custom = sel + 1 == option_count;
-            if p.is_multi(focus) {
-                if !is_custom && sel < p.multi_selected[focus].len() {
-                    p.multi_selected[focus][sel] = !p.multi_selected[focus][sel];
-                }
-                p.answered[focus] = true;
-                // Advance to next unanswered question, else submit.
-                if let Some(next) = p.answered.iter().position(|a| !a) {
-                    p.focused_question = next;
-                    p.custom_editing = false;
+            p.answered[focus] = true;
+            if focus + 1 < p.questions.len() && p.answered[focus + 1..].contains(&false) {
+                // Jump to the next unanswered freeform question.
+                if let Some(offset) = p.answered[focus + 1..].iter().position(|a| !a) {
+                    p.focused_question = focus + 1 + offset;
+                    p.custom_editing = true;
+                    p.custom_cursor = p.custom_inputs[p.focused_question].len();
                     state.dirty = true;
                     return None;
-                }
-            } else {
-                p.answered[focus] = true;
-                if focus + 1 < p.questions.len() && p.answered[focus + 1..].contains(&false) {
-                    // Jump to next unanswered question.
-                    if let Some(offset) =
-                        p.answered[focus + 1..].iter().position(|a| !a)
-                    {
-                        p.focused_question = focus + 1 + offset;
-                        p.custom_editing = false;
-                        state.dirty = true;
-                        return None;
-                    }
                 }
             }
             // All answered (or last Enter): build answers and submit.
@@ -2239,57 +2203,13 @@ fn handle_ask_user_key(
                     answers.push(None);
                     continue;
                 }
-                if p.is_multi(i) {
-                    let indices: Vec<usize> = p.multi_selected[i]
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, on)| on.then_some(idx))
-                        .collect();
-                    if indices.is_empty() {
-                        let custom = p.custom_inputs[i].trim();
-                        if !custom.is_empty() {
-                            answers.push(Some(
-                                crate::providers::AskUserAnswerValue::OtherText(
-                                    custom.to_string(),
-                                ),
-                            ));
-                        } else {
-                            answers.push(None);
-                        }
-                    } else {
-                        answers.push(Some(
-                            crate::providers::AskUserAnswerValue::SelectedIndices(indices),
-                        ));
-                    }
+                let answer = p.custom_inputs[i].trim();
+                if answer.is_empty() {
+                    answers.push(None);
                 } else {
-                    let sel = p.selected_options[i];
-                    let base = p.multi_selected[i].len();
-                    if sel < base {
-                        answers.push(Some(
-                            crate::providers::AskUserAnswerValue::SelectedIndex(sel),
-                        ));
-                    } else {
-                        let custom = p.custom_inputs[i].trim();
-                        if custom.is_empty() {
-                            // Fall back to legacy free-text answer if present.
-                            let legacy = p.answers[i].trim();
-                            if legacy.is_empty() {
-                                answers.push(None);
-                            } else {
-                                answers.push(Some(
-                                    crate::providers::AskUserAnswerValue::OtherText(
-                                        legacy.to_string(),
-                                    ),
-                                ));
-                            }
-                        } else {
-                            answers.push(Some(
-                                crate::providers::AskUserAnswerValue::OtherText(
-                                    custom.to_string(),
-                                ),
-                            ));
-                        }
-                    }
+                    answers.push(Some(crate::providers::AskUserAnswerValue::OtherText(
+                        answer.to_string(),
+                    )));
                 }
             }
             runtime.send_ask_user_answer(crate::providers::AskUserAnswer {
@@ -2317,25 +2237,25 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             name, id: _, input, ..
         } => {
             let summary = tool_input_summary(&name, &input);
-            state.active_blocks.push(crate::tui::app::OutputBlock::Tool(ToolCall {
-                name,
-                input_summary: summary,
-                status: ToolStatus::Running,
-                output_preview: None,
-                started_at: Instant::now(),
-                duration_ms: None,
-                children: Vec::new(),
-                run_id: None,
-            }));
+            state
+                .active_blocks
+                .push(crate::tui::app::OutputBlock::Tool(ToolCall {
+                    name,
+                    input_summary: summary,
+                    status: ToolStatus::Running,
+                    output_preview: None,
+                    started_at: Instant::now(),
+                    duration_ms: None,
+                    children: Vec::new(),
+                    run_id: None,
+                }));
             state.tool_count += 1;
             // A `spawn_agents` call may have started before the UI processed
             // its ToolStart — attach any sub-agent activity that arrived in
             // the meantime.
-            if state
-                .active_blocks
-                .last()
-                .is_some_and(|b| matches!(b, crate::tui::app::OutputBlock::Tool(t) if t.name == "spawn_agents"))
-            {
+            if state.active_blocks.last().is_some_and(
+                |b| matches!(b, crate::tui::app::OutputBlock::Tool(t) if t.name == "spawn_agents"),
+            ) {
                 drain_pending_subagents(state);
             }
         }
@@ -2412,8 +2332,7 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
 /// Whether `tool` (a `spawn_agents` call) owns the given sub-agent run,
 /// directly (its own binding) or via one of its nested sub-agent headers.
 fn tool_owns_run(tool: &ToolCall, run_id: u64) -> bool {
-    tool.run_id == Some(run_id)
-        || tool.children.iter().any(|c| c.run_id == Some(run_id))
+    tool.run_id == Some(run_id) || tool.children.iter().any(|c| c.run_id == Some(run_id))
 }
 
 /// Where the `spawn_agents` call owning a sub-agent run lives.
@@ -2457,10 +2376,7 @@ fn find_spawn_parent(state: &AppState, run_id: u64) -> Option<SpawnParentLoc> {
 /// Attach one forwarded sub-agent activity event to its `spawn_agents` parent
 /// call. The parent may be in the active tools or the last committed turn
 /// (events can arrive after the turn completed).
-fn handle_subagent_event(
-    state: &mut AppState,
-    activity: crate::subagents::SubAgentActivity,
-) {
+fn handle_subagent_event(state: &mut AppState, activity: crate::subagents::SubAgentActivity) {
     let run_id = activity.run_id();
     let Some(loc) = find_spawn_parent(state, run_id) else {
         // The parent ToolStart hasn't been processed yet — buffer until it is
@@ -2535,7 +2451,9 @@ fn attach_subagent_activity(
         }
         // ToolStart: a tool call inside this sub-agent.
         SubAgentActivity::ToolStart {
-            name, input_summary, ..
+            name,
+            input_summary,
+            ..
         } => {
             if let Some(header) = parent
                 .children
@@ -2784,10 +2702,7 @@ fn handle_slash_command(
                     .iter()
                     .position(|(p, m)| crate::providers::display_model_id(p, m) == current_id)
                     .unwrap_or(0);
-                state.overlay = Overlay::ModelPicker(ModelPickerState {
-                    selected,
-                    ..picker
-                });
+                state.overlay = Overlay::ModelPicker(ModelPickerState { selected, ..picker });
                 state.dirty = true;
             } else {
                 match runtime.select_text(rest) {
@@ -2802,7 +2717,9 @@ fn handle_slash_command(
                                 ));
                                 state.push_system(format!("Switched to {label}"));
                             }
-                            Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+                            Err(e) => {
+                                state.push_system(format!("Failed to switch to {label}: {e}"))
+                            }
                         }
                     }
                     Err(e) => state.push_system(format!("{e}")),
@@ -2839,7 +2756,9 @@ fn handle_slash_command(
                                 ));
                                 state.push_system(format!("Switched to {label}"));
                             }
-                            Err(e) => state.push_system(format!("Failed to switch to {label}: {e}")),
+                            Err(e) => {
+                                state.push_system(format!("Failed to switch to {label}: {e}"))
+                            }
                         }
                     }
                     Err(e) => state.push_system(format!("{e}")),
@@ -2970,7 +2889,12 @@ pub(crate) fn tool_input_summary(name: &str, input: &serde_json::Value) -> Strin
                     .iter()
                     .filter_map(|a| a.get("agent_type").and_then(|t| t.as_str()))
                     .collect();
-                format!("[{}] ({} agent{})", types.join(", "), list.len(), if list.len() == 1 { "" } else { "s" })
+                format!(
+                    "[{}] ({} agent{})",
+                    types.join(", "),
+                    list.len(),
+                    if list.len() == 1 { "" } else { "s" }
+                )
             }
             None => truncate(&serde_json::to_string(input).unwrap_or_default(), 60),
         },
@@ -3038,7 +2962,9 @@ mod tests {
 
     /// Push a tool call as the trailing active block (as ToolStart does).
     fn push_tool(state: &mut AppState, tool: ToolCall) {
-        state.active_blocks.push(crate::tui::app::OutputBlock::Tool(tool));
+        state
+            .active_blocks
+            .push(crate::tui::app::OutputBlock::Tool(tool));
     }
 
     /// The tool call in `blocks` at `idx` (panics if that block isn't a tool).
@@ -3130,7 +3056,10 @@ mod tests {
         assert_eq!(header.children[0].name, "WebSearch");
         assert_eq!(header.children[0].status, ToolStatus::Done);
         assert_eq!(header.children[0].duration_ms, Some(210));
-        assert_eq!(header.children[0].output_preview.as_deref(), Some("3 results"));
+        assert_eq!(
+            header.children[0].output_preview.as_deref(),
+            Some("3 results")
+        );
     }
 
     #[test]
@@ -3222,7 +3151,10 @@ mod tests {
             "[researcher-web, code-reviewer] (2 agents)"
         );
         let single = serde_json::json!({"agents": [{ "agent_type": "code-searcher" }]});
-        assert_eq!(tool_input_summary("spawn_agents", &single), "[code-searcher] (1 agent)");
+        assert_eq!(
+            tool_input_summary("spawn_agents", &single),
+            "[code-searcher] (1 agent)"
+        );
     }
 
     #[test]
@@ -3353,9 +3285,10 @@ mod tests {
         assert!(s.copy_feedback.nothing_selected);
         assert!(!s.copy_feedback.copied);
         assert_eq!(s.copy_feedback.snippet, None);
-        assert!(s
-            .copy_feedback_message()
-            .is_some_and(|m| m.starts_with("nothing selected")));
+        assert!(
+            s.copy_feedback_message()
+                .is_some_and(|m| m.starts_with("nothing selected"))
+        );
     }
 
     #[test]
@@ -3402,7 +3335,10 @@ mod tests {
         s.frame_count += 1;
         draw(&mut terminal, &mut s, &theme).unwrap();
         let copied = row_text(&terminal, x, y, w);
-        assert!(copied.starts_with("copied: copy me"), "strip shows {copied:?}");
+        assert!(
+            copied.starts_with("copied: copy me"),
+            "strip shows {copied:?}"
+        );
 
         // 2.5 s later the strip reverts to its normal status text.
         s.frame_count += COPY_FEEDBACK_FRAMES;
@@ -3513,7 +3449,11 @@ mod tests {
         assert_eq!(picker.filtered().len(), 1);
         assert_eq!(picker.filtered()[0].name, "writing");
 
-        handle_combo_picker_key(&mut s, key_for(KeyCode::Enter, KeyModifiers::NONE), &runtime);
+        handle_combo_picker_key(
+            &mut s,
+            key_for(KeyCode::Enter, KeyModifiers::NONE),
+            &runtime,
+        );
         assert!(matches!(s.overlay, Overlay::None));
         let (provider, model) = runtime.current();
         assert_eq!((provider.as_str(), model.as_str()), ("combos", "writing"));
@@ -3585,13 +3525,21 @@ mod tests {
         assert_eq!(ids[0], "test/test-2");
 
         // Enter switches the runtime to the filtered match.
-        handle_model_picker_key(&mut s, key_for(KeyCode::Enter, KeyModifiers::NONE), &runtime);
+        handle_model_picker_key(
+            &mut s,
+            key_for(KeyCode::Enter, KeyModifiers::NONE),
+            &runtime,
+        );
         assert!(matches!(s.overlay, Overlay::None));
         let (provider, model) = runtime.current();
         assert_eq!((provider.as_str(), model.as_str()), ("test", "test/test-2"));
         assert_eq!(s.model, "test/test-2");
         let last = s.turns.last().unwrap();
-        assert!(last.content.contains("Switched to test/test-2"), "{}", last.content);
+        assert!(
+            last.content.contains("Switched to test/test-2"),
+            "{}",
+            last.content
+        );
 
         // Esc closes without switching.
         let mut s = state();
@@ -3608,7 +3556,11 @@ mod tests {
         handle_slash_command(&mut s, "/combos coding", &config, &runtime);
         let last = s.turns.last().unwrap();
         assert_eq!(last.role, crate::tui::app::TurnRole::System);
-        assert!(last.content.contains("Switched to combos/coding"), "{}", last.content);
+        assert!(
+            last.content.contains("Switched to combos/coding"),
+            "{}",
+            last.content
+        );
         assert_eq!(s.model, "combos/coding");
         assert_eq!(s.effective_model.as_deref(), Some("test/test-model"));
         let (provider, model) = runtime.current();
@@ -3648,8 +3600,9 @@ mod tests {
     fn interview_inline_mode_sends_and_displays_full_prompt() {
         let (config, runtime) = runtime_with_combos();
         let mut s = state();
-        let prompt = handle_slash_command(&mut s, "/interview add OAuth support", &config, &runtime)
-            .expect("inline /interview returns a prompt");
+        let prompt =
+            handle_slash_command(&mut s, "/interview add OAuth support", &config, &runtime)
+                .expect("inline /interview returns a prompt");
         // The agent receives the full templated prompt, not the raw command.
         assert!(prompt.starts_with(crate::interview::INTERVIEW_BASE_PROMPT));
         assert!(prompt.ends_with("add OAuth support"));
@@ -3863,7 +3816,10 @@ mod tests {
         // highlights it.
         handle_mouse(&mut s, moved(1, 10));
         assert_eq!(s.hovered_followup, Some((0, 0)));
-        assert!(s.messages_dirty, "hover change should rebuild committed rows");
+        assert!(
+            s.messages_dirty,
+            "hover change should rebuild committed rows"
+        );
 
         // Moving onto the second followup row moves the highlight.
         handle_mouse(&mut s, moved(2, 10));
@@ -3933,7 +3889,9 @@ mod tests {
         // 12 logical lines over a 4-row box (2 content rows inside the
         // border): the input overflows and the wheel scrolls it.
         let mut s = state();
-        s.input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12".into();
+        s.input =
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12"
+                .into();
         s.input_area = Some((0, 10, 20, 4)); // inner height 2, usable 14
 
         // Scrolling down inside the box moves the input scroll.
@@ -4082,43 +4040,67 @@ mod tests {
         s.input = "hello".into();
         handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
         assert_eq!(s.selection_text().as_deref(), Some("hello"));
-        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+        assert!(matches!(
+            s.selection,
+            Some(Selection {
+                target: SelectionTarget::Input,
+                ..
+            })
+        ));
 
         // Empty input: Cmd+A stays in the input (zero-width selection, which
         // yields no text) rather than grabbing the output document.
         let mut s = state();
         handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
-        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+        assert!(matches!(
+            s.selection,
+            Some(Selection {
+                target: SelectionTarget::Input,
+                ..
+            })
+        ));
         assert_eq!(s.selection_text(), None);
 
         // Streaming: the input is read-only (cursor isn't there), so Cmd+A
         // selects the output document.
         let mut s = state();
         s.is_streaming = true;
-        s.virtual_list.set_committed(vec![crate::tui::virtual_list::VItem::new(
-            ratatui::prelude::Line::from("streamed output"),
-        )]);
+        s.virtual_list
+            .set_committed(vec![crate::tui::virtual_list::VItem::new(
+                ratatui::prelude::Line::from("streamed output"),
+            )]);
         handle_editing_key(&mut s, key_for(KeyCode::Char('a'), M::SUPER));
-        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Output, .. })));
+        assert!(matches!(
+            s.selection,
+            Some(Selection {
+                target: SelectionTarget::Output,
+                ..
+            })
+        ));
         assert_eq!(s.selection_text().as_deref(), Some("streamed output"));
     }
 
     #[test]
     fn shift_arrows_extend_the_right_target() {
         use crate::tui::virtual_list::VItem;
-        use ratatui::prelude::*;
         use crossterm::event::KeyModifiers as M;
+        use ratatui::prelude::*;
 
         let mut s = state();
         s.input = "hello".into();
-        s.virtual_list.set_committed(vec![
-            VItem::new(Line::from("world")),
-        ]);
+        s.virtual_list
+            .set_committed(vec![VItem::new(Line::from("world"))]);
 
         // Shift+Right with no selection extends the *input* selection.
         handle_editing_key(&mut s, key_for(KeyCode::Right, M::SHIFT));
         assert_eq!(s.selection_text().as_deref(), Some("h"));
-        assert!(matches!(s.selection, Some(Selection { target: SelectionTarget::Input, .. })));
+        assert!(matches!(
+            s.selection,
+            Some(Selection {
+                target: SelectionTarget::Input,
+                ..
+            })
+        ));
 
         // Once a selection lives in the output, Shift+Right extends it there.
         s.selection = Some(Selection {
@@ -4295,7 +4277,9 @@ mod tests {
         // Read completes with a long, file-like preview.
         let mut preview = String::new();
         for i in 1..=40 {
-            preview.push_str(&format!("line {i}: {i} the quick brown fox jumps over the lazy dog\n"));
+            preview.push_str(&format!(
+                "line {i}: {i} the quick brown fox jumps over the lazy dog\n"
+            ));
         }
         for b in s.active_blocks.iter_mut().rev() {
             if let crate::tui::app::OutputBlock::Tool(t) = b

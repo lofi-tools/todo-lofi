@@ -23,7 +23,6 @@ pub enum StorageSetupErr {
 #[snafu(visibility(pub))]
 pub enum QueryErr {
     // -- Tag operations --
-
     #[snafu(display("create tag '{name}': {source}"))]
     CreateTag { name: String, source: toasty::Error },
 
@@ -31,10 +30,7 @@ pub enum QueryErr {
     GetTag { id: u64, source: toasty::Error },
 
     #[snafu(display("find tag by name '{name}': {source}"))]
-    FindTagByName {
-        name: String,
-        source: toasty::Error,
-    },
+    FindTagByName { name: String, source: toasty::Error },
 
     #[snafu(display("delete tag {id}: {source}"))]
     DeleteTag { id: u64, source: toasty::Error },
@@ -74,7 +70,6 @@ pub enum QueryErr {
     },
 
     // -- Task operations --
-
     #[snafu(display("create task: {source}"))]
     CreateTask { source: toasty::Error },
 
@@ -91,24 +86,16 @@ pub enum QueryErr {
     ListTasksByPriority { source: toasty::Error },
 
     #[snafu(display("list tasks by tag {tag_id}: {source}"))]
-    ListTasksByTag {
-        tag_id: u64,
-        source: toasty::Error,
-    },
+    ListTasksByTag { tag_id: u64, source: toasty::Error },
 
     #[snafu(display("load tags for task {task_id}: {source}"))]
-    LoadTaskTags {
-        task_id: u64,
-        source: toasty::Error,
-    },
+    LoadTaskTags { task_id: u64, source: toasty::Error },
 
     // -- Generic fallback --
-
     #[snafu(display("database error: {source}"))]
     Database { source: toasty::Error },
 
     // -- Other --
-
     #[snafu(display("failed to parse timestamp: {source}"))]
     TimestampParse { source: jiff::Error },
 

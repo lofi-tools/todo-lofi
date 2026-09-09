@@ -15,13 +15,13 @@
 use crate::providers::Resolved;
 use crate::tools::{ReadDocsTool, RgSearchTool, WebSearchTool};
 use async_trait::async_trait;
+use cersei::Agent;
 use cersei::events::AgentEvent;
 use cersei::tools::permissions::AllowAll;
 use cersei::tools::web_fetch::WebFetchTool;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
-use cersei::Agent;
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -111,10 +111,7 @@ pub enum SubAgentActivity {
         duration_ms: u64,
     },
     /// The sub-agent finished; `text` is its final output.
-    Finished {
-        run_id: u64,
-        text: String,
-    },
+    Finished { run_id: u64, text: String },
 }
 
 impl SubAgentActivity {
@@ -257,7 +254,10 @@ pub fn sub_agent_defs() -> Vec<SubAgentDef> {
 pub fn spawner_system_prompt() -> String {
     let mut agents = String::new();
     for def in sub_agent_defs() {
-        agents.push_str(&format!("- {} ({}): {}\n", def.id, def.display_name, def.spawner_prompt));
+        agents.push_str(&format!(
+            "- {} ({}): {}\n",
+            def.id, def.display_name, def.spawner_prompt
+        ));
     }
     format!(
         "## Sub-agents\n\
@@ -556,7 +556,13 @@ impl Tool for SpawnAgentsTool {
                 (
                     i,
                     run_sub_agent(
-                        def, resolved, parent, &prompt, working_dir, events, run_id,
+                        def,
+                        resolved,
+                        parent,
+                        &prompt,
+                        working_dir,
+                        events,
+                        run_id,
                         reasoning,
                     )
                     .await,
@@ -735,7 +741,9 @@ async fn run_sub_agent(
         }
     }
 
-    let agent = builder.build().map_err(|e| format!("failed to build sub-agent: {e}"))?;
+    let agent = builder
+        .build()
+        .map_err(|e| format!("failed to build sub-agent: {e}"))?;
     if let Some(sender) = &events {
         let _ignored = sender.send(SubAgentActivity::Started {
             run_id,
@@ -797,8 +805,8 @@ async fn run_sub_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cersei::tools::permissions::AllowAll;
     use cersei::tools::CostTracker;
+    use cersei::tools::permissions::AllowAll;
 
     /// A ToolContext rooted at `working_dir` with an allow-all permission
     /// policy (tools run locally in tests, nothing is executed remotely).
@@ -829,8 +837,14 @@ mod tests {
         );
         // History-inheriting agents: code-reviewer (reviews the changes) and
         // thinker (reasons about the conversation); the others start fresh.
-        assert!(defs.iter().any(|d| d.id == "code-reviewer" && d.include_message_history));
-        assert!(defs.iter().any(|d| d.id == "thinker" && d.include_message_history));
+        assert!(
+            defs.iter()
+                .any(|d| d.id == "code-reviewer" && d.include_message_history)
+        );
+        assert!(
+            defs.iter()
+                .any(|d| d.id == "thinker" && d.include_message_history)
+        );
         // The thinker is tool-free and strips its <think> blocks from the
         // answer the parent sees.
         let thinker = defs.iter().find(|d| d.id == "thinker").unwrap();
@@ -891,7 +905,10 @@ mod tests {
         ] {
             assert!(prompt.contains(phase), "workflow missing {phase}");
         }
-        assert!(prompt.contains("re-review"), "reviewer loop must require re-review");
+        assert!(
+            prompt.contains("re-review"),
+            "reviewer loop must require re-review"
+        );
         assert!(prompt.contains("Follow-up Requests"));
     }
 
@@ -931,25 +948,37 @@ mod tests {
             extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
-                resolved,
-                Arc::new(Mutex::new(None)),
-                None,
-                cersei::provider::ReasoningField::Auto,
-            );
+            resolved,
+            Arc::new(Mutex::new(None)),
+            None,
+            cersei::provider::ReasoningField::Auto,
+        );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(json!({ "agents": [{ "agent_type": "nope" }] }), &ctx)
             .await;
         assert!(result.is_error);
-        assert!(result.content.contains("unknown agent_type"), "{}", result.content);
-        assert!(result.content.contains("researcher-web"), "{}", result.content);
+        assert!(
+            result.content.contains("unknown agent_type"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("researcher-web"),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]
     async fn spawn_code_searcher_runs_queries() {
         let dir = std::env::temp_dir().join(format!("subagent-search-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("src/lib.rs"), "pub fn create_user() {}\npub fn delete_user() {}\n").unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn create_user() {}\npub fn delete_user() {}\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("README.md"), "create_user docs here\n").unwrap();
 
         let resolved = Resolved {
@@ -963,11 +992,11 @@ mod tests {
             extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
-                resolved,
-                Arc::new(Mutex::new(None)),
-                None,
-                cersei::provider::ReasoningField::Auto,
-            );
+            resolved,
+            Arc::new(Mutex::new(None)),
+            None,
+            cersei::provider::ReasoningField::Auto,
+        );
         let ctx = test_context(dir.clone());
         let result = tool
             .execute(
@@ -988,7 +1017,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("[code-searcher]"), "{}", result.content);
+        assert!(
+            result.content.contains("[code-searcher]"),
+            "{}",
+            result.content
+        );
         assert!(result.content.contains("create_user"), "{}", result.content);
         assert!(result.content.contains("delete_user"), "{}", result.content);
         // The -g *.rs flag must be honored by the search.
@@ -1059,9 +1092,8 @@ mod tests {
                             }]
                         }),
                     );
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}"
-                    );
+                    let response =
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}");
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.shutdown().await;
                 });
@@ -1090,11 +1122,11 @@ mod tests {
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
         let tool = SpawnAgentsTool::new(
-                resolved,
-                parent.clone(),
-                Some(tx),
-                cersei::provider::ReasoningField::Auto,
-            );
+            resolved,
+            parent.clone(),
+            Some(tx),
+            cersei::provider::ReasoningField::Auto,
+        );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -1125,8 +1157,16 @@ mod tests {
             }
         }
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("[researcher-web]"), "{}", result.content);
-        assert!(result.content.contains("The answer is 42"), "{}", result.content);
+        assert!(
+            result.content.contains("[researcher-web]"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("The answer is 42"),
+            "{}",
+            result.content
+        );
         assert!(saw_started, "sub-agent never forwarded a Started event");
         assert!(saw_finished, "sub-agent never forwarded a Finished event");
     }
@@ -1151,11 +1191,11 @@ mod tests {
         let parent: ParentHandle = Arc::new(Mutex::new(None));
         let (tx, mut rx) = broadcast::channel(64);
         let tool = SpawnAgentsTool::new(
-                resolved,
-                parent.clone(),
-                Some(tx),
-                cersei::provider::ReasoningField::Auto,
-            );
+            resolved,
+            parent.clone(),
+            Some(tx),
+            cersei::provider::ReasoningField::Auto,
+        );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -1173,7 +1213,11 @@ mod tests {
         // The parent sees the stripped answer, never the raw thinking.
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("[thinker]"), "{}", result.content);
-        assert!(result.content.contains("The answer is 42"), "{}", result.content);
+        assert!(
+            result.content.contains("The answer is 42"),
+            "{}",
+            result.content
+        );
         assert!(
             !result.content.contains("<think>"),
             "think tags leaked into the parent: {}",
@@ -1182,7 +1226,10 @@ mod tests {
         // The TUI preview also gets the clean text.
         while let Ok(activity) = rx.recv().await {
             if let SubAgentActivity::Finished { text, .. } = activity {
-                assert!(!text.contains("<think>"), "think tags leaked into preview: {text}");
+                assert!(
+                    !text.contains("<think>"),
+                    "think tags leaked into preview: {text}"
+                );
                 assert!(text.contains("The answer is 42"), "preview: {text}");
             }
         }
@@ -1201,11 +1248,11 @@ mod tests {
             extra_body: None,
         };
         let tool = SpawnAgentsTool::new(
-                resolved,
-                Arc::new(Mutex::new(None)),
-                None,
-                cersei::provider::ReasoningField::Auto,
-            );
+            resolved,
+            Arc::new(Mutex::new(None)),
+            None,
+            cersei::provider::ReasoningField::Auto,
+        );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -1218,7 +1265,15 @@ mod tests {
         // The missing-params failure is reported inside the agent's result
         // section (batch semantics — one bad agent doesn't fail the batch).
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("[code-searcher]"), "{}", result.content);
-        assert!(result.content.contains("searchQueries"), "{}", result.content);
+        assert!(
+            result.content.contains("[code-searcher]"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("searchQueries"),
+            "{}",
+            result.content
+        );
     }
 }

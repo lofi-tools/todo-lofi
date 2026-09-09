@@ -70,7 +70,13 @@ mod tests {
     #[test]
     fn hy3_matches_bare_and_provider_qualified_ids() {
         // The same family applies no matter which provider serves it.
-        for id in ["hy3", "b.ai/hy3", "siliconflow/hy3", "HY3", "hunyuan-hy3-pro"] {
+        for id in [
+            "hy3",
+            "b.ai/hy3",
+            "siliconflow/hy3",
+            "HY3",
+            "hunyuan-hy3-pro",
+        ] {
             let family = family_for_model(id).expect("hy3 id must resolve");
             assert_eq!(family.name, "hy3");
             assert_eq!(family.reasoning_field, Some("reasoning_content"));
@@ -80,7 +86,12 @@ mod tests {
 
     #[test]
     fn unrelated_models_have_no_builtin_family() {
-        for id in ["gpt-4o", "deepseek/deepseek-chat", "stealth/ox-alpha", "claude-sonnet-5"] {
+        for id in [
+            "gpt-4o",
+            "deepseek/deepseek-chat",
+            "stealth/ox-alpha",
+            "claude-sonnet-5",
+        ] {
             assert!(family_for_model(id).is_none(), "{id} must not match hy3");
         }
     }

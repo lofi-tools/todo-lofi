@@ -1,5 +1,5 @@
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use gpui_component::{input::*, *};
 use std::collections::HashSet;
 use storage::prelude::*;

@@ -1,6 +1,6 @@
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
-    prelude::FluentBuilder,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;

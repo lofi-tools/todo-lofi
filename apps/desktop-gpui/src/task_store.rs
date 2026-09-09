@@ -189,9 +189,7 @@ impl TaskStore {
     }
 
     pub fn store_handle(&self) -> Arc<tokio::sync::Mutex<TodoStore>> {
-        self.store
-            .clone()
-            .expect("TaskStore not initialized")
+        self.store.clone().expect("TaskStore not initialized")
     }
 
     pub fn insert_task(
@@ -207,9 +205,7 @@ impl TaskStore {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
 
-            let task = s
-                .create_task(Task::create().title(title))
-                .await?;
+            let task = s.create_task(Task::create().title(title)).await?;
 
             for tag_name in &tags {
                 let _ = s.assign_tag_to_task(task.id, tag_name).await;

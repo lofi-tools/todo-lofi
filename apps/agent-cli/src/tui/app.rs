@@ -23,13 +23,9 @@ pub struct AskUserPending {
     pub current_input: String,
     /// Cursor position in `current_input`.
     pub cursor_pos: usize,
-    /// Selected option index per question (options.len() == "Custom").
-    pub selected_options: Vec<usize>,
-    /// Per-question multi-select state (for multiSelect questions).
-    pub multi_selected: Vec<Vec<bool>>,
-    /// Custom free-text per question (used when "Custom" is selected).
+    /// Freeform text per question.
     pub custom_inputs: Vec<String>,
-    /// Whether the focused question is currently editing its custom text.
+    /// Whether the focused question is currently editing its freeform text.
     pub custom_editing: bool,
     /// Cursor position within the focused custom input.
     pub custom_cursor: usize,
@@ -44,15 +40,6 @@ impl AskUserPending {
         question_summaries: Vec<String>,
     ) -> Self {
         let count = questions.len();
-        let mut multi_selected = Vec::with_capacity(count);
-        for q in &questions {
-            let option_count = q
-                .get("options")
-                .and_then(|o| o.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            multi_selected.push(vec![false; option_count]);
-        }
         Self {
             request_id,
             questions,
@@ -61,33 +48,11 @@ impl AskUserPending {
             focused_question: 0,
             current_input: String::new(),
             cursor_pos: 0,
-            selected_options: vec![0; count],
-            multi_selected,
             custom_inputs: vec![String::new(); count],
-            custom_editing: false,
+            custom_editing: true,
             custom_cursor: 0,
             answered: vec![false; count],
         }
-    }
-
-    /// Number of selectable rows for question `idx` (options + Custom).
-    pub fn option_count(&self, idx: usize) -> usize {
-        let base = self
-            .questions
-            .get(idx)
-            .and_then(|q| q.get("options"))
-            .and_then(|o| o.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
-        base + 1
-    }
-
-    pub fn is_multi(&self, idx: usize) -> bool {
-        self.questions
-            .get(idx)
-            .and_then(|q| q.get("multiSelect"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
     }
 }
 
@@ -186,7 +151,7 @@ impl CopyFeedback {
 
 #[cfg(test)]
 mod copy_feedback_tests {
-    use super::{CopyFeedback, COPY_FEEDBACK_FRAMES};
+    use super::{COPY_FEEDBACK_FRAMES, CopyFeedback};
 
     #[test]
     fn feedback_expires_after_window_frames() {
@@ -474,11 +439,7 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
             qi += 1;
         }
     }
-    if qi == q.len() {
-        Some(score)
-    } else {
-        None
-    }
+    if qi == q.len() { Some(score) } else { None }
 }
 
 /// Commands matching `query`, best matches first.
@@ -1135,7 +1096,11 @@ impl AppState {
                         break;
                     }
                     append_preview(&mut out, "\n", max_bytes);
-                    append_preview(&mut out, &self.virtual_list.row_text(row as usize), max_bytes);
+                    append_preview(
+                        &mut out,
+                        &self.virtual_list.row_text(row as usize),
+                        max_bytes,
+                    );
                 }
                 if out.len() < max_bytes {
                     append_preview(&mut out, "\n", max_bytes);
@@ -1149,11 +1114,7 @@ impl AppState {
                         max_bytes,
                     );
                 }
-                if out.is_empty() {
-                    None
-                } else {
-                    Some(out)
-                }
+                if out.is_empty() { None } else { Some(out) }
             }
         }
     }
@@ -1494,7 +1455,10 @@ mod tests {
             active: SelectionPoint::Input(s.input.len()),
             dragging: false,
         });
-        assert_eq!(s.selection_preview(200).as_deref(), Some("line one line two"));
+        assert_eq!(
+            s.selection_preview(200).as_deref(),
+            Some("line one line two")
+        );
 
         // Multi-row output selection flattens to one line too.
         s.virtual_list.set_committed(vec![

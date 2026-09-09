@@ -26,7 +26,10 @@ pub async fn prompt_raw(
 ) -> anyhow::Result<String> {
     let resolved = providers::resolve(config, provider, model)
         .with_context(|| format!("resolving '{provider}' for direct prompt"))?;
-    let url = format!("{}/chat/completions", resolved.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        resolved.base_url.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "model": resolved.model,
         "messages": [{ "role": "user", "content": prompt }],
@@ -49,7 +52,10 @@ pub async fn prompt_raw(
         let text = response.text().await.unwrap_or_default();
         anyhow::bail!("direct prompt failed: HTTP {status}: {text}");
     }
-    response.text().await.context("failed to read direct prompt response body")
+    response
+        .text()
+        .await
+        .context("failed to read direct prompt response body")
 }
 
 /// Prompt a model and split its streamed output into thinking/text segments
@@ -109,7 +115,7 @@ mod tests {
     // way the wire format intends. Fixtures are committed so the tests pass
     // on machines with no api keys.
 
-fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
+    fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
         let path = fixtures_dir()
             .join(family)
             .join(format!("{model}-{name}.sse"));
@@ -140,7 +146,10 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
         let answer = text_segments.concat();
         assert!(!answer.is_empty());
         // The answer is a list of three steps (the prompt asked for three).
-        assert!(answer.contains("1."), "answer should start a numbered list: {answer:?}");
+        assert!(
+            answer.contains("1."),
+            "answer should start a numbered list: {answer:?}"
+        );
         // The thinking is distinct content — it contains the model's
         // internal reasoning, not the final answer verbatim.
         assert_ne!(thinking, answer.trim());
@@ -180,7 +189,10 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
         let answer = text_segments.concat();
         // The prompt asked for 23 × 17; the answer is the product, not the
         // thinking.
-        assert!(answer.contains("391"), "answer should contain the product: {answer:?}");
+        assert!(
+            answer.contains("391"),
+            "answer should contain the product: {answer:?}"
+        );
         assert_ne!(thinking, answer.trim());
     }
 
@@ -226,7 +238,10 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
             .collect();
         let answer = text_segments.concat();
         assert!(!answer.is_empty());
-        assert!(answer.contains("1."), "answer should start a numbered list: {answer:?}");
+        assert!(
+            answer.contains("1."),
+            "answer should start a numbered list: {answer:?}"
+        );
         assert_ne!(thinking, answer.trim());
     }
 
@@ -295,10 +310,8 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
                     body.contains("data:"),
                     "{name}: expected an SSE body, got: {body}"
                 );
-                let segments = parse_sse(
-                    &crate::response_format::family("reasoning").unwrap(),
-                    &body,
-                );
+                let segments =
+                    parse_sse(&crate::response_format::family("reasoning").unwrap(), &body);
                 assert!(
                     segments.iter().any(|s| s.kind == SegmentKind::Thinking),
                     "{name}: expected thinking segments, got {segments:?}"
@@ -411,8 +424,8 @@ fn replay(family: &str, model: &str, name: &str) -> Vec<Segment> {
                     segments.iter().any(|s| s.kind == SegmentKind::Text),
                     "{name}: expected answer text, got {segments:?}"
                 );
-                let path = save_fixture("reasoning_content", "nemotron-3-ultra", name, &body)
-                    .unwrap();
+                let path =
+                    save_fixture("reasoning_content", "nemotron-3-ultra", name, &body).unwrap();
                 eprintln!("captured {name} -> {}", path.display());
             }
         }

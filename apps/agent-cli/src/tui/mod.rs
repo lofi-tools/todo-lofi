@@ -79,7 +79,12 @@ pub fn install_panic_hook() {
 pub fn setup_terminal() -> io::Result<Terminal> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
 
     // Enable kitty keyboard protocol for Shift+Enter detection.
     // Only if the terminal actually supports it (avoids broken state on resize).

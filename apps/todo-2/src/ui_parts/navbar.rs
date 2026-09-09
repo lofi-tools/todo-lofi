@@ -1,6 +1,6 @@
 use gpui::{
-    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Task, Window, div, px, rgb,
+    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
 };
 use gpui_component::StyledExt;
 use std::collections::HashMap;
@@ -52,7 +52,13 @@ impl NavBar {
         }
     }
 
-    fn navigate_to_tag(&mut self, tag_name: &str, _tag_id: u64, path: &[String], cx: &mut Context<Self>) {
+    fn navigate_to_tag(
+        &mut self,
+        tag_name: &str,
+        _tag_id: u64,
+        path: &[String],
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_path == path {
             self.selected_path.retain(|p| p != tag_name);
             cx.emit(NavBarEvent::AllTasks);
@@ -69,8 +75,8 @@ impl NavBar {
                     let store = self.store.clone();
                     let id = tag.id;
                     let fetch_task = store.get_children(id, cx);
-                    self._fetch_children = Some(cx.spawn(async move |this, cx| {
-                        match fetch_task.await {
+                    self._fetch_children =
+                        Some(cx.spawn(async move |this, cx| match fetch_task.await {
                             Ok(children) => {
                                 this.update(cx, |this, cx| {
                                     this.children_cache.insert(id, children);
@@ -82,11 +88,14 @@ impl NavBar {
                             Err(e) => {
                                 tracing::error!("Failed to fetch children: {e}");
                             }
-                        }
-                    }));
+                        }));
                     break;
                 }
-                current_children = self.children_cache.get(&tag.id).cloned().unwrap_or_default();
+                current_children = self
+                    .children_cache
+                    .get(&tag.id)
+                    .cloned()
+                    .unwrap_or_default();
             }
         }
         cx.notify();
@@ -112,13 +121,27 @@ impl NavBar {
             let is_on_path = selected_path.iter().any(|p| p == &tag.name);
             if is_on_path {
                 for child in &children {
-                    walk(child, depth + 1, &path, selected_path, children_cache, result);
+                    walk(
+                        child,
+                        depth + 1,
+                        &path,
+                        selected_path,
+                        children_cache,
+                        result,
+                    );
                 }
             }
         }
 
         for tag in &self.top_level_tags {
-            walk(tag, 0, &[], &self.selected_path, &self.children_cache, &mut result);
+            walk(
+                tag,
+                0,
+                &[],
+                &self.selected_path,
+                &self.children_cache,
+                &mut result,
+            );
         }
 
         result
@@ -156,41 +179,52 @@ impl Render for NavBar {
                     .px_3()
                     .py_1()
                     .rounded_md()
-                    .bg(if is_all_tasks { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
+                    .bg(if is_all_tasks {
+                        rgb(0x2a2a2a)
+                    } else {
+                        rgb(0x1e1e1e)
+                    })
                     .hover(|s| s.bg(rgb(0x2a2a2a)))
-                    .on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.selected_path.clear();
-                            cx.emit(NavBarEvent::AllTasks);
-                            cx.notify();
-                        }),
-                    ),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected_path.clear();
+                        cx.emit(NavBarEvent::AllTasks);
+                        cx.notify();
+                    })),
             )
-            .children(visible_tags.into_iter().map(|(tag_name, tag_id, depth, _has_children, path)| {
-                let tag_for_click = tag_name.clone();
-                let path_for_click = path;
-                let is_selected = selected_tag.as_deref() == Some(&tag_name);
+            .children(visible_tags.into_iter().map(
+                |(tag_name, tag_id, depth, _has_children, path)| {
+                    let tag_for_click = tag_name.clone();
+                    let path_for_click = path;
+                    let is_selected = selected_tag.as_deref() == Some(&tag_name);
 
-                div()
-                    .h_flex()
-                    .items_center()
-                    .ml(px(depth as f32 * 8.0))
-                    .child(
-                        div()
-                            .id(("tag", tag_id))
-                            .flex_1()
-                            .child(tag_name)
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(if is_selected { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
-                            .hover(|s| s.bg(rgb(0x2a2a2a)))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.navigate_to_tag(&tag_for_click, tag_id, &path_for_click, cx);
-                                }),
-                            ),
-                    )
-            }))
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .ml(px(depth as f32 * 8.0))
+                        .child(
+                            div()
+                                .id(("tag", tag_id))
+                                .flex_1()
+                                .child(tag_name)
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .bg(if is_selected {
+                                    rgb(0x2a2a2a)
+                                } else {
+                                    rgb(0x1e1e1e)
+                                })
+                                .hover(|s| s.bg(rgb(0x2a2a2a)))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.navigate_to_tag(
+                                        &tag_for_click,
+                                        tag_id,
+                                        &path_for_click,
+                                        cx,
+                                    );
+                                })),
+                        )
+                },
+            ))
     }
 }

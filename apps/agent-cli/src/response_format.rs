@@ -183,7 +183,9 @@ pub fn classify_delta(format: &ResponseFormat, delta: &Value) -> Vec<Segment> {
 pub fn parse_sse(format: &ResponseFormat, body: &str) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::new();
     for line in body.lines() {
-        let Some(data) = line.strip_prefix("data:") else { continue };
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
         let data = data.trim();
         if data.is_empty() || data == "[DONE]" {
             continue;
@@ -239,8 +241,14 @@ mod tests {
         assert_eq!(
             segments,
             vec![
-                Segment { kind: SegmentKind::Thinking, text: "the thinking".into() },
-                Segment { kind: SegmentKind::Text, text: "the answer".into() },
+                Segment {
+                    kind: SegmentKind::Thinking,
+                    text: "the thinking".into()
+                },
+                Segment {
+                    kind: SegmentKind::Text,
+                    text: "the answer".into()
+                },
             ]
         );
     }
@@ -276,14 +284,18 @@ data: [DONE]\n";
                     kind: SegmentKind::Thinking,
                     text: "The user wants a list.".into()
                 },
-                Segment { kind: SegmentKind::Text, text: "1. one\n2. two".into() },
+                Segment {
+                    kind: SegmentKind::Text,
+                    text: "1. one\n2. two".into()
+                },
             ]
         );
     }
 
     #[test]
     fn parse_sse_skips_non_data_lines() {
-        let body = ": keep-alive comment\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let body =
+            ": keep-alive comment\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
         let segments = parse_sse(&ox_alpha(), body);
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "hi");
@@ -292,16 +304,24 @@ data: [DONE]\n";
     #[test]
     fn format_for_resolves_families_from_config() {
         let mut config = AppConfig::default();
-        config.model_families.insert("stealth/ox-alpha".into(), "reasoning".into());
-        config.model_families.insert("deepseek/deepseek-chat".into(), "reasoning_content".into());
+        config
+            .model_families
+            .insert("stealth/ox-alpha".into(), "reasoning".into());
+        config
+            .model_families
+            .insert("deepseek/deepseek-chat".into(), "reasoning_content".into());
 
         assert_eq!(
             format_for(&config, "stealth/ox-alpha"),
-            ResponseFormat::ReasoningField { field: "reasoning".into() }
+            ResponseFormat::ReasoningField {
+                field: "reasoning".into()
+            }
         );
         assert_eq!(
             format_for(&config, "deepseek/deepseek-chat"),
-            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+            ResponseFormat::ReasoningField {
+                field: "reasoning_content".into()
+            }
         );
         // Unlisted models and unknown family names fall back to Plain.
         assert_eq!(format_for(&config, "groq/compound"), ResponseFormat::Plain);
@@ -312,9 +332,15 @@ data: [DONE]\n";
     fn reasoning_field_for_maps_families_to_provider_fields() {
         use cersei::provider::ReasoningField;
         let mut config = AppConfig::default();
-        config.model_families.insert("stealth/ox-alpha".into(), "reasoning".into());
-        config.model_families.insert("deepseek/deepseek-chat".into(), "reasoning_content".into());
-        config.model_families.insert("groq/compound".into(), "plain".into());
+        config
+            .model_families
+            .insert("stealth/ox-alpha".into(), "reasoning".into());
+        config
+            .model_families
+            .insert("deepseek/deepseek-chat".into(), "reasoning_content".into());
+        config
+            .model_families
+            .insert("groq/compound".into(), "plain".into());
 
         // Configured families drive an explicit field...
         assert_eq!(
@@ -326,11 +352,17 @@ data: [DONE]\n";
             ReasoningField::Field("reasoning_content")
         );
         // ...`plain` opts out entirely...
-        assert_eq!(reasoning_field_for(&config, "groq/compound"), ReasoningField::Off);
+        assert_eq!(
+            reasoning_field_for(&config, "groq/compound"),
+            ReasoningField::Off
+        );
         // ...and unlisted models auto-detect (reasoning models emit reasoning
         // fields only when they think, so auto is the safe default for the
         // live path).
-        assert_eq!(reasoning_field_for(&config, "some/other-model"), ReasoningField::Auto);
+        assert_eq!(
+            reasoning_field_for(&config, "some/other-model"),
+            ReasoningField::Auto
+        );
     }
 
     #[test]
@@ -342,11 +374,15 @@ data: [DONE]\n";
         // id AND the same model served by any provider.
         assert_eq!(
             format_for(&config, "hy3"),
-            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+            ResponseFormat::ReasoningField {
+                field: "reasoning_content".into()
+            }
         );
         assert_eq!(
             format_for(&config, "b.ai/hy3"),
-            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+            ResponseFormat::ReasoningField {
+                field: "reasoning_content".into()
+            }
         );
         assert_eq!(
             reasoning_field_for(&config, "hy3"),
@@ -370,10 +406,14 @@ data: [DONE]\n";
         let mut config = AppConfig::default();
         // `model_families` values may name a built-in family directly, so a
         // provider's hy3 id that doesn't contain the marker can still opt in.
-        config.model_families.insert("b.ai/hunyuan-3-pro".into(), "hy3".into());
+        config
+            .model_families
+            .insert("b.ai/hunyuan-3-pro".into(), "hy3".into());
         assert_eq!(
             format_for(&config, "b.ai/hunyuan-3-pro"),
-            ResponseFormat::ReasoningField { field: "reasoning_content".into() }
+            ResponseFormat::ReasoningField {
+                field: "reasoning_content".into()
+            }
         );
         assert_eq!(
             reasoning_field_for(&config, "b.ai/hunyuan-3-pro"),

@@ -40,27 +40,14 @@ impl Render for Layout {
             .flex()
             .flex_row()
             .size_full()
-            .child(
-                div()
-                    .w(px(256.))
-                    .flex_none()
-                    .child(self.nav_bar.clone()),
-            )
+            .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
             .child(
                 div()
                     .flex_1()
                     .flex()
                     .flex_row()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(self.task_list.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .child("Details"),
-                    ),
+                    .child(div().flex_1().child(self.task_list.clone()))
+                    .child(div().flex_1().child("Details")),
             )
     }
 }

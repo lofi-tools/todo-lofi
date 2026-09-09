@@ -243,7 +243,8 @@ impl TodoStore {
         let assignments = seed_assignments();
         for assignment in &assignments {
             if let Some(&task_id) = task_map.get(&assignment.task_title) {
-                self.assign_tag_to_task(task_id, &assignment.tag_name).await?;
+                self.assign_tag_to_task(task_id, &assignment.tag_name)
+                    .await?;
             }
         }
 

@@ -34,7 +34,11 @@ impl Store {
         })
     }
 
-    pub fn get_children(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
+    pub fn get_children(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<Tag>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -76,7 +80,11 @@ impl Store {
                 .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
             let tasks = s.list_tasks_by_tag(tag_id).await?;
             for t in &tasks {
-                tracing::info!(task_id = t.task.id, done = t.task.done, "list_tasks_by_tag_name: task");
+                tracing::info!(
+                    task_id = t.task.id,
+                    done = t.task.done,
+                    "list_tasks_by_tag_name: task"
+                );
             }
             Ok(tasks)
         })

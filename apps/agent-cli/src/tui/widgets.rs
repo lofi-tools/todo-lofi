@@ -523,7 +523,10 @@ pub mod header {
             spans.push(Span::styled(suffix, Style::default().fg(theme.dim)));
         }
         spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
-        spans.push(Span::styled(mode_str, mode_style(state.permission_mode, theme)));
+        spans.push(Span::styled(
+            mode_str,
+            mode_style(state.permission_mode, theme),
+        ));
         spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
         spans.push(Span::styled(&tokens_str, Style::default().fg(theme.dim)));
         spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
@@ -610,10 +613,7 @@ pub mod header {
             // Combo running on a (fallback) entry: suffix names the concrete
             // model while the selection stays the combo.
             assert_eq!(
-                effective_suffix(
-                    "combos/coding",
-                    &Some("openrouter/openrouter/free".into()),
-                ),
+                effective_suffix("combos/coding", &Some("openrouter/openrouter/free".into()),),
                 Some(" → openrouter/openrouter/free".into())
             );
         }
@@ -629,7 +629,7 @@ pub mod input {
     use crate::tui::{app::AppState, theme::Theme};
     use ratatui::{
         prelude::*,
-        widgets::{Block, Borders, BorderType, Paragraph},
+        widgets::{Block, BorderType, Borders, Paragraph},
     };
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -656,11 +656,7 @@ pub mod input {
 
     impl VisualRow {
         fn prefix<'a>(&self, prompt: &'a str) -> &'a str {
-            if self.is_first {
-                prompt
-            } else {
-                CONTINUATION
-            }
+            if self.is_first { prompt } else { CONTINUATION }
         }
 
         fn prefix_len(&self, prompt: &str) -> usize {
@@ -694,7 +690,11 @@ pub mod input {
         // to a character position (see `char_pos_at_click`).
         state.input_area = Some((area.x, area.y, area.width, area.height));
 
-        let prompt = if state.is_streaming { CONTINUATION } else { PROMPT };
+        let prompt = if state.is_streaming {
+            CONTINUATION
+        } else {
+            PROMPT
+        };
         let width = inner.width as usize;
         if width < 4 {
             state.input_scroll = 0;
@@ -800,7 +800,8 @@ pub mod input {
         let mut seg_start = 0;
         for (line_index, line) in input.split('\n').enumerate() {
             let seg_end = seg_start + line.len();
-            for (chunk_index, (chunk_start, chunk_end)) in wrap_segment(line, usable).into_iter().enumerate()
+            for (chunk_index, (chunk_start, chunk_end)) in
+                wrap_segment(line, usable).into_iter().enumerate()
             {
                 rows.push(VisualRow {
                     is_first: line_index == 0 && chunk_index == 0,
@@ -946,7 +947,9 @@ pub mod input {
         use crate::tui::app::CommandMatch;
         use ratatui::widgets::{Clear, List, ListItem, ListState};
 
-        let Some(sel) = &state.command_selector else { return };
+        let Some(sel) = &state.command_selector else {
+            return;
+        };
         if sel.matches.is_empty() {
             return;
         }
@@ -975,7 +978,9 @@ pub mod input {
             .map(|m: &CommandMatch| {
                 let name = Span::styled(
                     format!("/{}", m.name),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 );
                 let desc = Span::styled(
                     format!("  {}", m.description),
@@ -1021,7 +1026,10 @@ pub mod input {
         #[test]
         fn wraps_long_words_and_breaks_at_spaces() {
             // Hard break with no space that fits.
-            assert_eq!(wrap_segment("hello world", 5), vec![(0, 5), (5, 6), (6, 11)]);
+            assert_eq!(
+                wrap_segment("hello world", 5),
+                vec![(0, 5), (5, 6), (6, 11)]
+            );
             // The space stays at the end of the wrapped row.
             assert_eq!(wrap_segment("hello world", 6), vec![(0, 6), (6, 11)]);
             // Fits entirely.
@@ -1079,11 +1087,26 @@ pub mod input {
             // At a genuinely narrow width the wrap point renders at the start
             // of the continuation.
             let rows = layout("hello world foo", 6);
-            assert_eq!(rows, vec![
-                VisualRow { is_first: true, start: 0, end: 6 },
-                VisualRow { is_first: false, start: 6, end: 12 },
-                VisualRow { is_first: false, start: 12, end: 15 },
-            ]);
+            assert_eq!(
+                rows,
+                vec![
+                    VisualRow {
+                        is_first: true,
+                        start: 0,
+                        end: 6
+                    },
+                    VisualRow {
+                        is_first: false,
+                        start: 6,
+                        end: 12
+                    },
+                    VisualRow {
+                        is_first: false,
+                        start: 12,
+                        end: 15
+                    },
+                ]
+            );
             assert_eq!(cursor_in_rows(&rows, "hello world foo", 6), (1, 2));
             assert_eq!(cursor_in_rows(&rows, "hello world foo", 12), (2, 2));
         }
@@ -1156,11 +1179,13 @@ pub mod input {
 
         #[test]
         fn visual_lines_match_layout() {
-            assert_eq!(visual_lines("hello world", "> ", 6), vec!["> hello ", "  world"]);
+            assert_eq!(
+                visual_lines("hello world", "> ", 6),
+                vec!["> hello ", "  world"]
+            );
             assert_eq!(visual_lines("ab\ncd", "> ", 20), vec!["> ab", "  cd"]);
             assert_eq!(visual_lines("", "> ", 20), vec!["> "]);
         }
-
     }
 }
 pub mod messages {
@@ -1232,7 +1257,9 @@ pub mod messages {
         state.virtual_list.sticky_bottom = state.scroll.sticky_bottom;
 
         // Render visible items to buffer, highlighting any output selection.
-        let sel = state.output_selection().map(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
+        let sel = state
+            .output_selection()
+            .map(|r| (r.start_row, r.start_col, r.end_row, r.end_col));
         state.virtual_list.render(area, f.buffer_mut(), sel);
     }
 
@@ -1253,9 +1280,9 @@ pub mod messages {
         // Push one row, recording which followup it belongs to (None for
         // ordinary rows). Keeps `items` and `followup_rows` in lockstep.
         let push = |items: &mut Vec<VItem>,
-                        followup_rows: &mut Vec<Option<(usize, usize)>>,
-                        line: Line<'static>,
-                        followup: Option<(usize, usize)>| {
+                    followup_rows: &mut Vec<Option<(usize, usize)>>,
+                    line: Line<'static>,
+                    followup: Option<(usize, usize)>| {
             items.push(VItem::new(line));
             followup_rows.push(followup);
         };
@@ -1277,12 +1304,7 @@ pub mod messages {
                             None,
                         );
                     }
-                    push(
-                        &mut items,
-                        &mut followup_rows,
-                        Line::default(),
-                        None,
-                    );
+                    push(&mut items, &mut followup_rows, Line::default(), None);
                 }
                 TurnRole::Assistant => {
                     // Render the turn's blocks in arrival order: text,
@@ -1293,12 +1315,7 @@ pub mod messages {
                             push(&mut items, &mut followup_rows, item.line, None);
                         }
                     }
-                    push(
-                        &mut items,
-                        &mut followup_rows,
-                        Line::default(),
-                        None,
-                    );
+                    push(&mut items, &mut followup_rows, Line::default(), None);
                 }
                 TurnRole::System => {
                     // Freebuff ghost/ephemeral elements: dashed rounded border
@@ -1308,10 +1325,7 @@ pub mod messages {
                         push(
                             &mut items,
                             &mut followup_rows,
-                            Line::from(Span::styled(
-                                format!("  {DASHED_TL} system"),
-                                border,
-                            )),
+                            Line::from(Span::styled(format!("  {DASHED_TL} system"), border)),
                             None,
                         );
                         // Leave room for the left border prefix so wrapped rows fit.
@@ -1350,8 +1364,7 @@ pub mod messages {
                                 theme.dimmed()
                             };
                             let row_text = format!("• {} — {}", followup.label, followup.prompt);
-                            let wrapped =
-                                wrap_text(&row_text, (width as usize).saturating_sub(7));
+                            let wrapped = wrap_text(&row_text, (width as usize).saturating_sub(7));
                             for wline in wrapped {
                                 push(
                                     &mut items,
@@ -1368,18 +1381,10 @@ pub mod messages {
                     push(
                         &mut items,
                         &mut followup_rows,
-                        Line::from(Span::styled(
-                            format!("  {DASHED_BL}"),
-                            border,
-                        )),
+                        Line::from(Span::styled(format!("  {DASHED_BL}"), border)),
                         None,
                     );
-                    push(
-                        &mut items,
-                        &mut followup_rows,
-                        Line::default(),
-                        None,
-                    );
+                    push(&mut items, &mut followup_rows, Line::default(), None);
                 }
             }
         }
@@ -1456,7 +1461,9 @@ pub mod messages {
                 if truncated {
                     wrapped = wrapped[wrapped.len() - THINKING_PREVIEW_LINES..].to_vec();
                 }
-                let style = Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC);
+                let style = Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC);
                 if truncated {
                     items.push(VItem::new(Line::from(vec![
                         Span::styled(format!("  {BORDER_V}"), border),
@@ -1469,7 +1476,10 @@ pub mod messages {
                         Span::styled(wline, style),
                     ])));
                 }
-                items.push(VItem::new(Line::from(Span::styled(format!("  {BORDER_BL}"), border))));
+                items.push(VItem::new(Line::from(Span::styled(
+                    format!("  {BORDER_BL}"),
+                    border,
+                ))));
             }
             crate::tui::app::OutputBlock::Text(text) => {
                 let md_lines = crate::tui::markdown::render_markdown(text, width);
@@ -1587,7 +1597,9 @@ pub mod messages {
             let lead = joined.find("leading words").expect("leading text rendered");
             let tool = joined.find("Grep").expect("tool call rendered");
             let think = joined.find("hmm").expect("thinking rendered");
-            let trail = joined.find("trailing words").expect("trailing text rendered");
+            let trail = joined
+                .find("trailing words")
+                .expect("trailing text rendered");
             assert!(
                 lead < tool && tool < think && think < trail,
                 "blocks rendered out of order:\n{joined}"
@@ -1621,12 +1633,7 @@ pub mod messages {
                 .collect();
             assert_eq!(
                 texts,
-                vec![
-                    "  ╭─ • Thinking",
-                    "  │ step by step reasoning",
-                    "  ╰─",
-                    ""
-                ]
+                vec!["  ╭─ • Thinking", "  │ step by step reasoning", "  ╰─", ""]
             );
         }
 
@@ -1666,7 +1673,10 @@ pub mod messages {
             assert_eq!(texts[1], "  │ ...");
             // The preview shows the tail: the last rows, not the first.
             assert!(texts[2].contains("reasoning line 16"), "{texts:?}");
-            assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES - 1], "  │ reasoning line 20");
+            assert_eq!(
+                texts[2 + super::THINKING_PREVIEW_LINES - 1],
+                "  │ reasoning line 20"
+            );
             assert_eq!(texts[2 + super::THINKING_PREVIEW_LINES], "  ╰─");
         }
 
@@ -1729,8 +1739,7 @@ pub mod messages {
                     },
                 ],
             };
-            let (lines, row_map) =
-                build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
+            let (lines, row_map) = build_committed_lines(&[turn], &Theme::dark(), 80, 0, None);
             let texts: Vec<String> = lines
                 .iter()
                 .map(|item| {
@@ -1773,9 +1782,12 @@ pub mod messages {
                     prompt: "a very long prompt that definitely wraps onto two rows".into(),
                 }],
             };
-            let (lines, row_map) =
-                build_committed_lines(&[turn], &Theme::dark(), 24, 0, None);
-            assert!(lines.len() > 3, "expected the row to wrap: {} lines", lines.len());
+            let (lines, row_map) = build_committed_lines(&[turn], &Theme::dark(), 24, 0, None);
+            assert!(
+                lines.len() > 3,
+                "expected the row to wrap: {} lines",
+                lines.len()
+            );
             // All wrapped lines of the followup map to the same followup.
             let fu_rows: Vec<_> = row_map
                 .iter()
@@ -1806,8 +1818,7 @@ pub mod messages {
             };
             // Hovering followup (0, 0) styles its row with success-green text
             // on the light-green hover background.
-            let (lines, _) =
-                build_committed_lines(&[turn.clone()], &theme, 80, 0, Some((0, 0)));
+            let (lines, _) = build_committed_lines(&[turn.clone()], &theme, 80, 0, Some((0, 0)));
             let row_style = lines[1].line.spans[1].style;
             assert_eq!(row_style.fg, Some(theme.success));
             assert_eq!(row_style.bg, Some(theme.followup_hover_bg));
@@ -1823,7 +1834,10 @@ pub mod overlay {
     //! Modal overlays: help, permission, recovery.
 
     use crate::tui::{
-        app::{AppState, ComboPickerState, ModelPickerState, Overlay, PermissionOverlay, ProviderExplorerPhase, ProviderExplorerState, RecoveryOverlay},
+        app::{
+            AppState, ComboPickerState, ModelPickerState, Overlay, PermissionOverlay,
+            ProviderExplorerPhase, ProviderExplorerState, RecoveryOverlay,
+        },
         theme::Theme,
     };
     use ratatui::{
@@ -2041,16 +2055,14 @@ pub mod overlay {
                 "No provider/model matches the filter."
             };
             f.render_widget(
-                Paragraph::new(msg)
-                    .style(theme.dimmed())
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .title(title)
-                            .border_style(theme.border_style())
-                            .style(Style::default().bg(theme.bg)),
-                    ),
+                Paragraph::new(msg).style(theme.dimmed()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(title)
+                        .border_style(theme.border_style())
+                        .style(Style::default().bg(theme.bg)),
+                ),
                 list_area,
             );
             return;
@@ -2137,16 +2149,14 @@ pub mod overlay {
                 "No combo matches the filter."
             };
             f.render_widget(
-                Paragraph::new(msg)
-                    .style(theme.dimmed())
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(BorderType::Rounded)
-                            .title(title)
-                            .border_style(theme.border_style())
-                            .style(Style::default().bg(theme.bg)),
-                    ),
+                Paragraph::new(msg).style(theme.dimmed()).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(title)
+                        .border_style(theme.border_style())
+                        .style(Style::default().bg(theme.bg)),
+                ),
                 list_area,
             );
             return;
@@ -2158,8 +2168,11 @@ pub mod overlay {
         let items: Vec<ListItem> = filtered
             .iter()
             .map(|combo| {
-                let marker =
-                    if p.current.as_deref() == Some(combo.name.as_str()) { " ● " } else { "   " };
+                let marker = if p.current.as_deref() == Some(combo.name.as_str()) {
+                    " ● "
+                } else {
+                    "   "
+                };
                 let chain = combo
                     .entries
                     .iter()
@@ -2262,12 +2275,12 @@ pub mod overlay {
                 let items: Vec<ListItem> = filtered
                     .iter()
                     .map(|provider| {
-                        let marker = if p.current_provider.as_deref() == Some(provider.name.as_str())
-                        {
-                            " ● "
-                        } else {
-                            "   "
-                        };
+                        let marker =
+                            if p.current_provider.as_deref() == Some(provider.name.as_str()) {
+                                " ● "
+                            } else {
+                                "   "
+                            };
                         ListItem::new(Line::from(vec![
                             Span::styled(
                                 format!("{marker}{}", provider.name),
@@ -2353,16 +2366,14 @@ pub mod overlay {
                         "No model matches the filter."
                     };
                     f.render_widget(
-                        Paragraph::new(msg)
-                            .style(theme.dimmed())
-                            .block(
-                                Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_type(BorderType::Rounded)
-                                    .title(title)
-                                    .border_style(theme.border_style())
-                                    .style(Style::default().bg(theme.bg)),
-                            ),
+                        Paragraph::new(msg).style(theme.dimmed()).block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_type(BorderType::Rounded)
+                                .title(title)
+                                .border_style(theme.border_style())
+                                .style(Style::default().bg(theme.bg)),
+                        ),
                         list_area,
                     );
                     return;
@@ -2394,11 +2405,11 @@ pub mod overlay {
         }
     }
 
-    /// Render the AskUser overlay: selectable suggestions + Custom input.
+    /// Render the AskUser overlay: freeform answers with suggested examples.
     /// Answered questions collapse to an elided Q+A summary line.
     fn render_ask_user(f: &mut Frame, p: &crate::tui::app::AskUserPending, theme: &Theme) {
-        use ratatui::widgets::{Block, Borders, Paragraph};
         use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Paragraph};
 
         fn elide(text: &str, max: usize) -> String {
             let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2429,36 +2440,7 @@ pub mod overlay {
             let is_focused = i == p.focused_question;
             let q_text = question["question"].as_str().unwrap_or("?");
             if p.answered[i] {
-                let summary = if p.is_multi(i) {
-                    let picked: Vec<String> = p.multi_selected[i]
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, on)| {
-                            on.then(|| {
-                                question["options"][idx]["label"]
-                                    .as_str()
-                                    .unwrap_or("?")
-                                    .to_string()
-                            })
-                        })
-                        .collect();
-                    if picked.is_empty() {
-                        elide(&p.custom_inputs[i], 60)
-                    } else {
-                        elide(&picked.join(", "), 60)
-                    }
-                } else {
-                    let sel = p.selected_options[i];
-                    let base = p.multi_selected[i].len();
-                    if sel < base {
-                        question["options"][sel]["label"]
-                            .as_str()
-                            .unwrap_or("?")
-                            .to_string()
-                    } else {
-                        elide(&p.custom_inputs[i], 60)
-                    }
-                };
+                let summary = elide(&p.custom_inputs[i], 60);
                 lines.push(Line::from(Span::styled(
                     format!("Q{}: {} → {}", i + 1, elide(q_text, 60), summary),
                     Style::default().fg(theme.dim),
@@ -2474,38 +2456,17 @@ pub mod overlay {
                     Style::default().fg(theme.fg)
                 },
             )));
-            if let Some(options) = question["options"].as_array() {
-                for (idx, opt) in options.iter().enumerate() {
-                    let selected = is_focused && p.selected_options[i] == idx && !p.custom_editing;
-                    let checked = if p.is_multi(i) {
-                        if p.multi_selected[i][idx] { "[x]" } else { "[ ]" }
-                    } else if selected {
-                        "(•)"
-                    } else {
-                        "( )"
-                    };
-                    let label = opt["label"].as_str().unwrap_or("?");
-                    let desc = opt["description"].as_str().unwrap_or("");
-                    let text = if desc.is_empty() {
-                        format!("  {checked} {label}")
-                    } else {
-                        format!("  {checked} {label} — {}", elide(desc, 60))
-                    };
+            if let Some(suggestions) = question["suggestions"].as_array() {
+                for (index, suggestion) in suggestions.iter().enumerate() {
+                    let suggestion = suggestion.as_str().unwrap_or("?");
                     lines.push(Line::from(Span::styled(
-                        text,
-                        if selected {
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            theme.text()
-                        },
+                        format!("  {}. {}", index + 1, suggestion),
+                        theme.text_secondary,
                     )));
                 }
+                lines.push(Line::default());
             }
-            // Extra "Custom" row with inline input box.
-            let option_count = p.option_count(i);
-            let custom_selected = is_focused && p.selected_options[i] + 1 == option_count;
+            // Freeform answer row with inline input box.
             let custom_text = &p.custom_inputs[i];
             let shown = if is_focused && p.custom_editing {
                 let mut s = custom_text.clone();
@@ -2520,8 +2481,8 @@ pub mod overlay {
                 custom_text.clone()
             };
             lines.push(Line::from(Span::styled(
-                format!("  [custom] {shown}"),
-                if custom_selected {
+                format!("  [answer] {shown}"),
+                if is_focused {
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD)
@@ -2536,7 +2497,12 @@ pub mod overlay {
         let visible = lines.into_iter().skip(start).collect::<Vec<_>>();
         f.render_widget(
             Paragraph::new(visible).block(Block::default()),
-            Rect { x: inner.x, y: inner.y, width: inner.width, height: inner.height },
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: inner.height,
+            },
         );
     }
 
@@ -3029,7 +2995,10 @@ pub mod status {
             };
             (feedback, style)
         } else if let Some(preview) = state.selection_preview(SELECTION_PREVIEW_BYTES) {
-            (format!("selected: {preview}"), Style::default().fg(theme.info))
+            (
+                format!("selected: {preview}"),
+                Style::default().fg(theme.info),
+            )
         } else if state.is_streaming {
             let elapsed = state.elapsed_ms();
             let secs = elapsed as f64 / 1000.0;
@@ -3119,14 +3088,10 @@ pub mod tool_call {
             // Freebuff TerminalCommandDisplay: the header is `$ <command>`
             // with the `$` in success green and the command bold. The full
             // command is shown — never elided — wrapped onto gutter rows.
-            let command_style = Style::default()
-                .fg(theme.fg)
-                .add_modifier(Modifier::BOLD);
-            let wrap_width = width.saturating_sub(
-                indent.chars().count() + BORDER_TL.chars().count() + 4,
-            );
-            let command_lines =
-                super::messages::wrap_text(&tool.input_summary, wrap_width.max(1));
+            let command_style = Style::default().fg(theme.fg).add_modifier(Modifier::BOLD);
+            let wrap_width =
+                width.saturating_sub(indent.chars().count() + BORDER_TL.chars().count() + 4);
+            let command_lines = super::messages::wrap_text(&tool.input_summary, wrap_width.max(1));
             for (i, cl) in command_lines.iter().enumerate() {
                 let prefix = if i == 0 {
                     format!("{indent}{BORDER_TL} ")
@@ -3163,7 +3128,13 @@ pub mod tool_call {
         // `spawn_agents` call the children carry the detail, so its own
         // (combined) output preview is skipped as redundant.
         for child in &tool.children {
-            lines.extend(render_tool_call_at(child, theme, frame_count, depth + 1, width));
+            lines.extend(render_tool_call_at(
+                child,
+                theme,
+                frame_count,
+                depth + 1,
+                width,
+            ));
         }
 
         let has_nested_children = !tool.children.is_empty();
@@ -3211,7 +3182,10 @@ pub mod tool_call {
         }
 
         // Close the frame.
-        lines.push(Line::from(Span::styled(format!("{indent}{BORDER_BL}"), frame)));
+        lines.push(Line::from(Span::styled(
+            format!("{indent}{BORDER_BL}"),
+            frame,
+        )));
 
         lines
     }
@@ -3264,15 +3238,26 @@ pub mod tool_call {
             // Parent badge at depth 0, child at depth 1, grandchild at depth 2,
             // each wrapped in a rounded frame (╭─ … ╰─).
             assert!(rendered.iter().any(|l| l.contains("spawn_agents")));
-            assert!(rendered.iter().any(|l| l.starts_with("  ╭─ ✓ [researcher-web]")));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|l| l.starts_with("  ╭─ ✓ [researcher-web]"))
+            );
             assert!(rendered.iter().any(|l| l.starts_with("    ╭─ ✓ WebSearch")));
             // Every frame is closed by its ╰─ footer.
-            assert_eq!(rendered.iter().filter(|l| l.starts_with("    ╰─")).count(), 1);
+            assert_eq!(
+                rendered.iter().filter(|l| l.starts_with("    ╰─")).count(),
+                1
+            );
             assert_eq!(rendered.iter().filter(|l| l.starts_with("  ╰─")).count(), 1);
             // The sub-agent's final text preview renders under its header.
             assert!(rendered.iter().any(|l| l.contains("the answer")));
             // A done nested header shows its duration.
-            assert!(rendered.iter().any(|l| l.contains("[researcher-web]") && l.contains("ms")));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|l| l.contains("[researcher-web]") && l.contains("ms"))
+            );
         }
 
         #[test]

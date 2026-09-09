@@ -138,7 +138,10 @@ mod tests {
         s.scroll_up(5);
         assert!(!s.sticky_bottom);
         s.scroll_down(5);
-        assert!(s.sticky_bottom, "reaching the bottom should re-enable sticky");
+        assert!(
+            s.sticky_bottom,
+            "reaching the bottom should re-enable sticky"
+        );
         assert_eq!(s.effective_offset(), 90);
     }
 
