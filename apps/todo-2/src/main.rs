@@ -1,6 +1,6 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, WindowOptions, div, px, rgb,
+    Subscription, Window, WindowOptions, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::*;
@@ -13,7 +13,8 @@ use projects::Project;
 use store::Store;
 use ui_parts::navbar::{NavBar, NavBarEvent};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
-use ui_parts::task_list::TaskListView;
+use ui_parts::task_details::TaskDetails;
+use ui_parts::task_list::{TaskListEvent, TaskListView};
 
 mod components;
 mod projects;
@@ -21,6 +22,7 @@ mod store;
 mod ui_parts {
     pub mod navbar;
     pub mod project_picker;
+    pub mod task_details;
     pub mod task_list;
     pub mod task_row;
 }
@@ -28,6 +30,7 @@ mod ui_parts {
 struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
+    details: Entity<TaskDetails>,
     store: Store,
     /// Repos found by the home-directory scan, shown in the project picker
     /// modal opened by the + button.
@@ -111,10 +114,19 @@ impl Layout {
             },
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
+        let details = cx.new(TaskDetails::new);
+        let details_for_list = details.clone();
+        cx.subscribe(&task_list, move |_this, _list, event, cx| {
+            let TaskListEvent::Selected(task) = event;
+            let task = task.clone();
+            details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
+        })
+        .detach();
 
         Self {
             task_list,
             nav_bar,
+            details,
             store: store.clone(),
             _projects: Vec::new(),
             _project_subscription: project_subscription,
@@ -167,7 +179,9 @@ impl Render for Layout {
                             .flex()
                             .flex_row()
                             .child(div().flex_1().child(self.task_list.clone()))
-                            .child(div().flex_1().child("Details")),
+                            .when(self.details.read(cx).has_selection(), |this| {
+                                this.child(div().flex_1().child(self.details.clone()))
+                            }),
                     ),
             )
             .children(dialog_layer)

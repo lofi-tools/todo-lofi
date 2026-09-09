@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, rgb,
+    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::input::*;
@@ -8,8 +8,13 @@ use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent};
-use super::task_row::TaskRow;
+use super::task_row::{TaskRow, TaskRowEvent};
 use crate::store::Store;
+
+#[derive(Clone)]
+pub enum TaskListEvent {
+    Selected(TaskWithMeta),
+}
 
 pub struct TaskListView {
     task_views: Vec<Entity<TaskRow>>,
@@ -143,7 +148,7 @@ impl TaskListView {
         self.task_views = tasks
             .into_iter()
             .map(|task| {
-                cx.new(|cx| {
+                let row = cx.new(|cx| {
                     TaskRow::new(
                         task,
                         self.store.clone(),
@@ -151,7 +156,13 @@ impl TaskListView {
                         selected_labels.to_vec(),
                         cx,
                     )
+                });
+                cx.subscribe(&row, |_this, _row, event, cx| {
+                    let TaskRowEvent::Selected(task) = event;
+                    cx.emit(TaskListEvent::Selected(task.clone()));
                 })
+                .detach();
+                row
             })
             .collect();
     }
@@ -160,6 +171,8 @@ impl TaskListView {
         self.set_tasks_with_path(tasks, &self.selected_path.clone(), &self.selected_labels.clone(), cx);
     }
 }
+
+impl EventEmitter<TaskListEvent> for TaskListView {}
 
 impl Render for TaskListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1,6 +1,6 @@
 use gpui::{
-    Context, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window, div,
-    prelude::FluentBuilder, px, rgb,
+    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -8,6 +8,11 @@ use storage::TaskWithMeta;
 
 use crate::components::Checkbox;
 use crate::store::Store;
+
+#[derive(Clone)]
+pub enum TaskRowEvent {
+    Selected(TaskWithMeta),
+}
 
 pub struct TaskRow {
     task: TaskWithMeta,
@@ -33,9 +38,10 @@ impl TaskRow {
     }
 }
 
+impl EventEmitter<TaskRowEvent> for TaskRow {}
+
 impl Render for TaskRow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let task_id = self.task.id;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {        let task_id = self.task.id;
         let done = self.task.done;
         let store = self.store.clone();
         let entity = cx.entity().clone();
@@ -57,6 +63,9 @@ impl Render for TaskRow {
             .px_3()
             .rounded_md()
             .hover(|s| s.bg(rgb(0x2a2a2a)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.emit(TaskRowEvent::Selected(this.task.clone()));
+            }))
             .child(
                 Checkbox::new(("checkbox", task_id))
                     .with_size(px(22.))
