@@ -1,7 +1,7 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, Styled, Subscription, Window, WindowOptions, div,
-    prelude::FluentBuilder, px, rgb,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
+    WindowOptions, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::*;
@@ -117,16 +117,16 @@ impl Layout {
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(TaskDetails::new);
         let details_for_list = details.clone();
+        let list_for_deselect = task_list.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
-                eprintln!("DBG layout: selected {}", task.id);
                 let task = task.clone();
                 details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
                 cx.notify();
             }
             TaskListEvent::Deselected => {
-                eprintln!("DBG layout: deselected");
                 details_for_list.update(cx, |details, cx| details.clear(cx));
+                list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
                 cx.notify();
             }
         })
@@ -178,9 +178,9 @@ impl Render for Layout {
             .size_full()
             .on_key_down(cx.listener(
                 |this, event: &KeyDownEvent, _, cx| {
-                    eprintln!("DBG key down: {}", event.keystroke.key);
                     if event.keystroke.key == "escape" {
                         this.details.update(cx, |details, cx| details.clear(cx));
+                        this.task_list.update(cx, |list, cx| list.clear_selection(cx));
                         cx.notify();
                     }
                 },
@@ -193,9 +193,16 @@ impl Render for Layout {
                     .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(
                         div()
+                            .id("right-column")
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.details.update(cx, |details, cx| details.clear(cx));
+                                this.task_list
+                                    .update(cx, |list, cx| list.clear_selection(cx));
+                                cx.notify();
+                            }))
                             .child(div().flex_1().child(self.task_list.clone()))
                             .when(self.details.read(cx).has_selection(), |this| {
                                 this.child(div().flex_1().child(self.details.clone()))

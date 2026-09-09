@@ -23,6 +23,7 @@ pub struct TaskListView {
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
+    selected_task_id: Option<u64>,
     input_needs_clear: bool,
     _fetch_tasks: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
@@ -117,10 +118,18 @@ impl TaskListView {
             store,
             selected_path: Vec::new(),
             selected_labels: Vec::new(),
+            selected_task_id: None,
             input_needs_clear: false,
             _fetch_tasks: None,
             _input_subscription: input_subscription,
             _nav_subscription: nav_subscription,
+        }
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected_task_id = None;
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| row.set_selected(false, cx));
         }
     }
 
@@ -161,20 +170,30 @@ impl TaskListView {
         selected_labels: &[String],
         cx: &mut Context<Self>,
     ) {
+        let selected_task_id = self.selected_task_id;
         self.task_views = tasks
             .into_iter()
             .map(|task| {
+                let is_selected = Some(task.id) == selected_task_id;
                 let row = cx.new(|cx| {
                     TaskRow::new(
                         task,
                         self.store.clone(),
                         selected_path.to_vec(),
                         selected_labels.to_vec(),
+                        is_selected,
                         cx,
                     )
                 });
-                cx.subscribe(&row, |_this, _row, event, cx| {
+                cx.subscribe(&row, |this, _row, event, cx| {
                     let TaskRowEvent::Selected(task) = event;
+                    this.selected_task_id = Some(task.id);
+                    let selected_id = task.id;
+                    for other in this.task_views.clone() {
+                        other.update(cx, |row, cx| {
+                            row.set_selected(row.task_id() == selected_id, cx)
+                        });
+                    }
                     cx.emit(TaskListEvent::Selected(task.clone()));
                 })
                 .detach();
@@ -211,7 +230,6 @@ impl Render for TaskListView {
             .p_8()
             .gap_4()
             .on_click(cx.listener(|_this, _, _, cx| {
-                eprintln!("DBG list background clicked");
                 cx.emit(TaskListEvent::Deselected);
             }))
             .child(

@@ -19,6 +19,7 @@ pub struct TaskRow {
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
+    selected: bool,
 }
 
 impl TaskRow {
@@ -27,6 +28,7 @@ impl TaskRow {
         store: Store,
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
+        selected: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -34,7 +36,19 @@ impl TaskRow {
             store,
             selected_path,
             selected_labels,
+            selected,
         }
+    }
+
+    pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
+        if self.selected != selected {
+            self.selected = selected;
+            cx.notify();
+        }
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task.id
     }
 }
 
@@ -62,9 +76,19 @@ impl Render for TaskRow {
             .gap_3()
             .px_3()
             .rounded_md()
-            .hover(|s| s.bg(rgb(0x2a2a2a)))
+            .bg(if self.selected {
+                rgb(0x3a3a3a)
+            } else {
+                rgb(0x1a1a1a)
+            })
+            .hover(|s| {
+                s.bg(if self.selected {
+                    rgb(0x444444)
+                } else {
+                    rgb(0x2a2a2a)
+                })
+            })
             .on_click(cx.listener(|this, _, _, cx| {
-                eprintln!("DBG row clicked: {}", this.task.id);
                 cx.stop_propagation();
                 cx.emit(TaskRowEvent::Selected(this.task.clone()));
             }))

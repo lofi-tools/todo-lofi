@@ -1,4 +1,7 @@
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb};
+use gpui::{
+    Context, InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement,
+    Styled, Window, div, px, rgb,
+};
 use gpui_component::StyledExt;
 use storage::TaskWithMeta;
 
@@ -63,7 +66,7 @@ fn format_deadline(deadline: u64) -> String {
 }
 
 impl Render for TaskDetails {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
             None => div()
                 .flex_1()
@@ -116,12 +119,16 @@ impl Render for TaskDetails {
         };
 
         div()
+            .id("task-details")
             .h_full()
             .v_flex()
             .p_4()
             .gap_4()
             .border_l_1()
             .border_color(rgb(0x333333))
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
             .child(
                 div()
                     .text_sm()
