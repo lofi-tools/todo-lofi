@@ -1412,6 +1412,14 @@ impl AcpServer {
                 } else {
                     None
                 },
+                followup_ask_user: if *self.client_elicitation.lock() {
+                    Some(crate::providers::AskUserBridge::new(
+                        self.ask_user_tx.clone(),
+                        self.ask_user_answer_rx.clone(),
+                    ))
+                } else {
+                    None
+                },
             },
         )
     }
@@ -2033,15 +2041,41 @@ fn suggestions_hint(suggestions: &[Value]) -> String {
 }
 
 /// Build the `elicitation/create` (form mode) params for an `ask_user`
-/// request. Every question becomes a freeform string property. Suggested
-/// answers are included in the property description as a numbered list so
-/// ACP clients show them on separate lines without constraining the response.
+/// request. Every question becomes a property: multi-select questions (the
+/// action-oriented follow-ups) become an ACP array-of-`anyOf` multi-select
+/// so clients render clickable checkboxes; everything else is a freeform
+/// string with suggested answers rendered as a numbered hint in the
+/// description so clients show them on separate lines without constraining
+/// the response.
 fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &str) -> Value {
     let mut properties = serde_json::Map::new();
     for (i, q) in request.questions.iter().enumerate() {
         let mut prop = serde_json::Map::new();
         let question = q.get("question").and_then(Value::as_str).unwrap_or("?");
         prop.insert("title".into(), json!(question));
+        let header = q
+            .get("header")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty());
+        let suggestions = q.get("suggestions").and_then(Value::as_array);
+        let multi_select = q
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if multi_select {
+            // ACP multi-select: array of items drawn from titled `anyOf`
+            // choices. The choice const is the zero-based suggestion index so
+            // the answer maps straight back to the suggested follow-ups.
+            prop.insert("type".into(), json!("array"));
+            prop.insert(
+                "items".into(),
+                json!({ "anyOf": multi_select_choices(suggestions) }),
+            );
+            let description = header.unwrap_or("Select all that apply.");
+            prop.insert("description".into(), json!(description));
+            properties.insert(format!("q{i}"), Value::Object(prop));
+            continue;
+        }
         prop.insert("type".into(), json!("string"));
         if let Some(validation) = q.get("validation").and_then(Value::as_object) {
             for key in ["maxLength", "minLength"] {
@@ -2053,11 +2087,6 @@ fn elicitation_params(request: &crate::providers::AskUserRequest, session_id: &s
                 prop.insert("pattern".into(), json!(pattern));
             }
         }
-        let header = q
-            .get("header")
-            .and_then(Value::as_str)
-            .filter(|h| !h.is_empty());
-        let suggestions = q.get("suggestions").and_then(Value::as_array);
         let hint = suggestions
             .filter(|items| !items.is_empty())
             .map(|items| suggestions_hint(items));
@@ -2126,13 +2155,47 @@ fn answer_from_elicitation(
     }
 }
 
-/// Map one elicited content value to the freeform answer expected by the
-/// `ask_user` tool. Suggested answers are hints only and are never used to
-/// reinterpret or constrain the text returned by the client.
+/// Build the `anyOf` choices of an ACP multi-select property: one titled
+/// entry per suggestion, with the zero-based suggestion index as the const.
+fn multi_select_choices(suggestions: Option<&Vec<Value>>) -> Vec<Value> {
+    suggestions
+        .map(|items| items.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .map(|(index, suggestion)| {
+            json!({
+                "const": index,
+                "title": suggestion.as_str().unwrap_or("?"),
+            })
+        })
+        .collect()
+}
+
+/// Map one elicited content value to the answer expected by the waiting
+/// tool. Multi-select questions come back as arrays of selected indices;
+/// regular questions stay freeform: suggested answers are hints only and
+/// are never used to reinterpret or constrain the text returned by the
+/// client.
 fn answer_value_for_question(
-    _question: &Value,
+    question: &Value,
     value: Option<&Value>,
 ) -> Option<crate::providers::AskUserAnswerValue> {
+    let multi_select = question
+        .get("multiSelect")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if multi_select {
+        let indices = value?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_u64)
+            .map(|index| index as usize)
+            .collect::<Vec<_>>();
+        return Some(crate::providers::AskUserAnswerValue::SelectedIndices(
+            indices,
+        ));
+    }
     value
         .and_then(Value::as_str)
         .map(|answer| crate::providers::AskUserAnswerValue::OtherText(answer.to_string()))
@@ -2631,6 +2694,30 @@ mod tests {
     }
 
     #[test]
+    fn elicitation_params_multi_select_builds_anyof_schema() {
+        let request = crate::providers::AskUserRequest {
+            request_id: 3,
+            session_id: Some("s1".into()),
+            questions: vec![json!({
+                "question": "Which follow-ups?",
+                "header": "Follow-ups",
+                "suggestions": ["Add tests", "Write docs"],
+                "multiSelect": true,
+            })],
+        };
+        let params = elicitation_params(&request, "s1");
+        let q0 = &params["requestedSchema"]["properties"]["q0"];
+        assert_eq!(q0["type"], "array");
+        assert_eq!(q0["description"], "Follow-ups");
+        let choices = &q0["items"]["anyOf"];
+        assert_eq!(choices.as_array().map(Vec::len), Some(2));
+        assert_eq!(choices[0]["const"], 0);
+        assert_eq!(choices[0]["title"], "Add tests");
+        assert_eq!(choices[1]["const"], 1);
+        assert_eq!(choices[1]["title"], "Write docs");
+    }
+
+    #[test]
     fn answer_from_elicitation_maps_accept_content() {
         let request = crate::providers::AskUserRequest {
             request_id: 7,
@@ -2645,12 +2732,23 @@ mod tests {
                     "suggestions": ["A", "B"],
                 }),
                 json!({ "question": "Pick many", "suggestions": ["A", "B", "C"] }),
+                json!({
+                    "question": "Pick follow-ups",
+                    "suggestions": ["A", "B"],
+                    "multiSelect": true,
+                }),
                 json!({ "question": "Name" }),
             ],
         };
         let result = json!({
             "action": "accept",
-            "content": { "q0": "Cookies", "q1": "Free text", "q2": "A, C", "q3": "Ada" },
+            "content": {
+                "q0": "Cookies",
+                "q1": "Free text",
+                "q2": "A, C",
+                "q3": [1],
+                "q4": "Ada",
+            },
         });
         let answer = answer_from_elicitation(&request, &result);
         assert_eq!(answer.request_id, 7);
@@ -2661,6 +2759,7 @@ mod tests {
                 Some(V::OtherText("Cookies".into())),
                 Some(V::OtherText("Free text".into())),
                 Some(V::OtherText("A, C".into())),
+                Some(V::SelectedIndices(vec![1])),
                 Some(V::OtherText("Ada".into())),
             ]
         );
@@ -2693,6 +2792,72 @@ mod tests {
             let answer = answer_from_elicitation(&request, &json!({ "action": action }));
             assert_eq!(answer.answers, vec![None, None], "action {action}");
         }
+    }
+
+    #[tokio::test]
+    async fn suggest_followups_round_trips_through_elicitation() {
+        let (connection, writer) = AcpConnection::new();
+        let (ask_user_tx, ask_user_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
+        let (ask_user_answer_tx, ask_user_answer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
+        let ask_user_answer_rx = Arc::new(tokio::sync::Mutex::new(ask_user_answer_rx));
+        let server = Arc::new(AcpServer {
+            connection,
+            sessions: Mutex::new(HashMap::new()),
+            config: config_with_combo(),
+            default_provider: "test".into(),
+            default_model: "test/test-model".into(),
+            max_turns: 10,
+            client_fs: Mutex::new(FileSystemCapabilities::default()),
+            client_elicitation: Mutex::new(true),
+            ask_user_tx: ask_user_tx.clone(),
+            ask_user_answer_tx: ask_user_answer_tx.clone(),
+            ask_user_answer_rx: ask_user_answer_rx.clone(),
+        });
+
+        // Simulated client: once the elicitation/create request (the first
+        // minted id) is registered, accept as if the user ticked follow-up 2.
+        let client = Arc::clone(&server);
+        let _sim = tokio::spawn(async move {
+            for _ in 0..400 {
+                if client.connection.pending.lock().contains_key(&1) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            client.connection.deliver_response(
+                &json!(1),
+                Some(json!({ "action": "accept", "content": { "q0": [1] } })),
+                None,
+            );
+        });
+
+        let drainer = Arc::clone(&server);
+        tokio::spawn(async move { drainer.drain_ask_user(ask_user_rx).await });
+
+        let sink: crate::subagents::FollowupSink = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let bridge = crate::providers::AskUserBridge::new(ask_user_tx, ask_user_answer_rx);
+        let tool = crate::subagents::SuggestFollowupsTool::new(sink, Some(bridge));
+        let ctx = test_tool_context();
+        let result = tool
+            .execute(
+                json!({
+                    "followups": [
+                        {"prompt": "Add caching", "label": "Add caching"},
+                        {"prompt": "Add tests", "label": "Add tests"}
+                    ]
+                }),
+                &ctx,
+            )
+            .await;
+        writer.abort();
+        assert!(!result.is_error, "tool failed: {}", result.content);
+        assert!(
+            result.content.contains("Add tests"),
+            "got: {}",
+            result.content
+        );
     }
 
     #[tokio::test]

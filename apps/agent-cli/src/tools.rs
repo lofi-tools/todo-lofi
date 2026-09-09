@@ -91,8 +91,12 @@ impl Tool for AskUserTool {
                             "header": { "type": "string", "description": "Short label, <= 12 chars (optional)." },
                             "suggestions": {
                                 "type": "array",
-                                "description": "Optional suggested answers. The user can always enter a different freeform answer.",
+                                "description": "Optional suggested answers. The user can always enter a different freeform answer, unless multiSelect is true.",
                                 "items": { "type": "string" }
+                            },
+                            "multiSelect": {
+                                "type": "boolean",
+                                "description": "When true, treat suggestions as a multi-select action prompt and return the selected suggestion indices."
                             },
                             "validation": {
                                 "type": "object",
@@ -119,6 +123,8 @@ impl Tool for AskUserTool {
             question: String,
             header: Option<String>,
             suggestions: Option<Vec<String>>,
+            #[serde(rename = "multiSelect")]
+            multi_select: Option<bool>,
             validation: Option<Validation>,
         }
         #[derive(serde::Deserialize, serde::Serialize, Clone)]
@@ -247,6 +253,16 @@ fn format_ask_user_answer(
         match a {
             Some(crate::providers::AskUserAnswerValue::OtherText(text)) => {
                 out.push_str(&format!("**A:** {}\n", text));
+            }
+            Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices)) => {
+                out.push_str(&format!(
+                    "**A:** selected {}\n",
+                    indices
+                        .iter()
+                        .map(|index| (index + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
             None => {
                 out.push_str("**A:** Skipped\n");

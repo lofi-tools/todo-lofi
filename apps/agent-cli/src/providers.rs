@@ -116,6 +116,7 @@ pub fn agent_tools(
     readonly: bool,
     reasoning: cersei::provider::ReasoningField,
     ask_user_tool: Option<Box<dyn cersei::tools::Tool>>,
+    followup_ask_user: Option<AskUserBridge>,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
@@ -159,6 +160,7 @@ pub fn agent_tools(
     tools.push(Box::new(cersei::tools::todo_write::TodoWriteTool));
     tools.push(Box::new(crate::subagents::SuggestFollowupsTool::new(
         followups,
+        followup_ask_user,
     )));
     // Read-only sessions (ACP readonly mode) can't spawn sub-agents: the
     // sub-agents run with AllowAll and could modify files.
@@ -298,6 +300,9 @@ pub struct BuildParams {
     /// channel to pause for user answers. When `None`, a default non-interactive
     /// tool is used.
     pub ask_user_tool: Option<Box<dyn cersei::tools::Tool>>,
+    /// Optional ACP bridge that makes `suggest_followups` wait for a clickable
+    /// multi-select response instead of only storing suggestions locally.
+    pub followup_ask_user: Option<AskUserBridge>,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -1023,6 +1028,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         params.readonly,
         params.reasoning,
         params.ask_user_tool,
+        params.followup_ask_user,
     );
     let mut builder = Agent::builder()
         .provider(provider)
@@ -1084,10 +1090,42 @@ pub struct AskUserAnswer {
     pub answers: Vec<Option<AskUserAnswerValue>>,
 }
 
-/// A freeform answer to an ask_user question.
+/// An answer to an ask_user question. Regular questions use freeform text;
+/// action-oriented multi-select prompts (such as ACP follow-ups) use indices.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AskUserAnswerValue {
     OtherText(String),
+    SelectedIndices(Vec<usize>),
+}
+
+/// ACP bridge used by `suggest_followups` to present model suggestions through
+/// the same ask-user elicitation channel as regular questions.
+#[derive(Clone)]
+pub struct AskUserBridge {
+    pub ask_user_tx: tokio::sync::mpsc::UnboundedSender<AskUserRequest>,
+    pub answer_rx:
+        std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<AskUserAnswer>>>,
+    request_counter: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AskUserBridge {
+    pub fn new(
+        ask_user_tx: tokio::sync::mpsc::UnboundedSender<AskUserRequest>,
+        answer_rx: std::sync::Arc<
+            tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<AskUserAnswer>>,
+        >,
+    ) -> Self {
+        Self {
+            ask_user_tx,
+            answer_rx,
+            request_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    pub fn next_request_id(&self) -> u64 {
+        self.request_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 pub struct AgentRuntime {
@@ -1156,6 +1194,7 @@ impl AgentRuntime {
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(config, &resolved.model),
                 ask_user_tool,
+                followup_ask_user: None,
             },
         )?;
         let fallback = fallback_for(config, &provider, &model);
@@ -1369,6 +1408,7 @@ impl AgentRuntime {
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
                 ask_user_tool: None,
+                followup_ask_user: None,
             },
         )?;
         let mut g = self.inner.lock();
@@ -1408,6 +1448,7 @@ impl AgentRuntime {
                 fs_reader: None,
                 reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
                 ask_user_tool: None,
+                followup_ask_user: None,
             },
         )?;
         let fallback = fallback_for(&config, provider, model);
@@ -2595,6 +2636,7 @@ mod tests {
             false,
             cersei::provider::ReasoningField::Auto,
             None,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"Read"), "built-in Read should be present");
@@ -2678,6 +2720,7 @@ mod tests {
             fs,
             false,
             cersei::provider::ReasoningField::Auto,
+            None,
             None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();

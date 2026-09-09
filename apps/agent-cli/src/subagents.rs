@@ -301,11 +301,18 @@ pub fn spawner_system_prompt() -> String {
 
 pub struct SuggestFollowupsTool {
     sink: FollowupSink,
+    followup_ask_user: Option<crate::providers::AskUserBridge>,
 }
 
 impl SuggestFollowupsTool {
-    pub fn new(sink: FollowupSink) -> Self {
-        Self { sink }
+    pub fn new(
+        sink: FollowupSink,
+        followup_ask_user: Option<crate::providers::AskUserBridge>,
+    ) -> Self {
+        Self {
+            sink,
+            followup_ask_user,
+        }
     }
 }
 
@@ -347,7 +354,7 @@ impl Tool for SuggestFollowupsTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(serde::Deserialize)]
         struct Input {
             followups: Vec<FollowupInput>,
@@ -370,8 +377,68 @@ impl Tool for SuggestFollowupsTool {
             })
             .collect();
         let count = followups.len();
-        *self.sink.lock() = followups;
-        ToolResult::success(format!("Recorded {count} followup suggestion(s)."))
+        *self.sink.lock() = followups.clone();
+
+        let Some(bridge) = &self.followup_ask_user else {
+            return ToolResult::success(format!("Recorded {count} followup suggestion(s)."));
+        };
+        if followups.is_empty() {
+            return ToolResult::success("No followup suggestions to ask about.".to_string());
+        }
+
+        let request_id = bridge.next_request_id();
+        let request = crate::providers::AskUserRequest {
+            request_id,
+            session_id: Some(ctx.session_id.clone()),
+            questions: vec![serde_json::json!({
+                "question": "Which follow-ups would you like to continue with?",
+                "header": "Follow-ups",
+                "suggestions": followups.iter().map(|followup| followup.label.clone()).collect::<Vec<_>>(),
+                "multiSelect": true,
+            })],
+        };
+        if bridge.ask_user_tx.send(request).is_err() {
+            return ToolResult::error("follow-up answer channel closed".to_string());
+        }
+
+        let mut answers = bridge.answer_rx.lock().await;
+        loop {
+            match answers.recv().await {
+                Some(answer) if answer.request_id == request_id => {
+                    let selected = match answer.answers.into_iter().next().flatten() {
+                        Some(crate::providers::AskUserAnswerValue::SelectedIndices(indices)) => {
+                            indices
+                        }
+                        Some(crate::providers::AskUserAnswerValue::OtherText(text)) => {
+                            return ToolResult::success(format!(
+                                "The user selected this follow-up text: {text}"
+                            ));
+                        }
+                        None => Vec::new(),
+                    };
+                    let selected_prompts = selected
+                        .iter()
+                        .filter_map(|index| followups.get(*index))
+                        .map(|followup| followup.prompt.as_str())
+                        .collect::<Vec<_>>();
+                    return ToolResult::success(if selected_prompts.is_empty() {
+                        "The user skipped the follow-ups.".to_string()
+                    } else {
+                        format!(
+                            "The user selected these follow-ups:\n{}",
+                            selected_prompts
+                                .iter()
+                                .enumerate()
+                                .map(|(index, prompt)| format!("{}. {prompt}", index + 1))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    });
+                }
+                Some(_) => continue,
+                None => return ToolResult::error("follow-up answer channel closed".to_string()),
+            }
+        }
     }
 }
 
@@ -915,7 +982,7 @@ mod tests {
     #[tokio::test]
     async fn suggest_followups_stores_sink() {
         let sink: FollowupSink = Arc::new(Mutex::new(Vec::new()));
-        let tool = SuggestFollowupsTool::new(sink.clone());
+        let tool = SuggestFollowupsTool::new(sink.clone(), None);
         let ctx = test_context(std::env::temp_dir());
         let result = tool
             .execute(
@@ -933,6 +1000,43 @@ mod tests {
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0].label, "Add caching");
         assert_eq!(stored[1].label, "Explain the refactor"); // label defaults to prompt
+    }
+
+    #[tokio::test]
+    async fn suggest_followups_without_bridge_reports_selected_prompt() {
+        // No bridge (headless / non-interactive): the tool still succeeds and
+        // records the suggestions without pausing.
+        let sink: FollowupSink = Arc::new(Mutex::new(Vec::new()));
+        let tool = SuggestFollowupsTool::new(sink, None);
+        let ctx = test_context(std::env::temp_dir());
+        let result = tool
+            .execute(json!({ "followups": [{"prompt": "Run tests"}] }), &ctx)
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("Recorded 1"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn suggest_followups_bridge_closed_errors() {
+        let sink: FollowupSink = Arc::new(Mutex::new(Vec::new()));
+        let (ask_user_tx, _keep_request_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
+        let (_keep_answer_tx, answer_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
+        // Nothing drains the request channel and no answer ever arrives, so
+        // this test needs the request send to fail: drop the only other
+        // request-receiver handle to close the channel instead.
+        drop(_keep_request_rx);
+        let bridge = crate::providers::AskUserBridge::new(
+            ask_user_tx,
+            Arc::new(tokio::sync::Mutex::new(answer_rx)),
+        );
+        let tool = SuggestFollowupsTool::new(sink, Some(bridge));
+        let ctx = test_context(std::env::temp_dir());
+        let result = tool
+            .execute(json!({ "followups": [{"prompt": "Run tests"}] }), &ctx)
+            .await;
+        assert!(result.is_error, "{}", result.content);
     }
 
     #[tokio::test]
