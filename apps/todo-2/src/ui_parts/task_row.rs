@@ -10,6 +10,7 @@ use storage::TaskWithMeta;
 
 use crate::components::Checkbox;
 use crate::store::Store;
+use crate::theme::{APP_BG, HAIRLINE};
 
 #[derive(Clone)]
 pub enum TaskRowEvent {
@@ -150,6 +151,7 @@ impl Render for TaskRow {
             .id(("task", task_id))
             .h_flex()
             .h(px(44.))
+            .when(self.editing, |this| this.h_auto().py_0p5())
             .items_center()
             .gap_3()
             .px_3()
@@ -157,7 +159,7 @@ impl Render for TaskRow {
             .bg(if self.selected {
                 rgb(0x3a3a3a)
             } else {
-                rgb(0x1a1a1a)
+                rgb(APP_BG)
             })
             .hover(|s| {
                 s.bg(if self.selected {
@@ -194,10 +196,17 @@ impl Render for TaskRow {
                 div()
                     .flex_1()
                     .v_flex()
+                    .gap_0p5()
             .child(if let Some(input) = self.edit_input.clone() {
-                div()
-                    .id(("task-title-edit", task_id))
-                    .child(Input::new(&input))
+                div().id(("task-title-edit", task_id)).pt_1().child(
+                    Input::new(&input)
+                        .small()
+                        .appearance(false)
+                        .bg(rgb(APP_BG))
+                        .border_1()
+                        .border_color(rgb(HAIRLINE))
+                        .rounded_md(),
+                )
             } else {
                 div()
                     .id(("task-title", task_id))

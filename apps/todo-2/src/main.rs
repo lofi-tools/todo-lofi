@@ -12,6 +12,7 @@ use tracing_subscriber::prelude::*;
 
 use projects::Project;
 use store::Store;
+use theme::APP_BG;
 use ui_parts::navbar::{NavBar, NavBarEvent};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
@@ -20,6 +21,7 @@ use ui_parts::task_list::{TaskListEvent, TaskListView};
 mod components;
 mod projects;
 mod store;
+mod theme;
 mod ui_parts {
     pub mod navbar;
     pub mod project_picker;
@@ -293,7 +295,7 @@ fn main() {
                             .detach();
 
                             cx.new(|cx| {
-                                gpui_component::Root::new(mini, window, cx).bg(rgb(0x1a1a1a))
+                                gpui_component::Root::new(mini, window, cx).bg(rgb(APP_BG))
                             })
                         })
                         .expect("Failed to open window");
