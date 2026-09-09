@@ -1,9 +1,11 @@
 use gpui::{
-    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
+    AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
+use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
 use crate::components::Checkbox;
@@ -12,6 +14,9 @@ use crate::store::Store;
 #[derive(Clone)]
 pub enum TaskRowEvent {
     Selected(TaskWithMeta),
+    EditStarted,
+    EditEnded,
+    TitleCommitted { task_id: u64, title: String },
 }
 
 pub struct TaskRow {
@@ -20,6 +25,9 @@ pub struct TaskRow {
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
     selected: bool,
+    editing: bool,
+    edit_input: Option<Entity<InputState>>,
+    _edit_subscription: Option<Subscription>,
 }
 
 impl TaskRow {
@@ -37,6 +45,9 @@ impl TaskRow {
             selected_path,
             selected_labels,
             selected,
+            editing: false,
+            edit_input: None,
+            _edit_subscription: None,
         }
     }
 
@@ -51,11 +62,71 @@ impl TaskRow {
         self.task.id
     }
 
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+
     pub fn set_done(&mut self, done: bool, cx: &mut Context<Self>) {
         if self.task.done != done {
             self.task.task.done = done;
             cx.notify();
         }
+    }
+
+    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing {
+            return;
+        }
+        let title = self.task.title.clone();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(&title, window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_edit(cx);
+            }
+        });
+        self.edit_input = Some(input.clone());
+        self._edit_subscription = Some(subscription);
+        self.editing = true;
+        cx.emit(TaskRowEvent::EditStarted);
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.edit_input.clone() else {
+            return;
+        };
+        let title = input.read(cx).text().to_string();
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            self.cancel_edit(cx);
+            return;
+        }
+        let task_id = self.task.id;
+        self.task.task.title = title.clone();
+        self.editing = false;
+        self.edit_input = None;
+        self._edit_subscription = None;
+        self.store.rename_task(task_id, title.clone(), cx).detach();
+        cx.emit(TaskRowEvent::TitleCommitted { task_id, title });
+        cx.notify();
+    }
+
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.editing {
+            return;
+        }
+        self.editing = false;
+        self.edit_input = None;
+        self._edit_subscription = None;
+        cx.emit(TaskRowEvent::EditEnded);
+        cx.notify();
     }
 }
 
@@ -123,13 +194,25 @@ impl Render for TaskRow {
                 div()
                     .flex_1()
                     .v_flex()
-                    .child(
-                        div()
-                            .text_base()
-                            .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
-                            .when(done, |this| this.line_through())
-                            .child(self.task.title.clone()),
-                    )
+            .child(if let Some(input) = self.edit_input.clone() {
+                div()
+                    .id(("task-title-edit", task_id))
+                    .child(Input::new(&input))
+            } else {
+                div()
+                    .id(("task-title", task_id))
+                    .text_base()
+                    .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                    .when(done, |this| this.line_through())
+                    .child(self.task.title.clone())
+                    .on_click(cx.listener(|this, event, window, cx| {
+                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                        {
+                            cx.stop_propagation();
+                            this.begin_edit(window, cx);
+                        }
+                    }))
+            })
                     .child(
                         div()
                             .h_flex()

@@ -36,6 +36,15 @@ impl TaskDetails {
         self.selected.is_some()
     }
 
+    pub fn update_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_some_and(|task| task.id == task_id) {
+            if let Some(selected) = &mut self.selected {
+                selected.task.title = title;
+            }
+            cx.notify();
+        }
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         cx.notify();

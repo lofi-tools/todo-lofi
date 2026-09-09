@@ -131,6 +131,11 @@ impl Layout {
                 list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
                 cx.notify();
             }
+            TaskListEvent::TitleCommitted { task_id, title } => {
+                details_for_list.update(cx, |details, cx| {
+                    details.update_title(*task_id, title.clone(), cx)
+                });
+            }
         })
         .detach();
         let list_for_toggle = task_list.clone();
@@ -148,6 +153,12 @@ impl Layout {
             move |layout: &mut Layout, event, _window, cx| {
                 if event.keystroke.key == "escape" {
                     if layout._picker_subscription.is_some() {
+                        return;
+                    }
+                    if layout.task_list.read(cx).is_editing() {
+                        layout
+                            .task_list
+                            .update(cx, |list, cx| list.cancel_editing(cx));
                         return;
                     }
                     layout.details.update(cx, |details, cx| details.clear(cx));

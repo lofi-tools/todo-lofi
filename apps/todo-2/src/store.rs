@@ -78,6 +78,20 @@ impl Store {
         })
     }
 
+    pub fn rename_task(
+        &self,
+        task_id: u64,
+        title: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.update_task_title(task_id, &title).await?;
+            Ok(())
+        })
+    }
+
     pub fn list_tasks_by_tag_name_with_labels(
         &self,
         tag_name: &str,

@@ -15,6 +15,7 @@ use crate::store::Store;
 pub enum TaskListEvent {
     Selected(TaskWithMeta),
     Deselected,
+    TitleCommitted { task_id: u64, title: String },
 }
 
 pub struct TaskListView {
@@ -24,6 +25,7 @@ pub struct TaskListView {
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
     selected_task_id: Option<u64>,
+    editing: bool,
     input_needs_clear: bool,
     _fetch_tasks: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
@@ -119,6 +121,7 @@ impl TaskListView {
             selected_path: Vec::new(),
             selected_labels: Vec::new(),
             selected_task_id: None,
+            editing: false,
             input_needs_clear: false,
             _fetch_tasks: None,
             _input_subscription: input_subscription,
@@ -131,6 +134,17 @@ impl TaskListView {
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| row.set_selected(false, cx));
         }
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+
+    pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| row.cancel_edit(cx));
+        }
+        self.editing = false;
     }
 
     pub fn set_task_done(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
@@ -180,6 +194,7 @@ impl TaskListView {
         selected_labels: &[String],
         cx: &mut Context<Self>,
     ) {
+        self.editing = false;
         let selected_task_id = self.selected_task_id;
         self.task_views = tasks
             .into_iter()
@@ -195,16 +210,37 @@ impl TaskListView {
                         cx,
                     )
                 });
-                cx.subscribe(&row, |this, _row, event, cx| {
-                    let TaskRowEvent::Selected(task) = event;
-                    this.selected_task_id = Some(task.id);
-                    let selected_id = task.id;
-                    for other in this.task_views.clone() {
-                        other.update(cx, |row, cx| {
-                            row.set_selected(row.task_id() == selected_id, cx)
+                cx.subscribe(&row, |this, _row, event, cx| match event {
+                    TaskRowEvent::Selected(task) => {
+                        let selected_id = task.id;
+                        for other in this.task_views.clone() {
+                            other.update(cx, |row, cx| {
+                                if row.task_id() != selected_id {
+                                    row.cancel_edit(cx);
+                                }
+                                row.set_selected(row.task_id() == selected_id, cx);
+                            });
+                        }
+                        this.selected_task_id = Some(selected_id);
+                        this.editing = this
+                            .task_views
+                            .iter()
+                            .any(|row| row.read(cx).is_editing());
+                        cx.emit(TaskListEvent::Selected(task.clone()));
+                    }
+                    TaskRowEvent::EditStarted => {
+                        this.editing = true;
+                    }
+                    TaskRowEvent::EditEnded => {
+                        this.editing = false;
+                    }
+                    TaskRowEvent::TitleCommitted { task_id, title } => {
+                        this.editing = false;
+                        cx.emit(TaskListEvent::TitleCommitted {
+                            task_id: *task_id,
+                            title: title.clone(),
                         });
                     }
-                    cx.emit(TaskListEvent::Selected(task.clone()));
                 })
                 .detach();
                 row
