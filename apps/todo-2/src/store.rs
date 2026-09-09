@@ -11,16 +11,31 @@ impl Store {
         Store(Arc::new(tokio::sync::Mutex::new(store)))
     }
 
+    /// Create a task and return the task list for the view the caller is
+    /// on. When a tag is selected the new task is assigned to it and the
+    /// result is that tag's task list; otherwise all tasks are returned.
     pub fn insert_task(
         &self,
         create: TaskCreate,
+        tag_name: Option<String>,
         cx: &impl AppContext,
     ) -> gpui::Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            let _ = s.create_task(create).await;
-            let tasks = s.list_tasks_by_priority().await.unwrap_or_default();
+            let task = s.create_task(create).await?;
+            let tasks = match &tag_name {
+                Some(tag_name) => {
+                    s.assign_tag_to_task(task.id, tag_name).await?;
+                    let tag_id = s
+                        .get_tag_by_name(tag_name)
+                        .await?
+                        .map(|t| t.id)
+                        .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
+                    s.list_tasks_by_tag(tag_id).await.unwrap_or_default()
+                }
+                None => s.list_tasks_by_priority().await.unwrap_or_default(),
+            };
             Ok(tasks)
         })
     }

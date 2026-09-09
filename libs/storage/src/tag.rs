@@ -643,6 +643,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_assigned_to_project_tag_appears_in_tag_list() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let tag = storage
+            .get_or_create_project_tag(std::path::Path::new("/Users/me/dev/about-me"))
+            .await?;
+
+        let task = storage
+            .create_task(Task::create().title("Improve about-me"))
+            .await?;
+        // Assign by the opaque project tag name, exactly like the app does
+        // when a task is added under a selected project tag.
+        storage.assign_tag_to_task(task.id, &tag.name).await?;
+
+        let tasks = storage.list_tasks_by_tag(tag.id).await?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task.id);
+        assert_eq!(tasks[0].direct_tags, vec![tag.name.clone()]);
+        assert_eq!(tasks[0].inferred_tags, vec![tag.name]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_add_tag_implication() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 

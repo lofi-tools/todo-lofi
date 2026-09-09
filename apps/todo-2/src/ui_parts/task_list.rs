@@ -101,9 +101,12 @@ impl TaskListView {
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
+        // When a tag is selected the new task belongs to it, so it is
+        // tagged and the view stays on that tag's task list.
+        let tag_name = self.selected_path.last().cloned();
         let create_task = self
             .store
-            .insert_task(TaskCreate::default().title(title), cx);
+            .insert_task(TaskCreate::default().title(title), tag_name, cx);
 
         self._fetch_tasks = Some(cx.spawn(async move |this, cx| {
             let new_tasks = match create_task.await {
