@@ -6,12 +6,15 @@ use gpui_component::StyledExt;
 use std::collections::HashMap;
 use storage::prelude::*;
 
+use crate::projects::Project;
 use crate::store::Store;
 
 #[derive(Clone)]
 pub enum NavBarEvent {
     TagSelected(Vec<String>),
     AllTasks,
+    /// A git-repo project row was clicked in the Projects section.
+    ProjectSelected(Project),
 }
 
 pub struct NavBar {
@@ -19,6 +22,11 @@ pub struct NavBar {
     top_level_tags: Vec<Tag>,
     children_cache: HashMap<u64, Vec<Tag>>,
     selected_path: Vec<String>,
+    /// Git repos found by the startup home-directory scan; empty until the
+    /// scan task lands via `set_projects`.
+    projects: Vec<Project>,
+    /// Name of the project row currently shown as selected.
+    selected_project: Option<String>,
     _fetch_tags: Option<Task<()>>,
     _fetch_children: Option<Task<()>>,
 }
@@ -47,9 +55,17 @@ impl NavBar {
             top_level_tags: Vec::new(),
             children_cache: HashMap::new(),
             selected_path: Vec::new(),
+            projects: Vec::new(),
+            selected_project: None,
             _fetch_tags,
             _fetch_children: None,
         }
+    }
+
+    /// Fill the Projects section once the background repo scan finishes.
+    pub fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
+        self.projects = projects;
+        cx.notify();
     }
 
     fn navigate_to_tag(
@@ -170,6 +186,39 @@ impl Render for NavBar {
                     .font_semibold()
                     .text_color(rgb(0xa3a3a3))
                     .mb_2()
+                    .mt_4()
+                    .child("Projects"),
+            )
+            .children(self.projects.iter().enumerate().map(|(project_index, project)| {
+                let project_for_click = project.clone();
+                let is_selected = self.selected_project.as_deref() == Some(project.name.as_str());
+
+                div()
+                    .id(gpui::ElementId::named_usize("project", project_index))
+                    .flex_1()
+                    .child(project.name.clone())
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(if is_selected {
+                        rgb(0x2a2a2a)
+                    } else {
+                        rgb(0x1e1e1e)
+                    })
+                    .hover(|s| s.bg(rgb(0x2a2a2a)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected_project = Some(project_for_click.name.clone());
+                        cx.emit(NavBarEvent::ProjectSelected(project_for_click.clone()));
+                        cx.notify();
+                    }))
+            }))
+            .child(
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(rgb(0xa3a3a3))
+                    .mb_2()
+                    .mt_4()
                     .child("Tags"),
             )
             .child(

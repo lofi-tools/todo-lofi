@@ -1,18 +1,21 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
-    WindowOptions, div, px, rgb,
+    AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, WindowOptions, div, px, rgb,
 };
+use gpui_component::StyledExt;
 use gpui_component::input::*;
 use gpui_component::{Theme, ThemeMode};
 use storage::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
+use projects::Project;
 use store::Store;
 use ui_parts::navbar::NavBar;
 use ui_parts::task_list::TaskListView;
 
 mod components;
+mod projects;
 mod store;
 mod ui_parts {
     pub mod navbar;
@@ -23,14 +26,72 @@ mod ui_parts {
 struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
+    /// Repos found in the home directory scan, kept here so the details pane
+    /// can look one up when a nav row is clicked.
+    _projects: Vec<Project>,
+    /// Rendered details-pane content for the selected project, if any.
+    project_details: Option<String>,
+    _project_subscription: Subscription,
 }
 
 impl Layout {
-    fn new(input: Entity<InputState>, store: Store, cx: &mut Context<Self>) -> Self {
-        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+    fn new(input: Entity<InputState>, store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));        // Kick off the home-directory repo scan in the background; the nav
+        // bar fills in its Projects section when it lands.
+        let scan = projects::scan(cx);
+        cx.spawn(async move |this, cx| {
+            let projects = match scan.await {
+                Ok(projects) => projects,
+                Err(e) => {
+                    tracing::error!("Failed to scan for git repos: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.nav_bar
+                    .update(cx, |nav, cx| nav.set_projects(projects.clone(), cx));
+                this._projects = projects;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+
+        // Clicking a project row in the nav bar fetches its details (branch,
+        // dirty-file count) and shows them in the right-hand pane.
+        let project_subscription = cx.subscribe_in(
+            &nav_bar,
+            window,
+            |_this, _nav, event, _window, cx| {
+                if let ui_parts::navbar::NavBarEvent::ProjectSelected(project) = event {
+                    let describe = project.describe(cx);
+                    cx.spawn(async move |this, cx| {
+                        let details = match describe.await {
+                            Ok(details) => details,
+                            Err(e) => {
+                                tracing::error!("Failed to describe project: {e}");
+                                return;
+                            }
+                        };
+                        this.update(cx, |this, cx| {
+                            this.project_details = Some(details);
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            },
+        );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
 
-        Self { task_list, nav_bar }
+        Self {
+            task_list,
+            nav_bar,
+            _projects: Vec::new(),
+            project_details: None,
+            _project_subscription: project_subscription,
+        }
     }
 }
 
@@ -47,7 +108,26 @@ impl Render for Layout {
                     .flex()
                     .flex_row()
                     .child(div().flex_1().child(self.task_list.clone()))
-                    .child(div().flex_1().child("Details")),
+                    .child(
+                        div()
+                            .flex_1()
+                            .p_8()
+                            .v_flex()
+                            .gap_1()
+                            .child(match &self.project_details {
+                                Some(details) => div().v_flex().gap_1().children(
+                                    details
+                                        .lines()
+                                        .map(|line| {
+                                            div().text_color(rgb(0xe5e5e5)).child(line.to_string())
+                                        })
+                                        .collect::<Vec<_>>(),
+                                ),
+                                None => div()
+                                    .text_color(rgb(0x666666))
+                                    .child("Select a project to see details"),
+                            }),
+                    ),
             )
     }
 }
@@ -85,7 +165,7 @@ fn main() {
                                 input_state
                             });
 
-                            let mini = cx.new(|cx| Layout::new(input, store, cx));
+                            let mini = cx.new(|cx| Layout::new(input, store, window, cx));
 
                             let entity = mini.clone();
                             cx.spawn(move |cx: &mut AsyncApp| {
