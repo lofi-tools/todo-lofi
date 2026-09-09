@@ -37,6 +37,9 @@ pub struct Task {
     pub updated_at: jiff::Timestamp,
     #[index]
     pub parent_id: Option<u64>,
+    /// The task this one was created as a follow-up of. Only set for
+    /// follow-up tasks; plain tasks and subtasks leave it empty.
+    pub source_task_id: Option<u64>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -147,6 +150,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         .parse::<jiff::Timestamp>()?;
     let parent_id = record.get(12).and_then(|v| v.to_i64()).map(|id| id as u64);
     let blocked_until = record.get(13).and_then(|v| v.to_u64());
+    let source_task_id = record.get(14).and_then(|v| v.to_i64()).map(|id| id as u64);
 
     let task = Task {
         id,
@@ -162,6 +166,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         created_at,
         updated_at,
         parent_id,
+        source_task_id,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };
@@ -272,7 +277,7 @@ impl TodoStore {
             SELECT
                 id, title, description, branch_name, labels, blocked_by,
                 deadline, importance_factor, urgency_factor, done, created_at, updated_at,
-                parent_id, blocked_until
+                parent_id, blocked_until, source_task_id
             FROM tasks
             ORDER BY
                 importance_factor * CASE
@@ -296,6 +301,7 @@ impl TodoStore {
             toasty::stmt::Type::Bool,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
@@ -383,7 +389,7 @@ impl TodoStore {
             SELECT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
                 t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
-                t.parent_id, t.blocked_until
+                t.parent_id, t.blocked_until, t.source_task_id
             FROM tasks t
             WHERE t.id IN ({})
             ORDER BY
@@ -411,6 +417,7 @@ impl TodoStore {
                 toasty::stmt::Type::Bool,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
+                toasty::stmt::Type::I64,
                 toasty::stmt::Type::I64,
                 toasty::stmt::Type::I64,
             ])

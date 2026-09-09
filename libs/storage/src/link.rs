@@ -220,15 +220,27 @@ impl TodoStore {
         Ok(tasks)
     }
 
-    /// Create a follow-up task that is blocked by `blocked_by`: the new
-    /// task cannot be worked on until `blocked_by` is done.
+    /// Create a follow-up task for `source_task`: the new task cannot be
+    /// worked on until the source is done, records the source in
+    /// `source_task_id`, and copies the source's native (direct) tags as
+    /// native tags of its own. Inferred and inherited tags are not copied.
     pub async fn create_follow_up(
         &mut self,
-        blocked_by: u64,
+        source_task: u64,
         title: String,
     ) -> QueryResult<crate::Task> {
-        let task = self.create_task(crate::Task::create().title(title)).await?;
-        self.add_blocker(task.id, blocked_by).await?;
+        let task = self
+            .create_task(
+                crate::Task::create()
+                    .title(title)
+                    .source_task_id(Some(source_task)),
+            )
+            .await?;
+        self.add_blocker(task.id, source_task).await?;
+        let source_tags = self.get_direct_task_tags(source_task).await?;
+        for tag in source_tags {
+            self.assign_tag_to_task(task.id, &tag.name).await?;
+        }
         Ok(task)
     }
 
@@ -566,6 +578,43 @@ mod tests {
         // Completing the parent unblocks the follow-up.
         set_done(&mut storage, parent.id, true).await;
         assert!(!storage.is_task_blocked(follow_up.id, 1000).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_follow_up_copies_source_tags_and_records_source() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let tag_a = storage.create_tag("TagA").await?;
+        let tag_b = storage.create_tag("TagB").await?;
+        let source = make_task(&mut storage, "source").await;
+        storage.assign_tag_to_task(source.id, &tag_a.name).await?;
+        storage.assign_tag_to_task(source.id, &tag_b.name).await?;
+
+        let follow_up = storage
+            .create_follow_up(source.id, "follow up".to_string())
+            .await?;
+
+        // The source is recorded on the follow-up (and survives reloads
+        // through both the ORM and the raw list queries).
+        assert_eq!(follow_up.source_task_id, Some(source.id));
+        let fetched = storage.get_task(follow_up.id).await?;
+        assert_eq!(fetched.source_task_id, Some(source.id));
+        let listed = storage.list_tasks_by_priority().await?;
+        let listed_follow_up = listed.iter().find(|t| t.id == follow_up.id).unwrap();
+        assert_eq!(listed_follow_up.task.source_task_id, Some(source.id));
+
+        // The source's native tags are copied as native tags, not inherited.
+        let copied = storage.get_direct_task_tags(follow_up.id).await?;
+        let names: Vec<String> = copied.iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&tag_a.name));
+        assert!(names.contains(&tag_b.name));
+        let meta = storage.get_task_with_meta(follow_up.id).await?;
+        assert!(meta.direct_tags.contains(&tag_a.label()));
+        assert!(meta.inherited_tags.is_empty(), "copied tags must be native");
+
+        // The source's own direct tags are unchanged.
+        let source_tags = storage.get_direct_task_tags(source.id).await?;
+        assert_eq!(source_tags.len(), 2);
         Ok(())
     }
 }
