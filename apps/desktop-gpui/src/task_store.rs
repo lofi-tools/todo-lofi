@@ -215,6 +215,7 @@ impl TaskStore {
                 task,
                 direct_tags: Vec::new(),
                 inferred_tags: Vec::new(),
+                leaf_tags: Vec::new(),
             };
             s.load_all_tags(&mut meta).await?;
             Ok(meta)

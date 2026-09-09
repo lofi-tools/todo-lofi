@@ -59,6 +59,9 @@ pub struct TaskWithMeta {
     pub task: Task,
     pub direct_tags: Vec<String>,
     pub inferred_tags: Vec<String>,
+    /// Most specific tags only: ancestors implied by another tag on the
+    /// same task are omitted. Used for display in the task list.
+    pub leaf_tags: Vec<String>,
 }
 impl std::ops::Deref for TaskWithMeta {
     type Target = Task;
@@ -153,6 +156,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         task,
         direct_tags: Vec::new(),
         inferred_tags: Vec::new(),
+        leaf_tags: Vec::new(),
     })
 }
 
@@ -324,6 +328,8 @@ impl TodoStore {
     pub async fn load_inferred_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         let tags = self.get_inferred_task_tags(task.id).await?;
         task.inferred_tags = tags.iter().map(|t| t.label()).collect();
+        let leaves = self.get_leaf_task_tags(task.id).await?;
+        task.leaf_tags = leaves.iter().map(|t| t.label()).collect();
         Ok(())
     }
 

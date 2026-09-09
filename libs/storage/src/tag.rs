@@ -513,6 +513,55 @@ impl TodoStore {
         Ok(tags)
     }
 
+    /// Leaf tags for a task: the most specific tags, dropping any tag that
+    /// is implied by another tag on the same task. E.g. if "programming"
+    /// implies "work", a task tagged "programming" shows only "programming".
+    pub async fn get_leaf_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
+        let all = self.get_inferred_task_tags(task_id).await?;
+        if all.len() < 2 {
+            return Ok(all);
+        }
+        let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: format!("load leaf tags for task {}", task_id),
+            })?;
+
+        let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in imp_rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let from = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let to = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                graph.entry(from).or_default().push(to);
+            }
+        }
+
+        let ids: HashSet<u64> = all.iter().map(|t| t.id).collect();
+        let mut implied: HashSet<u64> = HashSet::new();
+        for tag in &all {
+            let mut queue: VecDeque<u64> =
+                graph.get(&tag.id).cloned().unwrap_or_default().into();
+            let mut seen: HashSet<u64> = HashSet::new();
+            while let Some(current) = queue.pop_front() {
+                if !seen.insert(current) {
+                    continue;
+                }
+                if ids.contains(&current) {
+                    implied.insert(current);
+                }
+                if let Some(next) = graph.get(&current) {
+                    for &n in next {
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+
+        Ok(all.into_iter().filter(|t| !implied.contains(&t.id)).collect())
+    }
+
     pub async fn get_all_descendants(&mut self, tag_id: u64) -> QueryResult<Vec<Tag>> {
         let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])

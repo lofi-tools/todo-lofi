@@ -42,7 +42,7 @@ impl Render for TaskRow {
 
         let visible_tags: Vec<_> = self
             .task
-            .inferred_tags
+            .leaf_tags
             .iter()
             .filter(|t| !self.selected_path.contains(t) && !self.selected_labels.contains(t))
             .cloned()
