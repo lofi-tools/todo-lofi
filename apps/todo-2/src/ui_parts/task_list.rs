@@ -2,7 +2,9 @@ use gpui::{
     AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
 };
+use gpui_component::Disableable;
 use gpui_component::StyledExt;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
@@ -24,7 +26,11 @@ pub struct TaskListView {
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
-    selected_task_id: Option<u64>,
+    selected: Option<TaskWithMeta>,
+    /// Previously selected tasks, oldest first. The forward stack only ever
+    /// grows via `go_back`, so "next" is meaningless until "prev" is used.
+    back: Vec<TaskWithMeta>,
+    forward: Vec<TaskWithMeta>,
     editing: bool,
     input_needs_clear: bool,
     _fetch_tasks: Option<gpui::Task<()>>,
@@ -120,7 +126,9 @@ impl TaskListView {
             store,
             selected_path: Vec::new(),
             selected_labels: Vec::new(),
-            selected_task_id: None,
+            selected: None,
+            back: Vec::new(),
+            forward: Vec::new(),
             editing: false,
             input_needs_clear: false,
             _fetch_tasks: None,
@@ -130,7 +138,7 @@ impl TaskListView {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selected_task_id = None;
+        self.selected = None;
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| row.set_selected(false, cx));
         }
@@ -138,12 +146,91 @@ impl TaskListView {
 
     /// Restore the row highlight to a task without emitting selection
     /// events (used when a pending details-panel navigation is cancelled).
-    pub fn restore_selection(&mut self, selected_id: Option<u64>, cx: &mut Context<Self>) {
-        self.selected_task_id = selected_id;
+    pub fn restore_selection(&mut self, selected: Option<TaskWithMeta>, cx: &mut Context<Self>) {
+        let selected_id = selected.as_ref().map(|task| task.id);
+        self.selected = selected;
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| {
                 row.set_selected(Some(row.task_id()) == selected_id, cx)
             });
+        }
+    }
+
+    /// Select a task, recording history when `record` is set. All
+    /// selection paths (row clicks, blocker navigation, history travel)
+    /// funnel through here so the details panel stays in sync via the
+    /// emitted event.
+    fn select(&mut self, task: TaskWithMeta, record: bool, cx: &mut Context<Self>) {
+        if record {
+            if let Some(current) = self.selected.clone() {
+                if current.id != task.id {
+                    self.back.push(current);
+                    self.forward.clear();
+                }
+            }
+        }
+        let selected_id = task.id;
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| {
+                if row.task_id() != selected_id {
+                    row.cancel_edit(cx);
+                }
+                row.set_selected(row.task_id() == selected_id, cx);
+            });
+        }
+        self.selected = Some(task.clone());
+        self.editing = self
+            .task_views
+            .iter()
+            .any(|row| row.read(cx).is_editing());
+        cx.emit(TaskListEvent::Selected(task));
+    }
+
+    /// Select a task by id, fetching it when it is not in the current list
+    /// (e.g. a blocker from another tag's view).
+    pub fn select_task_by_id(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_some_and(|task| task.id == task_id) {
+            return;
+        }
+        if let Some(task) = self.task_views.iter().find_map(|row| {
+            let data = row.read(cx).task_data();
+            (data.id == task_id).then_some(data)
+        }) {
+            self.select(task, true, cx);
+            return;
+        }
+        let fetch = self.store.get_task_meta(task_id, cx);
+        cx.spawn(async move |this, cx| {
+            match fetch.await {
+                Ok(task) => {
+                    this.update(cx, |this, cx| this.select(task, true, cx))
+                        .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch task {task_id}: {e}");
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        let current = self.selected.clone();
+        if let Some(previous) = self.back.pop() {
+            if let Some(current) = current {
+                self.forward.push(current);
+            }
+            self.select(previous, false, cx);
+        }
+    }
+
+    pub fn go_forward(&mut self, cx: &mut Context<Self>) {
+        let current = self.selected.clone();
+        if let Some(next) = self.forward.pop() {
+            if let Some(current) = current {
+                self.back.push(current);
+            }
+            self.select(next, false, cx);
         }
     }
 
@@ -216,7 +303,7 @@ impl TaskListView {
         cx: &mut Context<Self>,
     ) {
         self.editing = false;
-        let selected_task_id = self.selected_task_id;
+        let selected_task_id = self.selected.as_ref().map(|task| task.id);
         self.task_views = tasks
             .into_iter()
             .map(|task| {
@@ -233,21 +320,7 @@ impl TaskListView {
                 });
                 cx.subscribe(&row, |this, _row, event, cx| match event {
                     TaskRowEvent::Selected(task) => {
-                        let selected_id = task.id;
-                        for other in this.task_views.clone() {
-                            other.update(cx, |row, cx| {
-                                if row.task_id() != selected_id {
-                                    row.cancel_edit(cx);
-                                }
-                                row.set_selected(row.task_id() == selected_id, cx);
-                            });
-                        }
-                        this.selected_task_id = Some(selected_id);
-                        this.editing = this
-                            .task_views
-                            .iter()
-                            .any(|row| row.read(cx).is_editing());
-                        cx.emit(TaskListEvent::Selected(task.clone()));
+                        this.select(task.clone(), true, cx);
                     }
                     TaskRowEvent::EditStarted => {
                         this.editing = true;
@@ -301,10 +374,38 @@ impl Render for TaskListView {
             }))
             .child(
                 div()
-                    .text_2xl()
-                    .font_bold()
-                    .text_color(rgb(0xe5e5e5))
-                    .child("Tasks"),
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("history-back")
+                            .ghost()
+                            .compact()
+                            .label("<")
+                            .disabled(self.back.is_empty())
+                            .tooltip("Previous task")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.go_back(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("history-forward")
+                            .ghost()
+                            .compact()
+                            .label(">")
+                            .disabled(self.forward.is_empty())
+                            .tooltip("Next task")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.go_forward(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_bold()
+                            .text_color(rgb(0xe5e5e5))
+                            .child("Tasks"),
+                    ),
             )
             .child(Input::new(&self.input))
             .child(

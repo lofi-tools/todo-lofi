@@ -22,6 +22,8 @@ pub enum TaskDetailsEvent {
     TitleCommitted { task_id: u64, title: String },
     PendingConfirmed { selected: Option<TaskWithMeta> },
     PendingCancelled,
+    /// A blocker row was clicked: navigate to that task.
+    SelectTask { task_id: u64 },
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -121,8 +123,8 @@ impl TaskDetails {
         self.blockers.iter().any(|blocker| !blocker.done)
     }
 
-    pub fn selected_id(&self) -> Option<u64> {
-        self.selected.as_ref().map(|task| task.id)
+    pub fn selected_task(&self) -> Option<TaskWithMeta> {
+        self.selected.clone()
     }
 
     /// Request selecting a task. When edits are unsaved and the task is a
@@ -600,6 +602,7 @@ impl TaskDetails {
                     .gap_2()
                     .child(
                         div()
+                            .id(("blocker-title", blocker_id))
                             .flex_1()
                             .text_sm()
                             .text_color(if blocker.done {
@@ -607,7 +610,10 @@ impl TaskDetails {
                             } else {
                                 rgb(0xe5e5e5)
                             })
-                            .child(blocker.title.clone()),
+                            .child(blocker.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: blocker_id });
+                            })),
                     )
                     .child(
                         div()

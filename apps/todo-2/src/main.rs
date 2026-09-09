@@ -169,8 +169,11 @@ impl Layout {
                     }
                 }
                 TaskDetailsEvent::PendingCancelled => {
-                    let current = details_for_pending.read(cx).selected_id();
+                    let current = details_for_pending.read(cx).selected_task();
                     list_for_pending.update(cx, |list, cx| list.restore_selection(current, cx));
+                }
+                TaskDetailsEvent::SelectTask { task_id } => {
+                    list_for_pending.update(cx, |list, cx| list.select_task_by_id(*task_id, cx));
                 }
             },
         )

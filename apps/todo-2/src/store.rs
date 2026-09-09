@@ -172,6 +172,18 @@ impl Store {
         })
     }
 
+    pub fn get_task_meta(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::TaskWithMeta>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_task_with_meta(task_id).await?)
+        })
+    }
+
     pub fn list_tasks_by_tag_name_with_labels(
         &self,
         tag_name: &str,

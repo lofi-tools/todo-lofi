@@ -64,6 +64,10 @@ impl TaskRow {
         self.task.id
     }
 
+    pub fn task_data(&self) -> TaskWithMeta {
+        self.task.clone()
+    }
+
     pub fn is_editing(&self) -> bool {
         self.editing
     }

@@ -227,6 +227,20 @@ impl TodoStore {
         Ok(task)
     }
 
+    /// Full task with tags, leaf tags and computed blocked flag.
+    pub async fn get_task_with_meta(&mut self, id: u64) -> crate::QueryResult<TaskWithMeta> {
+        let task = self.get_task(id).await?;
+        let mut meta = TaskWithMeta {
+            task,
+            direct_tags: Vec::new(),
+            inferred_tags: Vec::new(),
+            leaf_tags: Vec::new(),
+            blocked: false,
+        };
+        self.load_all_meta(&mut meta).await?;
+        Ok(meta)
+    }
+
     #[fastrace::trace]
     pub async fn list_tasks(&mut self) -> crate::QueryResult<Vec<Task>> {
         let tasks = Task::all()
