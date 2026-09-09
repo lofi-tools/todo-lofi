@@ -1293,6 +1293,53 @@ impl TaskDetails {
             lists = lists.child(div().v_flex().gap_1().ml_2().children(after_rows));
         }
 
+        // Subtasks live inside the lists so they paint before (under) the
+        // floating picker cards, which are siblings added after `lists`.
+        if !self.subtasks.is_empty() {
+            lists = lists.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child(format!("Subtasks ({})", self.subtasks.len())),
+            );
+        }
+        let subtask_rows = self
+            .subtasks
+            .clone()
+            .into_iter()
+            .map(|subtask| {
+                let subtask_id = subtask.id;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("subtask-title", subtask_id))
+                            .flex_1()
+                            .text_sm()
+                            .text_color(if subtask.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xe5e5e5)
+                            })
+                            .child(subtask.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: subtask_id });
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if subtask.done { "done" } else { "" }.to_string()),
+                    )
+            })
+            .collect::<Vec<_>>();
+        if !subtask_rows.is_empty() {
+            lists = lists.child(div().v_flex().gap_1().ml_2().children(subtask_rows));
+        }
+
         if let Some(error) = &self.link_error {
             lists = lists.child(
                 div()
@@ -1389,63 +1436,6 @@ impl TaskDetails {
         section
     }
 
-    /// "Subtasks (N)" section: clickable titles with done markers, shown
-    /// only when the selected task has children. Hidden until loaded so the
-    /// section does not flash in empty.
-    fn subtasks_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.subtasks.is_empty() {
-            return div().into_any_element();
-        }
-        let count = self.subtasks.len();
-        let rows = self
-            .subtasks
-            .clone()
-            .into_iter()
-            .map(|subtask| {
-                let subtask_id = subtask.id;
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id(("subtask-title", subtask_id))
-                            .flex_1()
-                            .text_sm()
-                            .text_color(if subtask.done {
-                                rgb(0x666666)
-                            } else {
-                                rgb(0xe5e5e5)
-                            })
-                            .child(subtask.title.clone())
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                cx.emit(TaskDetailsEvent::SelectTask { task_id: subtask_id });
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x737373))
-                            .child(if subtask.done { "done" } else { "" }.to_string()),
-                    )
-            })
-            .collect::<Vec<_>>();
-
-        div()
-            .v_flex()
-            .gap_2()
-            .mt_2()
-            .child(
-                div()
-                    .text_base()
-                    .font_bold()
-                    .underline()
-                    .text_color(rgb(0xe5e5e5))
-                    .child(format!("Subtasks ({count})")),
-            )
-            .child(div().v_flex().gap_1().ml_2().children(rows))
-            .into_any_element()
-    }
 }
 
 /// Small transparent relationship button: gray text with a gray hairline
@@ -1688,7 +1678,6 @@ impl Render for TaskDetails {
                     details = details.child(field("Branch", branch.clone()));
                 }
                 details = details.child(self.relationships_section(window, cx));
-                details = details.child(self.subtasks_section(cx));
                 details
             }
         };
