@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, Focusable, IntoElement, ParentElement, Render,
-    Styled, Subscription, Window, WindowOptions, div, px, rgb,
+    AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, WindowOptions, div, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::*;
@@ -73,8 +73,14 @@ impl Layout {
                 NavBarEvent::OpenProjectPicker => {
                     let projects = this._projects.clone();
                     let picker = cx.new(|cx| ProjectPicker::new(projects, window, cx));
-                    let focus = picker.focus_handle(cx);
-                    window.on_next_frame(move |window, cx| focus.focus(window, cx));
+                    // The input is only in the focus tree after the dialog
+                    // renders, so defer the autofocus one frame.
+                    let picker_for_focus = picker.clone();
+                    window.on_next_frame(move |window, cx| {
+                        picker_for_focus.update(cx, |picker, cx| {
+                            picker.focus_filter(window, cx);
+                        });
+                    });
                     // Subscribe before opening the dialog so the very first
                     // selection is not missed.
                     this._picker_subscription = Some(cx.subscribe_in(

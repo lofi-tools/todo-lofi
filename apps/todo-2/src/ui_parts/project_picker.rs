@@ -152,6 +152,13 @@ impl ProjectPicker {
         self.cursor = next as usize;
         cx.notify();
     }
+
+    /// Focus the fuzzy-filter input so typing filters immediately. The
+    /// picker's own focus handle only carries the key context; the input is
+    /// what should receive keystrokes.
+    pub fn focus_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.query.update(cx, |state, cx| state.focus(window, cx));
+    }
 }
 
 impl Focusable for ProjectPicker {
