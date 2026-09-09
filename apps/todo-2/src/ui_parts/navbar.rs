@@ -79,15 +79,12 @@ impl NavBar {
 
     fn navigate_to_tag(
         &mut self,
-        tag_name: &str,
+        _tag_name: &str,
         _tag_id: u64,
         path: &[String],
         cx: &mut Context<Self>,
     ) {
         if self.selected_path == path {
-            self.selected_path.retain(|p| p != tag_name);
-            cx.emit(NavBarEvent::AllTasks);
-            cx.notify();
             return;
         }
         self.selected_path = path.to_vec();
