@@ -603,7 +603,7 @@ impl TaskDetails {
 
     /// Floating card below the "+ blocked until" button: menu-style rows
     /// separated by hairlines, floating above the content underneath.
-    fn until_card(&self) -> impl IntoElement {
+    fn until_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(picker) = self.until_picker.clone() {
             div()
                 .absolute()
@@ -614,6 +614,9 @@ impl TaskDetails {
                 .border_1()
                 .border_color(rgb(HAIRLINE))
                 .rounded_md()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.close_until_panel_and_notify(cx);
+                }))
                 .child(picker)
         } else {
             div()
@@ -621,7 +624,7 @@ impl TaskDetails {
     }
 
 
-    fn blocker_card(&self) -> impl IntoElement {
+    fn blocker_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(picker) = self.blocker_picker.clone() {
             div()
                 .absolute()
@@ -634,6 +637,9 @@ impl TaskDetails {
                 .rounded_md()
                 .px_3()
                 .py_2()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.close_blocker_picker_and_notify(cx);
+                }))
                 .child(picker)
                 .into_any_element()
         } else {
@@ -795,9 +801,9 @@ impl TaskDetails {
                         ),
                 )
                 .when(self.until_panel_open(), |this| {
-                    this.child(self.until_card())
+                    this.child(self.until_card(cx))
                 })
-                .child(self.blocker_card()),
+                .child(self.blocker_card(cx)),
         );
 
         if self.computed_blocked() {
@@ -1099,25 +1105,6 @@ impl Render for TaskDetails {
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
             }))
-            .when(
-                self.blocker_picker.is_some() || self.until_panel_open(),
-                |this| {
-                    this.child(
-                        div()
-                            .id("details-backdrop")
-                            .absolute()
-                            .top(px(0.))
-                            .left(px(0.))
-                            .right(px(0.))
-                            .bottom(px(0.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_blocker_picker();
-                                this.close_until_panel();
-                                cx.notify();
-                            })),
-                    )
-                },
-            )
             .child(body)
             .when(self.confirming, |this| {
                 this.child(
