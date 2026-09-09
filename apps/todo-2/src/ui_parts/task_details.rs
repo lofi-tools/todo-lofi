@@ -19,6 +19,11 @@ impl TaskDetails {
     pub fn has_selection(&self) -> bool {
         self.selected.is_some()
     }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
 }
 
 fn field_label(label: &str) -> impl IntoElement {

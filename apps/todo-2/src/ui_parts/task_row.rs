@@ -64,6 +64,7 @@ impl Render for TaskRow {
             .rounded_md()
             .hover(|s| s.bg(rgb(0x2a2a2a)))
             .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
                 cx.emit(TaskRowEvent::Selected(this.task.clone()));
             }))
             .child(

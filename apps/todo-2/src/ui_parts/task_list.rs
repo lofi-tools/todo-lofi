@@ -1,6 +1,6 @@
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, rgb,
+    AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::input::*;
@@ -14,6 +14,7 @@ use crate::store::Store;
 #[derive(Clone)]
 pub enum TaskListEvent {
     Selected(TaskWithMeta),
+    Deselected,
 }
 
 pub struct TaskListView {
@@ -68,7 +69,12 @@ impl TaskListView {
                         };
                         this.update(cx, |this, cx| {
                             this.selected_labels = labels;
-                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
+                            this.set_tasks_with_path(
+                                tasks,
+                                &this.selected_path.clone(),
+                                &this.selected_labels.clone(),
+                                cx,
+                            );
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -86,7 +92,12 @@ impl TaskListView {
                             s.list_tasks_by_priority().await.unwrap_or_default()
                         };
                         this.update(cx, |this, cx| {
-                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
+                            this.set_tasks_with_path(
+                                tasks,
+                                &this.selected_path.clone(),
+                                &this.selected_labels.clone(),
+                                cx,
+                            );
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -130,7 +141,12 @@ impl TaskListView {
                 }
             };
             this.update(cx, |this, cx| {
-                this.set_tasks_with_path(new_tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
+                this.set_tasks_with_path(
+                    new_tasks,
+                    &this.selected_path.clone(),
+                    &this.selected_labels.clone(),
+                    cx,
+                );
                 this.input_needs_clear = true;
                 cx.notify();
             })
@@ -168,7 +184,12 @@ impl TaskListView {
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskWithMeta>, cx: &mut Context<Self>) {
-        self.set_tasks_with_path(tasks, &self.selected_path.clone(), &self.selected_labels.clone(), cx);
+        self.set_tasks_with_path(
+            tasks,
+            &self.selected_path.clone(),
+            &self.selected_labels.clone(),
+            cx,
+        );
     }
 }
 
@@ -184,16 +205,20 @@ impl Render for TaskListView {
         }
 
         div()
+            .id("task-list")
             .flex_1()
             .v_flex()
             .p_8()
             .gap_4()
+            .on_click(cx.listener(|_this, _, _, cx| {
+                cx.emit(TaskListEvent::Deselected);
+            }))
             .child(
                 div()
                     .text_2xl()
                     .font_bold()
                     .text_color(rgb(0xe5e5e5))
-                    .child("Mini Todo"),
+                    .child("Tasks"),
             )
             .child(Input::new(&self.input))
             .child(

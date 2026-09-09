@@ -1,6 +1,7 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, WindowOptions, div, prelude::FluentBuilder, px, rgb,
+    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, Styled, Subscription, Window, WindowOptions, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::*;
@@ -116,10 +117,14 @@ impl Layout {
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(TaskDetails::new);
         let details_for_list = details.clone();
-        cx.subscribe(&task_list, move |_this, _list, event, cx| {
-            let TaskListEvent::Selected(task) = event;
-            let task = task.clone();
-            details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
+        cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
+            TaskListEvent::Selected(task) => {
+                let task = task.clone();
+                details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
+            }
+            TaskListEvent::Deselected => {
+                details_for_list.update(cx, |details, cx| details.clear(cx));
+            }
         })
         .detach();
 
@@ -167,6 +172,13 @@ impl Render for Layout {
         div()
             .relative()
             .size_full()
+            .on_key_down(cx.listener(
+                |this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.details.update(cx, |details, cx| details.clear(cx));
+                    }
+                },
+            ))
             .child(
                 div()
                     .flex()
