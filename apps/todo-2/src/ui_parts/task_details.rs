@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
@@ -16,7 +17,13 @@ use crate::theme::{APP_BG, HAIRLINE};
 pub enum TaskDetailsEvent {
     Toggled { task_id: u64, done: bool },
     TitleCommitted { task_id: u64, title: String },
+    PendingConfirmed { selected: Option<TaskWithMeta> },
+    PendingCancelled,
 }
+
+/// A selection change that arrived while edits were unsaved. `Some` selects
+/// a task, `None` deselects.
+type PendingSelection = Option<TaskWithMeta>;
 
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
@@ -27,6 +34,8 @@ pub struct TaskDetails {
     editing_description: bool,
     description_input: Option<Entity<InputState>>,
     _description_subscription: Option<Subscription>,
+    confirming: bool,
+    pending: Option<PendingSelection>,
 }
 
 impl TaskDetails {
@@ -40,11 +49,69 @@ impl TaskDetails {
             editing_description: false,
             description_input: None,
             _description_subscription: None,
+            confirming: false,
+            pending: None,
         }
     }
 
     pub fn set_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         self.selected = Some(task);
+        cx.notify();
+    }
+
+    pub fn selected_id(&self) -> Option<u64> {
+        self.selected.as_ref().map(|task| task.id)
+    }
+
+    /// Request selecting a task. When edits are unsaved and the task is a
+    /// different one, the request is stashed and a confirm dialog is shown
+    /// instead; returns true when deferred.
+    pub fn request_select(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) -> bool {
+        let same_task = self.selected.as_ref().is_some_and(|t| t.id == task.id);
+        if self.is_editing() && !same_task {
+            self.pending = Some(Some(task));
+            self.confirming = true;
+            cx.notify();
+            true
+        } else {
+            self.set_selected(task, cx);
+            false
+        }
+    }
+
+    /// Request deselecting. Defers with a confirm dialog when edits are
+    /// unsaved; returns true when deferred.
+    pub fn request_clear(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_editing() {
+            self.pending = Some(None);
+            self.confirming = true;
+            cx.notify();
+            true
+        } else {
+            self.clear(cx);
+            false
+        }
+    }
+
+    pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.confirming = false;
+        self.abandon_edits();
+        self.selected = pending;
+        let selected = self.selected.clone();
+        cx.emit(TaskDetailsEvent::PendingConfirmed { selected });
+        cx.notify();
+    }
+
+    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) {
+        if !self.confirming {
+            return;
+        }
+        self.pending = None;
+        self.confirming = false;
+        cx.emit(TaskDetailsEvent::PendingCancelled);
         cx.notify();
     }
 
@@ -69,6 +136,15 @@ impl TaskDetails {
 
     pub fn is_editing(&self) -> bool {
         self.editing_title || self.editing_description
+    }
+
+    fn abandon_edits(&mut self) {
+        self.editing_title = false;
+        self.title_input = None;
+        self._title_subscription = None;
+        self.editing_description = false;
+        self.description_input = None;
+        self._description_subscription = None;
     }
 
     pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
@@ -408,6 +484,7 @@ impl Render for TaskDetails {
 
         div()
             .id("task-details")
+            .relative()
             .h_full()
             .v_flex()
             .p_4()
@@ -418,5 +495,72 @@ impl Render for TaskDetails {
                 cx.stop_propagation();
             }))
             .child(body)
+            .when(self.confirming, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .bottom(px(0.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x000000cc))
+                        .child(
+                            div()
+                                .v_flex()
+                                .gap_3()
+                                .w(px(260.))
+                                .p_4()
+                                .rounded_md()
+                                .bg(rgb(0x2a2a2a))
+                                .border_1()
+                                .border_color(rgb(HAIRLINE))
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .text_color(rgb(0xe5e5e5))
+                                                .child("Discard unsaved changes?"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xa3a3a3))
+                                                .child(
+                                                    "Your title and description edits will be lost.",
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("keep-editing")
+                                                .ghost()
+                                                .label("Keep editing")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_pending(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("discard-changes")
+                                                .danger()
+                                                .label("Discard")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.confirm_pending(cx);
+                                                })),
+                                        ),
+                                ),
+                        ),
+                )
+            })
     }
 }

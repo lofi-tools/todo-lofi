@@ -124,14 +124,20 @@ impl Layout {
         let list_for_deselect = task_list.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
-                let task = task.clone();
-                details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
-                cx.notify();
+                let deferred = details_for_list.update(cx, |details, cx| {
+                    details.request_select(task.clone(), cx)
+                });
+                if !deferred {
+                    cx.notify();
+                }
             }
             TaskListEvent::Deselected => {
-                details_for_list.update(cx, |details, cx| details.clear(cx));
-                list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
-                cx.notify();
+                let deferred =
+                    details_for_list.update(cx, |details, cx| details.request_clear(cx));
+                if !deferred {
+                    list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
+                    cx.notify();
+                }
             }
             TaskListEvent::TitleCommitted { task_id, title } => {
                 details_for_list.update(cx, |details, cx| {
@@ -141,6 +147,8 @@ impl Layout {
         })
         .detach();
         let list_for_toggle = task_list.clone();
+        let list_for_pending = task_list.clone();
+        let details_for_pending = details.clone();
         cx.subscribe(&details, move |_this, _details, event, cx| match event {
             TaskDetailsEvent::Toggled { task_id, done } => {
                 list_for_toggle.update(cx, |list, cx| list.set_task_done(*task_id, *done, cx));
@@ -149,6 +157,16 @@ impl Layout {
                 list_for_toggle.update(cx, |list, cx| {
                     list.set_task_title(*task_id, title.clone(), cx)
                 });
+            }
+            TaskDetailsEvent::PendingConfirmed { selected } => {
+                if selected.is_none() {
+                    list_for_pending.update(cx, |list, cx| list.clear_selection(cx));
+                    cx.notify();
+                }
+            }
+            TaskDetailsEvent::PendingCancelled => {
+                let current = details_for_pending.read(cx).selected_id();
+                list_for_pending.update(cx, |list, cx| list.restore_selection(current, cx));
             }
         })
         .detach();
@@ -172,7 +190,7 @@ impl Layout {
                     if layout.details.read(cx).is_editing() {
                         layout
                             .details
-                            .update(cx, |details, cx| details.cancel_editing(cx));
+                            .update(cx, |details, cx| details.request_clear(cx));
                         return;
                     }
                     layout.details.update(cx, |details, cx| details.clear(cx));
@@ -242,10 +260,14 @@ impl Render for Layout {
                             .flex()
                             .flex_row()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.details.update(cx, |details, cx| details.clear(cx));
-                                this.task_list
-                                    .update(cx, |list, cx| list.clear_selection(cx));
-                                cx.notify();
+                                let deferred = this
+                                    .details
+                                    .update(cx, |details, cx| details.request_clear(cx));
+                                if !deferred {
+                                    this.task_list
+                                        .update(cx, |list, cx| list.clear_selection(cx));
+                                    cx.notify();
+                                }
                             }))
                             .child(div().flex_1().child(self.task_list.clone()))
                             .when(self.details.read(cx).has_selection(), |this| {

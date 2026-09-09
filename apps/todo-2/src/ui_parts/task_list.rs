@@ -136,6 +136,17 @@ impl TaskListView {
         }
     }
 
+    /// Restore the row highlight to a task without emitting selection
+    /// events (used when a pending details-panel navigation is cancelled).
+    pub fn restore_selection(&mut self, selected_id: Option<u64>, cx: &mut Context<Self>) {
+        self.selected_task_id = selected_id;
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| {
+                row.set_selected(Some(row.task_id()) == selected_id, cx)
+            });
+        }
+    }
+
     pub fn is_editing(&self) -> bool {
         self.editing
     }
