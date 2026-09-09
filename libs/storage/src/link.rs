@@ -220,6 +220,105 @@ impl TodoStore {
         Ok(tasks)
     }
 
+    /// Load task metadata for every id in `ids`, one query per id but
+    /// shared by the two map helpers below.
+    async fn load_meta_map(&mut self, ids: &[u64]) -> QueryResult<HashMap<u64, crate::TaskWithMeta>> {
+        let mut map = HashMap::with_capacity(ids.len());
+        for &id in ids {
+            map.insert(id, self.get_task_with_meta(id).await?);
+        }
+        Ok(map)
+    }
+
+    /// All tasks blocked by any of `task_ids`, as a map from blocker id to
+    /// its blocked tasks (with metadata). One query over `task_links`;
+    /// used by the task list to nest blocked tasks under their blocker.
+    pub async fn blocking_map(
+        &mut self,
+        task_ids: &[u64],
+    ) -> QueryResult<HashMap<u64, Vec<crate::TaskWithMeta>>> {
+        if task_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let id_list: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let rows = toasty::sql::query(format!(
+            "SELECT task_id, other_id FROM task_links WHERE kind = 'blocked_by' AND other_id IN ({})",
+            placeholders.join(",")
+        ))
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "blocking map",
+        })?;
+        let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut all_blocked: Vec<u64> = Vec::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let blocked = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let blocker = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                grouped.entry(blocker).or_default().push(blocked);
+                all_blocked.push(blocked);
+            }
+        }
+        let meta = self.load_meta_map(&all_blocked).await?;
+        let mut map = HashMap::with_capacity(grouped.len());
+        for (blocker, blocked_ids) in grouped {
+            let tasks: Vec<crate::TaskWithMeta> = blocked_ids
+                .into_iter()
+                .filter_map(|id| meta.get(&id).cloned())
+                .collect();
+            map.insert(blocker, tasks);
+        }
+        Ok(map)
+    }
+
+    /// All blockers of any of `task_ids`, as a map from blocked task id to
+    /// its blocker tasks (with metadata). Used to decide which tasks nest
+    /// under their blocker and to unblock dependants locally when a
+    /// blocker completes.
+    pub async fn blockers_map(
+        &mut self,
+        task_ids: &[u64],
+    ) -> QueryResult<HashMap<u64, Vec<crate::TaskWithMeta>>> {
+        if task_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let id_list: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let rows = toasty::sql::query(format!(
+            "SELECT task_id, other_id FROM task_links WHERE kind = 'blocked_by' AND task_id IN ({})",
+            placeholders.join(",")
+        ))
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "blockers map",
+        })?;
+        let mut grouped: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut all_blockers: Vec<u64> = Vec::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let blocked = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let blocker = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                grouped.entry(blocked).or_default().push(blocker);
+                all_blockers.push(blocker);
+            }
+        }
+        let meta = self.load_meta_map(&all_blockers).await?;
+        let mut map = HashMap::with_capacity(grouped.len());
+        for (blocked, blocker_ids) in grouped {
+            let tasks: Vec<crate::TaskWithMeta> = blocker_ids
+                .into_iter()
+                .filter_map(|id| meta.get(&id).cloned())
+                .collect();
+            map.insert(blocked, tasks);
+        }
+        Ok(map)
+    }
+
     /// Create a follow-up task for `source_task`: the new task cannot be
     /// worked on until the source is done, records the source in
     /// `source_task_id`, and copies the source's native (direct) tags as
@@ -365,6 +464,41 @@ impl TodoStore {
 #[allow(non_snake_case)]
 mod tests {
     use crate::TodoStore;
+
+    #[tokio::test]
+    async fn test_blocking_and_blockers_maps() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let first = make_task(&mut storage, "first").await;
+        let second = make_task(&mut storage, "second").await;
+        let third = make_task(&mut storage, "third").await;
+
+        storage.add_blocker(second.id, first.id).await?;
+        storage.add_blocker(third.id, first.id).await?;
+
+        // blocking_map: first blocks second and third.
+        let blocking = storage.blocking_map(&[first.id]).await?;
+        let blocked = blocking.get(&first.id).unwrap();
+        let titles: Vec<&str> = blocked.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["second", "third"]);
+
+        // blockers_map: second's blocker is first.
+        let blockers = storage.blockers_map(&[second.id, third.id]).await?;
+        assert_eq!(blockers[&second.id][0].title, "first");
+        assert_eq!(blockers[&third.id][0].title, "first");
+
+        // Completing the blocker unblocks dependants (meta flags refresh).
+        set_done(&mut storage, first.id, true).await;
+        let blocking = storage.blocking_map(&[first.id]).await?;
+        assert!(
+            !blocking[&first.id][0].blocked,
+            "dependant should be unblocked once its blocker is done"
+        );
+        assert!(
+            !blocking[&first.id][1].blocked,
+            "second dependant should also be unblocked"
+        );
+        Ok(())
+    }
 
     async fn make_task(storage: &mut TodoStore, title: &str) -> crate::Task {
         storage

@@ -216,6 +216,33 @@ impl Store {
         })
     }
 
+    /// All tasks blocked by any of `task_ids`, keyed by blocker id (used
+    /// to nest blocked tasks under their blocker in the task list).
+    pub fn blocking_map(
+        &self,
+        task_ids: Vec<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<std::collections::HashMap<u64, Vec<storage::TaskWithMeta>>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.blocking_map(&task_ids).await?)
+        })
+    }
+
+    /// All blockers of any of `task_ids`, keyed by blocked task id.
+    pub fn blockers_map(
+        &self,
+        task_ids: Vec<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<std::collections::HashMap<u64, Vec<storage::TaskWithMeta>>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.blockers_map(&task_ids).await?)
+        })
+    }
+
     /// Tasks blocked by `task_id` (the reverse of its blockers).
     pub fn list_blocking_tasks(
         &self,

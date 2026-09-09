@@ -44,6 +44,10 @@ fn seed_tags() -> Vec<SeedTag> {
             implies: Some("backend".to_string()),
         },
         SeedTag {
+            name: "ops".to_string(),
+            implies: Some("work".to_string()),
+        },
+        SeedTag {
             name: "personal".to_string(),
             implies: None,
         },
@@ -146,6 +150,16 @@ fn seed_tasks() -> Vec<SeedTask> {
             parent_title: None,
         },
         SeedTask {
+            title: "Deploy to production".to_string(),
+            description: Some("Ship the reviewed changes to the production environment".to_string()),
+            branch_name: Some("release/prod".to_string()),
+            labels: vec!["release".to_string()],
+            deadline: Some(now_secs + 2 * 86400),
+            importance_factor: 1.5,
+            urgency_factor: 1.5,
+            parent_title: None,
+        },
+        SeedTask {
             title: "feed dorito".to_string(),
             description: Some("Feed the cat every evening".to_string()),
             branch_name: None,
@@ -191,6 +205,10 @@ fn seed_assignments() -> Vec<SeedAssignment> {
         SeedAssignment {
             task_title: "Code review PRs".to_string(),
             tag_name: "work".to_string(),
+        },
+        SeedAssignment {
+            task_title: "Deploy to production".to_string(),
+            tag_name: "ops".to_string(),
         },
         SeedAssignment {
             task_title: "feed dorito".to_string(),
@@ -262,12 +280,25 @@ impl TodoStore {
             }
         }
 
-        // "Write migration tests" can't start until the task CRUD work is
-        // done, so it is blocked by "Implement task CRUD".
-        if let (Some(&crud_id), Some(&migration_tests_id)) =
-            (task_map.get("Implement task CRUD"), task_map.get("Write migration tests"))
+        // "Write migration tests" and "Add tag filtering" can't start
+        // until the task CRUD work is done, so both are blocked by
+        // "Implement task CRUD" (demoing the "blocks 2" chip in the task
+        // list).
+        if let Some(&crud_id) = task_map.get("Implement task CRUD") {
+            for dependent in ["Write migration tests", "Add tag filtering"] {
+                if let Some(&dependent_id) = task_map.get(dependent) {
+                    self.add_blocker(dependent_id, crud_id).await?;
+                }
+            }
+        }
+
+        // "Deploy to production" must wait for the code review, so it is
+        // blocked by exactly one task ("Code review PRs") — demoing the
+        // inline arrow chain (single blocker) in the task list.
+        if let (Some(&review_id), Some(&deploy_id)) =
+            (task_map.get("Code review PRs"), task_map.get("Deploy to production"))
         {
-            self.add_blocker(migration_tests_id, crud_id).await?;
+            self.add_blocker(deploy_id, review_id).await?;
         }
 
         // "feed dorito" repeats every day at 6pm.
@@ -295,10 +326,10 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 9);
+        assert_eq!(tasks.len(), 10);
 
         let tags = store.list_tags().await?;
-        assert_eq!(tags.len(), 8);
+        assert_eq!(tags.len(), 9);
 
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
         assert!(task_with_parent.is_some());
@@ -310,17 +341,50 @@ mod tests {
         assert_eq!(template.interval_days, 1);
         assert_eq!(template.time_of_day, Some(18 * 60));
 
-        // "Write migration tests" is blocked by "Implement task CRUD" (the
-        // blocked flag is computed by the meta loader).
+        // "Write migration tests" and "Add tag filtering" are blocked by
+        // "Implement task CRUD" (the blocked flag is computed by the meta
+        // loader).
         let with_meta = store.list_tasks_by_priority().await?;
         let migration_tests = with_meta
             .iter()
             .find(|t| t.title == "Write migration tests")
             .unwrap();
         assert!(migration_tests.blocked, "migration tests should be blocked");
+        let tag_filtering = with_meta
+            .iter()
+            .find(|t| t.title == "Add tag filtering")
+            .unwrap();
+        assert!(tag_filtering.blocked, "tag filtering should be blocked");
         let blockers = store.list_blockers(migration_tests.id).await?;
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].title, "Implement task CRUD");
+
+        // "Implement task CRUD" blocks exactly those two tasks.
+        let blocking = store.blocking_map(&[blockers[0].id]).await?;
+        let blocked_titles: Vec<&str> = blocking[&blockers[0].id]
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(blocked_titles, vec!["Write migration tests", "Add tag filtering"]);
+
+        // "Deploy to production" is blocked by exactly one task ("Code
+        // review PRs"), so it demos the inline arrow chain.
+        let deploy = with_meta
+            .iter()
+            .find(|t| t.title == "Deploy to production")
+            .unwrap();
+        assert!(deploy.blocked, "deploy should be blocked by the review");
+        let deploy_blockers = store.list_blockers(deploy.id).await?;
+        assert_eq!(deploy_blockers.len(), 1);
+        assert_eq!(deploy_blockers[0].title, "Code review PRs");
+
+        // "Code review PRs" blocks exactly that one task.
+        let blocking = store.blocking_map(&[deploy_blockers[0].id]).await?;
+        let blocked_titles: Vec<&str> = blocking[&deploy_blockers[0].id]
+            .iter()
+            .map(|t| t.title.as_str())
+            .collect();
+        assert_eq!(blocked_titles, vec!["Deploy to production"]);
 
         Ok(())
     }

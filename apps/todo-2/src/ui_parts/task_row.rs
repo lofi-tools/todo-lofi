@@ -1,7 +1,7 @@
 use gpui::{
-    AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, px, rgb,
+    App, AppContext, AnyElement, ClickEvent, Context, Entity, EventEmitter, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
+    div, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -22,8 +22,28 @@ pub enum TaskRowEvent {
     DoneToggled { task_id: u64, done: bool },
 }
 
+/// One level of a "task blocks X (which blocks Y)" chain, rendered inline
+/// after an arrow next to the blocker's title.
+#[derive(Clone)]
+pub struct ChainNode {
+    pub task: TaskWithMeta,
+    pub nested: Vec<ChainNode>,
+}
+
+/// What a task row displays about the tasks its task blocks.
+pub struct RowBlocking {
+    /// The tasks rendered inline (arrow + grayed title) after the
+    /// blocker's title.
+    pub blocked: Vec<ChainNode>,
+    /// Every task the row's task exclusively blocks, shown via the
+    /// "blocks N" chip and its expandable list.
+    pub blocks: Vec<TaskWithMeta>,
+}
+
 pub struct TaskRow {
     task: TaskWithMeta,
+    /// What this row's task blocks (inline chain + blocks-N list).
+    blocking: RowBlocking,
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
@@ -32,6 +52,8 @@ pub struct TaskRow {
     /// True while a completed task is jumping to the bottom of the list;
     /// clicks on the row are ignored so nothing lands mid-animation.
     locked: bool,
+    /// Whether the "blocks N" chip is expanded to show the blocked tasks.
+    blocks_expanded: bool,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
 }
@@ -39,6 +61,7 @@ pub struct TaskRow {
 impl TaskRow {
     pub fn new(
         task: TaskWithMeta,
+        blocking: RowBlocking,
         store: Store,
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
@@ -47,12 +70,14 @@ impl TaskRow {
     ) -> Self {
         Self {
             task,
+            blocking,
             store,
             selected_path,
             selected_labels,
             selected,
             editing: false,
             locked: false,
+            blocks_expanded: false,
             edit_input: None,
             _edit_subscription: None,
         }
@@ -89,6 +114,43 @@ impl TaskRow {
             self.locked = locked;
             cx.notify();
         }
+    }
+
+    /// Update the blocked flag of a task shown in this row's chain or
+    /// "blocks N" list (e.g. the blocker completed, so the dependant is no
+    /// longer blocked).
+    pub fn set_chain_blocked(&mut self, task_id: u64, blocked: bool, cx: &mut Context<Self>) {
+        fn update_chain(nodes: &mut [ChainNode], task_id: u64, blocked: bool) -> bool {
+            for node in nodes {
+                if node.task.id == task_id {
+                    node.task.blocked = blocked;
+                    return true;
+                }
+                if update_chain(&mut node.nested, task_id, blocked) {
+                    return true;
+                }
+            }
+            false
+        }
+        let changed = update_chain(&mut self.blocking.blocked, task_id, blocked)
+            || self
+                .blocking
+                .blocks
+                .iter_mut()
+                .any(|task| if task.id == task_id {
+                    task.blocked = blocked;
+                    true
+                } else {
+                    false
+                });
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn toggle_blocks(&mut self, cx: &mut Context<Self>) {
+        self.blocks_expanded = !self.blocks_expanded;
+        cx.notify();
     }
 
     pub fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
@@ -167,6 +229,8 @@ impl Render for TaskRow {
         let done = self.task.done;
         let store = self.store.clone();
         let entity = cx.entity().clone();
+        let entity_for_chain = entity.clone();
+        let entity_for_checkbox = entity.clone();
 
         let visible_tags: Vec<_> = self
             .task
@@ -218,7 +282,7 @@ impl Render for TaskRow {
                             return;
                         }
                         let store = store.clone();
-                        let entity = entity.clone();
+                        let entity = entity_for_checkbox.clone();
                         let new_done = *new_done;
                         cx.spawn(async move |cx| {
                             if let Err(e) = store.toggle_task_done(task_id, new_done, cx).await {
@@ -254,17 +318,62 @@ impl Render for TaskRow {
             } else {
                 div()
                     .id(("task-title", task_id))
-                    .text_base()
-                    .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
-                    .when(done, |this| this.line_through())
-                    .child(self.task.title.clone())
-                    .on_click(cx.listener(|this, event, window, cx| {
-                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
-                        {
-                            cx.stop_propagation();
-                            this.begin_edit(window, cx);
-                        }
-                    }))
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("task-title-text", task_id))
+                            .text_base()
+                            .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                            .when(done, |this| this.line_through())
+                            .child(self.task.title.clone())
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                                {
+                                    cx.stop_propagation();
+                                    this.begin_edit(window, cx);
+                                }
+                            })),
+                    )
+                    .children(
+                        self.blocking
+                            .blocked
+                            .iter()
+                            .flat_map(|node| chain_children(node, &entity_for_chain)),
+                    )
+                    .when(self.blocking.blocks.len() > 1, |this| {
+                        this.child(
+                            div()
+                                .id(("blocks-chip", task_id))
+                                .h_flex()
+                                .items_center()
+                                .gap_0p5()
+                                .px(px(4.))
+                                .rounded(px(2.))
+                                .bg(rgb(0x2a2a2a))
+                                .text_color(rgb(0xa3a3a3))
+                                .text_size(px(10.))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_blocks(cx);
+                                }))
+                                .child(format!("blocks {}", self.blocking.blocks.len()))
+                                .child(if self.blocks_expanded { "▾" } else { "▸" }),
+                        )
+                    })
+            })
+            .when(self.blocks_expanded && self.blocking.blocks.len() > 1, |this| {
+                this                    .child(
+                        div()
+                            .id(("blocks-list", task_id))
+                            .v_flex()
+                            .pl_4()
+                            .children(self.blocking.blocks.iter().map(|task| {
+                                blocked_title(task.clone(), &entity)
+                            })),
+                    )
             })
                     .child(
                         div()
@@ -283,3 +392,89 @@ impl Render for TaskRow {
             )
     }
 }
+
+/// Right-pointing arrow separating a blocker from the task it blocks.
+/// Rendered as an alpha mask tinted by the text color (same technique as
+/// the repeat icon).
+fn arrow_svg() -> impl IntoElement {
+    div()
+        .h_flex()
+        .items_center()
+        .mx_1()
+        .text_color(rgb(0x666666))
+        .child(
+            svg()
+                .size_3()
+                .data(ARROW_SVG),
+        )
+}
+
+/// Render a chain node inline after the blocker's title: arrow + grayed
+/// title, recursing into nested nodes.
+fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElement> {
+    let mut children: Vec<AnyElement> = Vec::new();
+    children.push(arrow_svg().into_any_element());
+    let muted = node.task.done || node.task.blocked;
+    let task = node.task.clone();
+    let row_entity = row_entity.clone();
+    let row_entity_for_click = row_entity.clone();
+    children.push(
+        div()
+            .id(("chain-title", task.id))
+            .text_base()
+            .text_color(if muted { rgb(0x666666) } else { rgb(0xcccccc) })
+            .when(task.done, |this| this.line_through())
+            .child(task.title.clone())
+            .cursor_pointer()
+            .on_click(move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
+                    cx.stop_propagation();
+                    row_entity_for_click.update(cx, |_row, cx| {
+                        cx.emit(TaskRowEvent::Selected(task.clone()));
+                    });
+                }
+            })
+            .into_any_element(),
+    );
+    for nested in &node.nested {
+        children.extend(chain_children(nested, &row_entity));
+    }
+    children
+}
+
+/// One expanded "blocks N" entry: arrow + grayed title.
+fn blocked_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoElement {
+    let muted = task.done || task.blocked;
+    let row_entity = row_entity.clone();
+    let row_entity_for_click = row_entity.clone();
+    div()
+        .id(("blocked-row", task.id))
+        .h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_0p5()
+        .rounded_md()
+        .child(arrow_svg())
+        .child(
+            div()
+                .id(("blocked-title", task.id))
+                .text_base()
+                .text_color(if muted { rgb(0x666666) } else { rgb(0xcccccc) })
+                .when(task.done, |this| this.line_through())
+                .child(task.title.clone())
+                .cursor_pointer()
+                .on_click(move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
+                        cx.stop_propagation();
+                        row_entity_for_click.update(cx, |_row, cx| {
+                            cx.emit(TaskRowEvent::Selected(task.clone()));
+                        });
+                    }
+                }),
+        )
+}
+
+/// Lucide `arrow-right`, drawn with an opaque stroke so the alpha-mask
+/// rendering tints it with the element's text color.
+const ARROW_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>"##;
