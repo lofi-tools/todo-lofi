@@ -29,6 +29,8 @@ const SKIPPED_DIRS: &[&str] = &[
     "venv",
 ];
 
+use crate::store::Store;
+
 /// A local git repository found on disk.
 #[derive(Clone, Debug)]
 pub struct Project {
@@ -39,43 +41,21 @@ pub struct Project {
 }
 
 impl Project {
-    /// Read-only summary shown in the details pane: path, current branch and
-    /// dirty-file count. Runs on the tokio runtime; failures degrade to
-    /// "unknown" instead of erroring so one broken repo doesn't break the
-    /// pane.
-    pub fn describe(&self, cx: &impl AppContext) -> Task<anyhow::Result<String>> {
+    /// Get-or-create the tag backing this project folder: a unique name
+    /// derived from the canonical absolute path plus the directory name as
+    /// display name. Runs on the tokio runtime.
+    pub fn tag(
+        &self,
+        store: &Store,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Tag>> {
+        let store = store.clone();
         let path = self.path.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let branch = git(&path, ["rev-parse", "--abbrev-ref", "HEAD"]).await;
-            let status = git(&path, ["status", "--porcelain"]).await;
-            let dirty = match status {
-                Some(out) => out.lines().filter(|l| !l.trim().is_empty()).count(),
-                None => 0,
-            };
-            Ok(format!(
-                "{}\n\nBranch: {}\nDirty files: {}",
-                path.display(),
-                branch.unwrap_or_else(|| "unknown".into()),
-                dirty
-            ))
+            let mut s = store.0.lock().await;
+            s.get_or_create_project_tag(&path).await.map_err(Into::into)
         })
     }
-}
-
-/// Run `git` in `dir` and return trimmed stdout, or `None` if the command
-/// fails (no git installed, not a repo, etc.).
-async fn git(dir: &Path, args: impl IntoIterator<Item = &str>) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
 }
 
 /// Scan the home directory for git repos on the tokio runtime. Returns repos

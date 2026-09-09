@@ -15,6 +15,10 @@ pub struct Tag {
     pub id: u64,
     #[unique]
     pub name: String,
+    /// Optional human-facing label. Tags derived from folder paths use a
+    /// unique opaque `name` (so different directories never collide) and
+    /// carry the directory name here for display.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +36,15 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        Some(Tag { id, name })
+        let display_name = record
+            .get(2)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Some(Tag {
+            id,
+            name,
+            display_name,
+        })
     } else {
         None
     }
@@ -40,13 +52,48 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
 
 impl TodoStore {
     pub async fn create_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
+        self.create_tag_with_display_name(name, None).await
+    }
+
+    pub async fn create_tag_with_display_name(
+        &mut self,
+        name: impl Into<String>,
+        display_name: Option<String>,
+    ) -> QueryResult<Tag> {
         let name = name.into();
         let tag = Tag::create()
             .name(name.clone())
+            .display_name(display_name)
             .exec(&mut self.db)
             .await
             .context(crate::error::CreateTagSnafu { name })?;
         Ok(tag)
+    }
+
+    /// Get or create the tag backing a local project folder. The tag name is
+    /// derived from the absolute folder path so it is unique per directory
+    /// (two different repos both named `api` never collide), while the
+    /// display name stays the plain directory name.
+    pub async fn get_or_create_project_tag(
+        &mut self,
+        path: &std::path::Path,
+    ) -> QueryResult<Tag> {
+        let name = format!(
+            "project:{}",
+            path.canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .display()
+        );
+        let display_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+        if let Some(tag) = self.get_tag_by_name(&name).await? {
+            return Ok(tag);
+        }
+        self.create_tag_with_display_name(name, Some(display_name))
+            .await
     }
 
     pub async fn get_tag(&mut self, id: u64) -> QueryResult<Tag> {
@@ -56,14 +103,19 @@ impl TodoStore {
     }
 
     pub async fn get_tag_by_name(&mut self, name: &str) -> QueryResult<Option<Tag>> {
-        let rows = toasty::sql::query(r#"SELECT id, name FROM tags WHERE LOWER(name) = LOWER(?1)"#)
-            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
-            .bind(name)
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::FindTagByNameSnafu {
-                name: name.to_string(),
-            })?;
+        let rows =
+            toasty::sql::query(r#"SELECT id, name, display_name FROM tags WHERE LOWER(name) = LOWER(?1)"#)
+                .column_types([
+                    toasty::stmt::Type::I64,
+                    toasty::stmt::Type::String,
+                    toasty::stmt::Type::String,
+                ])
+                .bind(name)
+                .exec(&mut self.db)
+                .await
+                .context(crate::error::FindTagByNameSnafu {
+                    name: name.to_string(),
+                })?;
 
         Ok(rows.into_iter().next().and_then(|row| parse_tag_row(&row)))
     }
@@ -204,7 +256,7 @@ impl TodoStore {
     pub async fn get_top_level_tags(&mut self) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT t.id, t.name
+            SELECT t.id, t.name, t.display_name
             FROM tags t
             WHERE t.id NOT IN (SELECT implier_id FROM tag_implications)
             "#,
@@ -228,7 +280,7 @@ impl TodoStore {
     pub async fn get_children(&mut self, parent_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT t.id, t.name
+            SELECT t.id, t.name, t.display_name
             FROM tags t
             JOIN tag_implications ti ON ti.implier_id = t.id
             WHERE ti.implied_id = ?1
@@ -254,7 +306,7 @@ impl TodoStore {
     pub async fn get_parents(&mut self, child_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT t.id, t.name
+            SELECT t.id, t.name, t.display_name
             FROM tags t
             JOIN tag_implications ti ON ti.implied_id = t.id
             WHERE ti.implier_id = ?1
@@ -332,7 +384,7 @@ impl TodoStore {
     pub async fn get_direct_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT t.id, t.name
+            SELECT t.id, t.name, t.display_name
             FROM tags t
             JOIN direct_task_tags dtt ON dtt.tag_id = t.id
             WHERE dtt.task_id = ?1
@@ -410,7 +462,7 @@ impl TodoStore {
         let id_list: Vec<String> = all_ids.iter().map(|id| id.to_string()).collect();
         let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
         let query = format!(
-            "SELECT t.id, t.name FROM tags t WHERE t.id IN ({})",
+            "SELECT t.id, t.name, t.display_name FROM tags t WHERE t.id IN ({})",
             placeholders.join(",")
         );
 
@@ -477,7 +529,7 @@ impl TodoStore {
         let id_list: Vec<String> = all_ids.iter().map(|id| id.to_string()).collect();
         let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
         let query = format!(
-            "SELECT t.id, t.name FROM tags t WHERE t.id IN ({})",
+            "SELECT t.id, t.name, t.display_name FROM tags t WHERE t.id IN ({})",
             placeholders.join(",")
         );
 
@@ -514,6 +566,30 @@ mod tests {
 
         let retrieved = storage.get_tag(tag.id).await?;
         assert_eq!(retrieved.name, "Python");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_project_tag() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let path = std::path::Path::new("/tmp/somewhere/api");
+        let tag = storage.get_or_create_project_tag(path).await?;
+        // Unique name derived from the path, display name is the dir name.
+        assert_eq!(tag.name, "project:/tmp/somewhere/api");
+        assert_eq!(tag.display_name.as_deref(), Some("api"));
+
+        // Same path returns the existing tag (no duplicate).
+        let again = storage.get_or_create_project_tag(path).await?;
+        assert_eq!(again.id, tag.id);
+        assert_eq!(storage.list_tags().await?.len(), 1);
+
+        // A different path with the same dir name does not collide.
+        let other = storage.get_or_create_project_tag(std::path::Path::new("/tmp/elsewhere/api")).await?;
+        assert_ne!(other.id, tag.id);
+        assert_eq!(other.name, "project:/tmp/elsewhere/api");
+        assert_eq!(other.display_name.as_deref(), Some("api"));
 
         Ok(())
     }

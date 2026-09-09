@@ -3,19 +3,20 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
 };
 use gpui_component::StyledExt;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::IconName;
 use gpui_component::scroll::ScrollableElement;
 use std::collections::HashMap;
 use storage::prelude::*;
 
-use crate::projects::Project;
 use crate::store::Store;
 
 #[derive(Clone)]
 pub enum NavBarEvent {
     TagSelected(Vec<String>),
     AllTasks,
-    /// A git-repo project row was clicked in the Projects section.
-    ProjectSelected(Project),
+    /// The + button was clicked; the parent should open the project picker.
+    OpenProjectPicker,
 }
 
 pub struct NavBar {
@@ -23,11 +24,6 @@ pub struct NavBar {
     top_level_tags: Vec<Tag>,
     children_cache: HashMap<u64, Vec<Tag>>,
     selected_path: Vec<String>,
-    /// Git repos found by the startup home-directory scan; empty until the
-    /// scan task lands via `set_projects`.
-    projects: Vec<Project>,
-    /// Name of the project row currently shown as selected.
-    selected_project: Option<String>,
     _fetch_tags: Option<Task<()>>,
     _fetch_children: Option<Task<()>>,
 }
@@ -56,17 +52,29 @@ impl NavBar {
             top_level_tags: Vec::new(),
             children_cache: HashMap::new(),
             selected_path: Vec::new(),
-            projects: Vec::new(),
-            selected_project: None,
             _fetch_tags,
             _fetch_children: None,
         }
     }
 
-    /// Fill the Projects section once the background repo scan finishes.
-    pub fn set_projects(&mut self, projects: Vec<Project>, cx: &mut Context<Self>) {
-        self.projects = projects;
-        cx.notify();
+    /// Re-fetch the tag tree after a new tag was created elsewhere (e.g. the
+    /// project picker modal).
+    pub fn refresh_tags(&mut self, cx: &mut Context<Self>) {
+        let fetch_task = self.store.list_top_level_tags(cx);
+        self._fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
+            Ok(tags) => {
+                this.update(cx, |this, cx| {
+                    this.top_level_tags = tags;
+                    this.children_cache.clear();
+                    this._fetch_tags = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to refresh tags: {e}");
+            }
+        }));
     }
 
     fn navigate_to_tag(
@@ -118,7 +126,7 @@ impl NavBar {
         cx.notify();
     }
 
-    fn collect_visible_tags(&self) -> Vec<(String, u64, usize, bool, Vec<String>)> {
+    fn collect_visible_tags(&self) -> Vec<(String, String, u64, usize, bool, Vec<String>)> {
         let mut result = Vec::new();
 
         fn walk(
@@ -127,13 +135,20 @@ impl NavBar {
             ancestors: &[String],
             selected_path: &[String],
             children_cache: &HashMap<u64, Vec<Tag>>,
-            result: &mut Vec<(String, u64, usize, bool, Vec<String>)>,
+            result: &mut Vec<(String, String, u64, usize, bool, Vec<String>)>,
         ) {
             let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
             let has_children = !children.is_empty();
             let mut path = ancestors.to_vec();
             path.push(tag.name.clone());
-            result.push((tag.name.clone(), tag.id, depth, has_children, path.clone()));
+            result.push((
+                tag.name.clone(),
+                tag_label(tag),
+                tag.id,
+                depth,
+                has_children,
+                path.clone(),
+            ));
 
             let is_on_path = selected_path.iter().any(|p| p == &tag.name);
             if is_on_path {
@@ -165,6 +180,15 @@ impl NavBar {
     }
 }
 
+/// The user-facing label of a tag: the display name when set (project
+/// tags), otherwise the plain name.
+fn tag_label(tag: &Tag) -> String {
+    tag.display_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| tag.name.clone())
+}
+
 impl EventEmitter<NavBarEvent> for NavBar {}
 
 impl Render for NavBar {
@@ -181,48 +205,33 @@ impl Render for NavBar {
             .p_4()
             .v_flex()
             .gap_2()
-            // The Projects + Tags sections can exceed the viewport height
-            // (long repo lists, deep tag trees), so make the nav scrollable.
+            // Deep tag trees can exceed the viewport height, so make the nav
+            // scrollable.
             .overflow_y_scrollbar()
             .child(
                 div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(0xa3a3a3))
+                    .h_flex()
+                    .items_center()
+                    .justify_between()
                     .mb_2()
                     .mt_4()
-                    .child("Projects"),
-            )
-            .children(self.projects.iter().enumerate().map(|(project_index, project)| {
-                let project_for_click = project.clone();
-                let is_selected = self.selected_project.as_deref() == Some(project.name.as_str());
-
-                div()
-                    .id(gpui::ElementId::named_usize("project", project_index))
-                    .child(project.name.clone())
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .bg(if is_selected {
-                        rgb(0x2a2a2a)
-                    } else {
-                        rgb(0x1e1e1e)
-                    })
-                    .hover(|s| s.bg(rgb(0x2a2a2a)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_project = Some(project_for_click.name.clone());
-                        cx.emit(NavBarEvent::ProjectSelected(project_for_click.clone()));
-                        cx.notify();
-                    }))
-            }))
-            .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(0xa3a3a3))
-                    .mb_2()
-                    .mt_4()
-                    .child("Tags"),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xa3a3a3))
+                            .child("Tags"),
+                    )
+                    .child(
+                        Button::new("add-project-tag")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Plus)
+                            .tooltip("Tag a local project")
+                            .on_click(cx.listener(|_this, _, _, cx| {
+                                cx.emit(NavBarEvent::OpenProjectPicker);
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -244,7 +253,7 @@ impl Render for NavBar {
                     })),
             )
             .children(visible_tags.into_iter().map(
-                |(tag_name, tag_id, depth, _has_children, path)| {
+                |(tag_name, tag_label, tag_id, depth, _has_children, path)| {
                     let tag_for_click = tag_name.clone();
                     let path_for_click = path;
                     let is_selected = selected_tag.as_deref() == Some(&tag_name);
@@ -257,7 +266,7 @@ impl Render for NavBar {
                             div()
                                 .id(("tag", tag_id))
                                 .flex_1()
-                                .child(tag_name)
+                                .child(tag_label)
                                 .px_2()
                                 .py_0p5()
                                 .rounded_md()

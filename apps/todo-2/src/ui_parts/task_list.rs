@@ -82,9 +82,9 @@ impl TaskListView {
                     });
                     this._fetch_tasks = Some(fetch);
                 }
-                NavBarEvent::ProjectSelected(_) => {
-                    // Project clicks fill the details pane (handled by the
-                    // Layout); the task list is unaffected.
+                NavBarEvent::OpenProjectPicker => {
+                    // Picker open is handled by the Layout; the task list is
+                    // unaffected.
                 }
             });
 

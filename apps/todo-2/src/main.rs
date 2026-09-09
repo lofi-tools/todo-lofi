@@ -1,8 +1,8 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, WindowOptions, div, px, rgb,
+    AppContext, AsyncApp, Context, Entity, Focusable, IntoElement, ParentElement, Render,
+    Styled, Subscription, Window, WindowOptions, div, px, rgb,
 };
-use gpui_component::StyledExt;
+use gpui_component::WindowExt;
 use gpui_component::input::*;
 use gpui_component::{Theme, ThemeMode};
 use storage::prelude::*;
@@ -11,7 +11,8 @@ use tracing_subscriber::prelude::*;
 
 use projects::Project;
 use store::Store;
-use ui_parts::navbar::NavBar;
+use ui_parts::navbar::{NavBar, NavBarEvent};
+use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_list::TaskListView;
 
 mod components;
@@ -19,6 +20,7 @@ mod projects;
 mod store;
 mod ui_parts {
     pub mod navbar;
+    pub mod project_picker;
     pub mod task_list;
     pub mod task_row;
 }
@@ -26,18 +28,21 @@ mod ui_parts {
 struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
-    /// Repos found in the home directory scan, kept here so the details pane
-    /// can look one up when a nav row is clicked.
+    store: Store,
+    /// Repos found by the home-directory scan, shown in the project picker
+    /// modal opened by the + button.
     _projects: Vec<Project>,
-    /// Rendered details-pane content for the selected project, if any.
-    project_details: Option<String>,
     _project_subscription: Subscription,
+    /// Subscription to the open project-picker modal, if one is open.
+    _picker_subscription: Option<Subscription>,
 }
 
 impl Layout {
     fn new(input: Entity<InputState>, store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));        // Kick off the home-directory repo scan in the background; the nav
-        // bar fills in its Projects section when it lands.
+        let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+
+        // Kick off the home-directory repo scan in the background; the nav
+        // repo list for the picker modal when it lands.
         let scan = projects::scan(cx);
         cx.spawn(async move |this, cx| {
             let projects = match scan.await {
@@ -48,8 +53,6 @@ impl Layout {
                 }
             };
             this.update(cx, |this, cx| {
-                this.nav_bar
-                    .update(cx, |nav, cx| nav.set_projects(projects.clone(), cx));
                 this._projects = projects;
                 cx.notify();
             })
@@ -57,29 +60,42 @@ impl Layout {
         })
         .detach();
 
-        // Clicking a project row in the nav bar fetches its details (branch,
-        // dirty-file count) and shows them in the right-hand pane.
+        // The + button opens the project-picker modal; picking one creates
+        // the folder's tag.
         let project_subscription = cx.subscribe_in(
             &nav_bar,
             window,
-            |_this, _nav, event, _window, cx| {
-                if let ui_parts::navbar::NavBarEvent::ProjectSelected(project) = event {
-                    let describe = project.describe(cx);
-                    cx.spawn(async move |this, cx| {
-                        let details = match describe.await {
-                            Ok(details) => details,
-                            Err(e) => {
-                                tracing::error!("Failed to describe project: {e}");
-                                return;
+            |this, _nav, event, window, cx| match event {
+                NavBarEvent::TagSelected(_) | NavBarEvent::AllTasks => {
+                    // Tag navigation is handled by the TaskListView's own
+                    // subscription.
+                }
+                NavBarEvent::OpenProjectPicker => {
+                    let projects = this._projects.clone();
+                    let picker = cx.new(|cx| ProjectPicker::new(projects, window, cx));
+                    let focus = picker.focus_handle(cx);
+                    window.on_next_frame(move |window, cx| focus.focus(window, cx));
+                    // Subscribe before opening the dialog so the very first
+                    // selection is not missed.
+                    this._picker_subscription = Some(cx.subscribe_in(
+                        &picker,
+                        window,
+                        |this, _picker, event, window, cx| match event {
+                            ProjectPickerEvent::Selected(project) => {
+                                this.handle_pick_project(project.clone(), window, cx);
                             }
-                        };
-                        this.update(cx, |this, cx| {
-                            this.project_details = Some(details);
-                            cx.notify();
+                            ProjectPickerEvent::Dismissed => {
+                                window.close_dialog(cx);
+                            }
+                        },
+                    ));
+                    let picker_for_dialog = picker.clone();
+                    window.open_dialog(cx, move |dialog, _, _| {
+                        let picker = picker_for_dialog.clone();
+                        dialog.title("Tag a project").content(move |content, _, _| {
+                            content.child(picker.clone())
                         })
-                        .ok();
-                    })
-                    .detach();
+                    });
                 }
             },
         );
@@ -88,58 +104,69 @@ impl Layout {
         Self {
             task_list,
             nav_bar,
+            store: store.clone(),
             _projects: Vec::new(),
-            project_details: None,
             _project_subscription: project_subscription,
+            _picker_subscription: None,
         }
+    }
+
+    fn handle_pick_project(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_dialog(cx);
+        self._picker_subscription = None;
+        let create = project.tag(&self.store, cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = create.await {
+                tracing::error!("Failed to create project tag: {e}");
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 
 impl Render for Layout {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The gpui-component Root only paints its main view; overlays like
+        // dialogs must be layered on top by the app (same composition as
+        // gpui-component's story app).
+        let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
+
         div()
-            .flex()
-            .flex_row()
+            .relative()
             .size_full()
-            .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
             .child(
                 div()
-                    .flex_1()
                     .flex()
                     .flex_row()
-                    .child(div().flex_1().child(self.task_list.clone()))
+                    .size_full()
+                    .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(
                         div()
                             .flex_1()
-                            .p_8()
-                            .v_flex()
-                            .gap_1()
-                            .child(match &self.project_details {
-                                Some(details) => div().v_flex().gap_1().children(
-                                    details
-                                        .lines()
-                                        .map(|line| {
-                                            div().text_color(rgb(0xe5e5e5)).child(line.to_string())
-                                        })
-                                        .collect::<Vec<_>>(),
-                                ),
-                                None => div()
-                                    .text_color(rgb(0x666666))
-                                    .child("Select a project to see details"),
-                            }),
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().child(self.task_list.clone()))
+                            .child(div().flex_1().child("Details")),
                     ),
             )
+            .children(dialog_layer)
     }
 }
 
 fn main() {
     init_logging();
 
-    let app = gpui_platform::application();
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
 
     app.run(move |cx| {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
+        ui_parts::project_picker::init(cx);
 
         let init_store = gpui_tokio::Tokio::spawn_result(cx, async move {
             let config = StorageConfig {
