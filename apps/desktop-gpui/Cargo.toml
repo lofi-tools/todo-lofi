@@ -20,14 +20,14 @@ uuid = { workspace = true, features = ["v4"] }
 
 
 # [dependencies] # UI
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+gpui = { package = "gpui-pre", version = "0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.4", features = [
   "font-kit",
 ] }
-gpui_tokio = { git = "https://github.com/zed-industries/zed" }
-gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui_tokio = { path = "../../libs/gpui-tokio" }
+gpui-component = "0.6.1"
 # # Optional, for default bundled assets
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.1" }
 # # gpui = { git = "https://github.com/zed-industries/gpui", features = ["test-support"] }
 # gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 # gpui = { version = "0.2.2" }

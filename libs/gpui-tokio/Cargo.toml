@@ -1,0 +1,12 @@
+[package]
+name = "gpui_tokio"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/gpui_tokio.rs"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "0.3.4" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+anyhow = "1"
