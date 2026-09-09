@@ -1189,11 +1189,11 @@ impl TaskDetails {
                                     }),
                                 ))
                                 .child(
-                                    relation_button("add-subtask", "+ subtasks")
+                                    relation_button("add-subtask", "+ subtask")
                                         .tooltip("Coming soon"),
                                 )
                                 .child(
-                                    relation_button("add-follow-up", "+ follow-up tasks")
+                                    relation_button("add-follow-up", "+ follow-up task")
                                         .tooltip("Coming soon"),
                                 ),
                         ),
