@@ -202,6 +202,33 @@ impl Store {
         })
     }
 
+    /// Create a follow-up task blocked by `blocked_by` (its blocker).
+    pub fn create_follow_up(
+        &self,
+        blocked_by: u64,
+        title: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Task>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.create_follow_up(blocked_by, title).await?)
+        })
+    }
+
+    /// Tasks blocked by `task_id` (the reverse of its blockers).
+    pub fn list_blocking_tasks(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_blocking_tasks(task_id).await?)
+        })
+    }
+
     pub fn list_after(
         &self,
         task_id: u64,

@@ -43,6 +43,8 @@ pub enum TaskDetailsEvent {
     TaskRefreshed(TaskWithMeta),
     /// A subtask was created; the task list reloads its current view.
     SubtaskCreated,
+    /// A follow-up task was created; the task list reloads its current view.
+    FollowUpCreated,
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -93,6 +95,13 @@ pub struct TaskDetails {
     /// link in the details view.
     parent: Option<storage::Task>,
     _parent_fetch: Option<gpui::Task<()>>,
+    /// True while the "+ follow-up task" button shows an inline title input.
+    adding_follow_up: bool,
+    follow_up_input: Option<Entity<InputState>>,
+    _follow_up_subscription: Option<Subscription>,
+    /// Tasks that this task blocks ("Linked to").
+    blocking: Vec<storage::Task>,
+    _blocking_fetch: Option<gpui::Task<()>>,
 }
 
 struct TimeEditInputs {
@@ -149,6 +158,11 @@ impl TaskDetails {
             _subtasks_fetch: None,
             parent: None,
             _parent_fetch: None,
+            adding_follow_up: false,
+            follow_up_input: None,
+            _follow_up_subscription: None,
+            blocking: Vec::new(),
+            _blocking_fetch: None,
         }
     }
 
@@ -161,16 +175,19 @@ impl TaskDetails {
         let fetch = self.store.list_blockers(task.id, cx);
         let after_fetch = self.store.list_after(task.id, cx);
         let subtasks_fetch = self.store.list_subtasks(task.id, cx);
+        let blocking_fetch = self.store.list_blocking_tasks(task.id, cx);
         self.selected = Some(task);
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
         self.subtasks = Vec::new();
+        self.blocking = Vec::new();
         self.parent = None;
         self.link_error = None;
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_time_edit();
         self.abandon_subtask();
+        self.abandon_follow_up();
         self._blockers_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
             Ok(blockers) => {
                 this.update(cx, |this, cx| {
@@ -230,6 +247,21 @@ impl TaskDetails {
                 }
             }));
         }
+        self._blocking_fetch = Some(cx.spawn(async move |this, cx| {
+            match blocking_fetch.await {
+                Ok(blocking) => {
+                    this.update(cx, |this, cx| {
+                        this.blocking = blocking;
+                        this._blocking_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch linked tasks: {e}");
+                }
+            }
+        }));
         cx.notify();
     }
 
@@ -322,6 +354,7 @@ impl TaskDetails {
         self.confirming = false;
         self.abandon_edits();
         self.abandon_subtask();
+        self.abandon_follow_up();
         self.close_blocker_picker();
         self.close_after_picker();
         match pending {
@@ -365,12 +398,14 @@ impl TaskDetails {
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
         self.subtasks = Vec::new();
+        self.blocking = Vec::new();
         self.parent = None;
         self.link_error = None;
         self.close_until_panel();
         self.close_blocker_picker();
         self.close_after_picker();
         self.abandon_subtask();
+        self.abandon_follow_up();
         self.cancel_editing(cx);
         cx.notify();
     }
@@ -617,6 +652,7 @@ impl TaskDetails {
             self.cancel_subtask(cx);
             return;
         }
+        self.abandon_follow_up();
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("Subtask title...", window, cx);
@@ -681,6 +717,141 @@ impl TaskDetails {
         }
         self.abandon_subtask();
         cx.notify();
+    }
+
+    /// Drop the inline follow-up input without notifying (callers that
+    /// clear state on selection change notify themselves).
+    fn abandon_follow_up(&mut self) {
+        self.adding_follow_up = false;
+        self.follow_up_input = None;
+        self._follow_up_subscription = None;
+    }
+
+    pub fn adding_follow_up(&self) -> bool {
+        self.adding_follow_up
+    }
+
+    /// Toggle the inline follow-up input: clicking the button while already
+    /// adding cancels, otherwise an autofocused title input appears below
+    /// the relationship buttons.
+    fn begin_follow_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            return;
+        }
+        if self.adding_follow_up {
+            self.cancel_follow_up(cx);
+            return;
+        }
+        self.abandon_subtask();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Follow-up title...", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_follow_up(cx);
+            }
+        });
+        let focus_input = input.clone();
+        self.follow_up_input = Some(input);
+        self._follow_up_subscription = Some(subscription);
+        self.adding_follow_up = true;
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            focus_input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_follow_up(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.follow_up_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let blocked_by = task.id;
+        let title = input.read(cx).text().to_string();
+        let title = title.trim().to_string();
+        self.abandon_follow_up();
+        if title.is_empty() {
+            cx.notify();
+            return;
+        }
+        let create = self.store.create_follow_up(blocked_by, title, cx);
+        cx.spawn(async move |this, cx| match create.await {
+            Ok(_created) => {
+                this.update(cx, |this, cx| {
+                    this.link_error = None;
+                    this.refresh_blocking(cx);
+                    cx.emit(TaskDetailsEvent::FollowUpCreated);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to create follow-up task: {e}");
+                this.update(cx, |this, cx| {
+                    this.link_error = Some(format!("Couldn't create follow-up: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn cancel_follow_up(&mut self, cx: &mut Context<Self>) {
+        if !self.adding_follow_up {
+            return;
+        }
+        self.abandon_follow_up();
+        cx.notify();
+    }
+
+    /// Reload the tasks this task blocks ("Linked to"), e.g. right after a
+    /// follow-up task was created.
+    fn refresh_blocking(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let fetch = self.store.list_blocking_tasks(task_id, cx);
+        self._blocking_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(blocking) => {
+                this.update(cx, |this, cx| {
+                    this.blocking = blocking;
+                    this._blocking_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch linked tasks: {e}");
+            }
+        }));
+    }
+
+    /// Remove the blocker link so `linked_id` is no longer blocked by the
+    /// selected task.
+    fn remove_linked(&mut self, linked_id: u64, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let remove = self.store.remove_blocker(linked_id, task.id, cx);
+        cx.spawn(async move |this, cx| match remove.await {
+            Ok(_) => {
+                this.update(cx, |this, cx| {
+                    this.refresh_blocking(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to unlink task: {e}");
+            }
+        })
+        .detach();
     }
 
     fn close_until_panel(&mut self) {
@@ -1174,6 +1345,11 @@ impl TaskDetails {
         {
             lists = lists.child(div().ml_2().child(Input::new(&input)));
         }
+        if self.adding_follow_up
+            && let Some(input) = self.follow_up_input.clone()
+        {
+            lists = lists.child(div().ml_2().child(Input::new(&input)));
+        }
 
         if self.computed_blocked() {
             lists = lists.child(
@@ -1291,6 +1467,61 @@ impl TaskDetails {
             .collect::<Vec<_>>();
         if !after_rows.is_empty() {
             lists = lists.child(div().v_flex().gap_1().ml_2().children(after_rows));
+        }
+
+        if !self.blocking.is_empty() {
+            lists = lists.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Linked to"),
+            );
+        }
+        let linked_rows = self
+            .blocking
+            .clone()
+            .into_iter()
+            .map(|linked| {
+                let linked_id = linked.id;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("linked-title", linked_id))
+                            .flex_1()
+                            .text_sm()
+                            .text_color(if linked.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xe5e5e5)
+                            })
+                            .child(linked.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: linked_id });
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if linked.done { "done" } else { "" }.to_string()),
+                    )
+                    .child(
+                        Button::new(("remove-linked", linked_id))
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Unlink task")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_linked(linked_id, cx);
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        if !linked_rows.is_empty() {
+            lists = lists.child(div().v_flex().gap_1().ml_2().children(linked_rows));
         }
 
         // Subtasks live inside the lists so they paint before (under) the
@@ -1421,8 +1652,11 @@ impl TaskDetails {
                                     ),
                                 )
                                 .child(
-                                    relation_button("add-follow-up", "+ follow-up task")
-                                        .tooltip("Coming soon"),
+                                    relation_button("add-follow-up", "+ follow-up task").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.begin_follow_up(window, cx);
+                                        }),
+                                    ),
                                 ),
                         ),
                 )

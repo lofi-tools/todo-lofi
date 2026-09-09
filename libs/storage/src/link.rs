@@ -196,6 +196,42 @@ impl TodoStore {
         Ok(tasks)
     }
 
+    /// Tasks that are blocked by `task_id` (the reverse of its blockers),
+    /// with full details, ordered by id. Used for the "linked to" list.
+    pub async fn list_blocking_tasks(&mut self, task_id: u64) -> QueryResult<Vec<crate::Task>> {
+        let rows = toasty::sql::query(
+            r#"SELECT task_id FROM task_links WHERE other_id = ?1 AND kind = 'blocked_by' ORDER BY task_id"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(task_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list tasks blocked by task",
+        })?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                if let Some(id) = record.first().and_then(|v| v.to_i64()) {
+                    tasks.push(self.get_task(id as u64).await?);
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Create a follow-up task that is blocked by `blocked_by`: the new
+    /// task cannot be worked on until `blocked_by` is done.
+    pub async fn create_follow_up(
+        &mut self,
+        blocked_by: u64,
+        title: String,
+    ) -> QueryResult<crate::Task> {
+        let task = self.create_task(crate::Task::create().title(title)).await?;
+        self.add_blocker(task.id, blocked_by).await?;
+        Ok(task)
+    }
+
     pub async fn add_after_link(&mut self, task_id: u64, other_id: u64) -> QueryResult<()> {
         self.add_link(task_id, other_id, LinkKind::After).await
     }
@@ -504,6 +540,32 @@ mod tests {
 
         // A task without children lists none.
         assert!(storage.list_subtasks(other.id).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_follow_up_blocked_by_parent_and_listed() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let parent = make_task(&mut storage, "parent").await;
+
+        let follow_up = storage
+            .create_follow_up(parent.id, "follow up".to_string())
+            .await?;
+
+        // The follow-up is blocked by the parent.
+        assert!(storage.is_task_blocked(follow_up.id, 1000).await?);
+        assert!(!storage.is_task_blocked(parent.id, 1000).await?);
+
+        // The parent's "linked to" list contains the follow-up.
+        let blocking = storage.list_blocking_tasks(parent.id).await?;
+        assert_eq!(
+            blocking.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![follow_up.id]
+        );
+
+        // Completing the parent unblocks the follow-up.
+        set_done(&mut storage, parent.id, true).await;
+        assert!(!storage.is_task_blocked(follow_up.id, 1000).await?);
         Ok(())
     }
 }
