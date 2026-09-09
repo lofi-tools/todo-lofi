@@ -21,6 +21,16 @@ pub struct Tag {
     pub display_name: Option<String>,
 }
 
+impl Tag {
+    /// User-facing label: display name when set, otherwise the plain name.
+    pub fn label(&self) -> String {
+        self.display_name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.name.clone())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TagNode {
     pub id: u64,
@@ -660,8 +670,8 @@ mod tests {
         let tasks = storage.list_tasks_by_tag(tag.id).await?;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, task.id);
-        assert_eq!(tasks[0].direct_tags, vec![tag.name.clone()]);
-        assert_eq!(tasks[0].inferred_tags, vec![tag.name]);
+        assert_eq!(tasks[0].direct_tags, vec![tag.label()]);
+        assert_eq!(tasks[0].inferred_tags, vec![tag.label()]);
 
         Ok(())
     }

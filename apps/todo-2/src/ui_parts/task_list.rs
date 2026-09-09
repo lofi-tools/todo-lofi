@@ -16,6 +16,7 @@ pub struct TaskListView {
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
+    selected_labels: Vec<String>,
     input_needs_clear: bool,
     _fetch_tasks: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
@@ -47,17 +48,22 @@ impl TaskListView {
                 NavBarEvent::TagSelected(path) => {
                     this.selected_path = path.clone();
                     let last = path.last().cloned().unwrap_or_default();
+                    let path_for_labels = path.clone();
                     let store = nav_store.clone();
                     let fetch = cx.spawn(async move |this, cx| {
-                        let tasks = match store.list_tasks_by_tag_name(&last, cx).await {
-                            Ok(tasks) => tasks,
+                        let (tasks, labels) = match store
+                            .list_tasks_by_tag_name_with_labels(&last, &path_for_labels, cx)
+                            .await
+                        {
+                            Ok(result) => result,
                             Err(e) => {
                                 tracing::error!("Failed to fetch tasks by tag: {e}");
                                 return;
                             }
                         };
                         this.update(cx, |this, cx| {
-                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), cx);
+                            this.selected_labels = labels;
+                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -67,6 +73,7 @@ impl TaskListView {
                 }
                 NavBarEvent::AllTasks => {
                     this.selected_path.clear();
+                    this.selected_labels.clear();
                     let store = nav_store.clone();
                     let fetch = cx.spawn(async move |this, cx| {
                         let tasks = {
@@ -74,7 +81,7 @@ impl TaskListView {
                             s.list_tasks_by_priority().await.unwrap_or_default()
                         };
                         this.update(cx, |this, cx| {
-                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), cx);
+                            this.set_tasks_with_path(tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
                             this._fetch_tasks = None;
                             cx.notify();
                         })
@@ -93,6 +100,7 @@ impl TaskListView {
             input,
             store,
             selected_path: Vec::new(),
+            selected_labels: Vec::new(),
             input_needs_clear: false,
             _fetch_tasks: None,
             _input_subscription: input_subscription,
@@ -117,7 +125,7 @@ impl TaskListView {
                 }
             };
             this.update(cx, |this, cx| {
-                this.set_tasks_with_path(new_tasks, &this.selected_path.clone(), cx);
+                this.set_tasks_with_path(new_tasks, &this.selected_path.clone(), &this.selected_labels.clone(), cx);
                 this.input_needs_clear = true;
                 cx.notify();
             })
@@ -129,18 +137,27 @@ impl TaskListView {
         &mut self,
         tasks: Vec<TaskWithMeta>,
         selected_path: &[String],
+        selected_labels: &[String],
         cx: &mut Context<Self>,
     ) {
         self.task_views = tasks
             .into_iter()
             .map(|task| {
-                cx.new(|cx| TaskRow::new(task, self.store.clone(), selected_path.to_vec(), cx))
+                cx.new(|cx| {
+                    TaskRow::new(
+                        task,
+                        self.store.clone(),
+                        selected_path.to_vec(),
+                        selected_labels.to_vec(),
+                        cx,
+                    )
+                })
             })
             .collect();
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskWithMeta>, cx: &mut Context<Self>) {
-        self.set_tasks_with_path(tasks, &self.selected_path.clone(), cx);
+        self.set_tasks_with_path(tasks, &self.selected_path.clone(), &self.selected_labels.clone(), cx);
     }
 }
 

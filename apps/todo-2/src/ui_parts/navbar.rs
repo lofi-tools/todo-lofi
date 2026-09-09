@@ -183,10 +183,7 @@ impl NavBar {
 /// The user-facing label of a tag: the display name when set (project
 /// tags), otherwise the plain name.
 fn tag_label(tag: &Tag) -> String {
-    tag.display_name
-        .clone()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| tag.name.clone())
+    tag.label()
 }
 
 impl EventEmitter<NavBarEvent> for NavBar {}

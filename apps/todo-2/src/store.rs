@@ -78,6 +78,36 @@ impl Store {
         })
     }
 
+    pub fn list_tasks_by_tag_name_with_labels(
+        &self,
+        tag_name: &str,
+        path: &[String],
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
+        let store = self.0.clone();
+        let tag_name = tag_name.to_string();
+        let path = path.to_vec();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let tag_id = s
+                .get_tag_by_name(&tag_name)
+                .await?
+                .map(|t| t.id)
+                .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
+            let tasks = s.list_tasks_by_tag(tag_id).await?;
+            let mut labels = Vec::with_capacity(path.len());
+            for name in &path {
+                let label = s
+                    .get_tag_by_name(name)
+                    .await?
+                    .map(|t| t.label())
+                    .unwrap_or_else(|| name.clone());
+                labels.push(label);
+            }
+            Ok((tasks, labels))
+        })
+    }
+
     pub fn list_tasks_by_tag_name(
         &self,
         tag_name: &str,

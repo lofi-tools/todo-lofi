@@ -317,13 +317,13 @@ impl TodoStore {
 
     pub async fn load_direct_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         let tags = self.get_direct_task_tags(task.id).await?;
-        task.direct_tags = tags.into_iter().map(|t| t.name).collect();
+        task.direct_tags = tags.iter().map(|t| t.label()).collect();
         Ok(())
     }
 
     pub async fn load_inferred_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         let tags = self.get_inferred_task_tags(task.id).await?;
-        task.inferred_tags = tags.into_iter().map(|t| t.name).collect();
+        task.inferred_tags = tags.iter().map(|t| t.label()).collect();
         Ok(())
     }
 

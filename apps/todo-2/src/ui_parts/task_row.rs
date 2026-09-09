@@ -13,6 +13,7 @@ pub struct TaskRow {
     task: TaskWithMeta,
     store: Store,
     selected_path: Vec<String>,
+    selected_labels: Vec<String>,
 }
 
 impl TaskRow {
@@ -20,12 +21,14 @@ impl TaskRow {
         task: TaskWithMeta,
         store: Store,
         selected_path: Vec<String>,
+        selected_labels: Vec<String>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
             task,
             store,
             selected_path,
+            selected_labels,
         }
     }
 }
@@ -41,7 +44,7 @@ impl Render for TaskRow {
             .task
             .inferred_tags
             .iter()
-            .filter(|t| !self.selected_path.contains(t))
+            .filter(|t| !self.selected_path.contains(t) && !self.selected_labels.contains(t))
             .cloned()
             .collect();
 
