@@ -158,6 +158,58 @@ impl Store {
         })
     }
 
+    pub fn list_after(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_after_tasks(task_id).await?)
+        })
+    }
+
+    pub fn after_candidates(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.after_candidates(task_id).await?)
+        })
+    }
+
+    pub fn add_after(
+        &self,
+        task_id: u64,
+        after_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.add_after_link(task_id, after_id).await?;
+            Ok(s.list_after_tasks(task_id).await?)
+        })
+    }
+
+    pub fn remove_after(
+        &self,
+        task_id: u64,
+        after_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.remove_after_link(task_id, after_id).await?;
+            Ok(s.list_after_tasks(task_id).await?)
+        })
+    }
+
     pub fn set_blocked_until(
         &self,
         task_id: u64,

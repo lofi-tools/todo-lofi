@@ -3,9 +3,9 @@ use gpui::{
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
+use gpui_component::Disableable;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
-use gpui_component::Disableable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
@@ -24,11 +24,21 @@ const OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration = std::time::Duration::fr
 
 #[derive(Clone)]
 pub enum TaskDetailsEvent {
-    Toggled { task_id: u64, done: bool },
-    TitleCommitted { task_id: u64, title: String },
-    PendingConfirmed { selected: Option<TaskWithMeta> },
+    Toggled {
+        task_id: u64,
+        done: bool,
+    },
+    TitleCommitted {
+        task_id: u64,
+        title: String,
+    },
+    PendingConfirmed {
+        selected: Option<TaskWithMeta>,
+    },
     PendingCancelled,
-    SelectTask { task_id: u64 },
+    SelectTask {
+        task_id: u64,
+    },
     /// Fresh DB state after a write, for syncing the task list row.
     TaskRefreshed(TaskWithMeta),
 }
@@ -62,6 +72,15 @@ pub struct TaskDetails {
     _blocker_picker_subscription: Option<Subscription>,
     /// Same as `until_outside_closed_at`, for the blocker picker card.
     blocker_outside_closed_at: Option<std::time::Instant>,
+    after_tasks: Vec<storage::Task>,
+    _after_fetch: Option<gpui::Task<()>>,
+    after_picker: Option<Entity<TaskPicker>>,
+    _after_picker_subscription: Option<Subscription>,
+    /// Same as `blocker_outside_closed_at`, for the after-task picker card.
+    after_outside_closed_at: Option<std::time::Instant>,
+    /// Inline message when a relationship write fails, e.g. adding a link
+    /// that would close a dependency cycle.
+    link_error: Option<String>,
 }
 
 struct TimeEditInputs {
@@ -105,6 +124,12 @@ impl TaskDetails {
             blocker_picker: None,
             _blocker_picker_subscription: None,
             blocker_outside_closed_at: None,
+            after_tasks: Vec::new(),
+            _after_fetch: None,
+            after_picker: None,
+            _after_picker_subscription: None,
+            after_outside_closed_at: None,
+            link_error: None,
         }
     }
 
@@ -114,23 +139,38 @@ impl TaskDetails {
 
     fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         let fetch = self.store.list_blockers(task.id, cx);
+        let after_fetch = self.store.list_after(task.id, cx);
         self.selected = Some(task);
         self.blockers = Vec::new();
+        self.after_tasks = Vec::new();
+        self.link_error = None;
         self.close_blocker_picker();
+        self.close_after_picker();
         self.close_time_edit();
-        self._blockers_fetch = Some(cx.spawn(async move |this, cx| {
-            match fetch.await {
-                Ok(blockers) => {
-                    this.update(cx, |this, cx| {
-                        this.blockers = blockers;
-                        this._blockers_fetch = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(e) => {
-                    tracing::error!("Failed to fetch blockers: {e}");
-                }
+        self._blockers_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(blockers) => {
+                this.update(cx, |this, cx| {
+                    this.blockers = blockers;
+                    this._blockers_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch blockers: {e}");
+            }
+        }));
+        self._after_fetch = Some(cx.spawn(async move |this, cx| match after_fetch.await {
+            Ok(after_tasks) => {
+                this.update(cx, |this, cx| {
+                    this.after_tasks = after_tasks;
+                    this._after_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch after tasks: {e}");
             }
         }));
         cx.notify();
@@ -138,6 +178,11 @@ impl TaskDetails {
 
     pub fn set_blockers(&mut self, blockers: Vec<storage::Task>, cx: &mut Context<Self>) {
         self.blockers = blockers;
+        cx.notify();
+    }
+
+    pub fn set_after_tasks(&mut self, after_tasks: Vec<storage::Task>, cx: &mut Context<Self>) {
+        self.after_tasks = after_tasks;
         cx.notify();
     }
 
@@ -198,6 +243,7 @@ impl TaskDetails {
         self.confirming = false;
         self.abandon_edits();
         self.close_blocker_picker();
+        self.close_after_picker();
         match pending {
             Some(task) => self.apply_selected(task, cx),
             None => self.clear(cx),
@@ -222,7 +268,11 @@ impl TaskDetails {
     }
 
     pub fn update_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
-        if self.selected.as_ref().is_some_and(|task| task.id == task_id) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|task| task.id == task_id)
+        {
             if let Some(selected) = &mut self.selected {
                 selected.task.title = title;
             }
@@ -233,8 +283,11 @@ impl TaskDetails {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         self.blockers = Vec::new();
+        self.after_tasks = Vec::new();
+        self.link_error = None;
         self.close_until_panel();
         self.close_blocker_picker();
+        self.close_after_picker();
         self.cancel_editing(cx);
         cx.notify();
     }
@@ -283,11 +336,7 @@ impl TaskDetails {
         let Some(edit) = self.time_edit.clone() else {
             return;
         };
-        let Some(until) = self
-            .selected
-            .as_ref()
-            .and_then(|task| task.blocked_until)
-        else {
+        let Some(until) = self.selected.as_ref().and_then(|task| task.blocked_until) else {
             return;
         };
         let parse_cell = |entity: &Entity<InputState>, cx: &App| {
@@ -491,7 +540,9 @@ impl TaskDetails {
             return;
         }
         self.blocker_outside_closed_at = None;
+        self.after_outside_closed_at = None;
         self.close_blocker_picker();
+        self.close_after_picker();
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
             DateTimePickerEvent::Committed(until) => {
@@ -533,7 +584,9 @@ impl TaskDetails {
             return;
         };
         self.until_outside_closed_at = None;
+        self.after_outside_closed_at = None;
         self.close_until_panel();
+        self.close_after_picker();
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
             TaskPickerEvent::Selected(blocker_id) => {
@@ -576,6 +629,95 @@ impl TaskDetails {
             };
             this.update(cx, |this, cx| {
                 if let Some(picker) = this.blocker_picker.clone() {
+                    picker.update(cx, |picker, cx| picker.set_tasks(tasks, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn close_after_picker(&mut self) {
+        self.after_picker = None;
+        self._after_picker_subscription = None;
+    }
+
+    pub fn close_after_picker_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.close_after_picker();
+        cx.notify();
+    }
+
+    pub fn after_picker_open(&self) -> bool {
+        self.after_picker.is_some()
+    }
+
+    /// True when the picker was closed by an outside mousedown within the
+    /// ignore window, consuming the marker so only that closing click is
+    /// swallowed.
+    fn take_recent_after_outside_close(&mut self) -> bool {
+        let Some(closed_at) = self.after_outside_closed_at.take() else {
+            return false;
+        };
+        closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
+    }
+
+    fn open_after_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        self.until_outside_closed_at = None;
+        self.blocker_outside_closed_at = None;
+        self.close_until_panel();
+        self.close_blocker_picker();
+        self.link_error = None;
+        let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
+        let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
+            TaskPickerEvent::Selected(after_id) => {
+                this.close_after_picker();
+                let add = this.store.add_after(task_id, *after_id, cx);
+                cx.spawn(async move |this, cx| match add.await {
+                    Ok(after_tasks) => {
+                        this.update(cx, |this, cx| {
+                            this.link_error = None;
+                            this.set_after_tasks(after_tasks, cx);
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to add after link: {e}");
+                        this.update(cx, |this, cx| {
+                            this.link_error = Some(format!("Couldn't add task: {e}"));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
+            TaskPickerEvent::Dismissed => {
+                this.close_after_picker();
+                cx.notify();
+            }
+        });
+        self.after_picker = Some(picker.clone());
+        self._after_picker_subscription = Some(subscription);
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.focus_filter(window, cx);
+            });
+        });
+        let fetch = self.store.after_candidates(task_id, cx);
+        cx.spawn(async move |this, cx| {
+            let tasks = match fetch.await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::error!("Failed to fetch after candidates: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                if let Some(picker) = this.after_picker.clone() {
                     picker.update(cx, |picker, cx| picker.set_tasks(tasks, cx));
                 }
             })
@@ -642,7 +784,7 @@ impl TaskDetails {
         if let Some(picker) = self.until_picker.clone() {
             div()
                 .absolute()
-                .top(px(30.))
+                .top(px(60.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -659,12 +801,11 @@ impl TaskDetails {
         }
     }
 
-
     fn blocker_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(picker) = self.blocker_picker.clone() {
             div()
                 .absolute()
-                .top(px(30.))
+                .top(px(60.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -676,6 +817,30 @@ impl TaskDetails {
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.blocker_outside_closed_at = Some(std::time::Instant::now());
                     this.close_blocker_picker_and_notify(cx);
+                }))
+                .child(picker)
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+
+    fn after_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.after_picker.clone() {
+            div()
+                .absolute()
+                .top(px(60.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(rgb(CARD_BG))
+                .border_1()
+                .border_color(rgb(HAIRLINE))
+                .rounded_md()
+                .px_3()
+                .py_2()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.after_outside_closed_at = Some(std::time::Instant::now());
+                    this.close_after_picker_and_notify(cx);
                 }))
                 .child(picker)
                 .into_any_element()
@@ -698,6 +863,25 @@ impl TaskDetails {
             }
             Err(e) => {
                 tracing::error!("Failed to remove blocker: {e}");
+            }
+        })
+        .detach();
+    }
+
+    fn remove_after(&mut self, after_id: u64, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let remove = self.store.remove_after(task.id, after_id, cx);
+        cx.spawn(async move |this, cx| match remove.await {
+            Ok(after_tasks) => {
+                this.update(cx, |this, cx| {
+                    this.set_after_tasks(after_tasks, cx);
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to remove after link: {e}");
             }
         })
         .detach();
@@ -731,10 +915,8 @@ impl TaskDetails {
                     });
                     (input, subscription)
                 };
-                let (hour_input, hour_sub) =
-                    make_cell(format!("{hour:02}"), window, cx);
-                let (minute_input, minute_sub) =
-                    make_cell(format!("{minute:02}"), window, cx);
+                let (hour_input, hour_sub) = make_cell(format!("{hour:02}"), window, cx);
+                let (minute_input, minute_sub) = make_cell(format!("{minute:02}"), window, cx);
                 self.time_edit = Some(TimeEditInputs {
                     hour: hour_input.clone(),
                     minute: minute_input,
@@ -752,13 +934,17 @@ impl TaskDetails {
                     .h_flex()
                     .items_center()
                     .gap_1()
-                    .child(div().w(px(30.)).child(
-                        Input::new(&edit.hour).small().appearance(false),
-                    ))
+                    .child(
+                        div()
+                            .w(px(30.))
+                            .child(Input::new(&edit.hour).small().appearance(false)),
+                    )
                     .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(":"))
-                    .child(div().w(px(30.)).child(
-                        Input::new(&edit.minute).small().appearance(false),
-                    ))
+                    .child(
+                        div()
+                            .w(px(30.))
+                            .child(Input::new(&edit.minute).small().appearance(false)),
+                    )
             });
             div()
                 .h_flex()
@@ -791,20 +977,25 @@ impl TaskDetails {
         }
     }
 
-    fn relationships_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn relationships_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut section = div().v_flex().gap_2().mt_2().child(
             div()
                 .text_base()
                 .font_bold()
                 .underline()
                 .text_color(rgb(0xe5e5e5))
-                .child("Relationships"),
+                .child("Linked to"),
         );
 
         // Overlay zone: the lists paint first, then the buttons row and the
         // picker cards on top, so open cards always cover (and receive hits
-        // before) the content underneath.
-        let mut lists = div().v_flex().gap_2().pt(px(38.));
+        // before) the content underneath. The two-line button row is 56px
+        // tall, so the lists start below it and cards float just under it.
+        let mut lists = div().v_flex().gap_2().pt(px(64.));
 
         if self.computed_blocked() {
             lists = lists.child(
@@ -837,7 +1028,9 @@ impl TaskDetails {
                             })
                             .child(blocker.title.clone())
                             .on_click(cx.listener(move |_this, _, _, cx| {
-                                cx.emit(TaskDetailsEvent::SelectTask { task_id: blocker_id });
+                                cx.emit(TaskDetailsEvent::SelectTask {
+                                    task_id: blocker_id,
+                                });
                             })),
                     )
                     .child(
@@ -862,8 +1055,73 @@ impl TaskDetails {
             lists = lists.child(div().v_flex().gap_1().ml_2().children(blocker_rows));
         }
 
-        if self.selected.as_ref().and_then(|t| t.blocked_until).is_some() {
+        if self
+            .selected
+            .as_ref()
+            .and_then(|t| t.blocked_until)
+            .is_some()
+        {
             lists = lists.child(self.until_row(window, cx));
+        }
+
+        if !self.after_tasks.is_empty() {
+            lists = lists.child(div().text_xs().text_color(rgb(0xa3a3a3)).child("After"));
+        }
+
+        let after_rows = self
+            .after_tasks
+            .clone()
+            .into_iter()
+            .map(|after| {
+                let after_id = after.id;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("after-title", after_id))
+                            .flex_1()
+                            .text_sm()
+                            .text_color(if after.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xe5e5e5)
+                            })
+                            .child(after.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: after_id });
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if after.done { "done" } else { "" }.to_string()),
+                    )
+                    .child(
+                        Button::new(("remove-after", after_id))
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Remove after task")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_after(after_id, cx);
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        if !after_rows.is_empty() {
+            lists = lists.child(div().v_flex().gap_1().ml_2().children(after_rows));
+        }
+
+        if let Some(error) = &self.link_error {
+            lists = lists.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xff6b6b))
+                    .child(error.clone()),
+            );
         }
 
         section = section.child(
@@ -876,51 +1134,75 @@ impl TaskDetails {
                         .top(px(0.))
                         .left(px(0.))
                         .right(px(0.))
-                        .h(px(30.))
-                        .h_flex()
-                        .flex_wrap()
-                        .items_center()
+                        .v_flex()
                         .gap_2()
                         .child(
-                            relation_button("add-blocker", "+ blocked by task").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    if this.blocker_picker_open() {
-                                        this.close_blocker_picker_and_notify(cx);
-                                    } else if this.take_recent_blocker_outside_close() {
-                                        // The mousedown before this click already
-                                        // closed the picker; don't reopen it.
-                                    } else {
-                                        this.open_blocker_picker(window, cx);
-                                    }
-                                }),
-                            ),
+                            div()
+                                .h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    relation_button("add-blocker", "+ blocked by task").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            if this.blocker_picker_open() {
+                                                this.close_blocker_picker_and_notify(cx);
+                                            } else if this.take_recent_blocker_outside_close() {
+                                                // The mousedown before this click already
+                                                // closed the picker; don't reopen it.
+                                            } else {
+                                                this.open_blocker_picker(window, cx);
+                                            }
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    relation_button("add-blocked-until", "+ blocked until")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.until_panel_open() {
+                                                this.close_until_panel_and_notify(cx);
+                                            } else if this.take_recent_until_outside_close() {
+                                                // The mousedown before this click already
+                                                // closed the card; don't reopen it.
+                                            } else {
+                                                this.open_until_panel(window, cx);
+                                            }
+                                        })),
+                                ),
                         )
                         .child(
-                        relation_button("add-blocked-until", "+ blocked until").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                if this.until_panel_open() {
-                                    this.close_until_panel_and_notify(cx);
-                                } else if this.take_recent_until_outside_close() {
-                                    // The mousedown before this click already
-                                    // closed the card; don't reopen it.
-                                } else {
-                                    this.open_until_panel(window, cx);
-                                }
-                            }),
-                        ),
-                        )
-                        .child(
-                            relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
-                        )
-                        .child(
-                            relation_button("add-follow-up", "+ follow-up tasks")
-                                .tooltip("Coming soon"),
+                            div()
+                                .h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(relation_button("add-after", "+ after task").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        if this.after_picker_open() {
+                                            this.close_after_picker_and_notify(cx);
+                                        } else if this.take_recent_after_outside_close() {
+                                            // The mousedown before this click already
+                                            // closed the picker; don't reopen it.
+                                        } else {
+                                            this.open_after_picker(window, cx);
+                                        }
+                                    }),
+                                ))
+                                .child(
+                                    relation_button("add-subtask", "+ subtasks")
+                                        .tooltip("Coming soon"),
+                                )
+                                .child(
+                                    relation_button("add-follow-up", "+ follow-up tasks")
+                                        .tooltip("Coming soon"),
+                                ),
                         ),
                 )
                 .when(self.until_panel_open(), |this| {
                     this.child(self.until_card(cx))
                 })
-                .child(self.blocker_card(cx)),
+                .child(self.blocker_card(cx))
+                .child(self.after_card(cx)),
         );
 
         section
@@ -928,7 +1210,7 @@ impl TaskDetails {
 }
 
 /// Small transparent relationship button: gray text with a gray hairline
-/// outline, shared by the four buttons in the relationships section.
+/// outline, shared by the buttons in the relationships section.
 fn relation_button(id: &'static str, label: &str) -> Button {
     Button::new(id)
         .ghost()
@@ -991,17 +1273,12 @@ impl EventEmitter<TaskDetailsEvent> for TaskDetails {}
 impl Render for TaskDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
-            None => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x737373))
-                        .child("Select a task to see details"),
-                ),
+            None => div().flex_1().flex().items_center().justify_center().child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x737373))
+                    .child("Select a task to see details"),
+            ),
             Some(task) => {
                 let task_id = task.id;
                 let done = task.done;
@@ -1098,17 +1375,21 @@ impl Render for TaskDetails {
                 if self.editing_description {
                     if let Some(input) = self.description_input.clone() {
                         details = details.child(
-                            div().v_flex().gap_1().child(field_label("Description")).child(
-                                div().id(("details-description-edit", task_id)).child(
-                                    Input::new(&input)
-                                        .small()
-                                        .appearance(false)
-                                        .bg(rgb(APP_BG))
-                                        .border_1()
-                                        .border_color(rgb(HAIRLINE))
-                                        .rounded_md(),
+                            div()
+                                .v_flex()
+                                .gap_1()
+                                .child(field_label("Description"))
+                                .child(
+                                    div().id(("details-description-edit", task_id)).child(
+                                        Input::new(&input)
+                                            .small()
+                                            .appearance(false)
+                                            .bg(rgb(APP_BG))
+                                            .border_1()
+                                            .border_color(rgb(HAIRLINE))
+                                            .rounded_md(),
+                                    ),
                                 ),
-                            ),
                         );
                     }
                 } else if let Some(desc) = &task.description
@@ -1196,14 +1477,9 @@ impl Render for TaskDetails {
                                                 .text_color(rgb(0xe5e5e5))
                                                 .child("Discard unsaved changes?"),
                                         )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0xa3a3a3))
-                                                .child(
-                                                    "Your title and description edits will be lost.",
-                                                ),
-                                        ),
+                                        .child(div().text_xs().text_color(rgb(0xa3a3a3)).child(
+                                            "Your title and description edits will be lost.",
+                                        )),
                                 )
                                 .child(
                                     div()

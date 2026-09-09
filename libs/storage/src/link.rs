@@ -5,8 +5,9 @@
 //!   of its blockers is unfinished; finishing or reopening a blocker
 //!   unblocks or re-blocks dependants automatically because blocked state
 //!   is computed, never stored.
-//! - [`LinkKind::After`]: soft ordering hint ("do A after B"). Stored for
-//!   now; the ordering function that consumes it comes later.
+//! - [`LinkKind::After`]: soft ordering hint ("do A after B"). Managed
+//!   from the task details UI; the ordering function that consumes it
+//!   comes later.
 //!
 //! Links form a DAG per kind: adding a link that would close a cycle is
 //! rejected with [`crate::error::QueryErr::LinkCycle`].
@@ -183,16 +184,41 @@ impl TodoStore {
         self.linked_ids(task_id, LinkKind::After).await
     }
 
+    /// Tasks that must be done before `task_id` ("do this after those"),
+    /// with full details, ordered by id.
+    pub async fn list_after_tasks(&mut self, task_id: u64) -> QueryResult<Vec<crate::Task>> {
+        let ids = self.after_ids(task_id).await?;
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in ids {
+            tasks.push(self.get_task(id).await?);
+        }
+        Ok(tasks)
+    }
+
     /// Candidates that may become blockers of `task_id`: every task except
     /// itself, its current blockers, and tasks that would close a cycle.
-    /// Returns `(task, done)` pairs ordered by id.
     pub async fn blocker_candidates(
         &mut self,
         task_id: u64,
     ) -> QueryResult<Vec<crate::Task>> {
-        let current: HashSet<u64> = self.blocker_ids(task_id).await?.into_iter().collect();
+        self.link_candidates(task_id, LinkKind::BlockedBy).await
+    }
+
+    /// Candidates that may be linked "after" `task_id`: every task except
+    /// itself, its current after links, and tasks that would close a cycle.
+    pub async fn after_candidates(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Vec<crate::Task>> {
+        self.link_candidates(task_id, LinkKind::After).await
+    }
+
+    /// Candidates that may be linked from `task_id` with `kind`: every task
+    /// except itself, its current links, and tasks that would close a cycle.
+    async fn link_candidates(&mut self, task_id: u64, kind: LinkKind) -> QueryResult<Vec<crate::Task>> {
+        let current: HashSet<u64> = self.linked_ids(task_id, kind).await?.into_iter().collect();
         let tasks = self.list_tasks().await?;
-        let graph = self.link_graph(LinkKind::BlockedBy).await?;
+        let graph = self.link_graph(kind).await?;
         let mut out = Vec::new();
         for task in tasks {
             if task.id == task_id || current.contains(&task.id) {
@@ -369,6 +395,57 @@ mod tests {
         // Current blockers are excluded too.
         storage.add_blocker(third.id, first.id).await?;
         let candidates = storage.blocker_candidates(third.id).await?;
+        let ids: Vec<u64> = candidates.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![second.id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_after_links_multiple_and_cycles() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let first = make_task(&mut storage, "first").await;
+        let second = make_task(&mut storage, "second").await;
+        let third = make_task(&mut storage, "third").await;
+
+        // Multiple "after" links for one task are allowed.
+        storage.add_after_link(first.id, second.id).await?;
+        storage.add_after_link(first.id, third.id).await?;
+        let after = storage.after_ids(first.id).await?;
+        assert_eq!(after, vec![second.id, third.id]);
+        let after_tasks = storage.list_after_tasks(first.id).await?;
+        assert_eq!(
+            after_tasks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![second.id, third.id]
+        );
+
+        // Direct and transitive cycles, plus self-links, are rejected.
+        assert!(storage.add_after_link(second.id, first.id).await.is_err());
+        assert!(storage.add_after_link(third.id, first.id).await.is_err());
+        assert!(storage.add_after_link(first.id, first.id).await.is_err());
+
+        // Removing one link keeps the other.
+        storage.remove_after_link(first.id, second.id).await?;
+        let after = storage.after_ids(first.id).await?;
+        assert_eq!(after, vec![third.id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_after_candidates_exclude_cycles_and_current() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let first = make_task(&mut storage, "first").await;
+        let second = make_task(&mut storage, "second").await;
+        let third = make_task(&mut storage, "third").await;
+
+        storage.add_after_link(second.id, first.id).await?;
+        // For `first`: `second` would close a cycle, `first` is itself.
+        let candidates = storage.after_candidates(first.id).await?;
+        let ids: Vec<u64> = candidates.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![third.id]);
+
+        // Current after links are excluded too.
+        storage.add_after_link(third.id, first.id).await?;
+        let candidates = storage.after_candidates(third.id).await?;
         let ids: Vec<u64> = candidates.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![second.id]);
         Ok(())

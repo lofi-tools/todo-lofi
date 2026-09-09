@@ -200,6 +200,12 @@ impl Layout {
                         });
                         return;
                     }
+                    if layout.details.read(cx).after_picker_open() {
+                        layout.details.update(cx, |details, cx| {
+                            details.close_after_picker_and_notify(cx)
+                        });
+                        return;
+                    }
                     if layout.details.read(cx).until_panel_open() {
                         layout.details.update(cx, |details, cx| {
                             details.close_until_panel_and_notify(cx)
