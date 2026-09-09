@@ -1,5 +1,5 @@
 use gpui::{
-    AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
+    App, AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
@@ -23,8 +23,9 @@ pub enum TaskDetailsEvent {
     TitleCommitted { task_id: u64, title: String },
     PendingConfirmed { selected: Option<TaskWithMeta> },
     PendingCancelled,
-    /// A blocker row was clicked: navigate to that task.
     SelectTask { task_id: u64 },
+    /// Fresh DB state after a write, for syncing the task list row.
+    TaskRefreshed(TaskWithMeta),
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -46,8 +47,28 @@ pub struct TaskDetails {
     _blockers_fetch: Option<gpui::Task<()>>,
     until_picker: Option<Entity<DateTimePicker>>,
     _until_picker_subscription: Option<Subscription>,
+    time_edit: Option<TimeEditInputs>,
+    focus_time_edit: bool,
     blocker_picker: Option<Entity<TaskPicker>>,
     _blocker_picker_subscription: Option<Subscription>,
+}
+
+struct TimeEditInputs {
+    hour: Entity<InputState>,
+    minute: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Clone for TimeEditInputs {
+    fn clone(&self) -> Self {
+        // Clones are for rendering only; subscriptions stay owned by the
+        // original in `time_edit`.
+        Self {
+            hour: self.hour.clone(),
+            minute: self.minute.clone(),
+            _subscriptions: Vec::new(),
+        }
+    }
 }
 
 impl TaskDetails {
@@ -67,6 +88,8 @@ impl TaskDetails {
             _blockers_fetch: None,
             until_picker: None,
             _until_picker_subscription: None,
+            time_edit: None,
+            focus_time_edit: false,
             blocker_picker: None,
             _blocker_picker_subscription: None,
         }
@@ -81,6 +104,7 @@ impl TaskDetails {
         self.selected = Some(task);
         self.blockers = Vec::new();
         self.close_blocker_picker();
+        self.close_time_edit();
         self._blockers_fetch = Some(cx.spawn(async move |this, cx| {
             match fetch.await {
                 Ok(blockers) => {
@@ -213,6 +237,86 @@ impl TaskDetails {
         self.editing_description = false;
         self.description_input = None;
         self._description_subscription = None;
+        self.close_time_edit();
+    }
+
+    fn close_time_edit(&mut self) {
+        self.time_edit = None;
+        self.focus_time_edit = false;
+    }
+
+    /// Today's or tomorrow's date label plus current time for the Until row.
+    /// Returns None for other dates, which render as static text.
+    fn until_today_tomorrow(&self) -> Option<(String, u8, u8)> {
+        let until = self.selected.as_ref()?.blocked_until?;
+        let zoned = jiff::Timestamp::from_second(until as i64)
+            .ok()?
+            .to_zoned(jiff::tz::TimeZone::system());
+        let today = crate::components::date_time_picker::today_date();
+        let day_label = if zoned.date() == today {
+            "today".to_string()
+        } else if Some(zoned.date()) == today.tomorrow().ok() {
+            "tomorrow".to_string()
+        } else {
+            return None;
+        };
+        Some((day_label, zoned.hour() as u8, zoned.minute() as u8))
+    }
+
+    /// Ensure the HH:MM inputs exist (creating + autofocus on first need),
+    /// then commit their content, rebuilding them from the stored time when
+    /// invalid or in the past.
+    fn commit_time_inputs(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.time_edit.clone() else {
+            return;
+        };
+        let Some(until) = self
+            .selected
+            .as_ref()
+            .and_then(|task| task.blocked_until)
+        else {
+            return;
+        };
+        let parse_cell = |entity: &Entity<InputState>, cx: &App| {
+            entity
+                .read(cx)
+                .text()
+                .to_string()
+                .trim()
+                .to_string()
+                .parse::<u8>()
+                .ok()
+        };
+        let (hour, minute) = (parse_cell(&edit.hour, cx), parse_cell(&edit.minute, cx));
+        let timestamp = jiff::Timestamp::from_second(until as i64)
+            .ok()
+            .map(|stamp| stamp.to_zoned(jiff::tz::TimeZone::system()))
+            .and_then(|zoned| {
+                if hour.is_some_and(|h| h < 24) && minute.is_some_and(|m| m < 60) {
+                    zoned
+                        .date()
+                        .at(hour.unwrap_or(0) as i8, minute.unwrap_or(0) as i8, 0, 0)
+                        .to_zoned(jiff::tz::TimeZone::system())
+                        .ok()
+                        .map(|zoned| zoned.timestamp().as_second())
+                } else {
+                    None
+                }
+            });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        match timestamp {
+            Some(timestamp) if timestamp > now => {
+                self.apply_blocked_until(timestamp as u64, false, cx);
+            }
+            _ => {
+                self.time_edit = None;
+                self.focus_time_edit = false;
+                cx.notify();
+            }
+        }
     }
 
     pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
@@ -367,7 +471,8 @@ impl TaskDetails {
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
             DateTimePickerEvent::Committed(until) => {
-                this.apply_blocked_until(*until, cx);
+                eprintln!("DBG committed: {until}");
+                this.apply_blocked_until(*until, true, cx);
             }
         });
         self.until_picker = Some(picker);
@@ -444,48 +549,53 @@ impl TaskDetails {
         .detach();
     }
 
-    fn apply_blocked_until(&mut self, until: u64, cx: &mut Context<Self>) {
-        let Some(task) = &self.selected else {
-            return;
-        };
-        let task_id = task.id;
-        let store = self.store.clone();
-        if let Some(selected) = &mut self.selected {
-            selected.task.blocked_until = Some(until);
-        }
-        self.close_until_panel();
-        let set = store.set_blocked_until(task_id, Some(until), cx);
-        cx.spawn(async move |this, cx| {
-            if let Err(e) = set.await {
-                tracing::error!(?e, "Failed set_blocked_until");
-            }
-            this.update(cx, |_, cx| {
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
+    fn apply_blocked_until(&mut self, until: u64, refocus_time: bool, cx: &mut Context<Self>) {
+        self.write_blocked_until(Some(until), refocus_time, cx);
     }
 
     fn clear_blocked_until(&mut self, cx: &mut Context<Self>) {
+        self.write_blocked_until(None, false, cx);
+    }
+
+    /// Optimistic local update, then persist and reload from the DB so both
+    /// this panel and the task list converge on stored truth.
+    fn write_blocked_until(
+        &mut self,
+        value: Option<u64>,
+        refocus_time: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(task) = &self.selected else {
             return;
         };
         let task_id = task.id;
         let store = self.store.clone();
         if let Some(selected) = &mut self.selected {
-            selected.task.blocked_until = None;
+            selected.task.blocked_until = value;
         }
-        let clear = store.set_blocked_until(task_id, None, cx);
+        self.close_until_panel();
+        self.time_edit = None;
+        self.focus_time_edit = refocus_time && self.until_today_tomorrow().is_some();
+        let write = store.set_blocked_until(task_id, value, cx);
         cx.spawn(async move |this, cx| {
-            if let Err(e) = clear.await {
-                tracing::error!(?e, "Failed clear_blocked_until");
+            if let Err(e) = write.await {
+                tracing::error!(?e, "Failed set_blocked_until");
+                return;
             }
-            this.update(cx, |_, cx| {
-                cx.notify();
-            })
-            .ok();
+            let reload = store.reload_task(task_id, cx);
+            match reload.await {
+                Ok(fresh) => {
+                    this.update(cx, |this, cx| {
+                        this.selected = Some(fresh.clone());
+                        cx.emit(TaskDetailsEvent::TaskRefreshed(fresh));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!(?e, "Failed to reload task after blocked_until write");
+                }
+            }
         })
         .detach();
         cx.notify();
@@ -550,7 +660,95 @@ impl TaskDetails {
         .detach();
     }
 
-    fn relationships_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// "Blocked until" row. For today/tomorrow the right side is an
+    /// editable HH:MM pair (created lazily, autofocused once after picking);
+    /// other dates render as static text.
+    fn until_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let clear_button = Button::new("clear-blocked-until")
+            .ghost()
+            .compact()
+            .label("×")
+            .tooltip("Clear time block")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.clear_blocked_until(cx);
+            }));
+
+        if let Some((day_label, hour, minute)) = self.until_today_tomorrow() {
+            if self.time_edit.is_none() {
+                let make_cell = |value: String, window: &mut Window, cx: &mut Context<Self>| {
+                    let input = cx.new(|cx| {
+                        let mut state = InputState::new(window, cx);
+                        state.set_value(&value, window, cx);
+                        state
+                    });
+                    let subscription = cx.subscribe(&input, |this, _, event, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            this.commit_time_inputs(cx);
+                        }
+                    });
+                    (input, subscription)
+                };
+                let (hour_input, hour_sub) =
+                    make_cell(format!("{hour:02}"), window, cx);
+                let (minute_input, minute_sub) =
+                    make_cell(format!("{minute:02}"), window, cx);
+                self.time_edit = Some(TimeEditInputs {
+                    hour: hour_input.clone(),
+                    minute: minute_input,
+                    _subscriptions: vec![hour_sub, minute_sub],
+                });
+                if self.focus_time_edit {
+                    self.focus_time_edit = false;
+                    window.on_next_frame(move |window, cx| {
+                        hour_input.update(cx, |state, cx| state.focus(window, cx));
+                    });
+                }
+            }
+            let time_cells = self.time_edit.clone().map(|edit| {
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().w(px(30.)).child(
+                        Input::new(&edit.hour).small().appearance(false),
+                    ))
+                    .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(":"))
+                    .child(div().w(px(30.)).child(
+                        Input::new(&edit.minute).small().appearance(false),
+                    ))
+            });
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(rgb(0xe5e5e5))
+                        .child(format!("Blocked until {day_label}")),
+                )
+                .children(time_cells)
+                .child(clear_button)
+        } else if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(rgb(0xe5e5e5))
+                        .child(format!("Blocked until {}", format_deadline(until))),
+                )
+                .child(clear_button)
+        } else {
+            div()
+        }
+    }
+
+    fn relationships_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div().v_flex().gap_2().mt_2().child(
             div()
                 .text_base()
@@ -658,30 +856,8 @@ impl TaskDetails {
             section = section.child(div().v_flex().gap_1().ml_2().children(blocker_rows));
         }
 
-        if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
-            section = section.child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .text_color(rgb(0xe5e5e5))
-                            .child(format!("Until {}", format_deadline(until))),
-                    )
-                    .child(
-                        Button::new("clear-blocked-until")
-                            .ghost()
-                            .compact()
-                            .label("×")
-                            .tooltip("Clear time block")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.clear_blocked_until(cx);
-                            })),
-                    ),
-            );
+        if self.selected.as_ref().and_then(|t| t.blocked_until).is_some() {
+            section = section.child(self.until_row(window, cx));
         }
 
         section
@@ -750,7 +926,7 @@ fn format_deadline(deadline: u64) -> String {
 impl EventEmitter<TaskDetailsEvent> for TaskDetails {}
 
 impl Render for TaskDetails {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
             None => div()
                 .flex_1()
@@ -898,12 +1074,15 @@ impl Render for TaskDetails {
                 if let Some(deadline) = task.deadline {
                     details = details.child(field("Deadline", format_deadline(deadline)));
                 }
+                if let Some(until) = task.blocked_until {
+                    details = details.child(field("Blocked until", format_deadline(until)));
+                }
                 if let Some(branch) = &task.branch_name
                     && !branch.is_empty()
                 {
                     details = details.child(field("Branch", branch.clone()));
                 }
-                details = details.child(self.relationships_section(cx));
+                details = details.child(self.relationships_section(window, cx));
                 details
             }
         };

@@ -86,6 +86,11 @@ impl TaskRow {
         }
     }
 
+    pub fn set_task_data(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
+        self.task = task;
+        cx.notify();
+    }
+
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing {
             return;

@@ -177,6 +177,9 @@ impl Layout {
                 TaskDetailsEvent::SelectTask { task_id } => {
                     list_for_pending.update(cx, |list, cx| list.select_task_by_id(*task_id, cx));
                 }
+                TaskDetailsEvent::TaskRefreshed(task) => {
+                    list_for_pending.update(cx, |list, cx| list.refresh_task_data(task, cx));
+                }
             },
         )
         .detach();

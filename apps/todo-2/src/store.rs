@@ -172,6 +172,19 @@ impl Store {
         })
     }
 
+    /// Reload a task with all metadata (tags, blocked flag) from the DB.
+    pub fn reload_task(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::TaskWithMeta>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_task_with_meta(task_id).await?)
+        })
+    }
+
     pub fn get_task_meta(
         &self,
         task_id: u64,

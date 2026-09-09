@@ -70,18 +70,23 @@ pub fn month_block(
         None => ("".to_string(), 0, 0),
     };
 
+    let stamp = (year as usize) * 100 + (month as usize);
+
     let mut cells: Vec<gpui::AnyElement> = Vec::new();
     for i in 0..lead_blanks {
         cells.push(
             div()
-                .id(gpui::ElementId::named_usize("calendar-blank", i))
+                .id(gpui::ElementId::named_usize(
+                    "calendar-blank",
+                    stamp * 100 + i,
+                ))
                 .w(px(CELL_W))
                 .h(px(CELL_H))
                 .into_any_element(),
         );
     }
     for day in 1..=days_in_month {
-        let index = lead_blanks + day - 1;
+        let index = stamp * 100 + day;
         let date = jiff::civil::Date::new(year, month, day as i8).ok();
         let is_past = date.is_some_and(|d| d < today);
         let is_selected = selected.is_some_and(|d| Some(d) == date);
@@ -123,7 +128,10 @@ pub fn month_block(
         let i = cells.len();
         cells.push(
             div()
-                .id(gpui::ElementId::named_usize("calendar-pad", i))
+                .id(gpui::ElementId::named_usize(
+                    "calendar-pad",
+                    stamp * 100 + i,
+                ))
                 .w(px(CELL_W))
                 .h(px(CELL_H))
                 .into_any_element(),
@@ -144,7 +152,10 @@ pub fn month_block(
         .enumerate()
         .map(|(week, days)| {
             div()
-                .id(gpui::ElementId::named_usize("calendar-week", week))
+                .id(gpui::ElementId::named_usize(
+                    "calendar-week",
+                    stamp * 10 + week,
+                ))
                 .h_flex()
                 .gap_1()
                 .children(days)

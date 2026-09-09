@@ -271,6 +271,18 @@ impl TaskListView {
         }
     }
 
+    /// Refresh a row from DB-reloaded task data (blocked flag, tags, ...).
+    /// Rows for tasks outside the current view are ignored.
+    pub fn refresh_task_data(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) {
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| {
+                if row.task_id() == task.id {
+                    row.set_task_data(task.clone(), cx);
+                }
+            });
+        }
+    }
+
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
         // When a tag is selected the new task belongs to it, so it is
         // tagged and the view stays on that tag's task list.

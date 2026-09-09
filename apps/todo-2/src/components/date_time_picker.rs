@@ -80,20 +80,47 @@ impl DateTimePicker {
             .unwrap_or(0);
         if timestamp <= now_secs() {
             self.error = Some("Pick a time in the future".to_string());
+            self.show_time_picker = true;
             cx.notify();
             return;
         }
         cx.emit(DateTimePickerEvent::Committed(timestamp as u64));
     }
 
-    fn quick_today(&mut self, cx: &mut Context<Self>) {
-        self.picked_date = Some(today_date());
-        self.show_time_picker = true;
+    /// Grid date click: commit right away with the current time selection,
+    /// falling back to the time picker when that moment already passed.
+    fn select_day(&mut self, date: jiff::civil::Date, cx: &mut Context<Self>) {
+        eprintln!("DBG select_day: {date}");
+        self.picked_date = Some(date);
         self.error = None;
-        cx.notify();
+        self.commit_datetime(cx);
+    }
+
+    fn quick_today(&mut self, cx: &mut Context<Self>) {
+        cx.emit(DateTimePickerEvent::Committed(now_secs() as u64 + 600));
     }
 
     fn quick_tomorrow(&mut self, cx: &mut Context<Self>) {
+        let timestamp = today_date()
+            .tomorrow()
+            .ok()
+            .and_then(|date| {
+                date.at(9, 0, 0, 0)
+                    .to_zoned(jiff::tz::TimeZone::system())
+                    .ok()
+            })
+            .map(|zoned| zoned.timestamp().as_second());
+        match timestamp {
+            Some(timestamp) if timestamp > now_secs() => {
+                cx.emit(DateTimePickerEvent::Committed(timestamp as u64));
+            }
+            _ => {
+                self.until_date_fallback_to_time_picker(cx);
+            }
+        }
+    }
+
+    fn until_date_fallback_to_time_picker(&mut self, cx: &mut Context<Self>) {
         self.picked_date = today_date().tomorrow().ok();
         self.show_time_picker = true;
         self.error = None;
@@ -249,10 +276,7 @@ impl Render for DateTimePicker {
                                 let picked = self.picked_date;
                                 month_block(year, month, picked, today, move |date, _window, cx| {
                                     picker.update(cx, |this, cx| {
-                                        this.picked_date = Some(date);
-                                        this.show_time_picker = true;
-                                        this.error = None;
-                                        cx.notify();
+                                        this.select_day(date, cx);
                                     });
                                 })
                             })),
@@ -347,7 +371,7 @@ fn now_secs() -> i64 {
 }
 
 /// Today's date in the system timezone.
-fn today_date() -> jiff::civil::Date {
+pub(crate) fn today_date() -> jiff::civil::Date {
     jiff::Zoned::now().date()
 }
 
