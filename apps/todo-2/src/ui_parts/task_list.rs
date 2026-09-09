@@ -2,9 +2,7 @@ use gpui::{
     AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
 };
-use gpui_component::Disableable;
 use gpui_component::StyledExt;
-use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
@@ -234,6 +232,14 @@ impl TaskListView {
         }
     }
 
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
     pub fn is_editing(&self) -> bool {
         self.editing
     }
@@ -374,38 +380,10 @@ impl Render for TaskListView {
             }))
             .child(
                 div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("history-back")
-                            .ghost()
-                            .compact()
-                            .label("<")
-                            .disabled(self.back.is_empty())
-                            .tooltip("Previous task")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.go_back(cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("history-forward")
-                            .ghost()
-                            .compact()
-                            .label(">")
-                            .disabled(self.forward.is_empty())
-                            .tooltip("Next task")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.go_forward(cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_bold()
-                            .text_color(rgb(0xe5e5e5))
-                            .child("Tasks"),
-                    ),
+                    .text_2xl()
+                    .font_bold()
+                    .text_color(rgb(0xe5e5e5))
+                    .child("Tasks"),
             )
             .child(Input::new(&self.input))
             .child(

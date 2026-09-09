@@ -1,11 +1,13 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window, WindowOptions, div,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
+use gpui_component::StyledExt;
 use gpui_component::input::*;
-use gpui_component::{Theme, ThemeMode};
+use gpui_component::{Disableable, Theme, ThemeMode, TitleBar};
+use gpui_component::button::{Button, ButtonVariants};
 use storage::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -261,11 +263,42 @@ impl Render for Layout {
         div()
             .relative()
             .size_full()
+            .v_flex()
+            .child(
+                TitleBar::new().bg(rgb(APP_BG)).child(
+                    div()
+                        .h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("history-back")
+                                .ghost()
+                                .compact()
+                                .label("<")
+                                .disabled(!self.task_list.read(cx).can_go_back())
+                                .tooltip("Previous task")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.task_list.update(cx, |list, cx| list.go_back(cx));
+                                })),
+                        )
+                        .child(
+                            Button::new("history-forward")
+                                .ghost()
+                                .compact()
+                                .label(">")
+                                .disabled(!self.task_list.read(cx).can_go_forward())
+                                .tooltip("Next task")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.task_list.update(cx, |list, cx| list.go_forward(cx));
+                                })),
+                        ),
+                ),
+            )
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .size_full()
+                    .flex_1()
                     .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(
                         div()
@@ -319,7 +352,7 @@ fn main() {
             async move {
                 match init_store.await {
                     Ok((store, tasks)) => {
-                        cx.open_window(WindowOptions::default(), |window, cx| {
+                        cx.open_window(TitleBar::window_options(), |window, cx| {
                             Theme::change(ThemeMode::Dark, Some(window), cx);
 
                             let input = cx.new(|cx| {
