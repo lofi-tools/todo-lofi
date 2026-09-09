@@ -1,7 +1,7 @@
 use gpui::{
     App, AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, px, rgb,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, px, rgb,
+    prelude::FluentBuilder, svg,
 };
 use gpui_component::Disableable;
 use gpui_component::Sizable;
@@ -1814,8 +1814,28 @@ impl TaskDetails {
                                     ),
                                 )
                                 .child(
-                                    relation_button("repeat-task", "repeat")
-                                        .icon(gpui_component_assets::IconName::RefreshCw)
+                                    // "repeat" button: an inline SVG icon left of the
+                                    // label, tinted the same color as the text.
+                                    div()
+                                        .id("repeat-task")
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .h_6()
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .text_sm()
+                                        .text_color(rgb(0xa3a3a3))
+                                        .hover(|this| this.bg(rgb(0x2a2a2a)))
+                                        .child(
+                                            svg()
+                                                .data(REFRESH_ICON_SVG)
+                                                .size(px(14.))
+                                                .text_color(rgb(0xa3a3a3)),
+                                        )
+                                        .child("repeat")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             if this.repeat_picker_open() {
                                                 this.close_repeat_picker_and_notify(cx);
@@ -1841,6 +1861,12 @@ impl TaskDetails {
     }
 
 }
+
+/// Lucide `refresh-cw`: two half-circle arrows chasing each other. Drawn
+/// with an opaque stroke; GPUI renders SVG data as an alpha mask tinted by
+/// the element's text color, so the icon picks up the surrounding text
+/// color automatically.
+const REFRESH_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>"##;
 
 /// Small transparent relationship button: gray text with a gray hairline
 /// outline, shared by the buttons in the relationships section.
