@@ -141,9 +141,15 @@ impl Layout {
         })
         .detach();
         let list_for_toggle = task_list.clone();
-        cx.subscribe(&details, move |_this, _details, event, cx| {
-            let TaskDetailsEvent::Toggled { task_id, done } = *event;
-            list_for_toggle.update(cx, |list, cx| list.set_task_done(task_id, done, cx));
+        cx.subscribe(&details, move |_this, _details, event, cx| match event {
+            TaskDetailsEvent::Toggled { task_id, done } => {
+                list_for_toggle.update(cx, |list, cx| list.set_task_done(*task_id, *done, cx));
+            }
+            TaskDetailsEvent::TitleCommitted { task_id, title } => {
+                list_for_toggle.update(cx, |list, cx| {
+                    list.set_task_title(*task_id, title.clone(), cx)
+                });
+            }
         })
         .detach();
 
@@ -161,6 +167,12 @@ impl Layout {
                         layout
                             .task_list
                             .update(cx, |list, cx| list.cancel_editing(cx));
+                        return;
+                    }
+                    if layout.details.read(cx).is_editing() {
+                        layout
+                            .details
+                            .update(cx, |details, cx| details.cancel_editing(cx));
                         return;
                     }
                     layout.details.update(cx, |details, cx| details.clear(cx));

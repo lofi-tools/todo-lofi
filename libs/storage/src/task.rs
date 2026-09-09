@@ -196,6 +196,20 @@ impl TodoStore {
     }
 
     #[fastrace::trace]
+    pub async fn update_task_description(
+        &mut self,
+        id: u64,
+        description: Option<String>,
+    ) -> crate::QueryResult<()> {
+        Task::update_by_id(id)
+            .description(description)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
+    }
+
+    #[fastrace::trace]
     pub async fn get_task(&mut self, id: u64) -> crate::QueryResult<Task> {
         let task = Task::get_by_id(&mut self.db, id)
             .await

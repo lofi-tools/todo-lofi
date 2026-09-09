@@ -157,6 +157,16 @@ impl TaskListView {
         }
     }
 
+    pub fn set_task_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| {
+                if row.task_id() == task_id {
+                    row.set_title(title.clone(), cx);
+                }
+            });
+        }
+    }
+
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
         // When a tag is selected the new task belongs to it, so it is
         // tagged and the view stays on that tag's task list.

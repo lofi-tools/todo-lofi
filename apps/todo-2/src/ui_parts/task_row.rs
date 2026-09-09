@@ -74,6 +74,13 @@ impl TaskRow {
         }
     }
 
+    pub fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
+        if self.task.title != title {
+            self.task.task.title = title;
+            cx.notify();
+        }
+    }
+
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing {
             return;

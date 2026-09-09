@@ -1,22 +1,32 @@
 use gpui::{
-    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
+    AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
+use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
 use crate::components::Checkbox;
 use crate::store::Store;
+use crate::theme::{APP_BG, HAIRLINE};
 
 #[derive(Clone)]
 pub enum TaskDetailsEvent {
     Toggled { task_id: u64, done: bool },
+    TitleCommitted { task_id: u64, title: String },
 }
 
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
     store: Store,
+    editing_title: bool,
+    title_input: Option<Entity<InputState>>,
+    _title_subscription: Option<Subscription>,
+    editing_description: bool,
+    description_input: Option<Entity<InputState>>,
+    _description_subscription: Option<Subscription>,
 }
 
 impl TaskDetails {
@@ -24,6 +34,12 @@ impl TaskDetails {
         Self {
             selected: None,
             store,
+            editing_title: false,
+            title_input: None,
+            _title_subscription: None,
+            editing_description: false,
+            description_input: None,
+            _description_subscription: None,
         }
     }
 
@@ -47,6 +63,141 @@ impl TaskDetails {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        self.cancel_editing(cx);
+        cx.notify();
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editing_title || self.editing_description
+    }
+
+    pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
+        if self.editing_title || self.editing_description {
+            self.editing_title = false;
+            self.title_input = None;
+            self._title_subscription = None;
+            self.editing_description = false;
+            self.description_input = None;
+            self._description_subscription = None;
+            cx.notify();
+        }
+    }
+
+    fn begin_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        if self.editing_title {
+            return;
+        }
+        let title = task.title.clone();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(&title, window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_title_edit(cx);
+            }
+        });
+        self.title_input = Some(input.clone());
+        self._title_subscription = Some(subscription);
+        self.editing_title = true;
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_title_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.title_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let title = input.read(cx).text().to_string();
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            self.cancel_editing(cx);
+            return;
+        }
+        let task_id = task.id;
+        if let Some(selected) = &mut self.selected {
+            selected.task.title = title.clone();
+        }
+        self.editing_title = false;
+        self.title_input = None;
+        self._title_subscription = None;
+        self.store.rename_task(task_id, title.clone(), cx).detach();
+        cx.emit(TaskDetailsEvent::TitleCommitted { task_id, title });
+        cx.notify();
+    }
+
+    fn begin_description_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        if self.editing_description {
+            return;
+        }
+        let description = task.description.clone().unwrap_or_default();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(&description, window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_description_edit(cx);
+            }
+        });
+        self.description_input = Some(input.clone());
+        self._description_subscription = Some(subscription);
+        self.editing_description = true;
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_description_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.description_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let description = input.read(cx).text().to_string();
+        let description = description.trim().to_string();
+        let task_id = task.id;
+        let store = self.store.clone();
+        if let Some(selected) = &mut self.selected {
+            selected.task.description = if description.is_empty() {
+                None
+            } else {
+                Some(description.clone())
+            };
+        }
+        self.editing_description = false;
+        self.description_input = None;
+        self._description_subscription = None;
+        let value = if description.is_empty() {
+            None
+        } else {
+            Some(description)
+        };
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = store.set_task_description(task_id, value, cx).await {
+                tracing::error!(?e, "Failed set_task_description");
+            }
+            this.update(cx, |_, cx| {
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 }
@@ -168,20 +319,80 @@ impl Render for TaskDetails {
                                 }),
                         )
                         .child(
-                            div()
-                                .flex_1()
-                                .text_xl()
-                                .font_bold()
-                                .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
-                                .when(done, |this| this.line_through())
-                                .child(task.title.clone()),
+                            if let Some(input) = self.title_input.clone() {
+                                div()
+                                    .id(("details-title-edit", task_id))
+                                    .flex_1()
+                                    .child(
+                                        Input::new(&input)
+                                            .small()
+                                            .appearance(false)
+                                            .bg(rgb(APP_BG))
+                                            .border_1()
+                                            .border_color(rgb(HAIRLINE))
+                                            .rounded_md(),
+                                    )
+                            } else {
+                                div()
+                                    .id(("details-title", task_id))
+                                    .flex_1()
+                                    .text_xl()
+                                    .font_bold()
+                                    .text_color(if done {
+                                        rgb(0x666666)
+                                    } else {
+                                        rgb(0xe5e5e5)
+                                    })
+                                    .when(done, |this| this.line_through())
+                                    .child(task.title.clone())
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                                        {
+                                            this.begin_title_edit(window, cx);
+                                        }
+                                    }))
+                            },
                         ),
                 );
                 details = details.child(header);
-                if let Some(desc) = &task.description
+                if self.editing_description {
+                    if let Some(input) = self.description_input.clone() {
+                        details = details.child(
+                            div().v_flex().gap_1().child(field_label("Description")).child(
+                                div().id(("details-description-edit", task_id)).child(
+                                    Input::new(&input)
+                                        .small()
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
+                                ),
+                            ),
+                        );
+                    }
+                } else if let Some(desc) = &task.description
                     && !desc.is_empty()
                 {
-                    details = details.child(field("Description", desc.clone()));
+                    details = details.child(
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .child(field_label("Description"))
+                            .child(
+                                div()
+                                    .id(("details-description", task_id))
+                                    .text_sm()
+                                    .text_color(rgb(0xe5e5e5))
+                                    .child(desc.clone())
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                                        {
+                                            this.begin_description_edit(window, cx);
+                                        }
+                                    })),
+                            ),
+                    );
                 }
                 if let Some(deadline) = task.deadline {
                     details = details.child(field("Deadline", format_deadline(deadline)));
