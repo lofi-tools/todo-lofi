@@ -525,7 +525,14 @@ impl TaskDetails {
     }
 
     fn relationships_section(&mut self, task_id: u64, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut section = div().v_flex().gap_2().child(field_label("Relationships"));
+        let mut section = div().v_flex().gap_2().mt_2().child(
+            div()
+                .text_base()
+                .font_bold()
+                .underline()
+                .text_color(rgb(0xe5e5e5))
+                .child("Relationships"),
+        );
 
         if let Some(picker) = self.blocker_picker.clone() {
             section = section.child(
@@ -573,40 +580,20 @@ impl TaskDetails {
         }
 
         if self.computed_blocked() {
-            let mut reasons = Vec::new();
-            if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
-                reasons.push(format!("until {}", format_deadline(until)));
-            }
-            let unfinished = self.blockers.iter().filter(|b| !b.done).count();
-            if unfinished > 0 {
-                reasons.push(format!(
-                    "by {unfinished} unfinished blocker{}",
-                    if unfinished == 1 { "" } else { "s" }
-                ));
-            }
             section = section.child(
                 div()
-                    .h_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xe06c60))
-                            .child("Blocked"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xa3a3a3))
-                            .child(reasons.join(" · ")),
-                    ),
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Blocked by"),
             );
         }
 
-        for blocker in self.blockers.clone() {
-            let blocker_id = blocker.id;
-            section = section.child(
+        let blocker_rows = self
+            .blockers
+            .clone()
+            .into_iter()
+            .map(|blocker| {
+                let blocker_id = blocker.id;
                 div()
                     .h_flex()
                     .items_center()
@@ -637,8 +624,11 @@ impl TaskDetails {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.remove_blocker(blocker_id, cx);
                             })),
-                    ),
-            );
+                    )
+            })
+            .collect::<Vec<_>>();
+        if !blocker_rows.is_empty() {
+            section = section.child(div().v_flex().gap_1().ml_2().children(blocker_rows));
         }
 
         if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
