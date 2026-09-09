@@ -179,28 +179,22 @@ impl Tool for AskUserTool {
                 );
             }
 
-            // Wait for the user's answer. This pauses the agent until the TUI
-            // surfaces the question and the user responds.
-            use tokio::time::{Duration, timeout};
-
+            // Wait indefinitely for the user's answer. This is deliberately
+            // not wrapped in a timeout: an unanswered question must keep the
+            // conversation paused for as long as the user needs.
             let mut rx_guard = self.answer_rx.as_ref().unwrap().lock().await;
             loop {
-                match timeout(Duration::from_secs(300), rx_guard.recv()).await {
-                    Ok(Some(answer)) if answer.request_id == request_id => {
+                match rx_guard.recv().await {
+                    Some(answer) if answer.request_id == request_id => {
                         let answer_text = format_ask_user_answer(&questions_json, &answer.answers);
                         return ToolResult::success(answer_text);
                     }
-                    Ok(Some(_)) => {
-                        // Stale answer, keep waiting
+                    Some(_) => {
+                        // Stale answer, keep waiting.
                         continue;
                     }
-                    Ok(None) => {
+                    None => {
                         return ToolResult::error("ask_user answer channel closed".to_string());
-                    }
-                    Err(_) => {
-                        return ToolResult::error(
-                            "ask_user timed out waiting for user answer".to_string(),
-                        );
                     }
                 }
             }

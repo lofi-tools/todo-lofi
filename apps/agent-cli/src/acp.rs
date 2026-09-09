@@ -1421,11 +1421,9 @@ impl AcpServer {
     /// wait would hang the agent run that triggered it.
     const FS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// Maximum wait for a client's `elicitation/create` response before
-    /// treating the question set as skipped. Slightly under the ask_user
-    /// tool's own 300s wait, so the tool sees a real answer rather than
-    /// timing out on its own.
-    const ELICITATION_TIMEOUT: Duration = Duration::from_secs(290);
+    /// Client `fs/*` requests have a bounded wait, but elicitation requests
+    /// intentionally do not: the conversation must remain paused until the
+    /// user answers, skips, or the connection closes.
 
     /// Forward `ask_user` tool calls to the client via the ACP Elicitation
     /// standard and route the user's answers back to the waiting tool.
@@ -1441,29 +1439,25 @@ impl AcpServer {
                 continue;
             };
             let params = elicitation_params(&request, &session_id);
-            let (id, rx) = self.connection.request("elicitation/create", params);
-            match tokio::time::timeout(Self::ELICITATION_TIMEOUT, rx).await {
-                Ok(Ok(RpcResponse::Result(result))) => {
+            let (_id, rx) = self.connection.request("elicitation/create", params);
+            match rx.await {
+                Ok(RpcResponse::Result(result)) => {
                     let answer = answer_from_elicitation(&request, &result);
                     let _ = self.ask_user_answer_tx.send(answer);
                 }
-                Ok(Ok(RpcResponse::Error(err))) => {
+                Ok(RpcResponse::Error(err)) => {
                     // The client rejected the request (e.g. it doesn't
-                    // actually implement elicitation despite advertising it);
-                    // report skipped so the run can continue.
+                    // actually implement elicitation despite advertising it).
+                    // Report skipped so the run can continue.
                     eprintln!(
                         "acp: elicitation/create failed: [{}] {}",
                         err.code, err.message
                     );
                     self.send_skipped_answer(&request);
                 }
-                Ok(Err(_)) => {
+                Err(_) => {
                     // Connection torn down; the tool will notice the closed
                     // channel itself, but answer anyway to be safe.
-                    self.send_skipped_answer(&request);
-                }
-                Err(_) => {
-                    self.connection.forget_request(id);
                     self.send_skipped_answer(&request);
                 }
             }
