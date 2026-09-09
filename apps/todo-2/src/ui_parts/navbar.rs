@@ -199,7 +199,7 @@ impl Render for NavBar {
             .border_color(rgb(0x333333))
             .p_4()
             .v_flex()
-            .gap_2()
+            .gap_0p5()
             // Deep tag trees can exceed the viewport height, so make the nav
             // scrollable.
             .overflow_y_scrollbar()
