@@ -243,13 +243,18 @@ impl Render for TaskRow {
         // gray out the moment they are done (before jumping to the bottom).
         let muted = done || self.task.blocked;
         let locked = self.locked;
+        // The row grows with its content: fixed 44px when collapsed, auto
+        // height when editing or when the "blocks N" list is expanded so
+        // the extra rows get their own vertical space.
+        let expanded = self.blocks_expanded && self.blocking.blocks.len() > 1;
 
         div()
             .id(("task", task_id))
             .h_flex()
-            .h(px(44.))
-            .when(self.editing, |this| this.h_auto().py_0p5())
+            .when(self.editing || expanded, |this| this.h_auto().py_0p5())
+            .when(!self.editing && !expanded, |this| this.h(px(44.)))
             .items_center()
+            .when(expanded, |this| this.items_start())
             .gap_3()
             .px_3()
             .rounded_md()
@@ -394,27 +399,30 @@ impl Render for TaskRow {
 }
 
 /// Right-pointing arrow separating a blocker from the task it blocks.
-/// Rendered as an alpha mask tinted by the text color (same technique as
-/// the repeat icon).
-fn arrow_svg() -> impl IntoElement {
+/// Rendered as an alpha mask tinted by the given text color (same
+/// technique as the repeat icon), so it matches the blocked task's shade.
+fn arrow_svg(color: u32) -> impl IntoElement {
     div()
         .h_flex()
         .items_center()
         .mx_1()
-        .text_color(rgb(0x666666))
-        .child(
-            svg()
-                .size_3()
-                .data(ARROW_SVG),
-        )
+        .text_color(rgb(color))
+        .child(svg().size_3().data(ARROW_SVG))
+}
+
+/// The text color of a blocked/blocking task title: the muted gray when
+/// it is blocked or done, the lighter gray otherwise.
+fn blocked_color(muted: bool) -> u32 {
+    if muted { 0x666666 } else { 0xcccccc }
 }
 
 /// Render a chain node inline after the blocker's title: arrow + grayed
 /// title, recursing into nested nodes.
 fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElement> {
     let mut children: Vec<AnyElement> = Vec::new();
-    children.push(arrow_svg().into_any_element());
     let muted = node.task.done || node.task.blocked;
+    let color = blocked_color(muted);
+    children.push(arrow_svg(color).into_any_element());
     let task = node.task.clone();
     let row_entity = row_entity.clone();
     let row_entity_for_click = row_entity.clone();
@@ -422,7 +430,7 @@ fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElem
         div()
             .id(("chain-title", task.id))
             .text_base()
-            .text_color(if muted { rgb(0x666666) } else { rgb(0xcccccc) })
+            .text_color(rgb(color))
             .when(task.done, |this| this.line_through())
             .child(task.title.clone())
             .cursor_pointer()
@@ -445,6 +453,7 @@ fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElem
 /// One expanded "blocks N" entry: arrow + grayed title.
 fn blocked_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoElement {
     let muted = task.done || task.blocked;
+    let color = blocked_color(muted);
     let row_entity = row_entity.clone();
     let row_entity_for_click = row_entity.clone();
     div()
@@ -455,12 +464,12 @@ fn blocked_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoE
         .px_3()
         .py_0p5()
         .rounded_md()
-        .child(arrow_svg())
+        .child(arrow_svg(color))
         .child(
             div()
                 .id(("blocked-title", task.id))
                 .text_base()
-                .text_color(if muted { rgb(0x666666) } else { rgb(0xcccccc) })
+                .text_color(rgb(color))
                 .when(task.done, |this| this.line_through())
                 .child(task.title.clone())
                 .cursor_pointer()
