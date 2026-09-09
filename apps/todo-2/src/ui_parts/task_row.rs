@@ -19,6 +19,7 @@ pub enum TaskRowEvent {
     EditStarted,
     EditEnded,
     TitleCommitted { task_id: u64, title: String },
+    DoneToggled { task_id: u64, done: bool },
 }
 
 pub struct TaskRow {
@@ -28,6 +29,9 @@ pub struct TaskRow {
     selected_labels: Vec<String>,
     selected: bool,
     editing: bool,
+    /// True while a completed task is jumping to the bottom of the list;
+    /// clicks on the row are ignored so nothing lands mid-animation.
+    locked: bool,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
 }
@@ -48,6 +52,7 @@ impl TaskRow {
             selected_labels,
             selected,
             editing: false,
+            locked: false,
             edit_input: None,
             _edit_subscription: None,
         }
@@ -75,6 +80,13 @@ impl TaskRow {
     pub fn set_done(&mut self, done: bool, cx: &mut Context<Self>) {
         if self.task.done != done {
             self.task.task.done = done;
+            cx.notify();
+        }
+    }
+
+    pub fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        if self.locked != locked {
+            self.locked = locked;
             cx.notify();
         }
     }
@@ -163,6 +175,10 @@ impl Render for TaskRow {
             .filter(|t| !self.selected_path.contains(t) && !self.selected_labels.contains(t))
             .cloned()
             .collect();
+        // Blocked tasks are grayed out while unworkable; completed tasks
+        // gray out the moment they are done (before jumping to the bottom).
+        let muted = done || self.task.blocked;
+        let locked = self.locked;
 
         div()
             .id(("task", task_id))
@@ -173,6 +189,7 @@ impl Render for TaskRow {
             .gap_3()
             .px_3()
             .rounded_md()
+            .opacity(if muted { 0.55 } else { 1.0 })
             .bg(if self.selected {
                 rgb(0x3a3a3a)
             } else {
@@ -187,7 +204,9 @@ impl Render for TaskRow {
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 cx.stop_propagation();
-                cx.emit(TaskRowEvent::Selected(this.task.clone()));
+                if !this.locked {
+                    cx.emit(TaskRowEvent::Selected(this.task.clone()));
+                }
             }))
             .child(
                 Checkbox::new(("checkbox", task_id))
@@ -195,6 +214,9 @@ impl Render for TaskRow {
                     .checked(done)
                     .disabled(self.task.blocked && !done)
                     .on_click(move |new_done, _window, cx| {
+                        if locked {
+                            return;
+                        }
                         let store = store.clone();
                         let entity = entity.clone();
                         let new_done = *new_done;
@@ -204,6 +226,10 @@ impl Render for TaskRow {
                             }
                             entity.update(cx, |this, cx| {
                                 this.task.task.done = new_done;
+                                cx.emit(TaskRowEvent::DoneToggled {
+                                    task_id,
+                                    done: new_done,
+                                });
                                 cx.notify();
                             });
                         })

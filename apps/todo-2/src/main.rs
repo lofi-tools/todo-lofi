@@ -158,7 +158,9 @@ impl Layout {
             window,
             move |_this, _details, event, _window, cx| match event {
                 TaskDetailsEvent::Toggled { task_id, done } => {
-                    list_for_toggle.update(cx, |list, cx| list.set_task_done(*task_id, *done, cx));
+                    list_for_toggle.update(cx, |list, cx| {
+                        list.on_task_done_toggled(*task_id, *done, cx)
+                    });
                 }
                 TaskDetailsEvent::TitleCommitted { task_id, title } => {
                     list_for_toggle.update(cx, |list, cx| {

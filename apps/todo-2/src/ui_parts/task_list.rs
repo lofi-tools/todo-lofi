@@ -31,6 +31,9 @@ pub struct TaskListView {
     forward: Vec<TaskWithMeta>,
     editing: bool,
     input_needs_clear: bool,
+    /// While a completed task is jumping to the bottom of the list, clicks
+    /// are disabled: from shortly before the jump until just after it.
+    locked_until: Option<std::time::Instant>,
     _fetch_tasks: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
     _nav_subscription: Subscription,
@@ -83,6 +86,7 @@ impl TaskListView {
             forward: Vec::new(),
             editing: false,
             input_needs_clear: false,
+            locked_until: None,
             _fetch_tasks: None,
             _input_subscription: input_subscription,
             _nav_subscription: nav_subscription,
@@ -205,7 +209,10 @@ impl TaskListView {
         self.editing = false;
     }
 
-    pub fn set_task_done(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
+    /// A task's done state changed. Completed tasks gray out immediately,
+    /// stay in place for a moment, then the list re-sorts them to the
+    /// bottom; reopened tasks jump back up right away.
+    pub fn on_task_done_toggled(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| {
                 if row.task_id() == task_id {
@@ -213,6 +220,43 @@ impl TaskListView {
                 }
             });
         }
+        let delay = if done {
+            // 10s in place, then jump to the bottom.
+            std::time::Duration::from_secs(10)
+        } else {
+            std::time::Duration::ZERO
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                // Disable clicks from shortly before the jump until just
+                // after it, so no click lands mid-animation.
+                this.locked_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(1300));
+                for row in this.task_views.clone() {
+                    row.update(cx, |row, cx| row.set_locked(true, cx));
+                }
+                this.refresh(cx);
+            })
+            .ok();
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1300))
+                .await;
+            this.update(cx, |this, cx| {
+                this.locked_until = None;
+                for row in this.task_views.clone() {
+                    row.update(cx, |row, cx| row.set_locked(false, cx));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.locked_until
+            .is_some_and(|t| t > std::time::Instant::now())
     }
 
     pub fn set_task_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
@@ -354,6 +398,9 @@ impl TaskListView {
                             title: title.clone(),
                         });
                     }
+                    TaskRowEvent::DoneToggled { task_id, done } => {
+                        this.on_task_done_toggled(*task_id, *done, cx);
+                    }
                 })
                 .detach();
                 row
@@ -382,21 +429,29 @@ impl Render for TaskListView {
             });
         }
 
+        let heading = self
+            .selected_path
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "Tasks".to_string());
+
         div()
             .id("task-list")
             .flex_1()
             .v_flex()
             .p_8()
             .gap_4()
-            .on_click(cx.listener(|_this, _, _, cx| {
-                cx.emit(TaskListEvent::Deselected);
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.is_locked() {
+                    cx.emit(TaskListEvent::Deselected);
+                }
             }))
             .child(
                 div()
                     .text_2xl()
                     .font_bold()
                     .text_color(rgb(0xe5e5e5))
-                    .child("Tasks"),
+                    .child(heading),
             )
             .child(Input::new(&self.input))
             .child(

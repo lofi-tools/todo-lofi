@@ -31,6 +31,10 @@ pub struct Task {
     pub urgency_factor: f64,
     #[default(false)]
     pub done: bool,
+    /// Epoch seconds when the task was completed (set when `done` flips to
+    /// true, cleared when reopened). Used to sort and eventually hide
+    /// completed tasks.
+    pub completed_at: Option<u64>,
     #[default(jiff::Timestamp::now())]
     pub created_at: jiff::Timestamp,
     #[update(jiff::Timestamp::now())]
@@ -151,6 +155,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let parent_id = record.get(12).and_then(|v| v.to_i64()).map(|id| id as u64);
     let blocked_until = record.get(13).and_then(|v| v.to_u64());
     let source_task_id = record.get(14).and_then(|v| v.to_i64()).map(|id| id as u64);
+    let completed_at = record.get(15).and_then(|v| v.to_u64());
 
     let task = Task {
         id,
@@ -163,6 +168,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         importance_factor,
         urgency_factor,
         done,
+        completed_at,
         created_at,
         updated_at,
         parent_id,
@@ -197,8 +203,14 @@ impl TodoStore {
     #[fastrace::trace]
     pub async fn update_task_done(&mut self, id: u64, done: bool) -> crate::QueryResult<()> {
         tracing::info!(id, done, "update_task_done: executing");
+        let completed_at = if done {
+            Some(Self::now_secs())
+        } else {
+            None
+        };
         Task::update_by_id(id)
             .done(done)
+            .completed_at(completed_at)
             .exec(&mut self.db)
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;
@@ -270,24 +282,52 @@ impl TodoStore {
         Ok(())
     }
 
-    #[fastrace::trace]
-    pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
-        let rows = toasty::sql::query(
-            r#"
-            SELECT
-                id, title, description, branch_name, labels, blocked_by,
-                deadline, importance_factor, urgency_factor, done, created_at, updated_at,
-                parent_id, blocked_until, source_task_id
-            FROM tasks
+    /// How long a completed task stays visible in the task list (sorted to
+    /// the bottom) before being hidden from list queries.
+    pub const COMPLETED_TASK_VISIBLE_SECS: u64 = 24 * 60 * 60;
+
+    /// ORDER BY clause shared by the list queries: open tasks by priority
+    /// score, then completed tasks at the bottom (most recently completed
+    /// first).
+    fn priority_order_sql() -> &'static str {
+        r#"
             ORDER BY
+                done ASC,
+                CASE WHEN done THEN completed_at ELSE 0 END DESC,
                 importance_factor * CASE
                     WHEN deadline IS NULL THEN 1.0
                     ELSE 86400.0 / MAX(1.0,
                         CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
                     )
                 END DESC
+        "#
+    }
+
+    /// WHERE clause shared by the list queries: hide completed tasks that
+    /// were finished more than `COMPLETED_TASK_VISIBLE_SECS` ago.
+    fn completed_visible_where_sql() -> &'static str {
+        "
+            AND NOT (done = 1 AND completed_at IS NOT NULL
+                AND completed_at < CAST(strftime('%s', 'now') AS INTEGER) - 86400)
+        "
+    }
+
+    #[fastrace::trace]
+    pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        let rows = toasty::sql::query(format!(
+            r#"
+            SELECT
+                id, title, description, branch_name, labels, blocked_by,
+                deadline, importance_factor, urgency_factor, done, created_at, updated_at,
+                parent_id, blocked_until, source_task_id, completed_at
+            FROM tasks
+            WHERE 1 = 1
+            {}
+            {}
             "#,
-        )
+            Self::completed_visible_where_sql(),
+            Self::priority_order_sql(),
+        ))
         .column_types([
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
@@ -301,6 +341,7 @@ impl TodoStore {
             toasty::stmt::Type::Bool,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
@@ -389,18 +430,15 @@ impl TodoStore {
             SELECT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
                 t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
-                t.parent_id, t.blocked_until, t.source_task_id
+                t.parent_id, t.blocked_until, t.source_task_id, t.completed_at
             FROM tasks t
             WHERE t.id IN ({})
-            ORDER BY
-                t.importance_factor * CASE
-                    WHEN t.deadline IS NULL THEN 1.0
-                    ELSE 86400.0 / MAX(1.0,
-                        CAST(t.deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
-                    )
-                END DESC
+            {}
+            {}
             "#,
-            task_placeholders.join(",")
+            task_placeholders.join(","),
+            Self::completed_visible_where_sql(),
+            Self::priority_order_sql().replace("importance_factor", "t.importance_factor"),
         );
 
         let rows = toasty::sql::query(&query)
@@ -417,6 +455,7 @@ impl TodoStore {
                 toasty::stmt::Type::Bool,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
+                toasty::stmt::Type::I64,
                 toasty::stmt::Type::I64,
                 toasty::stmt::Type::I64,
                 toasty::stmt::Type::I64,
@@ -708,6 +747,57 @@ mod tests {
             )
             .await?;
         assert_eq!(no_deadline.compute_priority_score(start_timestamp), 3.0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_completed_tasks_sorted_to_bottom_and_hidden_after_24h() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let open = storage.create_task(Task::create().title("Open task")).await?;
+        let done_recent = storage.create_task(Task::create().title("Done recently")).await?;
+        let done_old = storage.create_task(Task::create().title("Done long ago")).await?;
+
+        storage.update_task_done(done_recent.id, true).await?;
+        storage.update_task_done(done_old.id, true).await?;
+
+        // Freshly completed tasks have a completed_at set.
+        let recent = storage.get_task(done_recent.id).await?;
+        assert!(recent.completed_at.is_some());
+
+        // Backdate the older one slightly (still within the window) and
+        // verify it sorts below the more recently completed task.
+        let now = TodoStore::now_secs();
+        toasty::sql::query(
+            "UPDATE tasks SET completed_at = ?1 WHERE id = ?2",
+        )
+        .bind(now - 3600)
+        .bind(done_old.id as i64)
+        .exec(&mut storage.db)
+        .await?;
+
+        let tasks = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Open task", "Done recently", "Done long ago"]);
+
+        // Backdate beyond the visibility window: hidden from the list.
+        toasty::sql::query(
+            "UPDATE tasks SET completed_at = ?1 WHERE id = ?2",
+        )
+        .bind(now - 25 * 60 * 60)
+        .bind(done_old.id as i64)
+        .exec(&mut storage.db)
+        .await?;
+
+        let tasks = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Open task", "Done recently"]);
+
+        // Reopening clears completed_at.
+        storage.update_task_done(done_old.id, false).await?;
+        let reopened = storage.get_task(done_old.id).await?;
+        assert!(reopened.completed_at.is_none());
 
         Ok(())
     }
