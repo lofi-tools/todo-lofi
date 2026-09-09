@@ -261,7 +261,11 @@ impl TodoStore {
             WHERE t.id NOT IN (SELECT implier_id FROM tag_implications)
             "#,
         )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
         .exec(&mut self.db)
         .await
         .context(crate::error::QueryTagsSnafu {
@@ -286,7 +290,11 @@ impl TodoStore {
             WHERE ti.implied_id = ?1
             "#,
         )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
         .bind(parent_id as i64)
         .exec(&mut self.db)
         .await
@@ -312,7 +320,11 @@ impl TodoStore {
             WHERE ti.implier_id = ?1
             "#,
         )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
         .bind(child_id as i64)
         .exec(&mut self.db)
         .await
@@ -390,7 +402,11 @@ impl TodoStore {
             WHERE dtt.task_id = ?1
             "#,
         )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
         .bind(task_id as i64)
         .exec(&mut self.db)
         .await
@@ -467,7 +483,11 @@ impl TodoStore {
         );
 
         let rows = toasty::sql::query(&query)
-            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -534,7 +554,11 @@ impl TodoStore {
         );
 
         let rows = toasty::sql::query(&query)
-            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -590,6 +614,30 @@ mod tests {
         assert_ne!(other.id, tag.id);
         assert_eq!(other.name, "project:/tmp/elsewhere/api");
         assert_eq!(other.display_name.as_deref(), Some("api"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_project_tag_display_name_survives_list_queries() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        // A project tag: opaque unique name + dir-name display label.
+        storage
+            .get_or_create_project_tag(std::path::Path::new("/Users/me/dev/about-me"))
+            .await?;
+
+        // Every SQL-backed read must return the display name (not the raw
+        // `project:/...` name) so UIs can show the short label.
+        let top = storage.get_top_level_tags().await?;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].display_name.as_deref(), Some("about-me"));
+
+        let by_name = storage.get_tag_by_name("project:/Users/me/dev/about-me").await?;
+        assert_eq!(by_name.unwrap().display_name.as_deref(), Some("about-me"));
+
+        let all = storage.list_tags().await?;
+        assert_eq!(all[0].display_name.as_deref(), Some("about-me"));
 
         Ok(())
     }

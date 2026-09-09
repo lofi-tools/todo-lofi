@@ -38,7 +38,12 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(input: Entity<InputState>, store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        input: Entity<InputState>,
+        store: Store,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
 
         // Kick off the home-directory repo scan in the background; the nav
@@ -98,9 +103,9 @@ impl Layout {
                     let picker_for_dialog = picker.clone();
                     window.open_dialog(cx, move |dialog, _, _| {
                         let picker = picker_for_dialog.clone();
-                        dialog.title("Tag a project").content(move |content, _, _| {
-                            content.child(picker.clone())
-                        })
+                        dialog
+                            .title("Add a project")
+                            .content(move |content, _, _| content.child(picker.clone()))
                     });
                 }
             },
@@ -117,7 +122,12 @@ impl Layout {
         }
     }
 
-    fn handle_pick_project(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_pick_project(
+        &mut self,
+        project: Project,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.close_dialog(cx);
         self._picker_subscription = None;
         let create = project.tag(&self.store, cx);
