@@ -211,6 +211,7 @@ impl Render for TaskListView {
             .p_8()
             .gap_4()
             .on_click(cx.listener(|_this, _, _, cx| {
+                eprintln!("DBG list background clicked");
                 cx.emit(TaskListEvent::Deselected);
             }))
             .child(

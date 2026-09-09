@@ -119,11 +119,15 @@ impl Layout {
         let details_for_list = details.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
+                eprintln!("DBG layout: selected {}", task.id);
                 let task = task.clone();
                 details_for_list.update(cx, |details, cx| details.set_selected(task, cx));
+                cx.notify();
             }
             TaskListEvent::Deselected => {
+                eprintln!("DBG layout: deselected");
                 details_for_list.update(cx, |details, cx| details.clear(cx));
+                cx.notify();
             }
         })
         .detach();
@@ -174,8 +178,10 @@ impl Render for Layout {
             .size_full()
             .on_key_down(cx.listener(
                 |this, event: &KeyDownEvent, _, cx| {
+                    eprintln!("DBG key down: {}", event.keystroke.key);
                     if event.keystroke.key == "escape" {
                         this.details.update(cx, |details, cx| details.clear(cx));
+                        cx.notify();
                     }
                 },
             ))
