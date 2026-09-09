@@ -1,6 +1,7 @@
 use crate::TodoStore;
 use derive_entity_id::EntityId;
 use snafu::{OptionExt, ResultExt};
+use std::collections::{HashMap, HashSet, VecDeque};
 use toasty::Deferred;
 use toasty::Embed;
 use toasty::Model;
@@ -61,6 +62,10 @@ pub type TaskCreate = <Task as toasty::schema::Model>::Create;
 pub struct TaskWithMeta {
     pub task: Task,
     pub direct_tags: Vec<String>,
+    /// Direct tags of the task's ancestor chain, so a subtask is
+    /// automatically tagged like its parents. Computed on load, never
+    /// stored, and not directly modifiable.
+    pub inherited_tags: Vec<String>,
     pub inferred_tags: Vec<String>,
     /// Most specific tags only: ancestors implied by another tag on the
     /// same task are omitted. Used for display in the task list.
@@ -164,6 +169,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     Ok(TaskWithMeta {
         task,
         direct_tags: Vec::new(),
+        inherited_tags: Vec::new(),
         inferred_tags: Vec::new(),
         leaf_tags: Vec::new(),
         blocked: false,
@@ -233,6 +239,7 @@ impl TodoStore {
         let mut meta = TaskWithMeta {
             task,
             direct_tags: Vec::new(),
+            inherited_tags: Vec::new(),
             inferred_tags: Vec::new(),
             leaf_tags: Vec::new(),
             blocked: false,
@@ -317,15 +324,68 @@ impl TodoStore {
 
         let id_list: Vec<String> = tag_ids.iter().map(|id| id.to_string()).collect();
         let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+
+        // Tasks carrying the tag (or a descendant tag), plus every task in
+        // their subtask tree: subtasks inherit their parent's tags. The
+        // closure is walked in Rust because the driver rejects recursive
+        // CTEs.
+        let seed_rows = toasty::sql::query(format!(
+            "SELECT DISTINCT dtt.task_id FROM direct_task_tags dtt WHERE dtt.tag_id IN ({})",
+            placeholders.join(",")
+        ))
+        .column_types([toasty::stmt::Type::I64])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::ListTasksByTagSnafu { tag_id })?;
+
+        let mut all_ids: HashSet<u64> = seed_rows
+            .iter()
+            .filter_map(|row| {
+                if let toasty::stmt::Value::Record(record) = row {
+                    record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let link_rows = toasty::sql::query(r#"SELECT id, parent_id FROM tasks"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::ListTasksByTagSnafu { tag_id })?;
+        let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+        for row in link_rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let parent = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                children.entry(parent).or_default().push(id);
+            }
+        }
+        let mut queue: VecDeque<u64> = all_ids.iter().copied().collect();
+        while let Some(current) = queue.pop_front() {
+            if let Some(subtasks) = children.get(&current) {
+                for &subtask in subtasks {
+                    if all_ids.insert(subtask) {
+                        queue.push_back(subtask);
+                    }
+                }
+            }
+        }
+
+        if all_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let task_id_list: Vec<String> = all_ids.iter().map(|id| id.to_string()).collect();
+        let task_placeholders: Vec<&str> = task_id_list.iter().map(|s| s.as_str()).collect();
         let query = format!(
             r#"
-            SELECT DISTINCT
+            SELECT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
                 t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
                 t.parent_id, t.blocked_until
             FROM tasks t
-            JOIN direct_task_tags dtt ON dtt.task_id = t.id
-            WHERE dtt.tag_id IN ({})
+            WHERE t.id IN ({})
             ORDER BY
                 t.importance_factor * CASE
                     WHEN t.deadline IS NULL THEN 1.0
@@ -334,7 +394,7 @@ impl TodoStore {
                     )
                 END DESC
             "#,
-            placeholders.join(",")
+            task_placeholders.join(",")
         );
 
         let rows = toasty::sql::query(&query)
@@ -374,16 +434,38 @@ impl TodoStore {
         Ok(())
     }
 
+    pub async fn load_inherited_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        let tags = self.inherited_task_tags(task.id).await?;
+        task.inherited_tags = tags.iter().map(|t| t.label()).collect();
+        Ok(())
+    }
+
+    /// Inferred and leaf tags over the task's own direct tags plus the
+    /// inherited tags of its ancestors, so a subtask carries the same
+    /// effective tag set (and leaf display) as its parents.
     pub async fn load_inferred_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
-        let tags = self.get_inferred_task_tags(task.id).await?;
+        let mut seed: HashSet<u64> = self
+            .get_direct_task_tags(task.id)
+            .await?
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        seed.extend(
+            self.inherited_task_tags(task.id)
+                .await?
+                .into_iter()
+                .map(|t| t.id),
+        );
+        let tags = self.inferred_tags_from_seed(&seed).await?;
         task.inferred_tags = tags.iter().map(|t| t.label()).collect();
-        let leaves = self.get_leaf_task_tags(task.id).await?;
+        let leaves = self.leaf_tags_from_all(&tags).await?;
         task.leaf_tags = leaves.iter().map(|t| t.label()).collect();
         Ok(())
     }
 
     pub async fn load_all_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         self.load_direct_tags(task).await?;
+        self.load_inherited_tags(task).await?;
         self.load_inferred_tags(task).await?;
         Ok(())
     }

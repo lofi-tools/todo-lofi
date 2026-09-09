@@ -437,6 +437,31 @@ impl TodoStore {
         Ok(tags)
     }
 
+    /// Direct tags of the task's ancestor chain (nearest ancestor first),
+    /// deduplicated. A subtask automatically inherits these on load; the
+    /// chain walk is bounded by visited ids so a corrupt cycle cannot loop.
+    pub async fn inherited_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
+        let mut out: Vec<Tag> = Vec::new();
+        let mut seen: HashSet<u64> = HashSet::new();
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut current_id = task_id;
+        loop {
+            let Some(parent_id) = self.get_task(current_id).await?.parent_id else {
+                break;
+            };
+            if !visited.insert(parent_id) {
+                break;
+            }
+            current_id = parent_id;
+            for tag in self.get_direct_task_tags(current_id).await? {
+                if seen.insert(tag.id) {
+                    out.push(tag);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn get_inferred_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
         let direct_rows =
             toasty::sql::query(r#"SELECT tag_id FROM direct_task_tags WHERE task_id = ?1"#)
@@ -446,7 +471,7 @@ impl TodoStore {
                 .await
                 .context(crate::error::LoadTaskTagsSnafu { task_id })?;
 
-        let direct_tag_ids: Vec<u64> = direct_rows
+        let seed: HashSet<u64> = direct_rows
             .iter()
             .filter_map(|row| {
                 if let toasty::stmt::Value::Record(record) = row {
@@ -456,13 +481,21 @@ impl TodoStore {
                 }
             })
             .collect();
+        self.inferred_tags_from_seed(&seed).await
+    }
 
+    /// Effective tags for a seed of tag ids (direct and/or inherited): the
+    /// seed plus everything implied by it through the tag DAG.
+    pub(crate) async fn inferred_tags_from_seed(
+        &mut self,
+        seed: &HashSet<u64>,
+    ) -> QueryResult<Vec<Tag>> {
         let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
-                context: format!("load inferred tags for task {}", task_id),
+                context: "load implied tags",
             })?;
 
         let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -474,9 +507,8 @@ impl TodoStore {
             }
         }
 
-        let mut all_ids: HashSet<u64> = direct_tag_ids.iter().copied().collect();
-        let mut queue: VecDeque<u64> = direct_tag_ids.into();
-
+        let mut all_ids: HashSet<u64> = seed.clone();
+        let mut queue: VecDeque<u64> = all_ids.iter().copied().collect();
         while let Some(current) = queue.pop_front() {
             if let Some(parents) = graph.get(&current) {
                 for &parent in parents {
@@ -507,7 +539,7 @@ impl TodoStore {
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
-                context: format!("fetch inferred tag details for task {}", task_id),
+                context: "fetch effective tag details",
             })?;
 
         let mut tags = Vec::new();
@@ -519,20 +551,20 @@ impl TodoStore {
         Ok(tags)
     }
 
-    /// Leaf tags for a task: the most specific tags, dropping any tag that
-    /// is implied by another tag on the same task. E.g. if "programming"
-    /// implies "work", a task tagged "programming" shows only "programming".
-    pub async fn get_leaf_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
-        let all = self.get_inferred_task_tags(task_id).await?;
+    /// Leaf tags from an already-computed effective tag set: the most
+    /// specific tags, dropping any tag implied by another tag in the set.
+    /// E.g. if "programming" implies "work", a task tagged "programming"
+    /// shows only "programming".
+    pub(crate) async fn leaf_tags_from_all(&mut self, all: &[Tag]) -> QueryResult<Vec<Tag>> {
         if all.len() < 2 {
-            return Ok(all);
+            return Ok(all.to_vec());
         }
         let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
             .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
-                context: format!("load leaf tags for task {}", task_id),
+                context: "load leaf tags",
             })?;
 
         let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
@@ -546,7 +578,7 @@ impl TodoStore {
 
         let ids: HashSet<u64> = all.iter().map(|t| t.id).collect();
         let mut implied: HashSet<u64> = HashSet::new();
-        for tag in &all {
+        for tag in all {
             let mut queue: VecDeque<u64> =
                 graph.get(&tag.id).cloned().unwrap_or_default().into();
             let mut seen: HashSet<u64> = HashSet::new();
@@ -565,7 +597,14 @@ impl TodoStore {
             }
         }
 
-        Ok(all.into_iter().filter(|t| !implied.contains(&t.id)).collect())
+        Ok(all.iter().filter(|t| !implied.contains(&t.id)).cloned().collect())
+    }
+
+    /// Leaf tags for a task's own direct tags (plus DAG inference): kept
+    /// for callers that do not want inherited-tag semantics.
+    pub async fn get_leaf_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
+        let all = self.get_inferred_task_tags(task_id).await?;
+        self.leaf_tags_from_all(&all).await
     }
 
     pub async fn get_all_descendants(&mut self, tag_id: u64) -> QueryResult<Vec<Tag>> {
@@ -946,6 +985,154 @@ mod tests {
         assert_eq!(backend_tasks.len(), 1);
         assert_eq!(backend_tasks[0].title, "Rust CLI");
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inherited_tags_walk_ancestor_chain() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let tag_a = storage.create_tag("TagA").await?;
+        let tag_b = storage.create_tag("TagB").await?;
+
+        let grandparent = storage.create_task(Task::create().title("Grandparent")).await?;
+        storage.assign_tag_to_task(grandparent.id, &tag_b.name).await?;
+        let parent = storage
+            .create_task(
+                Task::create()
+                    .title("Parent")
+                    .parent_id(Some(grandparent.id)),
+            )
+            .await?;
+        storage.assign_tag_to_task(parent.id, &tag_a.name).await?;
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Child")
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        // Inherited tags are the ancestors' direct tags, nearest first,
+        // transitive through the whole chain.
+        let meta = storage.get_task_with_meta(child.id).await?;
+        assert_eq!(meta.inherited_tags, vec![tag_a.label(), tag_b.label()]);
+        assert!(meta.direct_tags.is_empty());
+
+        // The parent itself inherits only from its own parent.
+        let meta = storage.get_task_with_meta(parent.id).await?;
+        assert_eq!(meta.inherited_tags, vec![tag_b.label()]);
+        assert_eq!(meta.direct_tags, vec![tag_a.label()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inherited_tags_deduplicated() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let tag = storage.create_tag("Shared").await?;
+
+        let grandparent = storage.create_task(Task::create().title("Grandparent")).await?;
+        storage.assign_tag_to_task(grandparent.id, &tag.name).await?;
+        let parent = storage
+            .create_task(
+                Task::create()
+                    .title("Parent")
+                    .parent_id(Some(grandparent.id)),
+            )
+            .await?;
+        storage.assign_tag_to_task(parent.id, &tag.name).await?;
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Child")
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        let meta = storage.get_task_with_meta(child.id).await?;
+        assert_eq!(meta.inherited_tags, vec![tag.label()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inherited_tags_feed_inference_and_leaf() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let cs = storage.create_tag("CS").await?;
+        let programming = storage.create_tag("Programming").await?;
+        let python = storage.create_tag("Python").await?;
+        storage
+            .add_tag_implication(python.id, programming.id)
+            .await?;
+        storage
+            .add_tag_implication(programming.id, cs.id)
+            .await?;
+
+        let parent = storage.create_task(Task::create().title("Parent")).await?;
+        storage.assign_tag_to_task(parent.id, &python.name).await?;
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Child")
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        let meta = storage.get_task_with_meta(child.id).await?;
+        assert_eq!(meta.inherited_tags, vec![python.label()]);
+        // Tag-DAG inference applies over inherited tags too.
+        for expected in [&python, &programming, &cs] {
+            assert!(
+                meta.inferred_tags.contains(&expected.label()),
+                "inferred tags should contain {}",
+                expected.name
+            );
+        }
+        // Leaf drops implied tags: only the most specific remains.
+        assert_eq!(meta.leaf_tags, vec![python.label()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_tasks_by_tag_includes_subtasks() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let tag = storage.create_tag("Team").await?;
+
+        let parent = storage.create_task(Task::create().title("Parent")).await?;
+        storage.assign_tag_to_task(parent.id, &tag.name).await?;
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Child")
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+        let grandchild = storage
+            .create_task(
+                Task::create()
+                    .title("Grandchild")
+                    .parent_id(Some(child.id)),
+            )
+            .await?;
+
+        // An unrelated task and its subtask stay out of the tag's list.
+        let other = storage.create_task(Task::create().title("Other")).await?;
+        storage
+            .create_task(
+                Task::create()
+                    .title("Other child")
+                    .parent_id(Some(other.id)),
+            )
+            .await?;
+
+        let tasks = storage.list_tasks_by_tag(tag.id).await?;
+        let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&parent.id));
+        assert!(ids.contains(&child.id));
+        assert!(ids.contains(&grandchild.id));
+        assert!(!ids.contains(&other.id));
+
+        // Listed subtasks carry their inherited tags.
+        let child_meta = tasks.iter().find(|t| t.id == child.id).unwrap();
+        assert_eq!(child_meta.inherited_tags, vec![tag.label()]);
         Ok(())
     }
 
