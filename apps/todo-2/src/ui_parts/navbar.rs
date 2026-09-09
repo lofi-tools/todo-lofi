@@ -3,6 +3,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
 };
 use gpui_component::StyledExt;
+use gpui_component::scroll::ScrollableElement;
 use std::collections::HashMap;
 use storage::prelude::*;
 
@@ -180,6 +181,9 @@ impl Render for NavBar {
             .p_4()
             .v_flex()
             .gap_2()
+            // The Projects + Tags sections can exceed the viewport height
+            // (long repo lists, deep tag trees), so make the nav scrollable.
+            .overflow_y_scrollbar()
             .child(
                 div()
                     .text_sm()
@@ -195,7 +199,6 @@ impl Render for NavBar {
 
                 div()
                     .id(gpui::ElementId::named_usize("project", project_index))
-                    .flex_1()
                     .child(project.name.clone())
                     .px_2()
                     .py_0p5()
