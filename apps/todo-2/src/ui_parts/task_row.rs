@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
+use gpui_component::Disableable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
@@ -183,6 +184,7 @@ impl Render for TaskRow {
                 Checkbox::new(("checkbox", task_id))
                     .with_size(px(22.))
                     .checked(done)
+                    .disabled(self.task.blocked && !done)
                     .on_click(move |new_done, _window, cx| {
                         let store = store.clone();
                         let entity = entity.clone();

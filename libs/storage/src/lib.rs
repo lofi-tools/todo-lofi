@@ -2,6 +2,7 @@ use snafu::ResultExt;
 use toasty_driver_turso::Turso;
 
 pub mod error;
+pub mod link;
 pub mod migrations;
 pub mod tag;
 pub mod task;
@@ -10,6 +11,7 @@ pub mod tracing_setup;
 
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
+    pub use crate::link::LinkKind;
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::tag::{Tag, TagId, TagNode};
     pub use crate::task::{Task, TaskWithMeta};

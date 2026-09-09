@@ -91,6 +91,28 @@ pub enum QueryErr {
     #[snafu(display("load tags for task {task_id}: {source}"))]
     LoadTaskTags { task_id: u64, source: toasty::Error },
 
+    // -- Task link operations --
+    #[snafu(display("add task link {task_id} -> {other_id}: {source}"))]
+    AddTaskLink {
+        task_id: u64,
+        other_id: u64,
+        source: toasty::Error,
+    },
+
+    #[snafu(display("remove task link {task_id} -> {other_id}: {source}"))]
+    RemoveTaskLink {
+        task_id: u64,
+        other_id: u64,
+        source: toasty::Error,
+    },
+
+    #[snafu(display("link {task_id} -> {other_id} ({kind}) would close a dependency cycle"))]
+    LinkCycle {
+        task_id: u64,
+        other_id: u64,
+        kind: String,
+    },
+
     // -- Generic fallback --
     #[snafu(display("database error: {source}"))]
     Database { source: toasty::Error },

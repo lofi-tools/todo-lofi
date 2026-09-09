@@ -5,6 +5,7 @@ use gpui::{
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
+use gpui_component::Disableable;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
@@ -19,6 +20,9 @@ pub enum TaskDetailsEvent {
     TitleCommitted { task_id: u64, title: String },
     PendingConfirmed { selected: Option<TaskWithMeta> },
     PendingCancelled,
+    /// The "+ blocked by task" button was clicked; the parent should open
+    /// the task picker dialog.
+    PickBlocker { task_id: u64 },
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -36,6 +40,12 @@ pub struct TaskDetails {
     _description_subscription: Option<Subscription>,
     confirming: bool,
     pending: Option<PendingSelection>,
+    blockers: Vec<storage::Task>,
+    _blockers_fetch: Option<gpui::Task<()>>,
+    until_form_open: bool,
+    until_input: Option<Entity<InputState>>,
+    _until_subscription: Option<Subscription>,
+    until_error: Option<String>,
 }
 
 impl TaskDetails {
@@ -51,12 +61,60 @@ impl TaskDetails {
             _description_subscription: None,
             confirming: false,
             pending: None,
+            blockers: Vec::new(),
+            _blockers_fetch: None,
+            until_form_open: false,
+            until_input: None,
+            _until_subscription: None,
+            until_error: None,
         }
     }
 
     pub fn set_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
+        self.apply_selected(task, cx);
+    }
+
+    fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
+        let fetch = self.store.list_blockers(task.id, cx);
         self.selected = Some(task);
+        self.blockers = Vec::new();
+        self._blockers_fetch = Some(cx.spawn(async move |this, cx| {
+            match fetch.await {
+                Ok(blockers) => {
+                    this.update(cx, |this, cx| {
+                        this.blockers = blockers;
+                        this._blockers_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch blockers: {e}");
+                }
+            }
+        }));
         cx.notify();
+    }
+
+    pub fn set_blockers(&mut self, blockers: Vec<storage::Task>, cx: &mut Context<Self>) {
+        self.blockers = blockers;
+        cx.notify();
+    }
+
+    /// Fresh blocked state from the loaded blockers plus `blocked_until`,
+    /// so reopening a blocker re-blocks immediately without a refetch.
+    fn computed_blocked(&self) -> bool {
+        let Some(task) = &self.selected else {
+            return false;
+        };
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if task.blocked_until.is_some_and(|until| until > now_secs) {
+            return true;
+        }
+        self.blockers.iter().any(|blocker| !blocker.done)
     }
 
     pub fn selected_id(&self) -> Option<u64> {
@@ -99,7 +157,11 @@ impl TaskDetails {
         };
         self.confirming = false;
         self.abandon_edits();
-        self.selected = pending;
+        self.close_until_form();
+        match pending {
+            Some(task) => self.apply_selected(task, cx),
+            None => self.clear(cx),
+        }
         let selected = self.selected.clone();
         cx.emit(TaskDetailsEvent::PendingConfirmed { selected });
         cx.notify();
@@ -130,6 +192,8 @@ impl TaskDetails {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        self.blockers = Vec::new();
+        self.close_until_form();
         self.cancel_editing(cx);
         cx.notify();
     }
@@ -276,6 +340,315 @@ impl TaskDetails {
         .detach();
         cx.notify();
     }
+
+    fn close_until_form(&mut self) {
+        self.until_form_open = false;
+        self.until_input = None;
+        self._until_subscription = None;
+        self.until_error = None;
+    }
+
+    fn begin_until_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.until_form_open {
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("YYYY-MM-DD HH:MM", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_until_form(cx);
+            }
+        });
+        self.until_input = Some(input.clone());
+        self._until_subscription = Some(subscription);
+        self.until_form_open = true;
+        self.until_error = None;
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_until_form(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.until_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let raw = input.read(cx).text().to_string();
+        match parse_blocked_until(&raw) {
+            None => {
+                self.until_error = Some("Use YYYY-MM-DD HH:MM, in the future".to_string());
+                cx.notify();
+            }
+            Some(until) => {
+                let task_id = task.id;
+                let store = self.store.clone();
+                if let Some(selected) = &mut self.selected {
+                    selected.task.blocked_until = Some(until);
+                }
+                self.close_until_form();
+                let set = store.set_blocked_until(task_id, Some(until), cx);
+                cx.spawn(async move |this, cx| {
+                    if let Err(e) = set.await {
+                        tracing::error!(?e, "Failed set_blocked_until");
+                    }
+                    this.update(cx, |_, cx| {
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+                cx.notify();
+            }
+        }
+    }
+
+    fn clear_blocked_until(&mut self, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let task_id = task.id;
+        let store = self.store.clone();
+        if let Some(selected) = &mut self.selected {
+            selected.task.blocked_until = None;
+        }
+        let clear = store.set_blocked_until(task_id, None, cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = clear.await {
+                tracing::error!(?e, "Failed clear_blocked_until");
+            }
+            this.update(cx, |_, cx| {
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn remove_blocker(&mut self, blocker_id: u64, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let remove = self.store.remove_blocker(task.id, blocker_id, cx);
+        cx.spawn(async move |this, cx| match remove.await {
+            Ok(blockers) => {
+                this.update(cx, |this, cx| {
+                    this.set_blockers(blockers, cx);
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to remove blocker: {e}");
+            }
+        })
+        .detach();
+    }
+
+    fn relationships_section(&mut self, task_id: u64, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut section = div().v_flex().gap_2().child(field_label("Relationships"));
+
+        if self.computed_blocked() {
+            let mut reasons = Vec::new();
+            if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
+                reasons.push(format!("until {}", format_deadline(until)));
+            }
+            let unfinished = self.blockers.iter().filter(|b| !b.done).count();
+            if unfinished > 0 {
+                reasons.push(format!(
+                    "by {unfinished} unfinished blocker{}",
+                    if unfinished == 1 { "" } else { "s" }
+                ));
+            }
+            section = section.child(
+                div()
+                    .h_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xe06c60))
+                            .child("Blocked"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(reasons.join(" · ")),
+                    ),
+            );
+        }
+
+        for blocker in self.blockers.clone() {
+            let blocker_id = blocker.id;
+            section = section.child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(if blocker.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xe5e5e5)
+                            })
+                            .child(blocker.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if blocker.done { "done" } else { "" }.to_string()),
+                    )
+                    .child(
+                        Button::new(("remove-blocker", blocker_id))
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Remove blocker")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_blocker(blocker_id, cx);
+                            })),
+                    ),
+            );
+        }
+
+        if let Some(until) = self.selected.as_ref().and_then(|t| t.blocked_until) {
+            section = section.child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(format!("Until {}", format_deadline(until))),
+                    )
+                    .child(
+                        Button::new("clear-blocked-until")
+                            .ghost()
+                            .compact()
+                            .label("×")
+                            .tooltip("Clear time block")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.clear_blocked_until(cx);
+                            })),
+                    ),
+            );
+        }
+
+        if self.until_form_open {
+            if let Some(input) = self.until_input.clone() {
+                section = section.child(
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .id(("blocked-until-edit", task_id))
+                                .h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Input::new(&input)
+                                        .small()
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
+                                )
+                                .child(
+                                    Button::new("set-blocked-until")
+                                        .ghost()
+                                        .compact()
+                                        .label("Set")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.commit_until_form(cx);
+                                        })),
+                                ),
+                        )
+                        .children(self.until_error.clone().map(|error| {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xe06c60))
+                                .child(error)
+                        })),
+                );
+            }
+        }
+
+        section.child(
+            div()
+                .h_flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("add-blocker")
+                        .ghost()
+                        .compact()
+                        .label("+ blocked by task")
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(TaskDetailsEvent::PickBlocker { task_id });
+                        })),
+                )
+                .child(
+                    Button::new("add-blocked-until")
+                        .ghost()
+                        .compact()
+                        .label("+ blocked until")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.begin_until_form(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("add-subtask")
+                        .ghost()
+                        .compact()
+                        .label("+ subtasks")
+                        .tooltip("Coming soon"),
+                )
+                .child(
+                    Button::new("add-follow-up")
+                        .ghost()
+                        .compact()
+                        .label("+ follow-up tasks")
+                        .tooltip("Coming soon"),
+                ),
+        )
+    }
+}
+
+/// Parse "YYYY-MM-DD HH:MM" (or date only, midnight) in the system timezone.
+/// Returns None for invalid input or times that are not in the future.
+fn parse_blocked_until(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let datetime = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M", raw)
+        .or_else(|_| {
+            jiff::civil::Date::strptime("%Y-%m-%d", raw).map(|date| date.at(0, 0, 0, 0))
+        })
+        .ok()?;
+    let until = datetime
+        .to_zoned(jiff::tz::TimeZone::system())
+        .ok()?
+        .timestamp()
+        .as_second();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    (until > now).then_some(until as u64)
 }
 
 fn field_label(label: &str) -> impl IntoElement {
@@ -345,6 +718,7 @@ impl Render for TaskDetails {
                 let done = task.done;
                 let store = self.store.clone();
                 let entity = cx.entity().clone();
+                let blocked = self.computed_blocked();
 
                 let mut details = div().v_flex().gap_3();
                 let mut header = div().v_flex().gap_1();
@@ -370,6 +744,7 @@ impl Render for TaskDetails {
                             Checkbox::new(("details-checkbox", task_id))
                                 .with_size(px(22.))
                                 .checked(done)
+                                .disabled(blocked && !done)
                                 .on_click(move |new_done, _window, cx| {
                                     let store = store.clone();
                                     let entity = entity.clone();
@@ -478,6 +853,7 @@ impl Render for TaskDetails {
                 {
                     details = details.child(field("Branch", branch.clone()));
                 }
+                details = details.child(self.relationships_section(task_id, cx));
                 details
             }
         };

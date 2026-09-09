@@ -21,6 +21,9 @@ pub struct Task {
     pub branch_name: Option<String>,
     pub labels: Option<toasty::Json<Vec<String>>>,
     pub deadline: Option<u64>,
+    /// Epoch seconds until which the task is blocked (time-based block).
+    /// `None` means no time block.
+    pub blocked_until: Option<u64>,
     #[default(1.0)]
     pub importance_factor: f64,
     #[default(1.0)]
@@ -62,6 +65,10 @@ pub struct TaskWithMeta {
     /// Most specific tags only: ancestors implied by another tag on the
     /// same task are omitted. Used for display in the task list.
     pub leaf_tags: Vec<String>,
+    /// True when the task currently cannot be worked on: an unfinished
+    /// blocker exists or `blocked_until` lies in the future. Computed on
+    /// load, so reopening a blocker re-blocks dependants automatically.
+    pub blocked: bool,
 }
 impl std::ops::Deref for TaskWithMeta {
     type Target = Task;
@@ -134,6 +141,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         })?
         .parse::<jiff::Timestamp>()?;
     let parent_id = record.get(12).and_then(|v| v.to_i64()).map(|id| id as u64);
+    let blocked_until = record.get(13).and_then(|v| v.to_u64());
 
     let task = Task {
         id,
@@ -142,6 +150,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         branch_name,
         labels,
         deadline,
+        blocked_until,
         importance_factor,
         urgency_factor,
         done,
@@ -157,6 +166,7 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         direct_tags: Vec::new(),
         inferred_tags: Vec::new(),
         leaf_tags: Vec::new(),
+        blocked: false,
     })
 }
 
@@ -241,7 +251,7 @@ impl TodoStore {
             SELECT
                 id, title, description, branch_name, labels, blocked_by,
                 deadline, importance_factor, urgency_factor, done, created_at, updated_at,
-                parent_id
+                parent_id, blocked_until
             FROM tasks
             ORDER BY
                 importance_factor * CASE
@@ -266,6 +276,7 @@ impl TodoStore {
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
         ])
         .exec(&mut self.db)
         .await
@@ -274,8 +285,7 @@ impl TodoStore {
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
-            self.load_direct_tags(&mut task).await?;
-            self.load_inferred_tags(&mut task).await?;
+            self.load_all_meta(&mut task).await?;
             tasks.push(task);
         }
 
@@ -298,7 +308,7 @@ impl TodoStore {
             SELECT DISTINCT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
                 t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
-                t.parent_id
+                t.parent_id, t.blocked_until
             FROM tasks t
             JOIN direct_task_tags dtt ON dtt.task_id = t.id
             WHERE dtt.tag_id IN ({})
@@ -328,6 +338,7 @@ impl TodoStore {
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::I64,
+                toasty::stmt::Type::I64,
             ])
             .exec(&mut self.db)
             .await
@@ -336,7 +347,7 @@ impl TodoStore {
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
             let mut task = parse_task_from_row(&row)?;
-            self.load_all_tags(&mut task).await?;
+            self.load_all_meta(&mut task).await?;
             tasks.push(task);
         }
 
@@ -360,6 +371,24 @@ impl TodoStore {
     pub async fn load_all_tags(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         self.load_direct_tags(task).await?;
         self.load_inferred_tags(task).await?;
+        Ok(())
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    pub async fn load_blocked(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        self.load_blocked_flag(task, Self::now_secs()).await
+    }
+
+    /// Tags plus computed blocked flag: everything list views need.
+    pub async fn load_all_meta(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        self.load_all_tags(task).await?;
+        self.load_blocked(task).await?;
         Ok(())
     }
 }

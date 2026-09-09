@@ -17,6 +17,7 @@ use ui_parts::navbar::{NavBar, NavBarEvent};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
+use ui_parts::task_picker::{TaskPicker, TaskPickerEvent};
 
 mod components;
 mod projects;
@@ -27,6 +28,7 @@ mod ui_parts {
     pub mod project_picker;
     pub mod task_details;
     pub mod task_list;
+    pub mod task_picker;
     pub mod task_row;
 }
 
@@ -41,6 +43,8 @@ struct Layout {
     _project_subscription: Subscription,
     /// Subscription to the open project-picker modal, if one is open.
     _picker_subscription: Option<Subscription>,
+    /// Subscription to the open task-picker modal, if one is open.
+    _task_picker_subscription: Option<Subscription>,
     /// Window-wide Escape observer (focus-independent deselect).
     _escape_observer: Subscription,
 }
@@ -149,26 +153,33 @@ impl Layout {
         let list_for_toggle = task_list.clone();
         let list_for_pending = task_list.clone();
         let details_for_pending = details.clone();
-        cx.subscribe(&details, move |_this, _details, event, cx| match event {
-            TaskDetailsEvent::Toggled { task_id, done } => {
-                list_for_toggle.update(cx, |list, cx| list.set_task_done(*task_id, *done, cx));
-            }
-            TaskDetailsEvent::TitleCommitted { task_id, title } => {
-                list_for_toggle.update(cx, |list, cx| {
-                    list.set_task_title(*task_id, title.clone(), cx)
-                });
-            }
-            TaskDetailsEvent::PendingConfirmed { selected } => {
-                if selected.is_none() {
-                    list_for_pending.update(cx, |list, cx| list.clear_selection(cx));
-                    cx.notify();
+        cx.subscribe_in(
+            &details,
+            window,
+            move |this, _details, event, window, cx| match event {
+                TaskDetailsEvent::Toggled { task_id, done } => {
+                    list_for_toggle.update(cx, |list, cx| list.set_task_done(*task_id, *done, cx));
                 }
-            }
-            TaskDetailsEvent::PendingCancelled => {
-                let current = details_for_pending.read(cx).selected_id();
-                list_for_pending.update(cx, |list, cx| list.restore_selection(current, cx));
-            }
-        })
+                TaskDetailsEvent::TitleCommitted { task_id, title } => {
+                    list_for_toggle.update(cx, |list, cx| {
+                        list.set_task_title(*task_id, title.clone(), cx)
+                    });
+                }
+                TaskDetailsEvent::PendingConfirmed { selected } => {
+                    if selected.is_none() {
+                        list_for_pending.update(cx, |list, cx| list.clear_selection(cx));
+                        cx.notify();
+                    }
+                }
+                TaskDetailsEvent::PendingCancelled => {
+                    let current = details_for_pending.read(cx).selected_id();
+                    list_for_pending.update(cx, |list, cx| list.restore_selection(current, cx));
+                }
+                TaskDetailsEvent::PickBlocker { task_id } => {
+                    this.open_blocker_picker(*task_id, window, cx);
+                }
+            },
+        )
         .detach();
 
         // Escape deselects wherever focus is: keystroke observers fire
@@ -178,7 +189,9 @@ impl Layout {
         let escape_observer = cx.observe_keystrokes(
             move |layout: &mut Layout, event, _window, cx| {
                 if event.keystroke.key == "escape" {
-                    if layout._picker_subscription.is_some() {
+                    if layout._picker_subscription.is_some()
+                        || layout._task_picker_subscription.is_some()
+                    {
                         return;
                     }
                     if layout.task_list.read(cx).is_editing() {
@@ -210,6 +223,7 @@ impl Layout {
             _projects: Vec::new(),
             _project_subscription: project_subscription,
             _picker_subscription: None,
+            _task_picker_subscription: None,
             _escape_observer: escape_observer,
         }
     }
@@ -230,6 +244,78 @@ impl Layout {
             }
             this.update(cx, |this, cx| {
                 this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_blocker_picker(&mut self, task_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
+        let picker_for_focus = picker.clone();
+        window.on_next_frame(move |window, cx| {
+            picker_for_focus.update(cx, |picker, cx| {
+                picker.focus(window, cx);
+            });
+        });
+        self._task_picker_subscription = Some(cx.subscribe_in(
+            &picker,
+            window,
+            move |this, _picker, event, window, cx| match event {
+                TaskPickerEvent::Selected(blocker_id) => {
+                    this.handle_pick_blocker(task_id, *blocker_id, window, cx);
+                }
+                TaskPickerEvent::Dismissed => {
+                    window.close_dialog(cx);
+                    this._task_picker_subscription = None;
+                }
+            },
+        ));
+        let picker_for_dialog = picker.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let picker = picker_for_dialog.clone();
+            dialog
+                .title("Blocked by")
+                .content(move |content, _, _| content.child(picker.clone()))
+        });
+        let fetch = self.store.blocker_candidates(task_id, cx);
+        cx.spawn(async move |this, cx| {
+            let tasks = match fetch.await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::error!("Failed to fetch blocker candidates: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |_, cx| {
+                picker.update(cx, |picker, cx| picker.set_tasks(tasks, cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn handle_pick_blocker(
+        &mut self,
+        task_id: u64,
+        blocker_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.close_dialog(cx);
+        self._task_picker_subscription = None;
+        let add = self.store.add_blocker(task_id, blocker_id, cx);
+        cx.spawn(async move |this, cx| {
+            let blockers = match add.await {
+                Ok(blockers) => blockers,
+                Err(e) => {
+                    tracing::error!("Failed to add blocker: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.details
+                    .update(cx, |details, cx| details.set_blockers(blockers, cx));
             })
             .ok();
         })
@@ -288,6 +374,7 @@ fn main() {
         gpui_tokio::init(cx);
         gpui_component::init(cx);
         ui_parts::project_picker::init(cx);
+        ui_parts::task_picker::init(cx);
 
         let init_store = gpui_tokio::Tokio::spawn_result(cx, async move {
             let config = StorageConfig {

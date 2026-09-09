@@ -106,6 +106,72 @@ impl Store {
         })
     }
 
+    pub fn list_blockers(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_blockers(task_id).await?)
+        })
+    }
+
+    pub fn blocker_candidates(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.blocker_candidates(task_id).await?)
+        })
+    }
+
+    pub fn add_blocker(
+        &self,
+        task_id: u64,
+        blocker_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.add_blocker(task_id, blocker_id).await?;
+            Ok(s.list_blockers(task_id).await?)
+        })
+    }
+
+    pub fn remove_blocker(
+        &self,
+        task_id: u64,
+        blocker_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.remove_blocker(task_id, blocker_id).await?;
+            Ok(s.list_blockers(task_id).await?)
+        })
+    }
+
+    pub fn set_blocked_until(
+        &self,
+        task_id: u64,
+        blocked_until: Option<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.update_blocked_until(task_id, blocked_until).await?;
+            Ok(())
+        })
+    }
+
     pub fn list_tasks_by_tag_name_with_labels(
         &self,
         tag_name: &str,
