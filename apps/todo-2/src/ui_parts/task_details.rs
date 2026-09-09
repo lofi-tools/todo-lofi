@@ -14,15 +14,14 @@ use crate::components::Checkbox;
 use crate::store::Store;
 use crate::theme::{APP_BG, HAIRLINE};
 
+use super::task_picker::{TaskPicker, TaskPickerEvent};
+
 #[derive(Clone)]
 pub enum TaskDetailsEvent {
     Toggled { task_id: u64, done: bool },
     TitleCommitted { task_id: u64, title: String },
     PendingConfirmed { selected: Option<TaskWithMeta> },
     PendingCancelled,
-    /// The "+ blocked by task" button was clicked; the parent should open
-    /// the task picker dialog.
-    PickBlocker { task_id: u64 },
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -46,6 +45,8 @@ pub struct TaskDetails {
     until_input: Option<Entity<InputState>>,
     _until_subscription: Option<Subscription>,
     until_error: Option<String>,
+    blocker_picker: Option<Entity<TaskPicker>>,
+    _blocker_picker_subscription: Option<Subscription>,
 }
 
 impl TaskDetails {
@@ -67,6 +68,8 @@ impl TaskDetails {
             until_input: None,
             _until_subscription: None,
             until_error: None,
+            blocker_picker: None,
+            _blocker_picker_subscription: None,
         }
     }
 
@@ -78,6 +81,7 @@ impl TaskDetails {
         let fetch = self.store.list_blockers(task.id, cx);
         self.selected = Some(task);
         self.blockers = Vec::new();
+        self.close_blocker_picker();
         self._blockers_fetch = Some(cx.spawn(async move |this, cx| {
             match fetch.await {
                 Ok(blockers) => {
@@ -157,7 +161,7 @@ impl TaskDetails {
         };
         self.confirming = false;
         self.abandon_edits();
-        self.close_until_form();
+        self.close_blocker_picker();
         match pending {
             Some(task) => self.apply_selected(task, cx),
             None => self.clear(cx),
@@ -194,6 +198,7 @@ impl TaskDetails {
         self.selected = None;
         self.blockers = Vec::new();
         self.close_until_form();
+        self.close_blocker_picker();
         self.cancel_editing(cx);
         cx.notify();
     }
@@ -348,6 +353,75 @@ impl TaskDetails {
         self.until_error = None;
     }
 
+    fn close_blocker_picker(&mut self) {
+        self.blocker_picker = None;
+        self._blocker_picker_subscription = None;
+    }
+
+    pub fn close_blocker_picker_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.close_blocker_picker();
+        cx.notify();
+    }
+
+    pub fn blocker_picker_open(&self) -> bool {
+        self.blocker_picker.is_some()
+    }
+
+    fn open_blocker_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let task_id = task.id;
+        let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
+        let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
+            TaskPickerEvent::Selected(blocker_id) => {
+                this.close_blocker_picker();
+                let add = this.store.add_blocker(task_id, *blocker_id, cx);
+                cx.spawn(async move |this, cx| match add.await {
+                    Ok(blockers) => {
+                        this.update(cx, |this, cx| {
+                            this.set_blockers(blockers, cx);
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to add blocker: {e}");
+                    }
+                })
+                .detach();
+            }
+            TaskPickerEvent::Dismissed => {
+                this.close_blocker_picker();
+                cx.notify();
+            }
+        });
+        self.blocker_picker = Some(picker.clone());
+        self._blocker_picker_subscription = Some(subscription);
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.focus_filter(window, cx);
+            });
+        });
+        let fetch = self.store.blocker_candidates(task_id, cx);
+        cx.spawn(async move |this, cx| {
+            let tasks = match fetch.await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::error!("Failed to fetch blocker candidates: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                if let Some(picker) = this.blocker_picker.clone() {
+                    picker.update(cx, |picker, cx| picker.set_tasks(tasks, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn begin_until_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.until_form_open {
             return;
@@ -452,6 +526,51 @@ impl TaskDetails {
 
     fn relationships_section(&mut self, task_id: u64, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div().v_flex().gap_2().child(field_label("Relationships"));
+
+        if let Some(picker) = self.blocker_picker.clone() {
+            section = section.child(
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child(picker)
+                    .child(
+                        relation_button("cancel-blocker-pick", "Cancel").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.close_blocker_picker();
+                                cx.notify();
+                            }),
+                        ),
+                    ),
+            );
+        } else {
+            section = section.child(
+                div()
+                    .h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        relation_button("add-blocker", "+ blocked by task").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.open_blocker_picker(window, cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        relation_button("add-blocked-until", "+ blocked until").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.begin_until_form(window, cx);
+                            }),
+                        ),
+                    )
+                    .child(
+                        relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
+                    )
+                    .child(
+                        relation_button("add-follow-up", "+ follow-up tasks")
+                            .tooltip("Coming soon"),
+                    ),
+            );
+        }
 
         if self.computed_blocked() {
             let mut reasons = Vec::new();
@@ -589,45 +708,21 @@ impl TaskDetails {
             }
         }
 
-        section.child(
-            div()
-                .h_flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    Button::new("add-blocker")
-                        .ghost()
-                        .compact()
-                        .label("+ blocked by task")
-                        .on_click(cx.listener(move |_this, _, _, cx| {
-                            cx.emit(TaskDetailsEvent::PickBlocker { task_id });
-                        })),
-                )
-                .child(
-                    Button::new("add-blocked-until")
-                        .ghost()
-                        .compact()
-                        .label("+ blocked until")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.begin_until_form(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("add-subtask")
-                        .ghost()
-                        .compact()
-                        .label("+ subtasks")
-                        .tooltip("Coming soon"),
-                )
-                .child(
-                    Button::new("add-follow-up")
-                        .ghost()
-                        .compact()
-                        .label("+ follow-up tasks")
-                        .tooltip("Coming soon"),
-                ),
-        )
+        section
     }
+}
+
+/// Small transparent relationship button: gray text with a gray hairline
+/// outline, shared by the four buttons in the relationships section.
+fn relation_button(id: &'static str, label: &str) -> Button {
+    Button::new(id)
+        .ghost()
+        .compact()
+        .with_size(gpui_component::Size::Small)
+        .border_1()
+        .border_color(rgb(HAIRLINE))
+        .text_color(rgb(0xa3a3a3))
+        .label(label)
 }
 
 /// Parse "YYYY-MM-DD HH:MM" (or date only, midnight) in the system timezone.

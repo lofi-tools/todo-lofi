@@ -2,9 +2,9 @@
 //! keyboard navigation (↑/↓/Enter/Esc) and mouse selection.
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
-    div, px, rgb,
+    div, px, rgb, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
+    Styled, Window,
 };
 use gpui_component::input::{
     Input, InputEvent, InputState, MoveDown as InputMoveDown, MoveUp as InputMoveUp,
@@ -115,8 +115,7 @@ impl ProjectPicker {
                 }
             }
         }
-        let spread = matched.last().copied().unwrap_or(0)
-            - matched.first().copied().unwrap_or(0);
+        let spread = matched.last().copied().unwrap_or(0) - matched.first().copied().unwrap_or(0);
         Some(name_lower.len() + spread)
     }
 
@@ -203,6 +202,7 @@ impl Render for ProjectPicker {
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_this, _: &Cancel, _, cx| {
+                cx.stop_propagation();
                 cx.emit(ProjectPickerEvent::Dismissed);
             }))
             .on_action(cx.listener(|this, _: &InputMoveUp, _, cx| {
