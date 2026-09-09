@@ -107,31 +107,4 @@ impl Store {
             Ok((tasks, labels))
         })
     }
-
-    pub fn list_tasks_by_tag_name(
-        &self,
-        tag_name: &str,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
-        let store = self.0.clone();
-        let tag_name = tag_name.to_string();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            tracing::info!(tag_name, "list_tasks_by_tag_name: start");
-            let mut s = store.lock().await;
-            let tag_id = s
-                .get_tag_by_name(&tag_name)
-                .await?
-                .map(|t| t.id)
-                .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
-            let tasks = s.list_tasks_by_tag(tag_id).await?;
-            for t in &tasks {
-                tracing::info!(
-                    task_id = t.task.id,
-                    done = t.task.done,
-                    "list_tasks_by_tag_name: task"
-                );
-            }
-            Ok(tasks)
-        })
-    }
 }
