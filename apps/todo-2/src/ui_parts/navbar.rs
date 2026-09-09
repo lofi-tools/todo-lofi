@@ -123,7 +123,7 @@ impl NavBar {
         cx.notify();
     }
 
-    fn collect_visible_tags(&self) -> Vec<(String, String, u64, usize, bool, Vec<String>)> {
+    fn collect_visible_tags(&self) -> Vec<(String, String, u64, usize, bool, Vec<String>, bool)> {
         let mut result = Vec::new();
 
         fn walk(
@@ -132,7 +132,7 @@ impl NavBar {
             ancestors: &[String],
             selected_path: &[String],
             children_cache: &HashMap<u64, Vec<Tag>>,
-            result: &mut Vec<(String, String, u64, usize, bool, Vec<String>)>,
+            result: &mut Vec<(String, String, u64, usize, bool, Vec<String>, bool)>,
         ) {
             let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
             let has_children = !children.is_empty();
@@ -145,6 +145,7 @@ impl NavBar {
                 depth,
                 has_children,
                 path.clone(),
+                tag.is_project(),
             ));
 
             let is_on_path = selected_path.iter().any(|p| p == &tag.name);
@@ -247,10 +248,32 @@ impl Render for NavBar {
                     })),
             )
             .children(visible_tags.into_iter().map(
-                |(tag_name, tag_label, tag_id, depth, _has_children, path)| {
+                |(tag_name, tag_label, tag_id, depth, _has_children, path, is_project)| {
                     let tag_for_click = tag_name.clone();
                     let path_for_click = path;
                     let is_selected = selected_tag.as_deref() == Some(&tag_name);
+
+                    let prefix: gpui::AnyElement = if is_project {
+                        div()
+                            .w(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(0x737373))
+                            .child(IconName::Folder)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .w(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(0x737373))
+                            .child("#")
+                            .into_any_element()
+                    };
 
                     div()
                         .h_flex()
@@ -260,6 +283,10 @@ impl Render for NavBar {
                             div()
                                 .id(("tag", tag_id))
                                 .flex_1()
+                                .h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(prefix)
                                 .child(tag_label)
                                 .px_2()
                                 .py_0p5()

@@ -29,6 +29,12 @@ impl Tag {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| self.name.clone())
     }
+
+    /// Project tags back a local folder: unique `project:{path}` name with
+    /// the directory name as display label.
+    pub fn is_project(&self) -> bool {
+        self.name.starts_with("project:")
+    }
 }
 
 #[derive(Debug, Clone)]
