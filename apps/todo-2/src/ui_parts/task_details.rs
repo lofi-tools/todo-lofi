@@ -17,6 +17,11 @@ use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
 
 use super::task_picker::{TaskPicker, TaskPickerEvent};
 
+/// How long after an outside mousedown closed a picker card before the
+/// toggle button treats a click as a fresh open rather than the same click
+/// that closed it (via `on_mouse_down_out`).
+const OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+
 #[derive(Clone)]
 pub enum TaskDetailsEvent {
     Toggled { task_id: u64, done: bool },
@@ -47,10 +52,16 @@ pub struct TaskDetails {
     _blockers_fetch: Option<gpui::Task<()>>,
     until_picker: Option<Entity<DateTimePicker>>,
     _until_picker_subscription: Option<Subscription>,
+    /// When the card was last closed by an outside mousedown. The toggle
+    /// button ignores a click within a short window so the capture-phase
+    /// close and the bubble-phase toggle don't cancel out.
+    until_outside_closed_at: Option<std::time::Instant>,
     time_edit: Option<TimeEditInputs>,
     focus_time_edit: bool,
     blocker_picker: Option<Entity<TaskPicker>>,
     _blocker_picker_subscription: Option<Subscription>,
+    /// Same as `until_outside_closed_at`, for the blocker picker card.
+    blocker_outside_closed_at: Option<std::time::Instant>,
 }
 
 struct TimeEditInputs {
@@ -88,10 +99,12 @@ impl TaskDetails {
             _blockers_fetch: None,
             until_picker: None,
             _until_picker_subscription: None,
+            until_outside_closed_at: None,
             time_edit: None,
             focus_time_edit: false,
             blocker_picker: None,
             _blocker_picker_subscription: None,
+            blocker_outside_closed_at: None,
         }
     }
 
@@ -463,10 +476,21 @@ impl TaskDetails {
         cx.notify();
     }
 
+    /// True when the card was closed by an outside mousedown within the
+    /// ignore window, consuming the marker so only that closing click is
+    /// swallowed.
+    fn take_recent_until_outside_close(&mut self) -> bool {
+        let Some(closed_at) = self.until_outside_closed_at.take() else {
+            return false;
+        };
+        closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
+    }
+
     fn open_until_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_none() {
             return;
         }
+        self.blocker_outside_closed_at = None;
         self.close_blocker_picker();
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
@@ -494,10 +518,21 @@ impl TaskDetails {
         self.blocker_picker.is_some()
     }
 
+    /// True when the picker was closed by an outside mousedown within the
+    /// ignore window, consuming the marker so only that closing click is
+    /// swallowed.
+    fn take_recent_blocker_outside_close(&mut self) -> bool {
+        let Some(closed_at) = self.blocker_outside_closed_at.take() else {
+            return false;
+        };
+        closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
+    }
+
     fn open_blocker_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
             return;
         };
+        self.until_outside_closed_at = None;
         self.close_until_panel();
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
@@ -615,6 +650,7 @@ impl TaskDetails {
                 .border_color(rgb(HAIRLINE))
                 .rounded_md()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.until_outside_closed_at = Some(std::time::Instant::now());
                     this.close_until_panel_and_notify(cx);
                 }))
                 .child(picker)
@@ -638,6 +674,7 @@ impl TaskDetails {
                 .px_3()
                 .py_2()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.blocker_outside_closed_at = Some(std::time::Instant::now());
                     this.close_blocker_picker_and_notify(cx);
                 }))
                 .child(picker)
@@ -847,7 +884,14 @@ impl TaskDetails {
                         .child(
                             relation_button("add-blocker", "+ blocked by task").on_click(
                                 cx.listener(|this, _, window, cx| {
-                                    this.open_blocker_picker(window, cx);
+                                    if this.blocker_picker_open() {
+                                        this.close_blocker_picker_and_notify(cx);
+                                    } else if this.take_recent_blocker_outside_close() {
+                                        // The mousedown before this click already
+                                        // closed the picker; don't reopen it.
+                                    } else {
+                                        this.open_blocker_picker(window, cx);
+                                    }
                                 }),
                             ),
                         )
@@ -856,6 +900,9 @@ impl TaskDetails {
                             cx.listener(|this, _, window, cx| {
                                 if this.until_panel_open() {
                                     this.close_until_panel_and_notify(cx);
+                                } else if this.take_recent_until_outside_close() {
+                                    // The mousedown before this click already
+                                    // closed the card; don't reopen it.
                                 } else {
                                     this.open_until_panel(window, cx);
                                 }
