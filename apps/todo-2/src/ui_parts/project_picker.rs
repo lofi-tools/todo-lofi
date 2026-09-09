@@ -223,7 +223,10 @@ impl Render for ProjectPicker {
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .max_h(px(320.))
+                    // The scrollable wrapper inherits the element's size
+                    // (not max-height), so the list needs a fixed height to
+                    // actually scroll instead of growing to fit its rows.
+                    .h(px(320.))
                     .overflow_y_scrollbar()
                     .children(rows),
             )
