@@ -764,50 +764,13 @@ impl TaskDetails {
                 .child("Relationships"),
         );
 
-        section = section.child(
-            div()
-                .relative()
-                .child(
-                    div()
-                        .h_flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .h(px(30.))
-                        .child(
-                            relation_button("add-blocker", "+ blocked by task").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.open_blocker_picker(window, cx);
-                                }),
-                            ),
-                        )
-                        .child(
-                        relation_button("add-blocked-until", "+ blocked until").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                if this.until_panel_open() {
-                                    this.close_until_panel_and_notify(cx);
-                                } else {
-                                    this.open_until_panel(window, cx);
-                                }
-                            }),
-                        ),
-                        )
-                        .child(
-                            relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
-                        )
-                        .child(
-                            relation_button("add-follow-up", "+ follow-up tasks")
-                                .tooltip("Coming soon"),
-                        ),
-                )
-                .when(self.until_panel_open(), |this| {
-                    this.child(self.until_card(cx))
-                })
-                .child(self.blocker_card(cx)),
-        );
+        // Overlay zone: the lists paint first, then the buttons row and the
+        // picker cards on top, so open cards always cover (and receive hits
+        // before) the content underneath.
+        let mut lists = div().v_flex().gap_2().pt(px(38.));
 
         if self.computed_blocked() {
-            section = section.child(
+            lists = lists.child(
                 div()
                     .text_xs()
                     .text_color(rgb(0xa3a3a3))
@@ -859,12 +822,59 @@ impl TaskDetails {
             })
             .collect::<Vec<_>>();
         if !blocker_rows.is_empty() {
-            section = section.child(div().v_flex().gap_1().ml_2().children(blocker_rows));
+            lists = lists.child(div().v_flex().gap_1().ml_2().children(blocker_rows));
         }
 
         if self.selected.as_ref().and_then(|t| t.blocked_until).is_some() {
-            section = section.child(self.until_row(window, cx));
+            lists = lists.child(self.until_row(window, cx));
         }
+
+        section = section.child(
+            div()
+                .relative()
+                .child(lists)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .h(px(30.))
+                        .h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            relation_button("add-blocker", "+ blocked by task").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.open_blocker_picker(window, cx);
+                                }),
+                            ),
+                        )
+                        .child(
+                        relation_button("add-blocked-until", "+ blocked until").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                if this.until_panel_open() {
+                                    this.close_until_panel_and_notify(cx);
+                                } else {
+                                    this.open_until_panel(window, cx);
+                                }
+                            }),
+                        ),
+                        )
+                        .child(
+                            relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
+                        )
+                        .child(
+                            relation_button("add-follow-up", "+ follow-up tasks")
+                                .tooltip("Coming soon"),
+                        ),
+                )
+                .when(self.until_panel_open(), |this| {
+                    this.child(self.until_card(cx))
+                })
+                .child(self.blocker_card(cx)),
+        );
 
         section
     }
