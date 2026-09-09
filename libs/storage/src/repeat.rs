@@ -16,6 +16,9 @@ pub struct RepeatTaskTemplate {
     /// Repeat period in days (1 = daily, 7 = weekly, 30 = monthly,
     /// 365 = yearly, any N = custom).
     pub interval_days: u64,
+    /// Time of day for each occurrence, as minutes since midnight.
+    /// `None` means no specific time.
+    pub time_of_day: Option<u64>,
     #[default(jiff::Timestamp::now())]
     pub created_at: jiff::Timestamp,
 }
@@ -29,11 +32,13 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
             .unwrap_or("")
             .to_string();
         let interval_days = record.get(2).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
-        let created_at = record.get(3).and_then(|v| v.as_str())?.parse().ok()?;
+        let time_of_day = record.get(3).and_then(|v| v.to_i64()).map(|m| m as u64);
+        let created_at = record.get(4).and_then(|v| v.as_str())?.parse().ok()?;
         Some(RepeatTaskTemplate {
             id,
             name,
             interval_days,
+            time_of_day,
             created_at,
         })
     } else {
@@ -49,7 +54,7 @@ impl TodoStore {
     ) -> QueryResult<Option<RepeatTaskTemplate>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT rtt.id, rtt.name, rtt.interval_days, rtt.created_at
+            SELECT rtt.id, rtt.name, rtt.interval_days, rtt.time_of_day, rtt.created_at
             FROM repeat_task_occurrences rto
             JOIN repeat_task_templates rtt ON rtt.id = rto.template_id
             WHERE rto.task_id = ?1
@@ -58,6 +63,7 @@ impl TodoStore {
         .column_types([
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
         ])
@@ -78,11 +84,13 @@ impl TodoStore {
         task_id: u64,
         name: String,
         interval_days: u64,
+        time_of_day: Option<u64>,
     ) -> QueryResult<RepeatTaskTemplate> {
         if let Some(existing) = self.repeat_template_for_task(task_id).await? {
             RepeatTaskTemplate::update_by_id(existing.id)
                 .name(name.clone())
                 .interval_days(interval_days)
+                .time_of_day(time_of_day)
                 .exec(&mut self.db)
                 .await
                 .context(crate::error::QueryTagsSnafu {
@@ -92,12 +100,14 @@ impl TodoStore {
                 id: existing.id,
                 name,
                 interval_days,
+                time_of_day,
                 created_at: existing.created_at,
             });
         }
         let template = RepeatTaskTemplate::create()
             .name(name)
             .interval_days(interval_days)
+            .time_of_day(time_of_day)
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -149,20 +159,24 @@ mod tests {
         assert!(storage.repeat_template_for_task(task.id).await?.is_none());
 
         let template = storage
-            .set_repeat(task.id, "Water plants".to_string(), 7)
+            .set_repeat(task.id, "Water plants".to_string(), 7, Some(18 * 60))
             .await?;
         assert_eq!(template.name, "Water plants");
         assert_eq!(template.interval_days, 7);
+        assert_eq!(template.time_of_day, Some(18 * 60));
 
         let found = storage.repeat_template_for_task(task.id).await?;
-        assert_eq!(found.unwrap().interval_days, 7);
+        let found = found.unwrap();
+        assert_eq!(found.interval_days, 7);
+        assert_eq!(found.time_of_day, Some(18 * 60));
 
         // Re-linking updates the frequency instead of creating a duplicate.
         let updated = storage
-            .set_repeat(task.id, "Water plants".to_string(), 14)
+            .set_repeat(task.id, "Water plants".to_string(), 14, None)
             .await?;
         assert_eq!(updated.id, template.id);
         assert_eq!(updated.interval_days, 14);
+        assert_eq!(updated.time_of_day, None);
         assert_eq!(
             storage
                 .repeat_template_for_task(task.id)
@@ -182,7 +196,9 @@ mod tests {
     async fn test_remove_repeat() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
         let task = storage.create_task(Task::create().title("Repeating")).await?;
-        storage.set_repeat(task.id, "Repeating".to_string(), 1).await?;
+        storage
+            .set_repeat(task.id, "Repeating".to_string(), 1, None)
+            .await?;
         assert!(storage.repeat_template_for_task(task.id).await?.is_some());
 
         storage.remove_repeat(task.id).await?;

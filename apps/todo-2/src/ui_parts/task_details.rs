@@ -15,7 +15,7 @@ use crate::components::{DateTimePicker, DateTimePickerEvent};
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
 
-use super::repeat_picker::{RepeatPicker, RepeatPickerEvent};
+use super::repeat_picker::{RepeatPicker, RepeatPickerEvent, repeat_label};
 use super::task_picker::{TaskPicker, TaskPickerEvent};
 
 /// How long after an outside mousedown closed a picker card before the
@@ -107,6 +107,9 @@ pub struct TaskDetails {
     _repeat_subscription: Option<Subscription>,
     /// Same as the other `*_outside_closed_at` markers, for the repeat card.
     repeat_outside_closed_at: Option<std::time::Instant>,
+    /// The selected task's repeat template, shown as a "Repeats" field.
+    repeat_template: Option<storage::RepeatTaskTemplate>,
+    _repeat_template_fetch: Option<gpui::Task<()>>,
 }
 
 struct TimeEditInputs {
@@ -171,6 +174,8 @@ impl TaskDetails {
             repeat_picker: None,
             _repeat_subscription: None,
             repeat_outside_closed_at: None,
+            repeat_template: None,
+            _repeat_template_fetch: None,
         }
     }
 
@@ -180,6 +185,7 @@ impl TaskDetails {
 
     fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         let parent_id = task.parent_id;
+        let task_id = task.id;
         let fetch = self.store.list_blockers(task.id, cx);
         let after_fetch = self.store.list_after(task.id, cx);
         let subtasks_fetch = self.store.list_subtasks(task.id, cx);
@@ -190,6 +196,7 @@ impl TaskDetails {
         self.subtasks = Vec::new();
         self.blocking = Vec::new();
         self.parent = None;
+        self.repeat_template = None;
         self.link_error = None;
         self.close_blocker_picker();
         self.close_after_picker();
@@ -268,6 +275,22 @@ impl TaskDetails {
                 }
                 Err(e) => {
                     tracing::error!("Failed to fetch linked tasks: {e}");
+                }
+            }
+        }));
+        let repeat_fetch = self.store.get_repeat(task_id, cx);
+        self._repeat_template_fetch = Some(cx.spawn(async move |this, cx| {
+            match repeat_fetch.await {
+                Ok(template) => {
+                    this.update(cx, |this, cx| {
+                        this.repeat_template = template;
+                        this._repeat_template_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch repeat template: {e}");
                 }
             }
         }));
@@ -410,6 +433,7 @@ impl TaskDetails {
         self.subtasks = Vec::new();
         self.blocking = Vec::new();
         self.parent = None;
+        self.repeat_template = None;
         self.link_error = None;
         self.close_until_panel();
         self.close_blocker_picker();
@@ -904,18 +928,25 @@ impl TaskDetails {
         self.link_error = None;
         let picker = cx.new(|cx| RepeatPicker::new(None, window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
-            RepeatPickerEvent::Saved { interval_days } => {
+            RepeatPickerEvent::Saved {
+                interval_days,
+                time_of_day,
+            } => {
                 this.close_repeat_picker();
                 let Some(task) = this.selected.clone() else {
                     return;
                 };
                 let task_id = task.id;
                 let name = task.title.clone();
-                let set = this.store.set_repeat(task_id, name, *interval_days, cx);
+                let set =
+                    this.store
+                        .set_repeat(task_id, name, *interval_days, *time_of_day, cx);
                 cx.spawn(async move |this, cx| match set.await {
-                    Ok(_template) => {
+                    Ok(template) => {
                         this.update(cx, |this, cx| {
                             this.link_error = None;
+                            // Show the chosen interval in the details right away.
+                            this.repeat_template = Some(template);
                             cx.notify();
                         })
                         .ok();
@@ -941,6 +972,7 @@ impl TaskDetails {
                     Ok(()) => {
                         this.update(cx, |this, cx| {
                             this.link_error = None;
+                            this.repeat_template = None;
                             cx.notify();
                         })
                         .ok();
@@ -2101,6 +2133,12 @@ impl Render for TaskDetails {
                 }
                 if let Some(until) = task.blocked_until {
                     details = details.child(field("Blocked until", format_deadline(until)));
+                }
+                if let Some(template) = &self.repeat_template {
+                    details = details.child(field(
+                        "Repeats",
+                        repeat_label(template.interval_days, template.time_of_day),
+                    ));
                 }
                 if let Some(branch) = &task.branch_name
                     && !branch.is_empty()

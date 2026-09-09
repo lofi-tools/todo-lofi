@@ -249,12 +249,13 @@ impl Store {
         task_id: u64,
         name: String,
         interval_days: u64,
+        time_of_day: Option<u64>,
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<storage::RepeatTaskTemplate>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.set_repeat(task_id, name, interval_days).await?)
+            Ok(s.set_repeat(task_id, name, interval_days, time_of_day).await?)
         })
     }
 

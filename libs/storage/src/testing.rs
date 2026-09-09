@@ -145,6 +145,16 @@ fn seed_tasks() -> Vec<SeedTask> {
             urgency_factor: 1.5,
             parent_title: None,
         },
+        SeedTask {
+            title: "feed dorito".to_string(),
+            description: Some("Feed the cat every evening".to_string()),
+            branch_name: None,
+            labels: vec!["chore".to_string()],
+            deadline: None,
+            importance_factor: 1.0,
+            urgency_factor: 1.0,
+            parent_title: None,
+        },
     ]
 }
 
@@ -181,6 +191,10 @@ fn seed_assignments() -> Vec<SeedAssignment> {
         SeedAssignment {
             task_title: "Code review PRs".to_string(),
             tag_name: "work".to_string(),
+        },
+        SeedAssignment {
+            task_title: "feed dorito".to_string(),
+            tag_name: "health".to_string(),
         },
     ]
 }
@@ -248,6 +262,12 @@ impl TodoStore {
             }
         }
 
+        // "feed dorito" repeats every day at 6pm.
+        if let Some(&task_id) = task_map.get("feed dorito") {
+            self.set_repeat(task_id, "feed dorito".to_string(), 1, Some(18 * 60))
+                .await?;
+        }
+
         tracing::info!(
             tasks = task_map.len(),
             tags = tag_map.len(),
@@ -267,7 +287,7 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 8);
+        assert_eq!(tasks.len(), 9);
 
         let tags = store.list_tags().await?;
         assert_eq!(tags.len(), 8);
@@ -275,6 +295,12 @@ mod tests {
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
         assert!(task_with_parent.is_some());
         assert!(task_with_parent.unwrap().parent_id.is_some());
+
+        // "feed dorito" repeats every day at 6pm.
+        let feed = tasks.iter().find(|t| t.title == "feed dorito").unwrap();
+        let template = store.repeat_template_for_task(feed.id).await?.unwrap();
+        assert_eq!(template.interval_days, 1);
+        assert_eq!(template.time_of_day, Some(18 * 60));
 
         Ok(())
     }
