@@ -40,6 +40,26 @@ impl Store {
         })
     }
 
+    /// Create a task as a subtask of `parent_id` (no tag assignment; the
+    /// subtask inherits whatever view the caller refreshes).
+    pub fn insert_subtask(
+        &self,
+        parent_id: u64,
+        title: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Task>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.create_task(
+                TaskCreate::default()
+                    .title(title)
+                    .parent_id(Some(parent_id)),
+            )
+            .await?)
+        })
+    }
+
     pub fn list_top_level_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -155,6 +175,30 @@ impl Store {
             let mut s = store.lock().await;
             s.remove_blocker(task_id, blocker_id).await?;
             Ok(s.list_blockers(task_id).await?)
+        })
+    }
+
+    pub fn get_task(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Task>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_task(task_id).await?)
+        })
+    }
+
+    pub fn list_subtasks(
+        &self,
+        parent_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Task>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_subtasks(parent_id).await?)
         })
     }
 

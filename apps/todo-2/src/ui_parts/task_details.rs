@@ -41,6 +41,8 @@ pub enum TaskDetailsEvent {
     },
     /// Fresh DB state after a write, for syncing the task list row.
     TaskRefreshed(TaskWithMeta),
+    /// A subtask was created; the task list reloads its current view.
+    SubtaskCreated,
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -81,6 +83,16 @@ pub struct TaskDetails {
     /// Inline message when a relationship write fails, e.g. adding a link
     /// that would close a dependency cycle.
     link_error: Option<String>,
+    /// True while the "+ subtasks" button shows an inline title input.
+    adding_subtask: bool,
+    subtask_input: Option<Entity<InputState>>,
+    _subtask_subscription: Option<Subscription>,
+    subtasks: Vec<storage::Task>,
+    _subtasks_fetch: Option<gpui::Task<()>>,
+    /// The selected task's parent (when it is a subtask), for the parent
+    /// link in the details view.
+    parent: Option<storage::Task>,
+    _parent_fetch: Option<gpui::Task<()>>,
 }
 
 struct TimeEditInputs {
@@ -130,6 +142,13 @@ impl TaskDetails {
             _after_picker_subscription: None,
             after_outside_closed_at: None,
             link_error: None,
+            adding_subtask: false,
+            subtask_input: None,
+            _subtask_subscription: None,
+            subtasks: Vec::new(),
+            _subtasks_fetch: None,
+            parent: None,
+            _parent_fetch: None,
         }
     }
 
@@ -138,15 +157,20 @@ impl TaskDetails {
     }
 
     fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
+        let parent_id = task.parent_id;
         let fetch = self.store.list_blockers(task.id, cx);
         let after_fetch = self.store.list_after(task.id, cx);
+        let subtasks_fetch = self.store.list_subtasks(task.id, cx);
         self.selected = Some(task);
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
+        self.subtasks = Vec::new();
+        self.parent = None;
         self.link_error = None;
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_time_edit();
+        self.abandon_subtask();
         self._blockers_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
             Ok(blockers) => {
                 this.update(cx, |this, cx| {
@@ -173,7 +197,62 @@ impl TaskDetails {
                 tracing::error!("Failed to fetch after tasks: {e}");
             }
         }));
+        self._subtasks_fetch = Some(cx.spawn(async move |this, cx| {
+            match subtasks_fetch.await {
+                Ok(subtasks) => {
+                    this.update(cx, |this, cx| {
+                        this.subtasks = subtasks;
+                        this._subtasks_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch subtasks: {e}");
+                }
+            }
+        }));
+        if let Some(parent_id) = parent_id {
+            let parent_fetch = self.store.get_task(parent_id, cx);
+            self._parent_fetch = Some(cx.spawn(async move |this, cx| {
+                match parent_fetch.await {
+                    Ok(parent) => {
+                        this.update(cx, |this, cx| {
+                            this.parent = Some(parent);
+                            this._parent_fetch = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to fetch parent task: {e}");
+                    }
+                }
+            }));
+        }
         cx.notify();
+    }
+
+    /// Reload the selected task's subtasks from the DB, e.g. right after a
+    /// new subtask was created.
+    fn refresh_subtasks(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let fetch = self.store.list_subtasks(task_id, cx);
+        self._subtasks_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(subtasks) => {
+                this.update(cx, |this, cx| {
+                    this.subtasks = subtasks;
+                    this._subtasks_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch subtasks: {e}");
+            }
+        }));
     }
 
     pub fn set_blockers(&mut self, blockers: Vec<storage::Task>, cx: &mut Context<Self>) {
@@ -242,6 +321,7 @@ impl TaskDetails {
         };
         self.confirming = false;
         self.abandon_edits();
+        self.abandon_subtask();
         self.close_blocker_picker();
         self.close_after_picker();
         match pending {
@@ -284,10 +364,13 @@ impl TaskDetails {
         self.selected = None;
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
+        self.subtasks = Vec::new();
+        self.parent = None;
         self.link_error = None;
         self.close_until_panel();
         self.close_blocker_picker();
         self.close_after_picker();
+        self.abandon_subtask();
         self.cancel_editing(cx);
         cx.notify();
     }
@@ -508,6 +591,95 @@ impl TaskDetails {
             .ok();
         })
         .detach();
+        cx.notify();
+    }
+
+    /// Drop the inline subtask input without notifying (callers that clear
+    /// state on selection change notify themselves).
+    fn abandon_subtask(&mut self) {
+        self.adding_subtask = false;
+        self.subtask_input = None;
+        self._subtask_subscription = None;
+    }
+
+    pub fn adding_subtask(&self) -> bool {
+        self.adding_subtask
+    }
+
+    /// Toggle the inline subtask input: clicking the button while already
+    /// adding cancels, otherwise an autofocused title input appears below
+    /// the relationship buttons.
+    fn begin_subtask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            return;
+        }
+        if self.adding_subtask {
+            self.cancel_subtask(cx);
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Subtask title...", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_subtask(cx);
+            }
+        });
+        let focus_input = input.clone();
+        self.subtask_input = Some(input);
+        self._subtask_subscription = Some(subscription);
+        self.adding_subtask = true;
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            focus_input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_subtask(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.subtask_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let parent_id = task.id;
+        let title = input.read(cx).text().to_string();
+        let title = title.trim().to_string();
+        self.abandon_subtask();
+        if title.is_empty() {
+            cx.notify();
+            return;
+        }
+        let create = self.store.insert_subtask(parent_id, title, cx);
+        cx.spawn(async move |this, cx| match create.await {
+            Ok(_created) => {
+                this.update(cx, |this, cx| {
+                    this.refresh_subtasks(cx);
+                    cx.emit(TaskDetailsEvent::SubtaskCreated);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to create subtask: {e}");
+                this.update(cx, |this, cx| {
+                    this.link_error = Some(format!("Couldn't create subtask: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn cancel_subtask(&mut self, cx: &mut Context<Self>) {
+        if !self.adding_subtask {
+            return;
+        }
+        self.abandon_subtask();
         cx.notify();
     }
 
@@ -997,6 +1169,12 @@ impl TaskDetails {
         // tall, so the lists start below it and cards float just under it.
         let mut lists = div().v_flex().gap_2().pt(px(64.));
 
+        if self.adding_subtask
+            && let Some(input) = self.subtask_input.clone()
+        {
+            lists = lists.child(div().ml_2().child(Input::new(&input)));
+        }
+
         if self.computed_blocked() {
             lists = lists.child(
                 div()
@@ -1189,8 +1367,11 @@ impl TaskDetails {
                                     }),
                                 ))
                                 .child(
-                                    relation_button("add-subtask", "+ subtask")
-                                        .tooltip("Coming soon"),
+                                    relation_button("add-subtask", "+ subtask").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.begin_subtask(window, cx);
+                                        }),
+                                    ),
                                 )
                                 .child(
                                     relation_button("add-follow-up", "+ follow-up task")
@@ -1206,6 +1387,64 @@ impl TaskDetails {
         );
 
         section
+    }
+
+    /// "Subtasks (N)" section: clickable titles with done markers, shown
+    /// only when the selected task has children. Hidden until loaded so the
+    /// section does not flash in empty.
+    fn subtasks_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.subtasks.is_empty() {
+            return div().into_any_element();
+        }
+        let count = self.subtasks.len();
+        let rows = self
+            .subtasks
+            .clone()
+            .into_iter()
+            .map(|subtask| {
+                let subtask_id = subtask.id;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("subtask-title", subtask_id))
+                            .flex_1()
+                            .text_sm()
+                            .text_color(if subtask.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xe5e5e5)
+                            })
+                            .child(subtask.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: subtask_id });
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if subtask.done { "done" } else { "" }.to_string()),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .v_flex()
+            .gap_2()
+            .mt_2()
+            .child(
+                div()
+                    .text_base()
+                    .font_bold()
+                    .underline()
+                    .text_color(rgb(0xe5e5e5))
+                    .child(format!("Subtasks ({count})")),
+            )
+            .child(div().v_flex().gap_1().ml_2().children(rows))
+            .into_any_element()
     }
 }
 
@@ -1372,6 +1611,28 @@ impl Render for TaskDetails {
                         ),
                 );
                 details = details.child(header);
+                if let Some(parent) = self.parent.clone() {
+                    let parent_id = parent.id;
+                    details = details.child(
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .child(field_label("Parent"))
+                            .child(
+                                div()
+                                    .id(("parent-link", parent_id))
+                                    .text_sm()
+                                    .text_color(rgb(0x93c5fd))
+                                    .hover(|this| this.underline())
+                                    .child(parent.title.clone())
+                                    .on_click(cx.listener(move |_this, _, _, cx| {
+                                        cx.emit(TaskDetailsEvent::SelectTask {
+                                            task_id: parent_id,
+                                        });
+                                    })),
+                            ),
+                    );
+                }
                 if self.editing_description {
                     if let Some(input) = self.description_input.clone() {
                         details = details.child(
@@ -1427,6 +1688,7 @@ impl Render for TaskDetails {
                     details = details.child(field("Branch", branch.clone()));
                 }
                 details = details.child(self.relationships_section(window, cx));
+                details = details.child(self.subtasks_section(cx));
                 details
             }
         };

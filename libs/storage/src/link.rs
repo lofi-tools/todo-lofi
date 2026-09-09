@@ -172,6 +172,30 @@ impl TodoStore {
         Ok(tasks)
     }
 
+    /// Tasks whose parent is `parent_id` (subtasks), with full details,
+    /// ordered by id.
+    pub async fn list_subtasks(&mut self, parent_id: u64) -> QueryResult<Vec<crate::Task>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id FROM tasks WHERE parent_id = ?1 ORDER BY id"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(parent_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list subtasks",
+        })?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                if let Some(id) = record.first().and_then(|v| v.to_i64()) {
+                    tasks.push(self.get_task(id as u64).await?);
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
     pub async fn add_after_link(&mut self, task_id: u64, other_id: u64) -> QueryResult<()> {
         self.add_link(task_id, other_id, LinkKind::After).await
     }
@@ -448,6 +472,38 @@ mod tests {
         let candidates = storage.after_candidates(third.id).await?;
         let ids: Vec<u64> = candidates.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![second.id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_subtasks_by_parent() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let parent = make_task(&mut storage, "parent").await;
+        let other = make_task(&mut storage, "other").await;
+
+        storage
+            .create_task(
+                crate::Task::create()
+                    .title("first child".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+        storage
+            .create_task(
+                crate::Task::create()
+                    .title("second child".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        let subtasks = storage.list_subtasks(parent.id).await?;
+        assert_eq!(subtasks.len(), 2);
+        assert!(subtasks.iter().all(|t| t.parent_id == Some(parent.id)));
+        assert_eq!(subtasks[0].title, "first child");
+        assert_eq!(subtasks[1].title, "second child");
+
+        // A task without children lists none.
+        assert!(storage.list_subtasks(other.id).await?.is_empty());
         Ok(())
     }
 }

@@ -55,62 +55,16 @@ impl TaskListView {
             }
         });
 
-        let nav_store = store.clone();
         let nav_subscription =
             cx.subscribe(&nav_bar, move |this, _nav_bar, event, cx| match event {
                 NavBarEvent::TagSelected(path) => {
                     this.selected_path = path.clone();
-                    let last = path.last().cloned().unwrap_or_default();
-                    let path_for_labels = path.clone();
-                    let store = nav_store.clone();
-                    let fetch = cx.spawn(async move |this, cx| {
-                        let (tasks, labels) = match store
-                            .list_tasks_by_tag_name_with_labels(&last, &path_for_labels, cx)
-                            .await
-                        {
-                            Ok(result) => result,
-                            Err(e) => {
-                                tracing::error!("Failed to fetch tasks by tag: {e}");
-                                return;
-                            }
-                        };
-                        this.update(cx, |this, cx| {
-                            this.selected_labels = labels;
-                            this.set_tasks_with_path(
-                                tasks,
-                                &this.selected_path.clone(),
-                                &this.selected_labels.clone(),
-                                cx,
-                            );
-                            this._fetch_tasks = None;
-                            cx.notify();
-                        })
-                        .ok();
-                    });
-                    this._fetch_tasks = Some(fetch);
+                    this.refresh(cx);
                 }
                 NavBarEvent::AllTasks => {
                     this.selected_path.clear();
                     this.selected_labels.clear();
-                    let store = nav_store.clone();
-                    let fetch = cx.spawn(async move |this, cx| {
-                        let tasks = {
-                            let mut s = store.0.lock().await;
-                            s.list_tasks_by_priority().await.unwrap_or_default()
-                        };
-                        this.update(cx, |this, cx| {
-                            this.set_tasks_with_path(
-                                tasks,
-                                &this.selected_path.clone(),
-                                &this.selected_labels.clone(),
-                                cx,
-                            );
-                            this._fetch_tasks = None;
-                            cx.notify();
-                        })
-                        .ok();
-                    });
-                    this._fetch_tasks = Some(fetch);
+                    this.refresh(cx);
                 }
                 NavBarEvent::OpenProjectPicker => {
                     // Picker open is handled by the Layout; the task list is
@@ -281,6 +235,53 @@ impl TaskListView {
                 }
             });
         }
+    }
+
+    /// Reload the current view (all tasks or the selected tag's tasks) from
+    /// the DB, e.g. after a subtask was created from the details panel.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let selected_path = self.selected_path.clone();
+        let selected_labels = self.selected_labels.clone();
+        let fetch = if let Some(last) = selected_path.last().cloned() {
+            let path = selected_path.clone();
+            cx.spawn(async move |this, cx| {
+                let (tasks, labels) =
+                    match store.list_tasks_by_tag_name_with_labels(&last, &path, cx).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::error!("Failed to fetch tasks by tag: {e}");
+                            return;
+                        }
+                    };
+                this.update(cx, |this, cx| {
+                    this.selected_labels = labels;
+                    this.set_tasks_with_path(tasks, &path, &this.selected_labels.clone(), cx);
+                    this._fetch_tasks = None;
+                    cx.notify();
+                })
+                .ok();
+            })
+        } else {
+            cx.spawn(async move |this, cx| {
+                let tasks = {
+                    let mut s = store.0.lock().await;
+                    s.list_tasks_by_priority().await.unwrap_or_default()
+                };
+                this.update(cx, |this, cx| {
+                    this.set_tasks_with_path(
+                        tasks,
+                        &selected_path,
+                        &selected_labels,
+                        cx,
+                    );
+                    this._fetch_tasks = None;
+                    cx.notify();
+                })
+                .ok();
+            })
+        };
+        self._fetch_tasks = Some(fetch);
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {

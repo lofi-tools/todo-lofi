@@ -180,6 +180,9 @@ impl Layout {
                 TaskDetailsEvent::TaskRefreshed(task) => {
                     list_for_pending.update(cx, |list, cx| list.refresh_task_data(task, cx));
                 }
+                TaskDetailsEvent::SubtaskCreated => {
+                    list_for_pending.update(cx, |list, cx| list.refresh(cx));
+                }
             },
         )
         .detach();
@@ -192,6 +195,12 @@ impl Layout {
             move |layout: &mut Layout, event, _window, cx| {
                 if event.keystroke.key == "escape" {
                     if layout._picker_subscription.is_some() {
+                        return;
+                    }
+                    if layout.details.read(cx).adding_subtask() {
+                        layout
+                            .details
+                            .update(cx, |details, cx| details.cancel_subtask(cx));
                         return;
                     }
                     if layout.details.read(cx).blocker_picker_open() {
