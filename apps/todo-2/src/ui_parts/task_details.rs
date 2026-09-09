@@ -387,10 +387,10 @@ impl TaskDetails {
     }
 
     fn open_blocker_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(task) = &self.selected else {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
             return;
         };
-        let task_id = task.id;
+        self.close_until_panel();
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
             TaskPickerEvent::Selected(blocker_id) => {
@@ -452,6 +452,7 @@ impl TaskDetails {
 
     fn open_until_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let today = jiff::Zoned::now().date();
+        self.close_blocker_picker();
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("Type a date", window, cx);
@@ -807,6 +808,26 @@ impl TaskDetails {
         card
     }
 
+    fn blocker_card(&self) -> impl IntoElement {
+        if let Some(picker) = self.blocker_picker.clone() {
+            div()
+                .absolute()
+                .top(px(30.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(rgb(CARD_BG))
+                .border_1()
+                .border_color(rgb(HAIRLINE))
+                .rounded_md()
+                .px_3()
+                .py_2()
+                .child(picker)
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+
     fn remove_blocker(&mut self, blocker_id: u64, cx: &mut Context<Self>) {
         let Some(task) = &self.selected else {
             return;
@@ -836,63 +857,47 @@ impl TaskDetails {
                 .child("Relationships"),
         );
 
-        if let Some(picker) = self.blocker_picker.clone() {
-            section = section.child(
-                div()
-                    .v_flex()
-                    .gap_2()
-                    .child(picker)
-                    .child(
-                        relation_button("cancel-blocker-pick", "Cancel").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.close_blocker_picker();
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            );
-        } else {
-            section = section.child(
-                div()
-                    .relative()
-                    .child(
-                        div()
-                            .h_flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .h(px(30.))
-                            .child(
-                                relation_button("add-blocker", "+ blocked by task").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.open_blocker_picker(window, cx);
-                                    }),
-                                ),
-                            )
-                            .child(
-                            relation_button("add-blocked-until", "+ blocked until").on_click(
+        section = section.child(
+            div()
+                .relative()
+                .child(
+                    div()
+                        .h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .h(px(30.))
+                        .child(
+                            relation_button("add-blocker", "+ blocked by task").on_click(
                                 cx.listener(|this, _, window, cx| {
-                                    if this.until_panel_open {
-                                        this.close_until_panel_and_notify(cx);
-                                    } else {
-                                        this.open_until_panel(window, cx);
-                                    }
+                                    this.open_blocker_picker(window, cx);
                                 }),
                             ),
-                            )
-                            .child(
-                                relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
-                            )
-                            .child(
-                                relation_button("add-follow-up", "+ follow-up tasks")
-                                    .tooltip("Coming soon"),
-                            ),
-                    )
-                    .when(self.until_panel_open, |this| {
-                        this.child(self.until_card(task_id, cx))
-                    }),
-            );
-        }
+                        )
+                        .child(
+                        relation_button("add-blocked-until", "+ blocked until").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                if this.until_panel_open {
+                                    this.close_until_panel_and_notify(cx);
+                                } else {
+                                    this.open_until_panel(window, cx);
+                                }
+                            }),
+                        ),
+                        )
+                        .child(
+                            relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
+                        )
+                        .child(
+                            relation_button("add-follow-up", "+ follow-up tasks")
+                                .tooltip("Coming soon"),
+                        ),
+                )
+                .when(self.until_panel_open, |this| {
+                    this.child(self.until_card(task_id, cx))
+                })
+                .child(self.blocker_card()),
+        );
 
         if self.computed_blocked() {
             section = section.child(
@@ -1254,6 +1259,25 @@ impl Render for TaskDetails {
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
             }))
+            .when(
+                self.blocker_picker.is_some() || self.until_panel_open,
+                |this| {
+                    this.child(
+                        div()
+                            .id("details-backdrop")
+                            .absolute()
+                            .top(px(0.))
+                            .left(px(0.))
+                            .right(px(0.))
+                            .bottom(px(0.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_blocker_picker();
+                                this.close_until_panel();
+                                cx.notify();
+                            })),
+                    )
+                },
+            )
             .child(body)
             .when(self.confirming, |this| {
                 this.child(
