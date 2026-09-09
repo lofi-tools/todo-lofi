@@ -1,7 +1,9 @@
 //! Minimal month calendar: weekday initials plus day numbers only.
 //!
-//! Selection state lives with the caller; interactions come back as
-//! [`CalendarEvent`]s. Past days render dimmed and are not clickable.
+//! Months render as fixed-height blocks so a scroll container can map its
+//! offset back to the top-visible month (see `MONTH_BLOCK_PX`). Selection
+//! state lives with the caller; day clicks come back through the
+//! `on_select_day` callback.
 
 use gpui::{
     div, px, rgb, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
@@ -12,27 +14,56 @@ use std::rc::Rc;
 
 use crate::theme::HAIRLINE;
 
-#[derive(Clone, Copy, Debug)]
-pub enum CalendarEvent {
-    SelectDay(jiff::civil::Date),
-    ShiftMonth(i32),
+/// Height of one month block: 20px separator + 4px gap + six 22px week
+/// rows with 4px gaps (20 + 4 + 6 * 22 + 5 * 4).
+pub const MONTH_BLOCK_PX: f32 = 176.0;
+
+const CELL_W: f32 = 26.0;
+const CELL_H: f32 = 22.0;
+
+/// Full month name and year for a sticky header, e.g. "September 2026".
+pub fn month_title(year: i16, month: i8) -> String {
+    jiff::civil::Date::new(year, month, 1)
+        .map(|first| first.strftime("%B %Y").to_string())
+        .unwrap_or_default()
 }
 
-/// Monday-first month grid for `year`/`month`, with prev/next month
-/// navigation. `today` drives the today outline and disables past days.
-pub fn month_calendar(
+/// Single-line Monday-first weekday initials row.
+pub fn weekday_header() -> impl IntoElement {
+    div().h_flex().gap_1().children(
+        ["M", "T", "W", "T", "F", "S", "S"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, initial)| {
+                div()
+                    .id(gpui::ElementId::named_usize("calendar-weekday", i))
+                    .w(px(CELL_W))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(0x737373))
+                    .child(initial)
+            }),
+    )
+}
+
+/// One fixed-height month block: abbreviated month separator with a
+/// full-width underline, then exactly six week rows of day numbers.
+/// Past days render dimmed and are not clickable.
+pub fn month_block(
     year: i16,
     month: i8,
     selected: Option<jiff::civil::Date>,
     today: jiff::civil::Date,
-    on_event: impl Fn(CalendarEvent, &mut Window, &mut App) + 'static,
+    on_select_day: impl Fn(jiff::civil::Date, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let on_event = Rc::new(on_event);
+    let on_select_day = Rc::new(on_select_day);
 
     let first = jiff::civil::Date::new(year, month, 1).ok();
-    let (title, lead_blanks, days_in_month) = match first {
+    let (abbrev, lead_blanks, days_in_month) = match first {
         Some(first) => (
-            first.strftime("%B %Y").to_string(),
+            first.strftime("%b").to_string(),
             first.weekday().to_monday_zero_offset() as usize,
             first.days_in_month() as usize,
         ),
@@ -44,8 +75,8 @@ pub fn month_calendar(
         cells.push(
             div()
                 .id(gpui::ElementId::named_usize("calendar-blank", i))
-                .w(px(26.))
-                .h(px(22.))
+                .w(px(CELL_W))
+                .h(px(CELL_H))
                 .into_any_element(),
         );
     }
@@ -57,8 +88,8 @@ pub fn month_calendar(
         let is_today = date.is_some_and(|d| d == today);
         let mut cell = div()
             .id(gpui::ElementId::named_usize("calendar-day", index))
-            .w(px(26.))
-            .h(px(22.))
+            .w(px(CELL_W))
+            .h(px(CELL_H))
             .flex()
             .items_center()
             .justify_center()
@@ -79,13 +110,24 @@ pub fn month_calendar(
         }
         if !is_past {
             if let Some(date) = date {
-                let on_event = on_event.clone();
+                let on_select_day = on_select_day.clone();
                 cell = cell.on_click(move |_, window, cx| {
-                    on_event(CalendarEvent::SelectDay(date), window, cx);
+                    on_select_day(date, window, cx);
                 });
             }
         }
         cells.push(cell.into_any_element());
+    }
+    // Always six rows so every month block is exactly MONTH_BLOCK_PX tall.
+    while cells.len() < 42 {
+        let i = cells.len();
+        cells.push(
+            div()
+                .id(gpui::ElementId::named_usize("calendar-pad", i))
+                .w(px(CELL_W))
+                .h(px(CELL_H))
+                .into_any_element(),
+        );
     }
 
     let mut weeks: Vec<Vec<gpui::AnyElement>> = vec![Vec::new()];
@@ -109,55 +151,23 @@ pub fn month_calendar(
         })
         .collect::<Vec<_>>();
 
-    let nav_button = |id: &'static str, label: &'static str, delta: i32| {
-        let on_event = on_event.clone();
-        div()
-            .id(id)
-            .px_2()
-            .text_sm()
-            .text_color(rgb(0xa3a3a3))
-            .hover(|s| s.text_color(rgb(0xe5e5e5)))
-            .child(label.to_string())
-            .on_click(move |_, window, cx| {
-                on_event(CalendarEvent::ShiftMonth(delta), window, cx);
-            })
-    };
-
     div()
         .v_flex()
         .gap_1()
         .child(
             div()
+                .h(px(20.))
                 .h_flex()
                 .items_center()
-                .justify_between()
-                .child(nav_button("calendar-prev-month", "<", -1))
+                .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_xs()
                         .font_semibold()
-                        .text_color(rgb(0xe5e5e5))
-                        .child(title),
+                        .text_color(rgb(0xa3a3a3))
+                        .child(abbrev),
                 )
-                .child(nav_button("calendar-next-month", ">", 1)),
-        )
-        .child(
-            div().h_flex().gap_1().children(
-                ["M", "T", "W", "T", "F", "S", "S"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, initial)| {
-                        div()
-                            .id(gpui::ElementId::named_usize("calendar-weekday", i))
-                            .w(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_xs()
-                            .text_color(rgb(0x737373))
-                            .child(initial)
-                    }),
-            ),
+                .child(div().flex_1().h_px().bg(rgb(HAIRLINE))),
         )
         .children(week_rows)
 }
