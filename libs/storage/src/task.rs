@@ -755,7 +755,7 @@ mod tests {
     async fn test_completed_tasks_sorted_to_bottom_and_hidden_after_24h() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
-        let open = storage.create_task(Task::create().title("Open task")).await?;
+        storage.create_task(Task::create().title("Open task")).await?;
         let done_recent = storage.create_task(Task::create().title("Done recently")).await?;
         let done_old = storage.create_task(Task::create().title("Done long ago")).await?;
 

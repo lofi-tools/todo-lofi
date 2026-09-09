@@ -262,6 +262,14 @@ impl TodoStore {
             }
         }
 
+        // "Write migration tests" can't start until the task CRUD work is
+        // done, so it is blocked by "Implement task CRUD".
+        if let (Some(&crud_id), Some(&migration_tests_id)) =
+            (task_map.get("Implement task CRUD"), task_map.get("Write migration tests"))
+        {
+            self.add_blocker(migration_tests_id, crud_id).await?;
+        }
+
         // "feed dorito" repeats every day at 6pm.
         if let Some(&task_id) = task_map.get("feed dorito") {
             self.set_repeat(task_id, "feed dorito".to_string(), 1, Some(18 * 60))
@@ -301,6 +309,18 @@ mod tests {
         let template = store.repeat_template_for_task(feed.id).await?.unwrap();
         assert_eq!(template.interval_days, 1);
         assert_eq!(template.time_of_day, Some(18 * 60));
+
+        // "Write migration tests" is blocked by "Implement task CRUD" (the
+        // blocked flag is computed by the meta loader).
+        let with_meta = store.list_tasks_by_priority().await?;
+        let migration_tests = with_meta
+            .iter()
+            .find(|t| t.title == "Write migration tests")
+            .unwrap();
+        assert!(migration_tests.blocked, "migration tests should be blocked");
+        let blockers = store.list_blockers(migration_tests.id).await?;
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].title, "Implement task CRUD");
 
         Ok(())
     }
