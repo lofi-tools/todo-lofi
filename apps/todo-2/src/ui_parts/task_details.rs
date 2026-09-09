@@ -15,6 +15,7 @@ use crate::components::{DateTimePicker, DateTimePickerEvent};
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
 
+use super::repeat_picker::{RepeatPicker, RepeatPickerEvent};
 use super::task_picker::{TaskPicker, TaskPickerEvent};
 
 /// How long after an outside mousedown closed a picker card before the
@@ -102,6 +103,10 @@ pub struct TaskDetails {
     /// Tasks that this task blocks ("Linked to").
     blocking: Vec<storage::Task>,
     _blocking_fetch: Option<gpui::Task<()>>,
+    repeat_picker: Option<Entity<RepeatPicker>>,
+    _repeat_subscription: Option<Subscription>,
+    /// Same as the other `*_outside_closed_at` markers, for the repeat card.
+    repeat_outside_closed_at: Option<std::time::Instant>,
 }
 
 struct TimeEditInputs {
@@ -163,6 +168,9 @@ impl TaskDetails {
             _follow_up_subscription: None,
             blocking: Vec::new(),
             _blocking_fetch: None,
+            repeat_picker: None,
+            _repeat_subscription: None,
+            repeat_outside_closed_at: None,
         }
     }
 
@@ -185,6 +193,7 @@ impl TaskDetails {
         self.link_error = None;
         self.close_blocker_picker();
         self.close_after_picker();
+        self.close_repeat_picker();
         self.close_time_edit();
         self.abandon_subtask();
         self.abandon_follow_up();
@@ -357,6 +366,7 @@ impl TaskDetails {
         self.abandon_follow_up();
         self.close_blocker_picker();
         self.close_after_picker();
+        self.close_repeat_picker();
         match pending {
             Some(task) => self.apply_selected(task, cx),
             None => self.clear(cx),
@@ -404,6 +414,7 @@ impl TaskDetails {
         self.close_until_panel();
         self.close_blocker_picker();
         self.close_after_picker();
+        self.close_repeat_picker();
         self.abandon_subtask();
         self.abandon_follow_up();
         self.cancel_editing(cx);
@@ -854,6 +865,144 @@ impl TaskDetails {
         .detach();
     }
 
+    fn close_repeat_picker(&mut self) {
+        self.repeat_picker = None;
+        self._repeat_subscription = None;
+    }
+
+    pub fn close_repeat_picker_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.close_repeat_picker();
+        cx.notify();
+    }
+
+    pub fn repeat_picker_open(&self) -> bool {
+        self.repeat_picker.is_some()
+    }
+
+    /// True when the card was closed by an outside mousedown within the
+    /// ignore window, consuming the marker so only that closing click is
+    /// swallowed.
+    fn take_recent_repeat_outside_close(&mut self) -> bool {
+        let Some(closed_at) = self.repeat_outside_closed_at.take() else {
+            return false;
+        };
+        closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
+    }
+
+    fn open_repeat_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        self.until_outside_closed_at = None;
+        self.blocker_outside_closed_at = None;
+        self.after_outside_closed_at = None;
+        self.close_until_panel();
+        self.close_blocker_picker();
+        self.close_after_picker();
+        self.abandon_subtask();
+        self.abandon_follow_up();
+        self.link_error = None;
+        let picker = cx.new(|cx| RepeatPicker::new(None, window, cx));
+        let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
+            RepeatPickerEvent::Saved { interval_days } => {
+                this.close_repeat_picker();
+                let Some(task) = this.selected.clone() else {
+                    return;
+                };
+                let task_id = task.id;
+                let name = task.title.clone();
+                let set = this.store.set_repeat(task_id, name, *interval_days, cx);
+                cx.spawn(async move |this, cx| match set.await {
+                    Ok(_template) => {
+                        this.update(cx, |this, cx| {
+                            this.link_error = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to save repeat template: {e}");
+                        this.update(cx, |this, cx| {
+                            this.link_error = Some(format!("Couldn't save repeat: {e}"));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
+            RepeatPickerEvent::Removed => {
+                this.close_repeat_picker();
+                let Some(task_id) = this.selected.as_ref().map(|task| task.id) else {
+                    return;
+                };
+                let remove = this.store.remove_repeat(task_id, cx);
+                cx.spawn(async move |this, cx| match remove.await {
+                    Ok(()) => {
+                        this.update(cx, |this, cx| {
+                            this.link_error = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to remove repeat template: {e}");
+                        this.update(cx, |this, cx| {
+                            this.link_error = Some(format!("Couldn't remove repeat: {e}"));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
+        });
+        self.repeat_picker = Some(picker.clone());
+        self._repeat_subscription = Some(subscription);
+        cx.notify();
+        let fetch = self.store.get_repeat(task_id, cx);
+        cx.spawn(async move |this, cx| {
+            let template = match fetch.await {
+                Ok(template) => template,
+                Err(e) => {
+                    tracing::error!("Failed to fetch repeat template: {e}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                if let Some(picker) = this.repeat_picker.clone() {
+                    picker.update(cx, |picker, cx| picker.set_current(template, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn repeat_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.repeat_picker.clone() {
+            div()
+                .absolute()
+                .top(px(60.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(rgb(CARD_BG))
+                .border_1()
+                .border_color(rgb(HAIRLINE))
+                .rounded_md()
+                .px_3()
+                .py_2()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.repeat_outside_closed_at = Some(std::time::Instant::now());
+                    this.close_repeat_picker_and_notify(cx);
+                }))
+                .child(picker)
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        }
+    }
+
     fn close_until_panel(&mut self) {
         self.until_picker = None;
         self._until_picker_subscription = None;
@@ -884,8 +1033,10 @@ impl TaskDetails {
         }
         self.blocker_outside_closed_at = None;
         self.after_outside_closed_at = None;
+        self.repeat_outside_closed_at = None;
         self.close_blocker_picker();
         self.close_after_picker();
+        self.close_repeat_picker();
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
             DateTimePickerEvent::Committed(until) => {
@@ -928,8 +1079,10 @@ impl TaskDetails {
         };
         self.until_outside_closed_at = None;
         self.after_outside_closed_at = None;
+        self.repeat_outside_closed_at = None;
         self.close_until_panel();
         self.close_after_picker();
+        self.close_repeat_picker();
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
             TaskPickerEvent::Selected(blocker_id) => {
@@ -1010,8 +1163,10 @@ impl TaskDetails {
         };
         self.until_outside_closed_at = None;
         self.blocker_outside_closed_at = None;
+        self.repeat_outside_closed_at = None;
         self.close_until_panel();
         self.close_blocker_picker();
+        self.close_repeat_picker();
         self.link_error = None;
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
@@ -1657,6 +1812,20 @@ impl TaskDetails {
                                             this.begin_follow_up(window, cx);
                                         }),
                                     ),
+                                )
+                                .child(
+                                    relation_button("repeat-task", "repeat")
+                                        .icon(gpui_component_assets::IconName::RefreshCw)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.repeat_picker_open() {
+                                                this.close_repeat_picker_and_notify(cx);
+                                            } else if this.take_recent_repeat_outside_close() {
+                                                // The mousedown before this click already
+                                                // closed the card; don't reopen it.
+                                            } else {
+                                                this.open_repeat_picker(window, cx);
+                                            }
+                                        })),
                                 ),
                         ),
                 )
@@ -1664,7 +1833,8 @@ impl TaskDetails {
                     this.child(self.until_card(cx))
                 })
                 .child(self.blocker_card(cx))
-                .child(self.after_card(cx)),
+                .child(self.after_card(cx))
+                .child(self.repeat_card(cx)),
         );
 
         section

@@ -27,6 +27,7 @@ mod theme;
 mod ui_parts {
     pub mod navbar;
     pub mod project_picker;
+    pub mod repeat_picker;
     pub mod task_details;
     pub mod task_list;
     pub mod task_picker;
@@ -224,6 +225,12 @@ impl Layout {
                     if layout.details.read(cx).until_panel_open() {
                         layout.details.update(cx, |details, cx| {
                             details.close_until_panel_and_notify(cx)
+                        });
+                        return;
+                    }
+                    if layout.details.read(cx).repeat_picker_open() {
+                        layout.details.update(cx, |details, cx| {
+                            details.close_repeat_picker_and_notify(cx)
                         });
                         return;
                     }

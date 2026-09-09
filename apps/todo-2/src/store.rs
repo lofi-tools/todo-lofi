@@ -229,6 +229,48 @@ impl Store {
         })
     }
 
+    /// The repeat template that `task_id` is an occurrence of, if any.
+    pub fn get_repeat(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::RepeatTaskTemplate>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.repeat_template_for_task(task_id).await?)
+        })
+    }
+
+    /// Create (or update) the repeat template linking `task_id` as the
+    /// first occurrence.
+    pub fn set_repeat(
+        &self,
+        task_id: u64,
+        name: String,
+        interval_days: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::RepeatTaskTemplate>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.set_repeat(task_id, name, interval_days).await?)
+        })
+    }
+
+    /// Delete the repeat template that `task_id` is an occurrence of.
+    pub fn remove_repeat(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.remove_repeat(task_id).await?)
+        })
+    }
+
     pub fn list_after(
         &self,
         task_id: u64,
