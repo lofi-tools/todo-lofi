@@ -1,7 +1,7 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
-    WindowOptions, div, prelude::FluentBuilder, px, rgb,
+    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window, WindowOptions, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::input::*;
@@ -39,6 +39,8 @@ struct Layout {
     _project_subscription: Subscription,
     /// Subscription to the open project-picker modal, if one is open.
     _picker_subscription: Option<Subscription>,
+    /// Window-wide Escape observer (focus-independent deselect).
+    _escape_observer: Subscription,
 }
 
 impl Layout {
@@ -132,6 +134,25 @@ impl Layout {
         })
         .detach();
 
+        // Escape deselects wherever focus is: keystroke observers fire
+        // window-wide, unlike `on_key_down` listeners which only run along
+        // the focus path. Skipped while the project picker modal is open so
+        // Esc there only dismisses the dialog.
+        let escape_observer = cx.observe_keystrokes(
+            move |layout: &mut Layout, event, _window, cx| {
+                if event.keystroke.key == "escape" {
+                    if layout._picker_subscription.is_some() {
+                        return;
+                    }
+                    layout.details.update(cx, |details, cx| details.clear(cx));
+                    layout
+                        .task_list
+                        .update(cx, |list, cx| list.clear_selection(cx));
+                    cx.notify();
+                }
+            },
+        );
+
         Self {
             task_list,
             nav_bar,
@@ -140,6 +161,7 @@ impl Layout {
             _projects: Vec::new(),
             _project_subscription: project_subscription,
             _picker_subscription: None,
+            _escape_observer: escape_observer,
         }
     }
 
@@ -176,15 +198,6 @@ impl Render for Layout {
         div()
             .relative()
             .size_full()
-            .on_key_down(cx.listener(
-                |this, event: &KeyDownEvent, _, cx| {
-                    if event.keystroke.key == "escape" {
-                        this.details.update(cx, |details, cx| details.clear(cx));
-                        this.task_list.update(cx, |list, cx| list.clear_selection(cx));
-                        cx.notify();
-                    }
-                },
-            ))
             .child(
                 div()
                     .flex()
