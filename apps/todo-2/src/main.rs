@@ -197,6 +197,12 @@ impl Layout {
                         });
                         return;
                     }
+                    if layout.details.read(cx).until_panel_open() {
+                        layout.details.update(cx, |details, cx| {
+                            details.close_until_panel_and_notify(cx)
+                        });
+                        return;
+                    }
                     if layout.task_list.read(cx).is_editing() {
                         layout
                             .task_list

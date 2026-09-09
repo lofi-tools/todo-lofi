@@ -12,7 +12,7 @@ use storage::TaskWithMeta;
 
 use crate::components::Checkbox;
 use crate::store::Store;
-use crate::theme::{APP_BG, HAIRLINE};
+use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
 
 use super::task_picker::{TaskPicker, TaskPickerEvent};
 
@@ -43,10 +43,19 @@ pub struct TaskDetails {
     pending: Option<PendingSelection>,
     blockers: Vec<storage::Task>,
     _blockers_fetch: Option<gpui::Task<()>>,
-    until_form_open: bool,
+    until_panel_open: bool,
     until_input: Option<Entity<InputState>>,
     _until_subscription: Option<Subscription>,
     until_error: Option<String>,
+    /// Date picked in the panel (grid or quick action); time below applies.
+    until_date: Option<jiff::civil::Date>,
+    until_hour: u8,
+    until_minute: u8,
+    /// Show the time picker once a date is chosen via today/tomorrow/grid.
+    show_time_picker: bool,
+    /// Month currently shown in the calendar grid.
+    view_year: i16,
+    view_month: i8,
     blocker_picker: Option<Entity<TaskPicker>>,
     _blocker_picker_subscription: Option<Subscription>,
 }
@@ -66,10 +75,16 @@ impl TaskDetails {
             pending: None,
             blockers: Vec::new(),
             _blockers_fetch: None,
-            until_form_open: false,
+            until_panel_open: false,
             until_input: None,
             _until_subscription: None,
             until_error: None,
+            until_date: None,
+            until_hour: 9,
+            until_minute: 0,
+            show_time_picker: false,
+            view_year: 0,
+            view_month: 0,
             blocker_picker: None,
             _blocker_picker_subscription: None,
         }
@@ -199,7 +214,7 @@ impl TaskDetails {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         self.blockers = Vec::new();
-        self.close_until_form();
+        self.close_until_panel();
         self.close_blocker_picker();
         self.cancel_editing(cx);
         cx.notify();
@@ -348,11 +363,13 @@ impl TaskDetails {
         cx.notify();
     }
 
-    fn close_until_form(&mut self) {
-        self.until_form_open = false;
+    fn close_until_panel(&mut self) {
+        self.until_panel_open = false;
         self.until_input = None;
         self._until_subscription = None;
         self.until_error = None;
+        self.until_date = None;
+        self.show_time_picker = false;
     }
 
     fn close_blocker_picker(&mut self) {
@@ -424,64 +441,167 @@ impl TaskDetails {
         .detach();
     }
 
-    fn begin_until_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.until_form_open {
-            return;
-        }
+    pub fn until_panel_open(&self) -> bool {
+        self.until_panel_open
+    }
+
+    pub fn close_until_panel_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.close_until_panel();
+        cx.notify();
+    }
+
+    fn open_until_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let today = jiff::Zoned::now().date();
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
-            state.set_placeholder("YYYY-MM-DD HH:MM", window, cx);
+            state.set_placeholder("Type a date", window, cx);
             state
         });
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                this.commit_until_form(cx);
+                this.commit_until_text(cx);
             }
         });
         self.until_input = Some(input.clone());
         self._until_subscription = Some(subscription);
-        self.until_form_open = true;
+        self.until_panel_open = true;
         self.until_error = None;
+        self.until_date = None;
+        self.until_hour = 9;
+        self.until_minute = 0;
+        self.show_time_picker = false;
+        self.view_year = today.year();
+        self.view_month = today.month();
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
         });
     }
 
-    fn commit_until_form(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.until_input.clone() else {
-            return;
-        };
+    fn apply_blocked_until(&mut self, until: u64, cx: &mut Context<Self>) {
         let Some(task) = &self.selected else {
             return;
         };
+        let task_id = task.id;
+        let store = self.store.clone();
+        if let Some(selected) = &mut self.selected {
+            selected.task.blocked_until = Some(until);
+        }
+        self.close_until_panel();
+        let set = store.set_blocked_until(task_id, Some(until), cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = set.await {
+                tracing::error!(?e, "Failed set_blocked_until");
+            }
+            this.update(cx, |_, cx| {
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn commit_until_text(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.until_input.clone() else {
+            return;
+        };
+        if self.selected.is_none() {
+            return;
+        }
         let raw = input.read(cx).text().to_string();
         match parse_blocked_until(&raw) {
             None => {
                 self.until_error = Some("Use YYYY-MM-DD HH:MM, in the future".to_string());
                 cx.notify();
             }
-            Some(until) => {
-                let task_id = task.id;
-                let store = self.store.clone();
-                if let Some(selected) = &mut self.selected {
-                    selected.task.blocked_until = Some(until);
-                }
-                self.close_until_form();
-                let set = store.set_blocked_until(task_id, Some(until), cx);
-                cx.spawn(async move |this, cx| {
-                    if let Err(e) = set.await {
-                        tracing::error!(?e, "Failed set_blocked_until");
-                    }
-                    this.update(cx, |_, cx| {
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-                cx.notify();
-            }
+            Some(until) => self.apply_blocked_until(until, cx),
         }
+    }
+
+    /// Commit the picked date with the picked time.
+    fn commit_until_datetime(&mut self, cx: &mut Context<Self>) {
+        let Some(date) = self.until_date else {
+            return;
+        };
+        if self.selected.is_none() {
+            return;
+        }
+        let timestamp = date
+            .at(self.until_hour as i8, self.until_minute as i8, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .map(|zoned| zoned.timestamp().as_second())
+            .unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        if timestamp <= now {
+            self.until_error = Some("Pick a time in the future".to_string());
+            cx.notify();
+            return;
+        }
+        self.apply_blocked_until(timestamp as u64, cx);
+    }
+
+    fn quick_until_today(&mut self, cx: &mut Context<Self>) {
+        self.until_date = Some(today_date());
+        self.show_time_picker = true;
+        self.until_error = None;
+        cx.notify();
+    }
+
+    fn quick_until_tomorrow(&mut self, cx: &mut Context<Self>) {
+        self.until_date = today_date().tomorrow().ok();
+        self.show_time_picker = true;
+        self.until_error = None;
+        cx.notify();
+    }
+
+    fn quick_until_weekend(&mut self, cx: &mut Context<Self>) {
+        self.until_date = Some(next_monday_offset_weekday(today_date(), 5, false));
+        self.until_hour = 9;
+        self.until_minute = 0;
+        self.show_time_picker = false;
+        self.until_error = None;
+        cx.notify();
+        self.commit_until_datetime(cx);
+    }
+
+    fn quick_until_next_week(&mut self, cx: &mut Context<Self>) {
+        self.until_date = Some(next_monday_offset_weekday(today_date(), 0, true));
+        self.until_hour = 9;
+        self.until_minute = 0;
+        self.show_time_picker = false;
+        self.until_error = None;
+        cx.notify();
+        self.commit_until_datetime(cx);
+    }
+
+    fn shift_view_month(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let mut year = self.view_year as i32;
+        let mut month = self.view_month as i32 + delta;
+        while month < 1 {
+            month += 12;
+            year -= 1;
+        }
+        while month > 12 {
+            month -= 12;
+            year += 1;
+        }
+        self.view_year = year as i16;
+        self.view_month = month as i8;
+        cx.notify();
+    }
+
+    fn shift_hour(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.until_hour = (self.until_hour as i32 + delta).rem_euclid(24) as u8;
+        cx.notify();
+    }
+
+    fn shift_minute(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.until_minute = (self.until_minute as i32 + delta).rem_euclid(60) as u8;
+        cx.notify();
     }
 
     fn clear_blocked_until(&mut self, cx: &mut Context<Self>) {
@@ -505,6 +625,186 @@ impl TaskDetails {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Floating card below the "+ blocked until" button: menu-style rows
+    /// separated by hairlines, floating above the content underneath.
+    fn until_card(&mut self, task_id: u64, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut card = div()
+            .absolute()
+            .top(px(30.))
+            .left(px(0.))
+            .right(px(0.))
+            .bg(rgb(CARD_BG))
+            .border_1()
+            .border_color(rgb(HAIRLINE))
+            .rounded_md()
+            .v_flex()
+            .gap_0();
+
+        if let Some(input) = self.until_input.clone() {
+            card = card.child(
+                div()
+                    .v_flex()
+                    .gap_0()
+                    .child(
+                        div()
+                            .id(("blocked-until-edit", task_id))
+                            .child(
+                                Input::new(&input)
+                                    .small()
+                                    .appearance(false)
+                                    .bg(rgb(CARD_BG)),
+                            ),
+                    )
+                    .children(self.until_error.clone().map(|error| {
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(0xe06c60))
+                            .child(error)
+                    })),
+            );
+        }
+
+        card = card.child(
+            div()
+                .px_3()
+                .py_2()
+                .border_t_1()
+                .border_color(rgb(HAIRLINE))
+                .h_flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    relation_button("quick-today", "Today")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_until_today(cx);
+                        })),
+                )
+                .child(
+                    relation_button("quick-tomorrow", "Tomorrow")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_until_tomorrow(cx);
+                        })),
+                )
+                .child(
+                    relation_button("quick-weekend", "This weekend")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_until_weekend(cx);
+                        })),
+                )
+                .child(
+                    relation_button("quick-next-week", "Next week")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_until_next_week(cx);
+                        })),
+                ),
+        );
+
+        {
+            let details = cx.entity().clone();
+            let year = self.view_year;
+            let month = self.view_month;
+            card = card.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(HAIRLINE))
+                    .child(crate::components::month_calendar(
+                        year,
+                        month,
+                        self.until_date,
+                        today_date(),
+                        move |event, _window, cx| match event {
+                            crate::components::CalendarEvent::SelectDay(date) => {
+                                details.update(cx, |this, cx| {
+                                    this.until_date = Some(date);
+                                    this.show_time_picker = true;
+                                    this.until_error = None;
+                                    cx.notify();
+                                });
+                            }
+                            crate::components::CalendarEvent::ShiftMonth(delta) => {
+                                details.update(cx, |this, cx| {
+                                    this.shift_view_month(delta, cx);
+                                });
+                            }
+                        },
+                    )),
+            );
+        }
+
+        if self.show_time_picker {
+            if let Some(date) = self.until_date {
+                let hour = self.until_hour;
+                let minute = self.until_minute;
+                card = card.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgb(HAIRLINE))
+                        .h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xe5e5e5))
+                                .child(date.to_string()),
+                        )
+                        .child(
+                            relation_button("hour-down", "-")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.shift_hour(-1, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xe5e5e5))
+                                .child(format!("{hour:02}")),
+                        )
+                        .child(
+                            relation_button("hour-up", "+")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.shift_hour(1, cx);
+                                })),
+                        )
+                        .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(":"))
+                        .child(
+                            relation_button("minute-down", "-")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.shift_minute(-15, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xe5e5e5))
+                                .child(format!("{minute:02}")),
+                        )
+                        .child(
+                            relation_button("minute-up", "+")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.shift_minute(15, cx);
+                                })),
+                        )
+                        .child(
+                            relation_button("set-until-datetime", "Set").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.commit_until_datetime(cx);
+                                }),
+                            ),
+                        ),
+                );
+            }
+        }
+
+        card
     }
 
     fn remove_blocker(&mut self, blocker_id: u64, cx: &mut Context<Self>) {
@@ -554,30 +854,43 @@ impl TaskDetails {
         } else {
             section = section.child(
                 div()
-                    .h_flex()
-                    .flex_wrap()
-                    .gap_2()
+                    .relative()
                     .child(
-                        relation_button("add-blocker", "+ blocked by task").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.open_blocker_picker(window, cx);
-                            }),
-                        ),
+                        div()
+                            .h_flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .h(px(30.))
+                            .child(
+                                relation_button("add-blocker", "+ blocked by task").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_blocker_picker(window, cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                            relation_button("add-blocked-until", "+ blocked until").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    if this.until_panel_open {
+                                        this.close_until_panel_and_notify(cx);
+                                    } else {
+                                        this.open_until_panel(window, cx);
+                                    }
+                                }),
+                            ),
+                            )
+                            .child(
+                                relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
+                            )
+                            .child(
+                                relation_button("add-follow-up", "+ follow-up tasks")
+                                    .tooltip("Coming soon"),
+                            ),
                     )
-                    .child(
-                        relation_button("add-blocked-until", "+ blocked until").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.begin_until_form(window, cx);
-                            }),
-                        ),
-                    )
-                    .child(
-                        relation_button("add-subtask", "+ subtasks").tooltip("Coming soon"),
-                    )
-                    .child(
-                        relation_button("add-follow-up", "+ follow-up tasks")
-                            .tooltip("Coming soon"),
-                    ),
+                    .when(self.until_panel_open, |this| {
+                        this.child(self.until_card(task_id, cx))
+                    }),
             );
         }
 
@@ -663,47 +976,6 @@ impl TaskDetails {
             );
         }
 
-        if self.until_form_open {
-            if let Some(input) = self.until_input.clone() {
-                section = section.child(
-                    div()
-                        .v_flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id(("blocked-until-edit", task_id))
-                                .h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    Input::new(&input)
-                                        .small()
-                                        .appearance(false)
-                                        .bg(rgb(APP_BG))
-                                        .border_1()
-                                        .border_color(rgb(HAIRLINE))
-                                        .rounded_md(),
-                                )
-                                .child(
-                                    Button::new("set-blocked-until")
-                                        .ghost()
-                                        .compact()
-                                        .label("Set")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.commit_until_form(cx);
-                                        })),
-                                ),
-                        )
-                        .children(self.until_error.clone().map(|error| {
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0xe06c60))
-                                .child(error)
-                        })),
-                );
-            }
-        }
-
         section
     }
 }
@@ -719,6 +991,27 @@ fn relation_button(id: &'static str, label: &str) -> Button {
         .border_color(rgb(HAIRLINE))
         .text_color(rgb(0xa3a3a3))
         .label(label)
+}
+
+/// Today's date in the system timezone.
+fn today_date() -> jiff::civil::Date {
+    jiff::Zoned::now().date()
+}
+
+/// Upcoming date with the given Monday-based weekday offset (0 = Monday,
+/// 5 = Saturday). Stays on `from` when it already matches unless
+/// `strict` is set, in which case it moves a full week ahead.
+fn next_monday_offset_weekday(
+    from: jiff::civil::Date,
+    target: i8,
+    strict: bool,
+) -> jiff::civil::Date {
+    let mut ahead = (target - from.weekday().to_monday_zero_offset() + 7) % 7;
+    if strict && ahead == 0 {
+        ahead = 7;
+    }
+    from.checked_add(jiff::ToSpan::days(ahead as i64))
+        .expect("small date offset")
 }
 
 /// Parse "YYYY-MM-DD HH:MM" (or date only, midnight) in the system timezone.
