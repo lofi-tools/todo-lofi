@@ -11,6 +11,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 use gpui_component::button::{Button, ButtonVariants};
 
 use crate::store::Store;
+use crate::theme::APP_BG;
 use crate::todoist_auth;
 
 pub enum IntegrationsEvent {
@@ -242,7 +243,9 @@ impl Render for IntegrationsView {
         div()
             .flex_1()
             .h_full()
-            .bg(rgb(0x1e1e1e))
+            // Same surface as the task list view (APP_BG), not the darker
+            // navbar tone.
+            .bg(rgb(APP_BG))
             .child(
                 div()
                     .p_8()

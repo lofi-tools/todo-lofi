@@ -4,15 +4,16 @@
 //! tombstones them and hides the run from the Workflows panel.
 
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div, rgb,
+    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div, px, rgb,
     prelude::FluentBuilder,
 };
-use gpui_component::StyledExt;
+use gpui_component::{Sizable, Size, StyledExt};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
 use storage::prelude::*;
 
 use crate::store::Store;
+use crate::theme::APP_BG;
 
 #[derive(Clone)]
 pub enum AutomationsEvent {
@@ -103,23 +104,26 @@ impl Render for AutomationsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
+            .h_full()
+            // Same surface as the task list and integrations panels.
+            .bg(rgb(APP_BG))
             // Long catalogs scroll; flex-1 gives the scrollable a definite
             // height inside the panel column.
             .overflow_y_scrollbar()
-            .v_flex()
-            .gap_2()
             .child(
                 div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(0xe5e5e5))
-                    .child("Automations"),
+                    .p_8()
+                    .v_flex()
+                    .gap_4()
+                    .child(div().text_xl().font_semibold().child("Automations"))
+                    .children(self.automations.iter().map(|meta| self.automation_card(meta, cx))),
             )
-            .children(self.automations.iter().map(|meta| self.automation_card(meta, cx)))
     }
 }
 
 impl AutomationsPanel {
+    /// Subtle card shell for one automation, matching the integrations
+    /// panel's card treatment.
     fn automation_card(
         &self,
         meta: &RecipeMeta,
@@ -149,47 +153,59 @@ impl AutomationsPanel {
                 .into_any_element()
         };
         div()
+            .rounded_lg()
             .border_1()
-            .border_color(rgb(0x2f2f2f))
-            .rounded_md()
-            .p_2()
-            .v_flex()
-            .gap_1()
+            .border_color(rgb(0x2e2e2e))
+            .bg(rgb(0x232323))
+            .p_4()
+            .h_flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(40.))
+                    .h(px(40.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(rgb(0x1e1e1e))
+                    .child(
+                        gpui_component::Icon::new(gpui_component_assets::IconName::Bot)
+                            .with_size(Size::Large),
+                    ),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(div().font_semibold().child(meta.name.clone()))
+                    .when_some(meta.description.clone(), |this, description| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xa3a3a3))
+                                .child(description),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .h_flex()
                     .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xe5e5e5))
-                            .child(meta.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .gap_2()
-                            .when(running, |this| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x6b9e6b))
-                                        .child("Running"),
-                                )
-                            })
-                            .child(toggle),
-                    ),
+                    .gap_2()
+                    .when(running, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x4ade80))
+                                .child("Running"),
+                        )
+                    })
+                    .child(toggle),
             )
-            .when_some(meta.description.clone(), |this, description| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x8a8a8a))
-                        .child(description),
-                )
-            })
             .into_any_element()
     }
 }
