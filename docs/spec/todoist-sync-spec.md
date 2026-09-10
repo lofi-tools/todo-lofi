@@ -233,6 +233,16 @@ marker label (§3.2).
   - `source_kind` (project / section / label)
   - `namespaced` flag for collision copies (§4.5)
   - unique on `(integration_id, external_id)`
+- `tag_settings` (new table, one row per configured tag):
+  - `tag_id`, optional sync target (`sync_integration_id` +
+    `sync_external_id` — the remote project/section the tag syncs with)
+  - `dirs` (JSON list of local directories backing a dir-project tag;
+    a project may span several dirs)
+  - new settings arrive as nullable columns; absent rows mean defaults
+- `tag_sections` (new table):
+  - `id`, `tag_id`, `name`, `position`; unique on `(tag_id, name)`
+  - named subdivisions living inside one tag (Todoist sections import
+    as sections of their project tag, see §3.1)
 - `repeat_task_templates`:
   - weekday rule, month-day rule, strict flag, timezone (see §3.4)
 - A sync-state table:
