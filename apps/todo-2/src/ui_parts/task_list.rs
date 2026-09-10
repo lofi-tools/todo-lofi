@@ -75,6 +75,10 @@ pub struct TaskListView {
     locked_until: Option<std::time::Instant>,
     _fetch_tasks: Option<gpui::Task<()>>,
     _fetch_sections: Option<gpui::Task<()>>,
+    /// Periodic time-based re-sort: priority scores decay as deadlines
+    /// approach, so the list re-fetches in score order every 60s.
+    /// Cancelled automatically when the view drops.
+    _reorder_timer: gpui::Task<()>,
     _input_subscription: Subscription,
     _nav_subscription: Subscription,
 }
@@ -138,6 +142,42 @@ impl TaskListView {
             input_needs_clear: false,
             locked_until: None,
             _fetch_tasks: None,
+            _reorder_timer: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                    let shifted = this
+                        .update(cx, |this, cx| {
+                            // Never yank rows mid-edit or mid-animation;
+                            // skip this cycle instead.
+                            if this.editing || this.is_locked() {
+                                return false;
+                            }
+                            this.set_locked(true, cx);
+                            this.refresh(cx);
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !shifted {
+                        // View dropped: end the loop. Otherwise this was
+                        // a skipped cycle; wait out the next minute.
+                        if this.upgrade().is_none() {
+                            break;
+                        }
+                        continue;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(1300))
+                        .await;
+                    if this
+                        .update(cx, |this, cx| this.set_locked(false, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
             _input_subscription: input_subscription,
             _nav_subscription: nav_subscription,
         }
@@ -312,13 +352,7 @@ impl TaskListView {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             this.update(cx, |this, cx| {
-                // Disable clicks from shortly before the jump until just
-                // after it, so no click lands mid-animation.
-                this.locked_until =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(1300));
-                for row in this.task_views.clone() {
-                    row.update(cx, |row, cx| row.set_locked(true, cx));
-                }
+                this.set_locked(true, cx);
                 this.refresh(cx);
             })
             .ok();
@@ -326,11 +360,7 @@ impl TaskListView {
                 .timer(std::time::Duration::from_millis(1300))
                 .await;
             this.update(cx, |this, cx| {
-                this.locked_until = None;
-                for row in this.task_views.clone() {
-                    row.update(cx, |row, cx| row.set_locked(false, cx));
-                }
-                cx.notify();
+                this.set_locked(false, cx);
             })
             .ok();
         })
@@ -340,6 +370,19 @@ impl TaskListView {
     pub fn is_locked(&self) -> bool {
         self.locked_until
             .is_some_and(|t| t > std::time::Instant::now())
+    }
+
+    /// Disable (or re-enable) clicks on the task list from shortly before
+    /// a row shift until just after it, so no click lands mid-animation.
+    /// Shared by the done-toggle jump and the periodic time-based re-sort.
+    fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.locked_until = locked.then(|| {
+            std::time::Instant::now() + std::time::Duration::from_millis(1300)
+        });
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| row.set_locked(locked, cx));
+        }
+        cx.notify();
     }
 
     pub fn set_task_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
