@@ -54,8 +54,12 @@ pub struct TaskRow {
     locked: bool,
     /// Whether the "blocks N" chip is expanded to show the blocked tasks.
     blocks_expanded: bool,
-    /// Subtask progress (done, total), shown right of the task's tags.
-    subtask_progress: Option<(u64, u64)>,
+    /// Whether the "N/M" counter is expanded to show the subtasks.
+    subtasks_expanded: bool,
+    /// The task's direct subtasks, collapsed under the row: the first one
+    /// renders inline right of the title, the rest behind the expandable
+    /// "N/M" counter.
+    subtasks: Vec<TaskWithMeta>,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
 }
@@ -64,11 +68,11 @@ impl TaskRow {
     pub fn new(
         task: TaskWithMeta,
         blocking: RowBlocking,
+        subtasks: Vec<TaskWithMeta>,
         store: Store,
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
         selected: bool,
-        subtask_progress: Option<(u64, u64)>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -81,7 +85,8 @@ impl TaskRow {
             editing: false,
             locked: false,
             blocks_expanded: false,
-            subtask_progress,
+            subtasks_expanded: false,
+            subtasks,
             edit_input: None,
             _edit_subscription: None,
         }
@@ -155,6 +160,31 @@ impl TaskRow {
     pub fn toggle_blocks(&mut self, cx: &mut Context<Self>) {
         self.blocks_expanded = !self.blocks_expanded;
         cx.notify();
+    }
+
+    pub fn toggle_subtasks(&mut self, cx: &mut Context<Self>) {
+        if self.subtasks.is_empty() {
+            return;
+        }
+        self.subtasks_expanded = !self.subtasks_expanded;
+        cx.notify();
+    }
+
+    /// Update the done flag of a subtask shown under this row (e.g. the
+    /// subtask was completed in the details panel), keeping the N/M
+    /// counter fresh without a DB round-trip.
+    pub fn set_subtask_done(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
+        let changed = self.subtasks.iter_mut().any(|task| {
+            if task.id == task_id {
+                task.task.done = done;
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            cx.notify();
+        }
     }
 
     pub fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
@@ -247,9 +277,10 @@ impl Render for TaskRow {
         let muted = done || self.task.blocked;
         let locked = self.locked;
         // The row grows with its content: fixed 44px when collapsed, auto
-        // height when editing or when the "blocks N" list is expanded so
-        // the extra rows get their own vertical space.
-        let expanded = self.blocks_expanded && self.blocking.blocks.len() > 1;
+        // height when editing or when the "blocks N" or subtask list is
+        // expanded so the extra rows get their own vertical space.
+        let expanded = (self.blocks_expanded && self.blocking.blocks.len() > 1)
+            || (self.subtasks_expanded && !self.subtasks.is_empty());
 
         div()
             .id(("task", task_id))
@@ -350,6 +381,11 @@ impl Render for TaskRow {
                             .iter()
                             .flat_map(chain_children),
                     )
+                    .when_some(self.subtasks.first().cloned(), |this, task| {
+                        // The first subtask's title sits directly right of
+                        // the main task; display-only, like chain titles.
+                        this.child(subtask_inline(task))
+                    })
                     .when(self.blocking.blocks.len() > 1, |this| {
                         this.child(
                             div()
@@ -393,6 +429,17 @@ impl Render for TaskRow {
                             })),
                     )
             })
+            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
+                this                    .child(
+                        div()
+                            .id(("subtask-list", task_id))
+                            .v_flex()
+                            .pl_4()
+                            .children(self.subtasks.iter().map(|task| {
+                                subtask_title(task.clone(), &entity)
+                            })),
+                    )
+            })
                     .child(
                         div()
                             .h_flex()
@@ -406,22 +453,29 @@ impl Render for TaskRow {
                                     .text_color(rgb(0xa3a3a3))
                                     .child(format!("#{tag}"))
                             }))
-                            .when_some(self.subtask_progress, |this, (done, total)| {
-                                // Subtask progress, right of the tags.
+                            .when(!self.subtasks.is_empty(), |this| {
+                                let done =
+                                    self.subtasks.iter().filter(|task| task.done).count();
+                                let total = self.subtasks.len();
+                                // Subtask progress, right of the tags; the
+                                // N/M counter expands/collapses the subtask
+                                // list under the row.
                                 this.child(
                                     div()
+                                        .id(("subtask-progress", task_id))
                                         .h_flex()
                                         .items_center()
                                         .gap_0p5()
                                         .text_size(px(10.))
                                         .text_color(rgb(0xa3a3a3))
-                                        .child(
-                                            svg()
-                                                .size(px(12.))
-                                                .data(SUBTASK_SVG)
-                                                .text_color(rgb(0xa3a3a3)),
-                                        )
-                                        .child(format!("{done}/{total}")),
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_subtasks(cx);
+                                        }))
+                                        .child(subtask_icon(0xa3a3a3))
+                                        .child(format!("{done}/{total}"))
+                                        .child(if self.subtasks_expanded { "▾" } else { "▸" }),
                                 )
                             }),
                     ),
@@ -447,6 +501,67 @@ fn arrow_svg(color: u32) -> impl IntoElement {
 /// it is blocked or done, the lighter gray otherwise.
 fn blocked_color(muted: bool) -> u32 {
     if muted { 0x666666 } else { 0xcccccc }
+}
+
+/// The subtask glyph (three indented bars), tinted by the given color.
+/// The tint must be set on the svg element itself (see `arrow_svg`).
+fn subtask_icon(color: u32) -> impl IntoElement {
+    div()
+        .h_flex()
+        .items_center()
+        .child(svg().size(px(12.)).data(SUBTASK_SVG).text_color(rgb(color)))
+}
+
+/// The first subtask's title, rendered inline right of the main task.
+/// Display-only: a click anywhere on the row selects the main task.
+fn subtask_inline(task: TaskWithMeta) -> impl IntoElement {
+    let muted = task.done || task.blocked;
+    let color = blocked_color(muted);
+    div()
+        .id(("subtask-title", task.id))
+        .h_flex()
+        .items_center()
+        .gap_0p5()
+        .text_base()
+        .text_color(rgb(color))
+        .when(task.done, |this| this.line_through())
+        .child(subtask_icon(color))
+        .child(task.title.clone())
+}
+
+/// One expanded subtask row: subtask icon + title, indented under the
+/// main task. Clicking selects the subtask.
+fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoElement {
+    let muted = task.done || task.blocked;
+    let color = blocked_color(muted);
+    let row_entity = row_entity.clone();
+    let row_entity_for_click = row_entity.clone();
+    div()
+        .id(("subtask-row", task.id))
+        .h_flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_0p5()
+        .rounded_md()
+        .child(subtask_icon(color))
+        .child(
+            div()
+                .id(("subtask-title-text", task.id))
+                .text_base()
+                .text_color(rgb(color))
+                .when(task.done, |this| this.line_through())
+                .child(task.title.clone())
+                .cursor_pointer()
+                .on_click(move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
+                        cx.stop_propagation();
+                        row_entity_for_click.update(cx, |_row, cx| {
+                            cx.emit(TaskRowEvent::Selected(task.clone()));
+                        });
+                    }
+                }),
+        )
 }
 
 /// Render a chain node inline after the blocker's title: arrow + grayed

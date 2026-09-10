@@ -31,6 +31,10 @@ pub struct RowSpec {
     /// Every task this task exclusively blocks, used for the "blocks N"
     /// chip and its expandable list.
     pub blocks: Vec<TaskWithMeta>,
+    /// The task's direct subtasks, collapsed under the row: the first one
+    /// renders inline right of the title, the rest behind the expandable
+    /// "N/M" counter.
+    pub subtasks: Vec<TaskWithMeta>,
 }
 
 pub struct TaskListView {
@@ -44,9 +48,9 @@ pub struct TaskListView {
     blockers_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     /// task_id -> tasks it blocks (with meta).
     blocking_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
-    /// task_id -> (done, total) direct subtask counts, shown as "N/M"
-    /// right of the task's tags.
-    subtask_counts: std::collections::HashMap<u64, (u64, u64)>,
+    /// task_id -> its direct subtasks (with meta), collapsed under the
+    /// parent's row (inline first title + expandable "N/M" list).
+    subtasks_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -107,7 +111,7 @@ impl TaskListView {
             row_specs: Vec::new(),
             blockers_map: std::collections::HashMap::new(),
             blocking_map: std::collections::HashMap::new(),
-            subtask_counts: std::collections::HashMap::new(),
+            subtasks_map: std::collections::HashMap::new(),
             input,
             store,
             selected_path: Vec::new(),
@@ -276,6 +280,9 @@ impl TaskListView {
                 if row.task_id() == task_id {
                     row.set_done(done, cx);
                 }
+                // Keep the parent's N/M counter fresh when a subtask's
+                // done state flips from the details panel.
+                row.set_subtask_done(task_id, done, cx);
                 for (id, blocked) in &changed {
                     row.set_chain_blocked(*id, *blocked, cx);
                 }
@@ -342,7 +349,7 @@ impl TaskListView {
         }
     }
 
-    /// Build the blockers/blocking maps and subtask counts for `tasks`
+    /// Build the blockers/blocking maps and subtasks map for `tasks`
     /// (used by the row computation below).
     async fn fetch_list_data(
         store: &Store,
@@ -351,13 +358,13 @@ impl TaskListView {
     ) -> (
         std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         std::collections::HashMap<u64, Vec<TaskWithMeta>>,
-        std::collections::HashMap<u64, (u64, u64)>,
+        std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     ) {
         let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
         let blockers = store.blockers_map(ids.clone(), cx).await.unwrap_or_default();
         let blocking = store.blocking_map(ids.clone(), cx).await.unwrap_or_default();
-        let subtask_counts = store.subtask_counts(ids, cx).await.unwrap_or_default();
-        (blockers, blocking, subtask_counts)
+        let subtasks = store.subtasks_map(ids, cx).await.unwrap_or_default();
+        (blockers, blocking, subtasks)
     }
 
     /// Reload the current view (all tasks or the selected tag's tasks) from
@@ -377,7 +384,7 @@ impl TaskListView {
                             return;
                         }
                     };
-                let (blockers_map, blocking_map, subtask_counts) =
+                let (blockers_map, blocking_map, subtasks) =
                     Self::fetch_list_data(&store, &tasks, cx).await;
                 this.update(cx, |this, cx| {
                     this.selected_labels = labels;
@@ -387,7 +394,7 @@ impl TaskListView {
                         &this.selected_labels.clone(),
                         blockers_map,
                         blocking_map,
-                        subtask_counts,
+                        subtasks,
                         cx,
                     );
                     this._fetch_tasks = None;
@@ -401,7 +408,7 @@ impl TaskListView {
                     let mut s = store.0.lock().await;
                     s.list_tasks_by_priority().await.unwrap_or_default()
                 };
-                let (blockers_map, blocking_map, subtask_counts) =
+                let (blockers_map, blocking_map, subtasks) =
                     Self::fetch_list_data(&store, &tasks, cx).await;
                 this.update(cx, |this, cx| {
                     this.set_tasks_with_path(
@@ -410,7 +417,7 @@ impl TaskListView {
                         &selected_labels,
                         blockers_map,
                         blocking_map,
-                        subtask_counts,
+                        subtasks,
                         cx,
                     );
                     this._fetch_tasks = None;
@@ -437,7 +444,7 @@ impl TaskListView {
                     return;
                 }
             };
-            let (blockers_map, blocking_map, subtask_counts) =
+            let (blockers_map, blocking_map, subtasks) =
                 Self::fetch_list_data(&store, &new_tasks, cx).await;
             // Select the fresh task so its details are one keypress/click
             // away without hunting for it in the list (works even when the
@@ -453,7 +460,7 @@ impl TaskListView {
                     &this.selected_labels.clone(),
                     blockers_map,
                     blocking_map,
-                    subtask_counts,
+                    subtasks,
                     cx,
                 );
                 if let Some(task) = created {
@@ -473,14 +480,19 @@ impl TaskListView {
         selected_labels: &[String],
         blockers_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         blocking_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
-        subtask_counts: std::collections::HashMap<u64, (u64, u64)>,
+        subtasks: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         cx: &mut Context<Self>,
     ) {
         self.editing = false;
         self.blockers_map = blockers_map;
         self.blocking_map = blocking_map;
-        self.subtask_counts = subtask_counts;
-        let row_specs = Self::compute_row_specs(&tasks, &self.blockers_map, &self.blocking_map);
+        self.subtasks_map = subtasks;
+        let row_specs = Self::compute_row_specs(
+            &tasks,
+            &self.blockers_map,
+            &self.blocking_map,
+            &self.subtasks_map,
+        );
         self.row_specs = row_specs;
         let selected_task_id = self.selected.as_ref().map(|task| task.id);
         self.task_views = self
@@ -488,7 +500,6 @@ impl TaskListView {
             .iter()
             .map(|spec| {
                 let is_selected = Some(spec.task.id) == selected_task_id;
-                let subtask_progress = self.subtask_counts.get(&spec.task.id).copied();
                 let row = cx.new(|cx| {
                     TaskRow::new(
                         spec.task.clone(),
@@ -496,11 +507,11 @@ impl TaskListView {
                             blocked: spec.blocked.clone(),
                             blocks: spec.blocks.clone(),
                         },
+                        spec.subtasks.clone(),
                         self.store.clone(),
                         selected_path.to_vec(),
                         selected_labels.to_vec(),
                         is_selected,
-                        subtask_progress,
                         cx,
                     )
                 });
@@ -536,7 +547,7 @@ impl TaskListView {
         let selected_path = self.selected_path.clone();
         let selected_labels = self.selected_labels.clone();
         self._fetch_tasks = Some(cx.spawn(async move |this, cx| {
-            let (blockers_map, blocking_map, subtask_counts) =
+            let (blockers_map, blocking_map, subtasks) =
                 Self::fetch_list_data(&store, &tasks, cx).await;
             this.update(cx, |this, cx| {
                 this.set_tasks_with_path(
@@ -545,7 +556,7 @@ impl TaskListView {
                     &selected_labels,
                     blockers_map,
                     blocking_map,
-                    subtask_counts,
+                    subtasks,
                     cx,
                 );
                 this._fetch_tasks = None;
@@ -555,30 +566,37 @@ impl TaskListView {
         }));
     }
 
-    /// Compute the visible rows from the task list plus the blocker
-    /// relationships: a task blocked by exactly one visible blocker does
-    /// not get its own row — it nests inside that blocker's chain.
+    /// Compute the visible rows from the task list plus the blocker and
+    /// subtask relationships: a task blocked by exactly one visible
+    /// blocker, or whose parent is a visible task, does not get its own
+    /// row — it nests inside that blocker's chain or the parent's row.
     pub fn compute_row_specs(
         tasks: &[TaskWithMeta],
         blockers_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         blocking_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+        subtasks_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     ) -> Vec<RowSpec> {
         let visible_ids: std::collections::HashSet<u64> =
             tasks.iter().map(|t| t.id).collect();
-        // A task is hidden into a blocker's row when exactly one of its
-        // blockers is a task in this view.
+        // A task is hidden when its parent is a task in this view (its
+        // subtask row collapses under the parent) or when exactly one of
+        // its blockers is a task in this view (blocker chain collapse).
         let hidden: std::collections::HashSet<u64> = tasks
             .iter()
             .filter(|task| {
-                blockers_map
+                let is_subtask = task
+                    .parent_id
+                    .is_some_and(|parent_id| visible_ids.contains(&parent_id));
+                let is_exclusively_blocked = blockers_map
                     .get(&task.id)
                     .is_some_and(|blockers| {
-                        let visible: Vec<&TaskWithMeta> = blockers
+                        blockers
                             .iter()
                             .filter(|b| visible_ids.contains(&b.id))
-                            .collect();
-                        visible.len() == 1
-                    })
+                            .count()
+                            == 1
+                    });
+                is_subtask || is_exclusively_blocked
             })
             .map(|task| task.id)
             .collect();
@@ -636,6 +654,7 @@ impl TaskListView {
                     task: task.clone(),
                     blocked: chain,
                     blocks: exclusively_blocked,
+                    subtasks: subtasks_map.get(&task.id).cloned().unwrap_or_default(),
                 }
             })
             .collect()
@@ -690,13 +709,46 @@ mod tests {
         blockers_map.insert(c.id, vec![a.clone()]);
         blocking_map.insert(a.id, vec![b.clone(), c.clone()]);
 
-        let specs = TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map);
+        let subtasks_map = std::collections::HashMap::new();
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
         // Only a is a visible row; b and c are collapsed under it.
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].task.id, 1);
         // Two exclusive dependants: no inline chain, but a blocks-N list.
         assert!(specs[0].blocked.is_empty());
         assert_eq!(specs[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_row_specs_hides_subtasks_under_visible_parent() {
+        let parent = meta(1, "parent");
+        let child = meta(2, "child");
+        let mut child_with_parent = child.clone();
+        child_with_parent.task.parent_id = Some(parent.id);
+        // A subtask whose parent is not in the view stays a visible row.
+        let orphan = meta(3, "orphan subtask");
+        let tasks = vec![parent.clone(), child_with_parent.clone(), orphan.clone()];
+
+        let blockers_map = std::collections::HashMap::new();
+        let blocking_map = std::collections::HashMap::new();
+        let mut subtasks_map = std::collections::HashMap::new();
+        subtasks_map.insert(parent.id, vec![child_with_parent.clone()]);
+
+        let specs = TaskListView::compute_row_specs(
+            &tasks,
+            &blockers_map,
+            &blocking_map,
+            &subtasks_map,
+        );
+        assert_eq!(specs.len(), 2);
+        // The child has no row of its own and nests under the parent.
+        assert!(specs.iter().all(|spec| spec.task.id != child.id));
+        let parent_spec = specs.iter().find(|spec| spec.task.id == parent.id).unwrap();
+        assert_eq!(parent_spec.subtasks.len(), 1);
+        assert_eq!(parent_spec.subtasks[0].id, child.id);
+        // The orphan (parent not in view) keeps its own row.
+        assert!(specs.iter().any(|spec| spec.task.id == orphan.id));
     }
 
     #[tokio::test]
@@ -713,7 +765,9 @@ mod tests {
         let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
         let blockers_map = store.blockers_map(&ids).await?;
         let blocking_map = store.blocking_map(&ids).await?;
-        let specs = TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map);
+        let subtasks_map = store.subtasks_map(&ids).await?;
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
 
         // "Write migration tests" is blocked by exactly one visible task
         // ("Implement task CRUD"), so it is hidden from its own row and
@@ -727,6 +781,17 @@ mod tests {
             "Write migration tests must not have its own row"
         );
         assert_eq!(crud.blocks.len(), 2, "CRUD blocks two tasks -> blocks-2 chip");
+
+        // "Migrate database schema" is a subtask of CRUD: no own row, and
+        // it nests under CRUD as its (only) collapsed subtask.
+        assert!(
+            specs
+                .iter()
+                .all(|spec| spec.task.title != "Migrate database schema"),
+            "subtask must not have its own row"
+        );
+        assert_eq!(crud.subtasks.len(), 1);
+        assert_eq!(crud.subtasks[0].title, "Migrate database schema");
 
         // "Code review PRs" blocks exactly one task ("Deploy to
         // production"), so the deploy task nests in its inline chain.
@@ -758,7 +823,9 @@ mod tests {
         blockers_map.insert(b.id, vec![a.clone()]);
         blocking_map.insert(a.id, vec![b.clone()]);
 
-        let specs = TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map);
+        let subtasks_map = std::collections::HashMap::new();
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].blocked.len(), 1);
         assert_eq!(specs[0].blocked[0].task.id, 2);
