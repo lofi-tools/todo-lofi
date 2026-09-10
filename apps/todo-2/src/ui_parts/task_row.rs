@@ -229,7 +229,6 @@ impl Render for TaskRow {
         let done = self.task.done;
         let store = self.store.clone();
         let entity = cx.entity().clone();
-        let entity_for_chain = entity.clone();
         let entity_for_checkbox = entity.clone();
 
         let visible_tags: Vec<_> = self
@@ -345,27 +344,37 @@ impl Render for TaskRow {
                         self.blocking
                             .blocked
                             .iter()
-                            .flat_map(|node| chain_children(node, &entity_for_chain)),
+                            .flat_map(chain_children),
                     )
                     .when(self.blocking.blocks.len() > 1, |this| {
                         this.child(
                             div()
-                                .id(("blocks-chip", task_id))
                                 .h_flex()
                                 .items_center()
                                 .gap_0p5()
-                                .px(px(4.))
-                                .rounded(px(2.))
-                                .bg(rgb(0x2a2a2a))
-                                .text_color(rgb(0xa3a3a3))
-                                .text_size(px(10.))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_blocks(cx);
-                                }))
-                                .child(format!("blocks {}", self.blocking.blocks.len()))
-                                .child(if self.blocks_expanded { "▾" } else { "▸" }),
+                                // Same arrow as the chain titles, tinted
+                                // to match the chip text; kept outside the
+                                // badge so it is not part of the pill.
+                                .child(arrow_svg(0xa3a3a3))
+                                .child(
+                                    div()
+                                        .id(("blocks-chip", task_id))
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_0p5()
+                                        .px(px(4.))
+                                        .rounded(px(2.))
+                                        .bg(rgb(0x2a2a2a))
+                                        .text_color(rgb(0xa3a3a3))
+                                        .text_size(px(10.))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_blocks(cx);
+                                        }))
+                                        .child(format!("blocks {}", self.blocking.blocks.len()))
+                                        .child(if self.blocks_expanded { "▾" } else { "▸" }),
+                                ),
                         )
                     })
             })
@@ -419,15 +428,14 @@ fn blocked_color(muted: bool) -> u32 {
 }
 
 /// Render a chain node inline after the blocker's title: arrow + grayed
-/// title, recursing into nested nodes.
-fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElement> {
+/// title, recursing into nested nodes. The titles are display-only: a
+/// click anywhere on the row selects the main task, not the blocked one.
+fn chain_children(node: &ChainNode) -> Vec<AnyElement> {
     let mut children: Vec<AnyElement> = Vec::new();
     let muted = node.task.done || node.task.blocked;
     let color = blocked_color(muted);
     children.push(arrow_svg(color).into_any_element());
     let task = node.task.clone();
-    let row_entity = row_entity.clone();
-    let row_entity_for_click = row_entity.clone();
     children.push(
         div()
             .id(("chain-title", task.id))
@@ -435,19 +443,10 @@ fn chain_children(node: &ChainNode, row_entity: &Entity<TaskRow>) -> Vec<AnyElem
             .text_color(rgb(color))
             .when(task.done, |this| this.line_through())
             .child(task.title.clone())
-            .cursor_pointer()
-            .on_click(move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
-                    cx.stop_propagation();
-                    row_entity_for_click.update(cx, |_row, cx| {
-                        cx.emit(TaskRowEvent::Selected(task.clone()));
-                    });
-                }
-            })
             .into_any_element(),
     );
     for nested in &node.nested {
-        children.extend(chain_children(nested, &row_entity));
+        children.extend(chain_children(nested));
     }
     children
 }
