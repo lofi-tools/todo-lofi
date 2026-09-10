@@ -19,6 +19,10 @@ pub struct Tag {
     /// unique opaque `name` (so different directories never collide) and
     /// carry the directory name here for display.
     pub display_name: Option<String>,
+    /// Seed data marker: demo content that must never sync to any
+    /// integration.
+    #[default(false)]
+    pub is_seed: bool,
 }
 
 impl Tag {
@@ -60,6 +64,8 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
             id,
             name,
             display_name,
+            // Raw tag queries don't select the seed marker.
+            is_seed: false,
         })
     } else {
         None
@@ -69,6 +75,19 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
 impl TodoStore {
     pub async fn create_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
         self.create_tag_with_display_name(name, None).await
+    }
+
+    /// Seed data tag: marked so sync never touches it.
+    pub async fn create_seed_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
+        let name = name.into();
+        let tag = Tag::create()
+            .name(name.clone())
+            .display_name(None)
+            .is_seed(true)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::CreateTagSnafu { name })?;
+        Ok(tag)
     }
 
     pub async fn create_tag_with_display_name(

@@ -287,13 +287,14 @@ impl TodoStore {
         Ok(ids)
     }
 
-    /// Materialize upcoming occurrences for every daily template: at most
-    /// one open occurrence exists per template. Each run tombstones open
-    /// occurrences from past dates (never completed), then creates the
-    /// nearest date whose start (or deadline) falls within the next 2
-    /// days — unless any linked occurrence already carries that deadline
-    /// (even a tombstoned one, so a deleted occurrence is never
-    /// resurrected). Returns the number of tasks created.
+    /// Materialize upcoming occurrences for every repeating template: at
+    /// most one open occurrence exists per template. Each run tombstones
+    /// open occurrences from past dates (never completed), then creates
+    /// the nearest date (in `interval_days` steps from the anchor) whose
+    /// start (or deadline) falls within the next 2 days — unless any
+    /// linked occurrence already carries that deadline (even a tombstoned
+    /// one, so a deleted occurrence is never resurrected). Returns the
+    /// number of tasks created.
     pub async fn materialize_daily_occurrences(
         &mut self,
         now_secs: u64,
@@ -302,7 +303,7 @@ impl TodoStore {
         let mut created = 0;
         for template in templates
             .into_iter()
-            .filter(|t| t.interval_days == 1 && t.time_of_day.is_some())
+            .filter(|t| t.interval_days >= 1 && t.time_of_day.is_some())
         {
             created += self
                 .materialize_upcoming_occurrences(&template, now_secs)
@@ -379,6 +380,23 @@ impl TodoStore {
         let today = jiff::Timestamp::from_second(now_secs as i64)
             .map(|stamp| stamp.to_zoned(zone.clone()).date())
             .unwrap_or_else(|_| jiff::Timestamp::now().to_zoned(zone.clone()).date());
+        // Anchor: earliest occurrence deadline date, else today. Dates
+        // advance in `interval_days` steps from here (daily, biweekly…).
+        let mut anchor: Option<jiff::civil::Date> = None;
+        for task_id in self.repeat_occurrences(template.id).await? {
+            let Ok(task) = self.get_task(task_id).await else {
+                continue;
+            };
+            if let Some(deadline) = task.deadline {
+                if let Some(date) = jiff::Timestamp::from_second(deadline as i64)
+                    .ok()
+                    .map(|stamp| stamp.to_zoned(zone.clone()).date())
+                {
+                    anchor = Some(anchor.map_or(date, |first: jiff::civil::Date| first.min(date)));
+                }
+            }
+        }
+        let anchor = anchor.unwrap_or(today);
         // Replace previous occurrences: tombstone open ones from past dates.
         let day_start = today
             .at(0, 0, 0, 0)
@@ -408,15 +426,19 @@ impl TodoStore {
                 return Ok(0);
             }
         }
-        for offset in 0..8 {
-            let date = today.checked_add(offset.days()).unwrap_or(today);
+        let step = template.interval_days.max(1) as i64;
+        for k in 0..1000 {
+            let date = anchor.checked_add((k * step).days()).unwrap_or(anchor);
+            if date < today {
+                continue;
+            }
             let Some((blocked_until, deadline)) =
                 occurrence_times_for_date(template, &zone, date)
             else {
                 continue;
             };
-            let anchor = blocked_until.unwrap_or(deadline);
-            if anchor > now_secs + MATERIALIZE_WINDOW_SECS {
+            let anchor_epoch = blocked_until.unwrap_or(deadline);
+            if anchor_epoch > now_secs + MATERIALIZE_WINDOW_SECS {
                 break;
             }
             if self
@@ -766,6 +788,73 @@ mod tests {
         let gym_days = storage.repeat_occurrences(gym_template.id).await?;
         let next_gym = *gym_days.last().unwrap();
         assert_eq!(storage.blocker_ids(next_shower).await?, vec![next_gym]);
+        Ok(())
+    }
+
+        fn epoch(raw: &str) -> u64 {
+        raw.parse::<jiff::Timestamp>().unwrap().as_second() as u64
+    }
+
+    #[tokio::test]
+    async fn test_materialize_biweekly_keeps_anchor_grid() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        // Past completed anchor: Mon Sep 7, enabled 4pm, due 9pm UTC.
+        let anchor = storage
+            .create_task(
+                Task::create()
+                    .title("green bin")
+                    .deadline(Some(epoch("2026-09-07T21:00:00Z")))
+                    .blocked_until(Some(epoch("2026-09-07T16:00:00Z")))
+                    .importance_factor(1.5),
+            )
+            .await?;
+        storage.update_task_done(anchor.id, true).await?;
+        storage
+            .set_repeat(anchor.id, "green bin".to_string(), 14, Some(21 * 60), Some(16 * 60))
+            .await?;
+
+        // Sun Sep 20 noon: Mon Sep 21 4pm is ~28h out (inside the window),
+        // Oct 5 is not. Exactly one occurrence appears.
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(epoch("2026-09-20T12:00:00Z"))
+                .await?,
+            1
+        );
+        let template = storage.repeat_template_for_task(anchor.id).await?.unwrap();
+        let occurrences = storage.repeat_occurrences(template.id).await?;
+        assert_eq!(occurrences.len(), 2);
+        let sep21 = storage.get_task(*occurrences.last().unwrap()).await?;
+        assert_eq!(sep21.deadline, Some(epoch("2026-09-21T21:00:00Z")));
+        assert_eq!(sep21.blocked_until, Some(epoch("2026-09-21T16:00:00Z")));
+        assert_eq!(sep21.importance_factor, 1.5);
+
+        // While Sep 21 is open, nothing else materializes.
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(epoch("2026-09-20T12:00:00Z"))
+                .await?,
+            0
+        );
+
+        // Completing it summons Oct 5 only once it slides into the window.
+        storage.update_task_done(sep21.id, true).await?;
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(epoch("2026-09-21T19:00:00Z"))
+                .await?,
+            0
+        );
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(epoch("2026-10-04T12:00:00Z"))
+                .await?,
+            1
+        );
+        let occurrences = storage.repeat_occurrences(template.id).await?;
+        let oct5 = storage.get_task(*occurrences.last().unwrap()).await?;
+        assert_eq!(oct5.deadline, Some(epoch("2026-10-05T21:00:00Z")));
+        assert!(oct5.deleted_at.is_none());
         Ok(())
     }
 

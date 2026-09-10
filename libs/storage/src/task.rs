@@ -50,6 +50,10 @@ pub struct Task {
     pub timezone: Option<String>,
     /// One-way imported remote comments as JSON.
     pub comments: Option<toasty::Json<Vec<crate::external::ExternalComment>>>,
+    /// Seed data marker: demo content that must never sync to any
+    /// integration (push skips it, import never relinks it).
+    #[default(false)]
+    pub is_seed: bool,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -186,6 +190,9 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         deleted_at: None,
         timezone: None,
         comments: None,
+        // Raw list queries don't select the seed marker; only `get_task`
+        // (used by sync guards) needs it accurate.
+        is_seed: false,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };

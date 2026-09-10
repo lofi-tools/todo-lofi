@@ -539,8 +539,8 @@ impl TodoStore {
     /// Push a field delta for one linked task via Sync commands
     /// (`item_update` for partial fields, `item_close`/`item_uncomplete`
     /// for completion — `item_update` explicitly does not support those).
-    /// Refreshes the link timestamp so the next import sees remote state
-    /// as current.
+    /// Seed rows never sync: silently skips them. Refreshes the link
+    /// timestamp so the next import sees remote state as current.
     pub async fn push_todoist_patch(
         &mut self,
         token: &str,
@@ -549,6 +549,9 @@ impl TodoStore {
         task_id: u64,
         patch: &TaskPatch,
     ) -> QueryResult<()> {
+        if self.get_task(task_id).await?.is_seed {
+            return Ok(());
+        }
         let mut update_args = serde_json::Map::new();
         update_args.insert(
             "id".to_string(),
@@ -683,6 +686,37 @@ mod tests {
             is_recurring: false,
         };
         assert!(deadline_for_due(&broken).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_push_skips_seed_tasks() -> anyhow::Result<()> {
+        use crate::TodoStore;
+        let mut storage = TodoStore::for_test().await?;
+        // Bogus token: a seed task must return before any network happens.
+        let seed = storage
+            .create_task(crate::Task::create().title("seed").is_seed(true))
+            .await?;
+        storage
+            .push_todoist_patch("bogus", 1, "ext-1", seed.id, &TaskPatch {
+                content: Some("changed".to_string()),
+                ..Default::default()
+            })
+            .await?;
+        // A real task with the same bogus token fails at the network —
+        // proving the guard above is what skipped the seed row.
+        let live = storage
+            .create_task(crate::Task::create().title("live"))
+            .await?;
+        assert!(
+            storage
+                .push_todoist_patch("bogus", 1, "ext-2", live.id, &TaskPatch {
+                    content: Some("changed".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]

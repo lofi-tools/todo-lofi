@@ -824,6 +824,7 @@ mod tests {
                 deleted_at: None,
                 timezone: None,
                 comments: None,
+                is_seed: false,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },
