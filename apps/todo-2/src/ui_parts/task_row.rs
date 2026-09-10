@@ -283,6 +283,16 @@ impl Render for TaskRow {
         // Blocked tasks are grayed out while unworkable; completed tasks
         // gray out the moment they are done (before jumping to the bottom).
         let muted = done || self.task.blocked;
+        // …unless the row carries a live (unblocked, undone) chain title:
+        // it must read as white as any pending row, so the row stays at
+        // full opacity and the done/blocked titles rely on their explicit
+        // gray + strikethrough instead.
+        let live_chain = chain_live(&self.blocking.blocked)
+            || self
+                .blocking
+                .blocks
+                .iter()
+                .any(|task| !task.done && !task.blocked);
         let locked = self.locked;
         // The row grows with its content: fixed 44px when collapsed, auto
         // height when editing or when the "blocks N" or subtask list is
@@ -300,7 +310,7 @@ impl Render for TaskRow {
             .gap_3()
             .px_3()
             .rounded_md()
-            .opacity(if muted { 0.55 } else { 1.0 })
+            .opacity(if muted && !live_chain { 0.55 } else { 1.0 })
             .bg(if self.selected {
                 rgb(0x3a3a3a)
             } else {
@@ -504,14 +514,14 @@ fn arrow_svg(color: u32) -> impl IntoElement {
     div()
         .h_flex()
         .items_center()
-        .mx_1()
         .child(svg().size_3().data(ARROW_SVG).text_color(rgb(color)))
 }
 
 /// The text color of a blocked/blocking task title: the muted gray when
-/// it is blocked or done, the lighter gray otherwise.
+/// it is blocked or done, the normal pending white otherwise (same as
+/// top-level pending rows).
 fn blocked_color(muted: bool) -> u32 {
-    if muted { 0x666666 } else { 0xcccccc }
+    if muted { 0x666666 } else { 0xe5e5e5 }
 }
 
 /// The subtask glyph (three indented bars), tinted by the given color.
@@ -602,11 +612,19 @@ fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>, store: &Store
         )
 }
 
+/// True when a chain contains a live title (neither done nor blocked):
+/// such a row must render at full opacity so the live title reads as
+/// white as any pending row.
+fn chain_live(nodes: &[ChainNode]) -> bool {
+    nodes
+        .iter()
+        .any(|node| (!node.task.done && !node.task.blocked) || chain_live(&node.nested))
+}
+
 /// Render a chain node inline after the blocker's title: arrow + grayed
 /// title, recursing into nested nodes. The titles are display-only: a
 /// click anywhere on the row selects the main task, not the blocked one.
-fn chain_children(node: &ChainNode) -> Vec<AnyElement> {
-    let mut children: Vec<AnyElement> = Vec::new();
+fn chain_children(node: &ChainNode) -> Vec<AnyElement> {    let mut children: Vec<AnyElement> = Vec::new();
     let muted = node.task.done || node.task.blocked;
     let color = blocked_color(muted);
     children.push(arrow_svg(color).into_any_element());

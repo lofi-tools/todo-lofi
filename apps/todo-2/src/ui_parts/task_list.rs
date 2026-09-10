@@ -699,9 +699,12 @@ impl TaskListView {
     }
 
     /// Compute the visible rows from the task list plus the blocker and
-    /// subtask relationships: a task blocked by exactly one visible
+    /// subtask relationships: a task blocked by exactly one visible *open*
     /// blocker, or whose parent is a visible task, does not get its own
     /// row — it nests inside that blocker's chain or the parent's row.
+    /// Tasks whose only visible blockers are done get their own full row
+    /// (e.g. after the 10s tick animation, the unlocked task replaces the
+    /// completed one instead of staying nested in it).
     pub fn compute_row_specs(
         tasks: &[TaskWithMeta],
         blockers_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
@@ -712,7 +715,9 @@ impl TaskListView {
             tasks.iter().map(|t| t.id).collect();
         // A task is hidden when its parent is a task in this view (its
         // subtask row collapses under the parent) or when exactly one of
-        // its blockers is a task in this view (blocker chain collapse).
+        // its *open* blockers is a task in this view (blocker chain
+        // collapse). Done blockers never collapse: the unlocked task
+        // stands on its own.
         let hidden: std::collections::HashSet<u64> = tasks
             .iter()
             .filter(|task| {
@@ -724,7 +729,7 @@ impl TaskListView {
                     .is_some_and(|blockers| {
                         blockers
                             .iter()
-                            .filter(|b| visible_ids.contains(&b.id))
+                            .filter(|b| !b.done && visible_ids.contains(&b.id))
                             .count()
                             == 1
                     });
@@ -875,6 +880,31 @@ mod tests {
         // Two exclusive dependants: no inline chain, but a blocks-N list.
         assert!(specs[0].blocked.is_empty());
         assert_eq!(specs[0].blocks.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_row_specs_done_blocker_frees_dependant() {
+        let mut a = meta(1, "blocker");
+        a.task.done = true;
+        let b = meta(2, "unlocked");
+        let tasks = vec![a.clone(), b.clone()];
+
+        let mut blockers_map = std::collections::HashMap::new();
+        let mut blocking_map = std::collections::HashMap::new();
+        blockers_map.insert(b.id, vec![a.clone()]);
+        blocking_map.insert(a.id, vec![b.clone()]);
+
+        let subtasks_map = std::collections::HashMap::new();
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
+        // Both stand on their own: the done blocker keeps a plain row with
+        // no chain, and the unlocked task gets a full row (own checkbox).
+        assert_eq!(specs.len(), 2);
+        let done_spec = specs.iter().find(|spec| spec.task.id == a.id).unwrap();
+        assert!(done_spec.blocked.is_empty());
+        assert!(done_spec.blocks.is_empty());
+        let free_spec = specs.iter().find(|spec| spec.task.id == b.id).unwrap();
+        assert!(!free_spec.task.blocked);
     }
 
     #[test]
@@ -1047,14 +1077,18 @@ impl TaskListView {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) = self
+        let (done_pairs, rest_pairs): (Vec<_>, Vec<_>) = self
             .row_specs
             .iter()
             .enumerate()
+            .partition(|(_, spec)| spec.task.done);
+        let done: Vec<usize> = done_pairs.into_iter().map(|(i, _)| i).collect();
+        let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) = rest_pairs
+            .into_iter()
             .partition(|(_, spec)| spec.task.blocked_until.is_some_and(|until| until > now_secs));
         let upcoming: Vec<usize> = upcoming_pairs.into_iter().map(|(i, _)| i).collect();
         let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
-        // No sections here: doable rows flat, upcoming under its header.
+        // No sections here: doable rows flat, then Upcoming, then Completed.
         if self.selected_path.is_empty() || self.section_order.is_empty() {
             let mut chunks = Vec::new();
             if !current.is_empty() {
@@ -1062,6 +1096,9 @@ impl TaskListView {
             }
             if !upcoming.is_empty() {
                 chunks.push(RowChunk::Upcoming(upcoming));
+            }
+            if !done.is_empty() {
+                chunks.push(RowChunk::Completed(done));
             }
             return Self::render_chunks(&self.task_views, &chunks);
         }
@@ -1076,6 +1113,9 @@ impl TaskListView {
         let mut chunks = sectioned_order(&current, &section_of, &self.section_order);
         if !upcoming.is_empty() {
             chunks.push(RowChunk::Upcoming(upcoming));
+        }
+        if !done.is_empty() {
+            chunks.push(RowChunk::Completed(done));
         }
         Self::render_chunks(&self.task_views, &chunks)
     }
@@ -1112,16 +1152,15 @@ impl TaskListView {
                     // Separated from the doable list above, like a
                     // Todoist section with a divider.
                     elements.push(
-                        div()
-                            .mt_4()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(rgb(0x333333))
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xa3a3a3))
-                            .child("Upcoming")
-                            .into_any_element(),
+                        divided_header("Upcoming")
+                    );
+                    for index in indices {
+                        elements.push(task_views[*index].clone().into_any_element());
+                    }
+                }
+                RowChunk::Completed(indices) => {
+                    elements.push(
+                        divided_header("Completed")
                     );
                     for index in indices {
                         elements.push(task_views[*index].clone().into_any_element());
@@ -1131,6 +1170,21 @@ impl TaskListView {
         }
         elements
     }
+}
+
+/// Divider-separated group header ("Upcoming", "Completed"): detached
+/// from the doable list above like a Todoist section.
+fn divided_header(label: &'static str) -> gpui::AnyElement {
+    div()
+        .mt_4()
+        .pt_2()
+        .border_t_1()
+        .border_color(rgb(0x333333))
+        .text_sm()
+        .font_semibold()
+        .text_color(rgb(0xa3a3a3))
+        .child(label)
+        .into_any_element()
 }
 
 /// System-local civil date key (`YYYY-MM-DD`) for detecting date
@@ -1176,10 +1230,11 @@ fn sectioned_order(
     chunks
 }
 
-/// One flat run of rows, optionally under a section header. `Upcoming`
-/// is the trailing not-yet-doable group with its own divider styling.
+/// One flat run of rows, a section header group, or one of the trailing
+/// divider-separated groups (Upcoming, Completed).
 enum RowChunk {
     Rows(Vec<usize>),
     Section(String, Vec<usize>),
     Upcoming(Vec<usize>),
+    Completed(Vec<usize>),
 }
