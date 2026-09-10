@@ -172,6 +172,45 @@ impl TodoStore {
         Ok(tasks)
     }
 
+    /// Direct subtask counts for every parent in `task_ids`, as a map from
+    /// parent id to `(done, total)`. One GROUP BY query; used by the task
+    /// list to show subtask progress (N/M) next to a task's tags.
+    pub async fn subtask_counts(
+        &mut self,
+        task_ids: &[u64],
+    ) -> QueryResult<HashMap<u64, (u64, u64)>> {
+        if task_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let id_list: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let rows = toasty::sql::query(format!(
+            "SELECT parent_id, SUM(CASE WHEN done THEN 1 ELSE 0 END), COUNT(*) \
+             FROM tasks WHERE parent_id IN ({}) GROUP BY parent_id",
+            placeholders.join(",")
+        ))
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+        ])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "count subtasks",
+        })?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let parent = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let done = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let total = record.get(2).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                counts.insert(parent, (done, total));
+            }
+        }
+        Ok(counts)
+    }
+
     /// Tasks whose parent is `parent_id` (subtasks), with full details,
     /// ordered by id.
     pub async fn list_subtasks(&mut self, parent_id: u64) -> QueryResult<Vec<crate::Task>> {
@@ -654,6 +693,40 @@ mod tests {
         let candidates = storage.after_candidates(third.id).await?;
         let ids: Vec<u64> = candidates.iter().map(|t| t.id).collect();
         assert_eq!(ids, vec![second.id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_subtask_counts() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let parent = make_task(&mut storage, "parent").await;
+        let other = make_task(&mut storage, "other").await;
+
+        let first = storage
+            .create_task(
+                crate::Task::create()
+                    .title("first child".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+        storage
+            .create_task(
+                crate::Task::create()
+                    .title("second child".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        let counts = storage.subtask_counts(&[parent.id, other.id]).await?;
+        assert_eq!(counts.get(&parent.id), Some(&(0, 2)));
+        assert!(!counts.contains_key(&other.id), "no subtasks -> absent");
+
+        // Completing one subtask advances the done half of the pair.
+        storage.update_task_done(first.id, true).await?;
+        let counts = storage.subtask_counts(&[parent.id]).await?;
+        assert_eq!(counts.get(&parent.id), Some(&(1, 2)));
+
+        assert!(storage.subtask_counts(&[]).await?.is_empty());
         Ok(())
     }
 

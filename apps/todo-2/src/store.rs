@@ -217,6 +217,20 @@ impl Store {
         })
     }
 
+    /// Direct subtask counts for any of `task_ids`, keyed by parent id
+    /// (done, total). Used by the task list to show subtask progress.
+    pub fn subtask_counts(
+        &self,
+        task_ids: Vec<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<std::collections::HashMap<u64, (u64, u64)>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.subtask_counts(&task_ids).await?)
+        })
+    }
+
     /// All tasks blocked by any of `task_ids`, keyed by blocker id (used
     /// to nest blocked tasks under their blocker in the task list).
     pub fn blocking_map(

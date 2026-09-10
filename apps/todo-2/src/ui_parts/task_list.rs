@@ -44,6 +44,9 @@ pub struct TaskListView {
     blockers_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     /// task_id -> tasks it blocks (with meta).
     blocking_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    /// task_id -> (done, total) direct subtask counts, shown as "N/M"
+    /// right of the task's tags.
+    subtask_counts: std::collections::HashMap<u64, (u64, u64)>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -104,6 +107,7 @@ impl TaskListView {
             row_specs: Vec::new(),
             blockers_map: std::collections::HashMap::new(),
             blocking_map: std::collections::HashMap::new(),
+            subtask_counts: std::collections::HashMap::new(),
             input,
             store,
             selected_path: Vec::new(),
@@ -338,20 +342,22 @@ impl TaskListView {
         }
     }
 
-    /// Build the blockers/blocking maps for `tasks` (used by the row
-    /// computation below).
-    async fn fetch_blocking_maps(
+    /// Build the blockers/blocking maps and subtask counts for `tasks`
+    /// (used by the row computation below).
+    async fn fetch_list_data(
         store: &Store,
         tasks: &[TaskWithMeta],
         cx: &mut AsyncApp,
     ) -> (
         std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+        std::collections::HashMap<u64, (u64, u64)>,
     ) {
         let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
         let blockers = store.blockers_map(ids.clone(), cx).await.unwrap_or_default();
         let blocking = store.blocking_map(ids.clone(), cx).await.unwrap_or_default();
-        (blockers, blocking)
+        let subtask_counts = store.subtask_counts(ids, cx).await.unwrap_or_default();
+        (blockers, blocking, subtask_counts)
     }
 
     /// Reload the current view (all tasks or the selected tag's tasks) from
@@ -371,8 +377,8 @@ impl TaskListView {
                             return;
                         }
                     };
-                let (blockers_map, blocking_map) =
-                    Self::fetch_blocking_maps(&store, &tasks, cx).await;
+                let (blockers_map, blocking_map, subtask_counts) =
+                    Self::fetch_list_data(&store, &tasks, cx).await;
                 this.update(cx, |this, cx| {
                     this.selected_labels = labels;
                     this.set_tasks_with_path(
@@ -381,6 +387,7 @@ impl TaskListView {
                         &this.selected_labels.clone(),
                         blockers_map,
                         blocking_map,
+                        subtask_counts,
                         cx,
                     );
                     this._fetch_tasks = None;
@@ -394,8 +401,8 @@ impl TaskListView {
                     let mut s = store.0.lock().await;
                     s.list_tasks_by_priority().await.unwrap_or_default()
                 };
-                let (blockers_map, blocking_map) =
-                    Self::fetch_blocking_maps(&store, &tasks, cx).await;
+                let (blockers_map, blocking_map, subtask_counts) =
+                    Self::fetch_list_data(&store, &tasks, cx).await;
                 this.update(cx, |this, cx| {
                     this.set_tasks_with_path(
                         tasks,
@@ -403,6 +410,7 @@ impl TaskListView {
                         &selected_labels,
                         blockers_map,
                         blocking_map,
+                        subtask_counts,
                         cx,
                     );
                     this._fetch_tasks = None;
@@ -429,8 +437,8 @@ impl TaskListView {
                     return;
                 }
             };
-            let (blockers_map, blocking_map) =
-                Self::fetch_blocking_maps(&store, &new_tasks, cx).await;
+            let (blockers_map, blocking_map, subtask_counts) =
+                Self::fetch_list_data(&store, &new_tasks, cx).await;
             // Select the fresh task so its details are one keypress/click
             // away without hunting for it in the list (works even when the
             // task nests inside another row's blocker chain).
@@ -445,6 +453,7 @@ impl TaskListView {
                     &this.selected_labels.clone(),
                     blockers_map,
                     blocking_map,
+                    subtask_counts,
                     cx,
                 );
                 if let Some(task) = created {
@@ -464,11 +473,13 @@ impl TaskListView {
         selected_labels: &[String],
         blockers_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         blocking_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+        subtask_counts: std::collections::HashMap<u64, (u64, u64)>,
         cx: &mut Context<Self>,
     ) {
         self.editing = false;
         self.blockers_map = blockers_map;
         self.blocking_map = blocking_map;
+        self.subtask_counts = subtask_counts;
         let row_specs = Self::compute_row_specs(&tasks, &self.blockers_map, &self.blocking_map);
         self.row_specs = row_specs;
         let selected_task_id = self.selected.as_ref().map(|task| task.id);
@@ -477,6 +488,7 @@ impl TaskListView {
             .iter()
             .map(|spec| {
                 let is_selected = Some(spec.task.id) == selected_task_id;
+                let subtask_progress = self.subtask_counts.get(&spec.task.id).copied();
                 let row = cx.new(|cx| {
                     TaskRow::new(
                         spec.task.clone(),
@@ -488,6 +500,7 @@ impl TaskListView {
                         selected_path.to_vec(),
                         selected_labels.to_vec(),
                         is_selected,
+                        subtask_progress,
                         cx,
                     )
                 });
@@ -523,8 +536,8 @@ impl TaskListView {
         let selected_path = self.selected_path.clone();
         let selected_labels = self.selected_labels.clone();
         self._fetch_tasks = Some(cx.spawn(async move |this, cx| {
-            let (blockers_map, blocking_map) =
-                Self::fetch_blocking_maps(&store, &tasks, cx).await;
+            let (blockers_map, blocking_map, subtask_counts) =
+                Self::fetch_list_data(&store, &tasks, cx).await;
             this.update(cx, |this, cx| {
                 this.set_tasks_with_path(
                     tasks,
@@ -532,6 +545,7 @@ impl TaskListView {
                     &selected_labels,
                     blockers_map,
                     blocking_map,
+                    subtask_counts,
                     cx,
                 );
                 this._fetch_tasks = None;

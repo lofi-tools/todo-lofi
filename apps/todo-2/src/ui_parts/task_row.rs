@@ -54,6 +54,8 @@ pub struct TaskRow {
     locked: bool,
     /// Whether the "blocks N" chip is expanded to show the blocked tasks.
     blocks_expanded: bool,
+    /// Subtask progress (done, total), shown right of the task's tags.
+    subtask_progress: Option<(u64, u64)>,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
 }
@@ -66,6 +68,7 @@ impl TaskRow {
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
         selected: bool,
+        subtask_progress: Option<(u64, u64)>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -78,6 +81,7 @@ impl TaskRow {
             editing: false,
             locked: false,
             blocks_expanded: false,
+            subtask_progress,
             edit_input: None,
             _edit_subscription: None,
         }
@@ -401,7 +405,25 @@ impl Render for TaskRow {
                                     .bg(rgb(0x2a2a2a))
                                     .text_color(rgb(0xa3a3a3))
                                     .child(format!("#{tag}"))
-                            })),
+                            }))
+                            .when_some(self.subtask_progress, |this, (done, total)| {
+                                // Subtask progress, right of the tags.
+                                this.child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_0p5()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child(
+                                            svg()
+                                                .size(px(12.))
+                                                .data(SUBTASK_SVG)
+                                                .text_color(rgb(0xa3a3a3)),
+                                        )
+                                        .child(format!("{done}/{total}")),
+                                )
+                            }),
                     ),
             )
     }
@@ -488,3 +510,8 @@ fn blocked_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoE
 /// Lucide `arrow-right`, drawn with an opaque stroke so the alpha-mask
 /// rendering tints it with the element's text color.
 const ARROW_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>"##;
+
+/// Todoist's subtask glyph: three bars, each indented further right (the
+/// classic "indent list" icon). Opaque stroke so the alpha-mask rendering
+/// tints it with the element's text color.
+const SUBTASK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M8 12h12"/><path d="M12 18h8"/></svg>"##;
