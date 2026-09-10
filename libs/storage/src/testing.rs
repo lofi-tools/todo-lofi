@@ -169,6 +169,49 @@ fn seed_tasks() -> Vec<SeedTask> {
             urgency_factor: 1.0,
             parent_title: None,
         },
+        // Parent with three subtasks, demoing the collapsed subtask row:
+        // the first subtask renders inline right of the title and the
+        // "0/3" counter expands the full list.
+        SeedTask {
+            title: "Rewrite the details panel".to_string(),
+            description: Some("Redesign the task details panel for the new task view".to_string()),
+            branch_name: Some("feat/details-redesign".to_string()),
+            labels: vec!["feature".to_string()],
+            deadline: Some(now_secs + 10 * 86400),
+            importance_factor: 1.5,
+            urgency_factor: 0.5,
+            parent_title: None,
+        },
+        SeedTask {
+            title: "Sketch the new layout".to_string(),
+            description: Some("Wireframe the sidebar and content area".to_string()),
+            branch_name: None,
+            labels: vec!["design".to_string()],
+            deadline: Some(now_secs + 10 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 0.5,
+            parent_title: Some("Rewrite the details panel".to_string()),
+        },
+        SeedTask {
+            title: "Implement the sidebar".to_string(),
+            description: Some("Build the attribute sidebar with edit controls".to_string()),
+            branch_name: Some("feat/details-sidebar".to_string()),
+            labels: vec!["frontend".to_string()],
+            deadline: Some(now_secs + 11 * 86400),
+            importance_factor: 1.5,
+            urgency_factor: 0.5,
+            parent_title: Some("Rewrite the details panel".to_string()),
+        },
+        SeedTask {
+            title: "Migrate existing actions".to_string(),
+            description: Some("Move repeat, blocker and follow-up actions into the new panel".to_string()),
+            branch_name: None,
+            labels: vec!["refactor".to_string()],
+            deadline: Some(now_secs + 12 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 0.5,
+            parent_title: Some("Rewrite the details panel".to_string()),
+        },
     ]
 }
 
@@ -213,6 +256,22 @@ fn seed_assignments() -> Vec<SeedAssignment> {
         SeedAssignment {
             task_title: "feed dorito".to_string(),
             tag_name: "personal".to_string(),
+        },
+        SeedAssignment {
+            task_title: "Rewrite the details panel".to_string(),
+            tag_name: "frontend".to_string(),
+        },
+        SeedAssignment {
+            task_title: "Sketch the new layout".to_string(),
+            tag_name: "frontend".to_string(),
+        },
+        SeedAssignment {
+            task_title: "Implement the sidebar".to_string(),
+            tag_name: "frontend".to_string(),
+        },
+        SeedAssignment {
+            task_title: "Migrate existing actions".to_string(),
+            tag_name: "frontend".to_string(),
         },
     ]
 }
@@ -326,7 +385,7 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 10);
+        assert_eq!(tasks.len(), 14);
 
         let tags = store.list_tags().await?;
         assert_eq!(tags.len(), 9);
@@ -334,6 +393,20 @@ mod tests {
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
         assert!(task_with_parent.is_some());
         assert!(task_with_parent.unwrap().parent_id.is_some());
+
+        // "Rewrite the details panel" has three subtasks, demoing the
+        // collapsed subtask row and the N/M counter.
+        let rewrite = tasks
+            .iter()
+            .find(|t| t.title == "Rewrite the details panel")
+            .unwrap();
+        let subtask_map = store.subtasks_map(&[rewrite.id]).await?;
+        let rewrite_subtasks = &subtask_map[&rewrite.id];
+        assert_eq!(rewrite_subtasks.len(), 3);
+        assert!(
+            rewrite_subtasks.iter().all(|t| t.parent_id == Some(rewrite.id)),
+            "all three subtasks must point back at the parent"
+        );
 
         // "feed dorito" repeats every day at 6pm.
         let feed = tasks.iter().find(|t| t.title == "feed dorito").unwrap();
