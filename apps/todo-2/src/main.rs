@@ -517,6 +517,11 @@ impl Render for Layout {
                     .flex()
                     .flex_row()
                     .flex_1()
+                    // A flex item refuses to shrink below its content
+                    // height, so the row would grow past the window and
+                    // push the navbar footer out of view; min_h_0 lets it
+                    // clamp to the remaining window height instead.
+                    .min_h_0()
                     .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(match self.panel {
                         NavPanel::Tasks => div()
@@ -524,6 +529,7 @@ impl Render for Layout {
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .min_h_0()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let deferred = this
                                     .details
@@ -543,24 +549,28 @@ impl Render for Layout {
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .min_h_0()
                             .child(div().flex_1().child(self.integrations.clone()))
                             .into_any_element(),
                         NavPanel::Automations => div()
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .min_h_0()
                             .child(div().flex_1().child(self.automations.clone()))
                             .into_any_element(),
                         NavPanel::Workflows => div()
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .min_h_0()
                             .child(div().flex_1().child(self.workflows.clone()))
                             .into_any_element(),
                         NavPanel::Settings => div()
                             .flex_1()
                             .flex()
                             .flex_row()
+                            .min_h_0()
                             .child(div().flex_1().child(self.settings.clone()))
                             .into_any_element(),
                     }),

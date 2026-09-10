@@ -9,6 +9,7 @@ use gpui::{
 };
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::scroll::ScrollableElement;
 use storage::prelude::*;
 
 use crate::store::Store;
@@ -143,11 +144,13 @@ impl EventEmitter<WorkflowPanelEvent> for WorkflowPanel {}
 
 impl Render for WorkflowPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().v_flex().gap_2().child(self.header(cx)).children(
-            self.runs
-                .iter()
-                .map(|view| self.run_card(view, window, cx)),
-        )
+        div()
+            .flex_1()
+            .overflow_y_scrollbar()
+            .v_flex()
+            .gap_2()
+            .child(self.header(cx))
+            .children(self.runs.iter().map(|view| self.run_card(view, window, cx)))
     }
 }
 
