@@ -24,6 +24,10 @@ pub struct RepeatTaskTemplate {
     /// today's start time, so the task is hidden until it becomes doable.
     /// `None` means occurrences start immediately.
     pub start_time_of_day: Option<u64>,
+    /// Template whose same-date occurrence blocks each of this template's
+    /// occurrences (per-generation dependence, e.g. daily "shower" waits
+    /// for daily "gym"). Wired by the materializer, never by hand.
+    pub blocked_by_template_id: Option<u64>,
     /// Weekdays for "every week on Mon/…" as JSON vec of 0=Mon..6=Sun.
     pub weekdays: Option<toasty::Json<Vec<u8>>>,
     /// Month day for "every Nth" (1-31, -1 = last day).
@@ -64,12 +68,14 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         let start_time_of_day = record.get(9).and_then(|v| v.to_i64()).map(|m| m as u64);
+        let blocked_by_template_id = record.get(10).and_then(|v| v.to_i64()).map(|id| id as u64);
         Some(RepeatTaskTemplate {
             id,
             name,
             interval_days,
             time_of_day,
             start_time_of_day,
+            blocked_by_template_id,
             weekdays,
             month_day,
             strict,
@@ -82,7 +88,8 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
 }
 
 const TEMPLATE_COLUMNS: &str = "rtt.id, rtt.name, rtt.interval_days, rtt.time_of_day, \
-     rtt.created_at, rtt.weekdays, rtt.month_day, rtt.strict, rtt.timezone, rtt.start_time_of_day";
+     rtt.created_at, rtt.weekdays, rtt.month_day, rtt.strict, rtt.timezone, \
+     rtt.start_time_of_day, rtt.blocked_by_template_id";
 
 impl TodoStore {
     /// The repeat template that `task_id` is an occurrence of, if any.
@@ -109,6 +116,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
         .bind(task_id as i64)
@@ -148,6 +156,7 @@ impl TodoStore {
                 interval_days,
                 time_of_day,
                 start_time_of_day,
+                blocked_by_template_id: existing.blocked_by_template_id,
                 weekdays: existing.weekdays,
                 month_day: existing.month_day,
                 strict: existing.strict,
@@ -194,11 +203,41 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Record that each occurrence of the template `task_id` belongs to
+    /// waits for the same-date occurrence of another template (per-
+    /// generation dependence). Clears with `None`. A task without a
+    /// template is a no-op.
+    pub async fn set_repeat_blocked_by(
+        &mut self,
+        task_id: u64,
+        blocked_by_template_id: Option<u64>,
+    ) -> QueryResult<()> {
+        let Some(template) = self.repeat_template_for_task(task_id).await? else {
+            return Ok(());
+        };
+        if let Some(dependency) = blocked_by_template_id
+            && dependency == template.id
+        {
+            return Err(crate::QueryErr::UnexpectedValue {
+                message: "A repeat template cannot depend on itself".to_string(),
+            });
+        }
+        RepeatTaskTemplate::update_by_id(template.id)
+            .blocked_by_template_id(blocked_by_template_id)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "set repeat dependency",
+            })?;
+        Ok(())
+    }
+
     /// All repeat templates, e.g. for the daily materializer.
     pub async fn list_repeat_templates(&mut self) -> QueryResult<Vec<RepeatTaskTemplate>> {
         let rows = toasty::sql::query(
             r#"SELECT id, name, interval_days, time_of_day, created_at,
-                      weekdays, month_day, strict, timezone, start_time_of_day
+                      weekdays, month_day, strict, timezone, start_time_of_day,
+                      blocked_by_template_id
                FROM repeat_task_templates ORDER BY id"#,
         )
         .column_types([
@@ -211,6 +250,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
         .exec(&mut self.db)
@@ -268,7 +308,65 @@ impl TodoStore {
                 .materialize_upcoming_occurrences(&template, now_secs)
                 .await?;
         }
+        self.link_repeat_dependencies().await?;
         Ok(created)
+    }
+
+    /// Wire per-generation dependence: for every template with
+    /// `blocked_by_template_id`, link each live occurrence to the live
+    /// occurrence of the depended template falling on the same civil date
+    /// (in the dependent's timezone). Mutual dependence is skipped, never
+    /// an error.
+    async fn link_repeat_dependencies(&mut self) -> QueryResult<()> {
+        let templates = self.list_repeat_templates().await?;
+        let by_id: std::collections::HashMap<u64, &RepeatTaskTemplate> =
+            templates.iter().map(|t| (t.id, t)).collect();
+        for template in &templates {
+            let Some(dependency_id) = template.blocked_by_template_id else {
+                continue;
+            };
+            if dependency_id == template.id || !by_id.contains_key(&dependency_id) {
+                continue;
+            }
+            let zone = template_zone(template);
+            let mut blockers: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for task_id in self.repeat_occurrences(dependency_id).await? {
+                let Ok(task) = self.get_task(task_id).await else {
+                    continue;
+                };
+                if task.done || task.deleted_at.is_some() {
+                    continue;
+                }
+                if let Some(date) = task_date_key(task.deadline, &zone) {
+                    blockers.entry(date).or_insert(task_id);
+                }
+            }
+            for task_id in self.repeat_occurrences(template.id).await? {
+                let Ok(task) = self.get_task(task_id).await else {
+                    continue;
+                };
+                if task.done || task.deleted_at.is_some() {
+                    continue;
+                }
+                let Some(date) = task_date_key(task.deadline, &zone) else {
+                    continue;
+                };
+                let Some(&blocker_id) = blockers.get(&date) else {
+                    continue;
+                };
+                if blocker_id == task_id
+                    || self.blocker_ids(task_id).await?.contains(&blocker_id)
+                    || self
+                        .link_would_create_cycle(task_id, blocker_id, crate::LinkKind::BlockedBy)
+                        .await?
+                {
+                    continue;
+                }
+                self.add_blocker(task_id, blocker_id).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn materialize_upcoming_occurrences(
@@ -394,8 +492,7 @@ impl TodoStore {
 
 /// Timezone for recurrence evaluation: the template's zone, else UTC.
 /// Task instances store UTC epochs only.
-fn template_zone(template: &RepeatTaskTemplate) -> jiff::tz::TimeZone {
-    template
+fn template_zone(template: &RepeatTaskTemplate) -> jiff::tz::TimeZone {    template
         .timezone
         .as_deref()
         .and_then(|name| jiff::tz::TimeZone::get(name).ok())
@@ -411,6 +508,14 @@ fn civil_at(
         .to_zoned(zone.clone())
         .ok()
         .map(|zoned| zoned.timestamp().as_second() as u64)
+}
+
+/// Civil date key (`YYYY-MM-DD`) of a deadline in a zone, for matching
+/// occurrences of the same generation across templates.
+fn task_date_key(deadline: Option<u64>, zone: &jiff::tz::TimeZone) -> Option<String> {
+    jiff::Timestamp::from_second(deadline? as i64)
+        .ok()
+        .map(|stamp| stamp.to_zoned(zone.clone()).date().to_string())
 }
 
 /// Occurrences materialize while startable (or due) within this horizon.
@@ -602,14 +707,76 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_repeat_dependency_links_same_generation() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let gym = storage
+            .create_task(Task::create().title("gym"))
+            .await?;
+        storage
+            .set_repeat(gym.id, "gym".to_string(), 1, Some(8 * 60), Some(7 * 60))
+            .await?;
+        let shower = storage
+            .create_task(Task::create().title("shower"))
+            .await?;
+        storage
+            .set_repeat(shower.id, "shower".to_string(), 1, Some(8 * 60 + 30), None)
+            .await?;
+        // Self-dependence is rejected.
+        let gym_template = storage.repeat_template_for_task(gym.id).await?.unwrap();
+        assert!(
+            storage
+                .set_repeat_blocked_by(gym.id, Some(gym_template.id))
+                .await
+                .is_err()
+        );
+        storage
+            .set_repeat_blocked_by(shower.id, Some(gym_template.id))
+            .await?;
+
+        let noon = utc_midday();
+        assert_eq!(storage.materialize_daily_occurrences(noon).await?, 2);
+
+        let shower_template = storage.repeat_template_for_task(shower.id).await?.unwrap();
+        let shower_days = storage.repeat_occurrences(shower_template.id).await?;
+        // Seed row (dateless, tombstoned) + today's live occurrence.
+        let live_today = *shower_days.last().unwrap();
+        let blockers = storage.blocker_ids(live_today).await?;
+        assert_eq!(blockers.len(), 1);
+        let gym_days = storage.repeat_occurrences(gym_template.id).await?;
+        let live_gym = *gym_days.last().unwrap();
+        assert_eq!(blockers, vec![live_gym]);
+
+        // Same civil date on both sides: no cross-generation links.
+        let today = storage.get_task(live_today).await?;
+        let gym_task = storage.get_task(live_gym).await?;
+        assert_eq!(today.deadline.unwrap() / 86400, gym_task.deadline.unwrap() / 86400);
+
+        // Tomorrow, after both are done, the new pair links up the same way.
+        storage.update_task_done(live_today, true).await?;
+        storage.update_task_done(live_gym, true).await?;
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(noon + 86400)
+                .await?,
+            2
+        );
+        let shower_days = storage.repeat_occurrences(shower_template.id).await?;
+        let next_shower = *shower_days.last().unwrap();
+        let gym_days = storage.repeat_occurrences(gym_template.id).await?;
+        let next_gym = *gym_days.last().unwrap();
+        assert_eq!(storage.blocker_ids(next_shower).await?, vec![next_gym]);
+        Ok(())
+    }
+
     #[test]
-    fn test_occurrence_times_uses_template_timezone() {
-        let template = RepeatTaskTemplate {
+    fn test_occurrence_times_uses_template_timezone() {        let template = RepeatTaskTemplate {
             id: 1,
             name: "x".to_string(),
             interval_days: 1,
             time_of_day: Some(18 * 60 + 30),
             start_time_of_day: Some(17 * 60 + 50),
+            blocked_by_template_id: None,
             weekdays: None,
             month_day: None,
             strict: false,

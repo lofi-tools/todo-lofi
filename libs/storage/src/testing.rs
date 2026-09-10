@@ -197,6 +197,28 @@ fn seed_tasks() -> Vec<SeedTask> {
             parent_title: None,
             blocked_until: Some(today_at(17 * 60 + 50)),
         },
+        SeedTask {
+            title: "gym".to_string(),
+            description: Some("Morning workout".to_string()),
+            branch_name: None,
+            labels: vec!["health".to_string()],
+            deadline: Some(today_at(11 * 60 + 30)),
+            importance_factor: 2.0,
+            urgency_factor: 1.0,
+            parent_title: None,
+            blocked_until: Some(today_at(10 * 60)),
+        },
+        SeedTask {
+            title: "shower".to_string(),
+            description: Some("Shower after the workout".to_string()),
+            branch_name: None,
+            labels: vec!["health".to_string()],
+            deadline: Some(today_at(12 * 60)),
+            importance_factor: 1.0,
+            urgency_factor: 1.0,
+            parent_title: None,
+            blocked_until: Some(today_at(11 * 60 + 30)),
+        },
         // Parent with three subtasks, demoing the collapsed subtask row:
         // the first subtask renders inline right of the title and the
         // "0/3" counter expands the full list.
@@ -288,6 +310,14 @@ fn seed_assignments() -> Vec<SeedAssignment> {
         SeedAssignment {
             task_title: "feed dorito".to_string(),
             tag_name: "personal".to_string(),
+        },
+        SeedAssignment {
+            task_title: "gym".to_string(),
+            tag_name: "health".to_string(),
+        },
+        SeedAssignment {
+            task_title: "shower".to_string(),
+            tag_name: "health".to_string(),
         },
         SeedAssignment {
             task_title: "Rewrite the details panel".to_string(),
@@ -417,6 +447,26 @@ impl TodoStore {
                 })?;
         }
 
+        // "gym" repeats daily (starts 10am, due 11:30am) and "shower"
+        // (starts 11:30am, due 12pm) waits for the same day's gym session
+        // via template dependence.
+        if let Some(&gym_id) = task_map.get("gym") {
+            let gym = self
+                .set_repeat(gym_id, "gym".to_string(), 1, Some(11 * 60 + 30), Some(10 * 60))
+                .await?;
+            if let Some(&shower_id) = task_map.get("shower") {
+                self.set_repeat(
+                    shower_id,
+                    "shower".to_string(),
+                    1,
+                    Some(12 * 60),
+                    Some(11 * 60 + 30),
+                )
+                .await?;
+                self.set_repeat_blocked_by(shower_id, Some(gym.id)).await?;
+            }
+        }
+
         tracing::info!(
             tasks = task_map.len(),
             tags = tag_map.len(),
@@ -436,7 +486,7 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 14);
+        assert_eq!(tasks.len(), 16);
 
         let tags = store.list_tags().await?;
         assert_eq!(tags.len(), 9);
@@ -468,6 +518,19 @@ mod tests {
         assert_eq!(template.time_of_day, Some(18 * 60 + 30));
         assert_eq!(template.start_time_of_day, Some(17 * 60 + 50));
         assert!(template.timezone.is_some());
+
+        // "gym" repeats daily (starts 10am, due 11:30am); "shower"
+        // (starts 11:30am, due 12pm) depends on the same day's gym session.
+        let gym = tasks.iter().find(|t| t.title == "gym").unwrap();
+        let gym_template = store.repeat_template_for_task(gym.id).await?.unwrap();
+        assert_eq!(gym_template.interval_days, 1);
+        assert_eq!(gym_template.time_of_day, Some(11 * 60 + 30));
+        assert_eq!(gym_template.start_time_of_day, Some(10 * 60));
+        let shower = tasks.iter().find(|t| t.title == "shower").unwrap();
+        let shower_template = store.repeat_template_for_task(shower.id).await?.unwrap();
+        assert_eq!(shower_template.time_of_day, Some(12 * 60));
+        assert_eq!(shower_template.start_time_of_day, Some(11 * 60 + 30));
+        assert_eq!(shower_template.blocked_by_template_id, Some(gym_template.id));
 
         // "Write migration tests" and "Add tag filtering" are blocked by
         // "Implement task CRUD" (the blocked flag is computed by the meta
