@@ -8,6 +8,7 @@ storage = { path = "../../libs/storage" }
 tokio = { workspace = true, features = ["sync", "rt"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 jiff = "0.2"
 anyhow.workspace = true

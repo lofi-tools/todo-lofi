@@ -77,7 +77,7 @@ impl IntegrationsView {
         let store = self.store.clone();
         self._connect = Some(cx.spawn(async move |this, cx| {
             let result = async {
-                let config = OAuthConfig::from_env()?;
+                let config = OAuthConfig::load()?;
                 let _token = todoist_auth::connect(&config).await?;
                 // Token storage (keychain vs config) is still open per the
                 // spec; record the connection so links can scope to it.
