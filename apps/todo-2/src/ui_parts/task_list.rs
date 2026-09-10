@@ -1054,12 +1054,16 @@ impl TaskListView {
             .partition(|(_, spec)| spec.task.blocked_until.is_some_and(|until| until > now_secs));
         let upcoming: Vec<usize> = upcoming_pairs.into_iter().map(|(i, _)| i).collect();
         let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
+        // No sections here: doable rows flat, upcoming under its header.
         if self.selected_path.is_empty() || self.section_order.is_empty() {
-            return current
-                .into_iter()
-                .chain(upcoming)
-                .map(|index| self.task_views[index].clone().into_any_element())
-                .collect();
+            let mut chunks = Vec::new();
+            if !current.is_empty() {
+                chunks.push(RowChunk::Rows(current));
+            }
+            if !upcoming.is_empty() {
+                chunks.push(RowChunk::Upcoming(upcoming));
+            }
+            return Self::render_chunks(&self.task_views, &chunks);
         }
         let section_of: std::collections::HashMap<usize, String> = current
             .iter()
@@ -1073,12 +1077,21 @@ impl TaskListView {
         if !upcoming.is_empty() {
             chunks.push(RowChunk::Upcoming(upcoming));
         }
+        Self::render_chunks(&self.task_views, &chunks)
+    }
+
+    /// Turn row chunks into elements: plain runs, section headers, and the
+    /// divider-separated Upcoming group.
+    fn render_chunks(
+        task_views: &[Entity<TaskRow>],
+        chunks: &[RowChunk],
+    ) -> Vec<gpui::AnyElement> {
         let mut elements = Vec::new();
         for chunk in chunks {
             match chunk {
                 RowChunk::Rows(indices) => {
                     for index in indices {
-                        elements.push(self.task_views[index].clone().into_any_element());
+                        elements.push(task_views[*index].clone().into_any_element());
                     }
                 }
                 RowChunk::Section(name, indices) => {
@@ -1088,11 +1101,11 @@ impl TaskListView {
                             .font_semibold()
                             .text_color(rgb(0xa3a3a3))
                             .mt_2()
-                            .child(name)
+                            .child(name.clone())
                             .into_any_element(),
                     );
                     for index in indices {
-                        elements.push(self.task_views[index].clone().into_any_element());
+                        elements.push(task_views[*index].clone().into_any_element());
                     }
                 }
                 RowChunk::Upcoming(indices) => {
@@ -1111,7 +1124,7 @@ impl TaskListView {
                             .into_any_element(),
                     );
                     for index in indices {
-                        elements.push(self.task_views[index].clone().into_any_element());
+                        elements.push(task_views[*index].clone().into_any_element());
                     }
                 }
             }
