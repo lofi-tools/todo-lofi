@@ -444,6 +444,94 @@ fn parse_tokens(body: &serde_json::Value, status: reqwest::StatusCode) -> anyhow
     })
 }
 
+/// A Todoist project for picking which remote projects to sync.
+#[derive(Debug, Clone)]
+pub struct TodoistProject {
+    pub id: String,
+    pub name: String,
+}
+
+/// Load the stored access token, refreshing it when expired. All network
+/// and file work happens here, so call this on the Tokio runtime (e.g.
+/// via `gpui_tokio::Tokio::spawn_result`), never on GPUI's executor.
+pub async fn access_token() -> anyhow::Result<String> {
+    let mut registered = ensure_client().await?;
+    let expired = registered
+        .expires_at
+        .is_none_or(|at| at <= now_epoch() + 60);
+    if expired {
+        let Some(refresh) = registered.refresh_token.clone() else {
+            return Err(anyhow::anyhow!(
+                "Todoist token expired and no refresh token is stored; reconnect the integration"
+            ));
+        };
+        let tokens = refresh_access_token(&registered.client_id, &refresh).await?;
+        registered.access_token = Some(tokens.access_token.clone());
+        if tokens.refresh_token.is_some() {
+            registered.refresh_token = tokens.refresh_token;
+        }
+        registered.expires_at = tokens.expires_at;
+        if !registered.from_env {
+            save_client_file(&registered).ok();
+        }
+    }
+    registered.access_token.ok_or_else(|| {
+        anyhow::anyhow!("No Todoist access token stored; connect the integration first")
+    })
+}
+
+async fn fetch_projects(token: &str) -> anyhow::Result<reqwest::Response> {
+    reqwest::Client::new()
+        .get("https://api.todoist.com/api/v1/projects")
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Could not list Todoist projects: {e}"))
+}
+
+/// List Todoist projects for the stored account, refreshing an expired
+/// token and retrying once on 401. Runs fully on the Tokio runtime.
+pub async fn list_projects() -> anyhow::Result<Vec<TodoistProject>> {
+    let token = access_token().await?;
+    let response = fetch_projects(&token).await?;
+    let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let registered = ensure_client().await?;
+        let Some(refresh) = registered.refresh_token.clone() else {
+            return Err(anyhow::anyhow!(
+                "Todoist rejected the token and no refresh token is stored; reconnect"
+            ));
+        };
+        let tokens = refresh_access_token(&registered.client_id, &refresh).await?;
+        fetch_projects(&tokens.access_token).await?
+    } else {
+        response
+    };
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Project list was not JSON: {e}"))?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "Could not list Todoist projects ({status}): {body}"
+        ));
+    }
+    let projects = body
+        .get("results")
+        .unwrap_or(&body)
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Unexpected project list shape: {body}"))?
+        .iter()
+        .filter_map(|project| {
+            Some(TodoistProject {
+                id: project.get("id")?.as_str()?.to_string(),
+                name: project.get("name")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    Ok(projects)
+}
+
 /// Exchange the code for tokens as a PKCE public client: client ID, code,
 /// redirect URI and verifier — no client secret.
 async fn exchange_code(

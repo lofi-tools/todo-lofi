@@ -61,8 +61,7 @@ impl Store {
         })
     }
 
-    pub fn list_top_level_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
-        let store = self.0.clone();
+    pub fn list_top_level_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {        let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             let tags = s.get_top_level_tags().await.unwrap_or_default();
@@ -468,6 +467,14 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             Ok(s.delete_integration(integration_id).await?)
+        })
+    }
+
+    pub fn create_tag(&self, name: String, cx: &impl AppContext) -> Task<anyhow::Result<Tag>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.create_tag(&name).await?)
         })
     }
 }

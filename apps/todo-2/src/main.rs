@@ -99,7 +99,8 @@ impl Layout {
                 }
                 NavBarEvent::OpenProjectPicker => {
                     let projects = this._projects.clone();
-                    let picker = cx.new(|cx| ProjectPicker::new(projects, window, cx));
+                    let store = this.store.clone();
+                    let picker = cx.new(|cx| ProjectPicker::new(projects, store, window, cx));
                     // The input is only in the focus tree after the dialog
                     // renders, so defer the autofocus one frame.
                     let picker_for_focus = picker.clone();
@@ -117,6 +118,17 @@ impl Layout {
                             ProjectPickerEvent::Selected(project) => {
                                 this.handle_pick_project(project.clone(), window, cx);
                             }
+                            ProjectPickerEvent::TagName(name) => {
+                                this.handle_create_tag(name.clone(), window, cx);
+                            }
+                            ProjectPickerEvent::TodoistProject { id, name } => {
+                                this.handle_pick_todoist_project(
+                                    id.clone(),
+                                    name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }
                             ProjectPickerEvent::Dismissed => {
                                 window.close_dialog(cx);
                             }
@@ -126,7 +138,7 @@ impl Layout {
                     window.open_dialog(cx, move |dialog, _, _| {
                         let picker = picker_for_dialog.clone();
                         dialog
-                            .title("Add a project")
+                            .title("Add a tag")
                             .content(move |content, _, _| content.child(picker.clone()))
                     });
                 }
@@ -314,6 +326,73 @@ impl Layout {
         cx.spawn(async move |this, cx| {
             if let Err(e) = create.await {
                 tracing::error!("Failed to create project tag: {e}");
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn handle_create_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        window.close_dialog(cx);
+        self._picker_subscription = None;
+        let create = self.store.create_tag(name, cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = create.await {
+                tracing::error!("Failed to create tag: {e}");
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Create the tag backing a Todoist project: the project name as-is,
+    /// or a `todoist/<name>` namespaced copy on collision (spec §4.5),
+    /// linked to the remote project so re-syncs reuse it.
+    fn handle_pick_todoist_project(
+        &mut self,
+        id: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.close_dialog(cx);
+        self._picker_subscription = None;
+        let store = self.store.clone();
+        let create = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut backend = store.0.lock().await;
+            let integration = backend
+                .list_integrations()
+                .await?
+                .into_iter()
+                .find(|i| i.provider == "todoist")
+                .ok_or_else(|| anyhow::anyhow!("Todoist is not connected"))?;
+            let (tag, namespaced) = match backend.get_tag_by_name(&name).await? {
+                Some(_) => {
+                    let scoped = format!("todoist/{name}");
+                    let tag = match backend.get_tag_by_name(&scoped).await? {
+                        Some(tag) => tag,
+                        None => backend.create_tag(&scoped).await?,
+                    };
+                    (tag, true)
+                }
+                None => (backend.create_tag(&name).await?, false),
+            };
+            backend
+                .link_tag(integration.id, &id, tag.id, "project", namespaced)
+                .await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = create.await {
+                tracing::error!("Failed to create Todoist project tag: {e}");
                 return;
             }
             this.update(cx, |this, cx| {
