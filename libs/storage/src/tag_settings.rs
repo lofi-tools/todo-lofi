@@ -16,6 +16,7 @@
 
 use crate::{QueryResult, TodoStore};
 use snafu::ResultExt;
+use std::collections::{HashMap, HashSet};
 
 /// Sync target of a tag: the remote object it syncs with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +311,74 @@ impl TodoStore {
             })?;
         Ok(())
     }
+
+    /// Group tasks under the sections of `tag_id` for sectioned display.
+    ///
+    /// A task belongs to the first (by child-tag id) direct tag that is a
+    /// child of `tag_id` — Todoist sections import as exactly such child
+    /// tags. Returns the section names in display order (`tag_sections`
+    /// position first, then any remaining alphabetically) plus the
+    /// task-id → section-name map. Tasks with no section tag are absent
+    /// from the map and render above the first header.
+    pub async fn section_groups_for_tasks(
+        &mut self,
+        tag_id: u64,
+        task_ids: &[u64],
+    ) -> QueryResult<(Vec<String>, HashMap<u64, String>)> {
+        let children = self.get_children(tag_id).await?;
+        if children.is_empty() || task_ids.is_empty() {
+            return Ok((Vec::new(), HashMap::new()));
+        }
+        let child_ids: HashSet<u64> = children.iter().map(|t| t.id).collect();
+        let label_by_id: HashMap<u64, String> =
+            children.into_iter().map(|t| (t.id, t.label())).collect();
+
+        let id_list: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        let rows = toasty::sql::query(format!(
+            "SELECT task_id, tag_id FROM direct_task_tags WHERE task_id IN ({}) ORDER BY tag_id",
+            placeholders.join(",")
+        ))
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "direct tags for section grouping",
+        })?;
+
+        // ORDER BY tag_id keeps the first matching child tag per task.
+        let mut task_section: HashMap<u64, String> = HashMap::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let task = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                let tag = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                if child_ids.contains(&tag) && !task_section.contains_key(&task) {
+                    if let Some(label) = label_by_id.get(&tag) {
+                        task_section.insert(task, label.clone());
+                    }
+                }
+            }
+        }
+        if task_section.is_empty() {
+            return Ok((Vec::new(), HashMap::new()));
+        }
+
+        let mut used: Vec<String> = task_section.values().cloned().collect();
+        used.sort();
+        used.dedup();
+        let ordered_rows = self.tag_sections(tag_id).await?;
+        let mut order: Vec<String> = ordered_rows
+            .into_iter()
+            .map(|s| s.name)
+            .filter(|name| used.contains(name))
+            .collect();
+        for name in used {
+            if !order.contains(&name) {
+                order.push(name);
+            }
+        }
+        Ok((order, task_section))
+    }
 }
 
 #[cfg(test)]
@@ -377,8 +446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tag_sections_crud() -> anyhow::Result<()> {
-        let mut storage = TodoStore::for_test().await?;
+    async fn test_tag_sections_crud() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
         let tag = storage.create_tag("Work").await?;
 
         assert!(storage.tag_sections(tag.id).await?.is_empty());
@@ -408,6 +476,42 @@ mod tests {
 
         storage.remove_tag_section(second.id).await?;
         assert_eq!(storage.tag_sections(tag.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_section_groups_for_tasks() -> anyhow::Result<()> {
+        use crate::prelude::*;
+        let mut storage = TodoStore::for_test().await?;
+        let project = storage.create_tag("Work").await?;
+        let backlog = storage.create_tag("Backlog").await?;
+        let doing = storage.create_tag("Doing").await?;
+        storage.add_tag_implication(backlog.id, project.id).await?;
+        storage.add_tag_implication(doing.id, project.id).await?;
+        storage.add_tag_section(project.id, "Doing".to_string()).await?;
+        storage.add_tag_section(project.id, "Backlog".to_string()).await?;
+
+        let unsectioned = storage
+            .create_task(Task::create().title("Loose"))
+            .await?;
+        storage.assign_tag_to_task(unsectioned.id, &project.name).await?;
+        let first = storage.create_task(Task::create().title("One")).await?;
+        storage.assign_tag_to_task(first.id, &backlog.name).await?;
+        let second = storage.create_task(Task::create().title("Two")).await?;
+        storage.assign_tag_to_task(second.id, &doing.name).await?;
+
+        let ids = vec![unsectioned.id, first.id, second.id];
+        let (order, map) = storage.section_groups_for_tasks(project.id, &ids).await?;
+        // Display order follows tag_sections position, not tag id order.
+        assert_eq!(order, vec!["Doing".to_string(), "Backlog".to_string()]);
+        assert_eq!(map.get(&first.id).map(String::as_str), Some("Backlog"));
+        assert_eq!(map.get(&second.id).map(String::as_str), Some("Doing"));
+        assert!(!map.contains_key(&unsectioned.id));
+
+        // Tags without section children group nothing.
+        let plain = storage.create_tag("Plain").await?;
+        let (order, map) = storage.section_groups_for_tasks(plain.id, &ids).await?;
+        assert!(order.is_empty() && map.is_empty());
         Ok(())
     }
 }

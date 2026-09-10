@@ -51,6 +51,11 @@ pub struct TaskListView {
     /// task_id -> its direct subtasks (with meta), collapsed under the
     /// parent's row (inline first title + expandable "N/M" list).
     subtasks_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    /// Section display order for the selected tag (Todoist-style headers),
+    /// plus task-id → section name. Empty in All-tasks view and for tags
+    /// without sectioned tasks: rows render flat.
+    section_order: Vec<String>,
+    task_section: std::collections::HashMap<u64, String>,
     /// The task whose subtask list is expanded, or None. Only one row's
     /// subtasks can be expanded at a time.
     expanded_subtask: Option<u64>,
@@ -69,6 +74,7 @@ pub struct TaskListView {
     /// are disabled: from shortly before the jump until just after it.
     locked_until: Option<std::time::Instant>,
     _fetch_tasks: Option<gpui::Task<()>>,
+    _fetch_sections: Option<gpui::Task<()>>,
     _input_subscription: Subscription,
     _nav_subscription: Subscription,
 }
@@ -117,6 +123,9 @@ impl TaskListView {
             blockers_map: std::collections::HashMap::new(),
             blocking_map: std::collections::HashMap::new(),
             subtasks_map: std::collections::HashMap::new(),
+            section_order: Vec::new(),
+            task_section: std::collections::HashMap::new(),
+            _fetch_sections: None,
             expanded_subtask: None,
             input,
             store,
@@ -373,12 +382,49 @@ impl TaskListView {
         (blockers, blocking, subtasks)
     }
 
+    /// Load section grouping for the selected tag (Todoist-style headers).
+    /// No-op in the All-tasks view. Runs after the rows are set so every
+    /// visible task id is known.
+    fn load_sections(&mut self, cx: &mut Context<Self>) {
+        let Some(tag_name) = self.selected_path.last().cloned() else {
+            self.section_order.clear();
+            self.task_section.clear();
+            return;
+        };
+        let task_ids: Vec<u64> = self.row_specs.iter().map(|spec| spec.task.id).collect();
+        if task_ids.is_empty() {
+            self.section_order.clear();
+            self.task_section.clear();
+            return;
+        }
+        let fetch = self.store.task_section_groups(tag_name, task_ids, cx);
+        self._fetch_sections = Some(cx.spawn(async move |this, cx| {
+            match fetch.await {
+                Ok((order, map)) => {
+                    this.update(cx, |this, cx| {
+                        this.section_order = order;
+                        this.task_section = map;
+                        this._fetch_sections = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to load sections: {e}");
+                }
+            }
+        }));
+    }
+
     /// Reload the current view (all tasks or the selected tag's tasks) from
     /// the DB, e.g. after a subtask was created from the details panel.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let selected_path = self.selected_path.clone();
         let selected_labels = self.selected_labels.clone();
+        // Drop stale section headers while the new list loads.
+        self.section_order.clear();
+        self.task_section.clear();
         let fetch = if let Some(last) = selected_path.last().cloned() {
             let path = selected_path.clone();
             cx.spawn(async move |this, cx| {
@@ -403,6 +449,7 @@ impl TaskListView {
                         subtasks,
                         cx,
                     );
+                    this.load_sections(cx);
                     this._fetch_tasks = None;
                     cx.notify();
                 })
@@ -469,6 +516,7 @@ impl TaskListView {
                     subtasks,
                     cx,
                 );
+                this.load_sections(cx);
                 if let Some(task) = created {
                     this.select(task, true, cx);
                 }
@@ -727,6 +775,26 @@ mod tests {
     }
 
     #[test]
+    fn test_sectioned_order_groups() {
+        let section_of: std::collections::HashMap<usize, String> =
+            [(1, "B".to_string()), (2, "A".to_string()), (4, "B".to_string())]
+                .into_iter()
+                .collect();
+        let order = vec!["A".to_string(), "B".to_string()];
+        let chunks = sectioned_order(5, &section_of, &order);
+        assert_eq!(chunks.len(), 3);
+        assert!(matches!(&chunks[0], RowChunk::Rows(rows) if rows == &[0, 3]));
+        assert!(matches!(&chunks[1], RowChunk::Section(name, rows) if name == "A" && rows == &[2]));
+        assert!(matches!(&chunks[2], RowChunk::Section(name, rows) if name == "B" && rows == &[1, 4]));
+    }
+
+    #[test]
+    fn test_sectioned_order_flat_without_sections() {
+        let chunks = sectioned_order(2, &std::collections::HashMap::new(), &[]);
+        assert!(matches!(&chunks[..], [RowChunk::Rows(rows)] if rows == &[0, 1]));
+    }
+
+    #[test]
     fn test_compute_row_specs_collapses_exclusive_blocker() {
         let a = meta(1, "a");
         let b = meta(2, "b");
@@ -907,7 +975,92 @@ impl Render for TaskListView {
                     .flex_1()
                     .v_flex()
                     .gap_2()
-                    .children(self.task_views.iter().cloned()),
+                    .children(self.sectioned_rows()),
             )
     }
+}
+
+impl TaskListView {
+    /// Rows for the list body: flat, or grouped under section headers when
+    /// the selected tag has sectioned tasks (Todoist-style).
+    fn sectioned_rows(&self) -> Vec<gpui::AnyElement> {
+        if self.selected_path.is_empty() || self.section_order.is_empty() {
+            return self.task_views.iter().cloned().map(|v| v.into_any_element()).collect();
+        }
+        let section_of: std::collections::HashMap<usize, String> = self
+            .row_specs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, spec)| {
+                self.task_section
+                    .get(&spec.task.id)
+                    .map(|name| (index, name.clone()))
+            })
+            .collect();
+        let mut elements = Vec::new();
+        for chunk in sectioned_order(self.row_specs.len(), &section_of, &self.section_order) {
+            match chunk {
+                RowChunk::Rows(indices) => {
+                    for index in indices {
+                        elements.push(self.task_views[index].clone().into_any_element());
+                    }
+                }
+                RowChunk::Section(name, indices) => {
+                    elements.push(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xa3a3a3))
+                            .mt_2()
+                            .child(name)
+                            .into_any_element(),
+                    );
+                    for index in indices {
+                        elements.push(self.task_views[index].clone().into_any_element());
+                    }
+                }
+            }
+        }
+        elements
+    }
+}
+
+/// Order row indices for sectioned display: unsectioned rows first (in
+/// list order), then one group per section in display order. Pure so it
+/// can be unit-tested; `section_of` maps row index → section name.
+fn sectioned_order(
+    count: usize,
+    section_of: &std::collections::HashMap<usize, String>,
+    section_order: &[String],
+) -> Vec<RowChunk> {
+    let mut plain = Vec::new();
+    let mut by_section: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for index in 0..count {
+        match section_of.get(&index) {
+            Some(name) => by_section.entry(name.clone()).or_default().push(index),
+            None => plain.push(index),
+        }
+    }
+    let mut chunks = Vec::new();
+    if !plain.is_empty() {
+        chunks.push(RowChunk::Rows(plain));
+    }
+    for name in section_order {
+        if let Some(rows) = by_section.remove(name) {
+            chunks.push(RowChunk::Section(name.clone(), rows));
+        }
+    }
+    let mut rest: Vec<(String, Vec<usize>)> = by_section.into_iter().collect();
+    rest.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, rows) in rest {
+        chunks.push(RowChunk::Section(name, rows));
+    }
+    chunks
+}
+
+/// One flat run of rows, optionally under a section header.
+enum RowChunk {
+    Rows(Vec<usize>),
+    Section(String, Vec<usize>),
 }

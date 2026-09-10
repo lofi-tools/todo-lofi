@@ -478,8 +478,7 @@ impl Store {
         })
     }
 
-    /// Sync all linked Todoist projects of every Todoist integration.
-    /// Runs entirely on the Tokio runtime (network + DB).
+    /// Sync all linked Todoist projects of every Todoist integration.    /// Runs entirely on the Tokio runtime (network + DB).
     pub fn sync_todoist(
         &self,
         cx: &impl AppContext,
@@ -504,6 +503,24 @@ impl Store {
                 total.tasks_tombstoned += summary.tasks_tombstoned;
             }
             Ok(total)
+        })
+    }
+
+    /// Section display order plus task-id → section map for a tag view.
+    /// Empty when the tag has no sectioned tasks.
+    pub fn task_section_groups(
+        &self,
+        tag_name: String,
+        task_ids: Vec<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<(Vec<String>, std::collections::HashMap<u64, String>)>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let Some(tag) = s.get_tag_by_name(&tag_name).await? else {
+                return Ok((Vec::new(), std::collections::HashMap::new()));
+            };
+            Ok(s.section_groups_for_tasks(tag.id, &task_ids).await?)
         })
     }
 }
