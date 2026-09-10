@@ -1,6 +1,5 @@
 use crate::prelude::*;
 use snafu::ResultExt;
-use toasty::Model;
 
 struct SeedTask {
     title: String,
@@ -93,9 +92,9 @@ fn seed_tasks() -> Vec<SeedTask> {
             .unwrap_or(now_secs)
     }
 
-    /// Today's `minutes` (since midnight) in the system timezone, as a UTC
-    /// epoch. Used for the "feed dorito" start (5:50pm) and deadline
-    /// (6:30pm).
+    // Today's `minutes` (since midnight) in the system timezone, as a UTC
+    // epoch. Used for the "feed dorito" start (5:50pm) and deadline
+    // (6:30pm).
     let today_at = |minutes: u64| {
         let zone = jiff::tz::TimeZone::system();
         let date = jiff::Timestamp::from_second(now_secs as i64)

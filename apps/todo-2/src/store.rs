@@ -458,14 +458,6 @@ impl Store {
         })
     }
 
-    pub fn list_tasks_by_tag_name_with_labels(        &self,
-        tag_name: &str,
-        path: &[String],
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
-        self.list_tasks_by_tag_name_with_labels_impl(tag_name, path, false, cx)
-    }
-
     /// Tag view including tasks that start more than 2 days out (the
     /// "show all" toggle reveals them from the fetched rows).
     pub fn list_tasks_by_tag_name_with_labels_including_distant(
@@ -474,10 +466,10 @@ impl Store {
         path: &[String],
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
-        self.list_tasks_by_tag_name_with_labels_impl(tag_name, path, true, cx)
+        self.list_tasks_by_tag_impl(tag_name, path, true, cx)
     }
 
-    fn list_tasks_by_tag_name_with_labels_impl(
+    fn list_tasks_by_tag_impl(
         &self,
         tag_name: &str,
         path: &[String],

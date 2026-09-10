@@ -1,7 +1,6 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, rgb,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -442,25 +441,6 @@ impl TaskListView {
         let blocking = store.blocking_map(ids.clone(), cx).await.unwrap_or_default();
         let subtasks = store.subtasks_map(ids, cx).await.unwrap_or_default();
         (blockers, blocking, subtasks)
-    }
-
-    /// Tasks starting more than 2 days out, hidden unless "show all" is
-    /// on. Count drives the toggle button label.
-    fn distant_count(&self) -> usize {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.row_specs
-            .iter()
-            .filter(|spec| {
-                !spec.task.done
-                    && spec
-                        .task
-                        .blocked_until
-                        .is_some_and(|until| until > now_secs + DISTANT_SECS)
-            })
-            .count()
     }
 
     /// Toggle revealing far-future tasks (for editing them early).
@@ -1072,8 +1052,6 @@ impl Render for TaskListView {
             .last()
             .cloned()
             .unwrap_or_else(|| "Tasks".to_string());
-        let distant = self.distant_count();
-        let show_all = self.show_all;
 
         div()
             .id("task-list")
@@ -1088,32 +1066,10 @@ impl Render for TaskListView {
             }))
             .child(
                 div()
-                    .h_flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_bold()
-                            .text_color(rgb(0xe5e5e5))
-                            .child(heading),
-                    )
-                    .when(distant > 0, |this| {
-                        this.child(
-                            Button::new("show-all-tasks")
-                                .ghost()
-                                .compact()
-                                .label(if show_all {
-                                    "Show less".to_string()
-                                } else {
-                                    format!("Show all ({distant})")
-                                })
-                                .tooltip("Reveal tasks starting more than 2 days out")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_show_all(cx);
-                                })),
-                        )
-                    }),
+                    .text_2xl()
+                    .font_bold()
+                    .text_color(rgb(0xe5e5e5))
+                    .child(heading),
             )
             .child(Input::new(&self.input))
             .child(
@@ -1121,7 +1077,7 @@ impl Render for TaskListView {
                     .flex_1()
                     .v_flex()
                     .gap_2()
-                    .children(self.sectioned_rows()),
+                    .children(self.sectioned_rows(cx)),
             )
     }
 }
@@ -1131,7 +1087,7 @@ impl TaskListView {
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
     /// tasks last under an "Upcoming" header. Tasks starting more than 2
     /// days out only render when "show all" is on.
-    fn sectioned_rows(&self) -> Vec<gpui::AnyElement> {
+    fn sectioned_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1155,9 +1111,11 @@ impl TaskListView {
                     .is_some_and(|until| until <= now_secs + DISTANT_SECS)
             });
         let mut upcoming = near_upcoming;
+        let distant_count = distant.len();
         if self.show_all {
             upcoming.extend(distant);
         }
+        let show_all = self.show_all;
         let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
         // No sections here: doable rows flat, then Upcoming, then Completed.
         if self.selected_path.is_empty() || self.section_order.is_empty() {
@@ -1171,7 +1129,7 @@ impl TaskListView {
             if !done.is_empty() {
                 chunks.push(RowChunk::Completed(done));
             }
-            return Self::render_chunks(&self.task_views, &chunks);
+            return self.render_chunks(&chunks, distant_count, show_all, cx);
         }
         let section_of: std::collections::HashMap<usize, String> = current
             .iter()
@@ -1188,21 +1146,25 @@ impl TaskListView {
         if !done.is_empty() {
             chunks.push(RowChunk::Completed(done));
         }
-        Self::render_chunks(&self.task_views, &chunks)
+        self.render_chunks(&chunks, distant_count, show_all, cx)
     }
 
     /// Turn row chunks into elements: plain runs, section headers, and the
-    /// divider-separated Upcoming group.
+    /// divider-separated Upcoming/Completed groups. The Upcoming header
+    /// carries the "show all" toggle when far-future tasks exist.
     fn render_chunks(
-        task_views: &[Entity<TaskRow>],
+        &self,
         chunks: &[RowChunk],
+        distant: usize,
+        show_all: bool,
+        cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         let mut elements = Vec::new();
         for chunk in chunks {
             match chunk {
                 RowChunk::Rows(indices) => {
                     for index in indices {
-                        elements.push(task_views[*index].clone().into_any_element());
+                        elements.push(self.task_views[*index].clone().into_any_element());
                     }
                 }
                 RowChunk::Section(name, indices) => {
@@ -1216,17 +1178,48 @@ impl TaskListView {
                             .into_any_element(),
                     );
                     for index in indices {
-                        elements.push(task_views[*index].clone().into_any_element());
+                        elements.push(self.task_views[*index].clone().into_any_element());
                     }
                 }
                 RowChunk::Upcoming(indices) => {
                     // Separated from the doable list above, like a
-                    // Todoist section with a divider.
-                    elements.push(
-                        divided_header("Upcoming")
-                    );
+                    // Todoist section with a divider; the toggle sits at
+                    // the end of the header row when far-future tasks
+                    // exist.
+                    let mut header = div()
+                        .mt_4()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(0x333333))
+                        .h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(rgb(0xa3a3a3))
+                                .child("Upcoming"),
+                        );
+                    if distant > 0 {
+                        header = header.child(
+                            Button::new("show-all-tasks")
+                                .ghost()
+                                .compact()
+                                .label(if show_all {
+                                    "Show less".to_string()
+                                } else {
+                                    format!("Show all ({distant})")
+                                })
+                                .tooltip("Reveal tasks starting more than 2 days out")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_show_all(cx);
+                                })),
+                        );
+                    }
+                    elements.push(header.into_any_element());
                     for index in indices {
-                        elements.push(task_views[*index].clone().into_any_element());
+                        elements.push(self.task_views[*index].clone().into_any_element());
                     }
                 }
                 RowChunk::Completed(indices) => {
@@ -1234,7 +1227,7 @@ impl TaskListView {
                         divided_header("Completed")
                     );
                     for index in indices {
-                        elements.push(task_views[*index].clone().into_any_element());
+                        elements.push(self.task_views[*index].clone().into_any_element());
                     }
                 }
             }
