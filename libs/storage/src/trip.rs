@@ -178,21 +178,22 @@ impl TodoStore {
         let tag = if let Some(tag) = self.get_tag_by_name(&tag_name).await? {
             tag
         } else {
-            let tag = self
-                .create_tag_with_display_name(tag_name.clone(), Some(parsed.name.clone()))
-                .await?;
-            toasty::sql::statement(
-                r#"UPDATE tags SET managed_by_recipe_id = ?1 WHERE id = ?2"#,
-            )
-            .bind(recipe_id as i64)
-            .bind(tag.id as i64)
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::QueryTagsSnafu {
-                context: "mark managed tag",
-            })?;
-            tag
+            self.create_tag_with_display_name(tag_name.clone(), Some(parsed.name.clone()))
+                .await?
         };
+        // Idempotent: mark the tag as managed and give it the recipe's
+        // display name, even when it pre-existed without one.
+        toasty::sql::statement(
+            r#"UPDATE tags SET managed_by_recipe_id = ?1, display_name = ?2 WHERE id = ?3"#,
+        )
+        .bind(recipe_id as i64)
+        .bind(parsed.name.as_str())
+        .bind(tag.id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "mark managed tag",
+        })?;
         // Checklist sections: child tags under the managed tag, ordered
         // via `tag_sections` so the task list groups items under them.
         for (key, display) in SECTION_DEFS {

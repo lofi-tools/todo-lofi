@@ -8,7 +8,7 @@
 
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Task, Window, div, px, rgb, prelude::FluentBuilder,
+    StatefulInteractiveElement, Styled, Task, Window, div, px, rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
@@ -171,45 +171,40 @@ impl TravelPanel {
 
 impl EventEmitter<TravelPanelEvent> for TravelPanel {}
 
-impl Render for TravelPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl TravelPanel {
+    /// The header strip: the "+ New trip" button, rendered above the task
+    /// list by the Layout. Same treatment as the task-details buttons:
+    /// ghost, compact, small, hairline outline.
+    pub fn header(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .relative()
-            .v_flex()
-            .gap_2()
+            .h_flex()
+            .items_center()
+            .justify_end()
             .px_8()
             .pt_8()
             .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .justify_end()
-                    // Same treatment as the task-details buttons: ghost,
-                    // compact, small, hairline outline.
-                    .child(
-                        Button::new("new-trip")
-                            .ghost()
-                            .compact()
-                            .with_size(Size::Small)
-                            .border_1()
-                            .border_color(rgb(HAIRLINE))
-                            .text_color(rgb(0xa3a3a3))
-                            .label("+ New trip")
-                            .tooltip("Add a trip: its checklist appears below in Pack and Before leaving sections")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_add();
-                                cx.notify();
-                            })),
-                    ),
+                Button::new("new-trip")
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .text_color(rgb(0xa3a3a3))
+                    .label("+ New trip")
+                    .tooltip("Add a trip: its checklist appears below in Pack and Before leaving sections")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_add();
+                        cx.notify();
+                    })),
             )
-            .child(self.add_trip_card(window, cx))
     }
-}
 
-impl TravelPanel {
     /// The add-trip popover: the same absolute card component the task
-    /// details pickers use, closed by an outside mousedown or Esc.
-    fn add_trip_card(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// details pickers use, closed by an outside mousedown or Esc. Rendered
+    /// by the Layout as the LAST child of the managed panel so GPUI paints
+    /// it above the task list (paint order follows tree order; there is no
+    /// z-index).
+    pub fn popover(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         if !self.adding {
             return div().into_any_element();
         }
@@ -250,7 +245,7 @@ impl TravelPanel {
 
         div()
             .absolute()
-            .top(px(44.))
+            .top(px(60.))
             .left(px(0.))
             .right(px(0.))
             .bg(rgb(CARD_BG))

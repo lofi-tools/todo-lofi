@@ -132,6 +132,9 @@ impl Layout {
                 NavBarEvent::AllTasks => {
                     this.managed_tag = None;
                     this.show_panel(NavPanel::Tasks, cx);
+                    this.task_list.update(cx, |list, cx| {
+                        list.set_empty_action(None, cx);
+                    });
                 }
                 NavBarEvent::OpenProjectPicker => {
                     let projects = this._projects.clone();
@@ -243,7 +246,8 @@ impl Layout {
         .detach();
         let details_for_list = details.clone();
         let list_for_deselect = task_list.clone();
-        cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
+        let travel_for_empty_action = travel_panel.clone();
+        cx.subscribe(&task_list, move |this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
                 let deferred = details_for_list.update(cx, |details, cx| {
                     details.request_select(task.clone(), cx)
@@ -264,6 +268,14 @@ impl Layout {
                 details_for_list.update(cx, |details, cx| {
                     details.update_title(*task_id, title.clone(), cx)
                 });
+            }
+            // Empty managed tag: open the travel panel's add-trip popover.
+            TaskListEvent::EmptyActionRequested => {
+                travel_for_empty_action.update(cx, |panel, cx| {
+                    panel.open_add();
+                    cx.notify();
+                });
+                this.task_list.update(cx, |list, cx| list.refresh(cx));
             }
         })
         .detach();
@@ -435,6 +447,15 @@ impl Layout {
                 if let Some(managed) = &this.managed_tag {
                     this.travel_panel.update(cx, |panel, cx| {
                         panel.set_tag(managed.recipe_id, managed.label.clone(), cx);
+                    });
+                    // Empty managed tag: offer the "+ New trip" action
+                    // where the checklist rows would appear.
+                    this.task_list.update(cx, |list, cx| {
+                        list.set_empty_action(Some("+ New trip".to_string()), cx);
+                    });
+                } else {
+                    this.task_list.update(cx, |list, cx| {
+                        list.set_empty_action(None, cx);
                     });
                 }
                 if changed {
@@ -616,15 +637,25 @@ impl Render for Layout {
                     .child(match self.panel {
                         NavPanel::Tasks if self.managed_tag.is_some() => div()
                             .id("managed-panel")
+                            .relative()
                             .flex_1()
                             .flex()
                             .flex_col()
                             .min_h_0()
-                            // The travel header ("+ New trip" + popover)
-                            // sits on top; the checklist items below use
-                            // the normal task list with its sections.
-                            .child(self.travel_panel.clone())
+                            // The travel header ("+ New trip") sits on top;
+                            // the checklist items below use the normal task
+                            // list with its sections. The popover is the
+                            // LAST child so GPUI paints it above the task
+                            // list (paint order follows tree order).
+                            .child(
+                                self.travel_panel
+                                    .update(cx, |panel, cx| panel.header(window, cx).into_any_element()),
+                            )
                             .child(div().flex_1().min_h_0().child(self.task_list.clone()))
+                            .child(
+                                self.travel_panel
+                                    .update(cx, |panel, cx| panel.popover(window, cx)),
+                            )
                             .into_any_element(),
                         NavPanel::Tasks => div()
                             .id("right-column")

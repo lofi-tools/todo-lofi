@@ -2,6 +2,7 @@ use gpui::{
     AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
 };
+use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
@@ -12,12 +13,15 @@ use storage::task::TaskCreate;
 use super::navbar::{NavBar, NavBarEvent};
 use super::task_row::{TaskRow, TaskRowEvent};
 use crate::store::Store;
+use crate::theme::HAIRLINE;
 
 #[derive(Clone)]
 pub enum TaskListEvent {
     Selected(TaskWithMeta),
     Deselected,
     TitleCommitted { task_id: u64, title: String },
+    /// The empty-list action button was clicked (managed tags).
+    EmptyActionRequested,
 }
 
 /// The display shape of one task-list row: the top-level task plus what it
@@ -64,6 +68,10 @@ pub struct TaskListView {
     /// The task whose subtask list is expanded, or None. Only one row's
     /// subtasks can be expanded at a time.
     expanded_subtask: Option<u64>,
+    /// When the list is empty, show this labeled button where the rows
+    /// would be (managed tags e.g. the travel checklists panel). Clicking
+    /// it emits `EmptyActionRequested`.
+    empty_action_label: Option<String>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -140,6 +148,7 @@ impl TaskListView {
             show_all: false,
             _fetch_sections: None,
             expanded_subtask: None,
+            empty_action_label: None,
             input,
             store,
             selected_path: Vec::new(),
@@ -488,6 +497,13 @@ impl TaskListView {
 
     /// Reload the current view (all tasks or the selected tag's tasks) from
     /// the DB, e.g. after a subtask was created from the details panel.
+    /// Set the empty-list action label (e.g. "+ New trip" for managed
+    /// tags); `None` restores the plain empty body.
+    pub fn set_empty_action(&mut self, label: Option<String>, cx: &mut Context<Self>) {
+        self.empty_action_label = label;
+        cx.notify();
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let selected_path = self.selected_path.clone();
@@ -1050,10 +1066,13 @@ impl Render for TaskListView {
             });
         }
 
+        // Prefer the fetched display label (e.g. a managed tag's
+        // "Travel checklists") over the raw tag name.
         let heading = self
-            .selected_path
+            .selected_labels
             .last()
             .cloned()
+            .or_else(|| self.selected_path.last().cloned())
             .unwrap_or_else(|| "Tasks".to_string());
 
         div()
@@ -1075,20 +1094,56 @@ impl Render for TaskListView {
                     .child(heading),
             )
             .child(Input::new(&self.input))
-            .child(
-                div()
-                    .flex_1()
-                    // Long lists scroll instead of growing past the window;
-                    // the flex-1 body gives the scrollable a definite height.
-                    .overflow_y_scrollbar()
-                    .v_flex()
-                    .gap_2()
-                    .children(self.sectioned_rows(cx)),
-            )
+            .child(self.list_body(window, cx))
     }
 }
 
 impl TaskListView {
+    /// The list body: the sectioned rows, or the empty-list action button
+    /// centered where the rows would be (managed tags only).
+    fn list_body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.sectioned_rows(cx);
+        let empty_action = self.empty_action_label.clone();
+        if rows.is_empty()
+            && let Some(label) = empty_action
+        {
+            return div()
+                .flex_1()
+                .v_flex()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xa3a3a3))
+                        .child("Nothing here yet"),
+                )
+                .child(
+                    Button::new("empty-list-action")
+                        .ghost()
+                        .compact()
+                        .with_size(gpui_component::Size::Small)
+                        .border_1()
+                        .border_color(rgb(HAIRLINE))
+                        .text_color(rgb(0xa3a3a3))
+                        .label(label)
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.emit(TaskListEvent::EmptyActionRequested);
+                        })),
+                )
+                .into_any_element();
+        }
+        div()
+            .flex_1()
+            // Long lists scroll instead of growing past the window;
+            // the flex-1 body gives the scrollable a definite height.
+            .overflow_y_scrollbar()
+            .v_flex()
+            .gap_2()
+            .children(rows)
+            .into_any_element()
+    }
     /// Rows for the list body: flat by default, grouped under section
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
     /// tasks last under an "Upcoming" header. Tasks starting more than 2
