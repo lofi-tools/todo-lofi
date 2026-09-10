@@ -247,11 +247,12 @@ impl TodoStore {
         Ok(ids)
     }
 
-    /// Materialize today's occurrence for every daily template that is
-    /// missing one, keyed by date in the template's timezone. The new
-    /// occurrence replaces previous open ones (tombstoned, never
-    /// completed) and inherits weights and tags from the latest
-    /// occurrence. Returns the number of tasks created.
+    /// Materialize upcoming occurrences for every daily template: each
+    /// date whose start (or deadline) falls within the next 2 days gets an
+    /// occurrence unless one already exists — even a tombstoned one, so a
+    /// deleted occurrence is never resurrected. The next occurrence
+    /// replaces previous ones: open occurrences from past dates are
+    /// tombstoned (never completed). Returns the number of tasks created.
     pub async fn materialize_daily_occurrences(
         &mut self,
         now_secs: u64,
@@ -262,38 +263,85 @@ impl TodoStore {
             .into_iter()
             .filter(|t| t.interval_days == 1 && t.time_of_day.is_some())
         {
-            if self.materialize_daily_occurrence(&template, now_secs).await? {
+            created += self
+                .materialize_upcoming_occurrences(&template, now_secs)
+                .await?;
+        }
+        Ok(created)
+    }
+
+    async fn materialize_upcoming_occurrences(
+        &mut self,
+        template: &RepeatTaskTemplate,
+        now_secs: u64,
+    ) -> QueryResult<usize> {
+        use jiff::ToSpan;
+        let zone = template_zone(template);
+        let today = jiff::Timestamp::from_second(now_secs as i64)
+            .map(|stamp| stamp.to_zoned(zone.clone()).date())
+            .unwrap_or_else(|_| jiff::Timestamp::now().to_zoned(zone.clone()).date());
+        let mut created = 0;
+        for offset in 0..8 {
+            let date = today.checked_add(offset.days()).unwrap_or(today);
+            let Some((blocked_until, deadline)) =
+                occurrence_times_for_date(template, &zone, date)
+            else {
+                continue;
+            };
+            let anchor = blocked_until.unwrap_or(deadline);
+            if anchor > now_secs + MATERIALIZE_WINDOW_SECS {
+                break;
+            }
+            if self
+                .ensure_date_occurrence(template, blocked_until, deadline)
+                .await?
+            {
                 created += 1;
+            }
+        }
+        // Replace previous occurrences: tombstone open ones from past dates.
+        let day_start = today
+            .at(0, 0, 0, 0)
+            .to_zoned(zone)
+            .ok()
+            .map(|zoned| zoned.timestamp().as_second() as u64)
+            .unwrap_or(now_secs);
+        for task_id in self.repeat_occurrences(template.id).await? {
+            let Ok(task) = self.get_task(task_id).await else {
+                continue;
+            };
+            if !task.done
+                && task.deleted_at.is_none()
+                && task.deadline.is_none_or(|deadline| deadline < day_start)
+            {
+                self.tombstone_task(task_id).await?;
             }
         }
         Ok(created)
     }
 
-    async fn materialize_daily_occurrence(
+    /// Create the occurrence for one date unless any linked occurrence
+    /// (live, done or tombstoned) already carries its deadline.
+    async fn ensure_date_occurrence(
         &mut self,
         template: &RepeatTaskTemplate,
-        now_secs: u64,
+        blocked_until: Option<u64>,
+        deadline: u64,
     ) -> QueryResult<bool> {
-        let Some((blocked_until, deadline)) = occurrence_times(template, now_secs) else {
-            return Ok(false);
-        };
         let mut latest: Option<crate::Task> = None;
         for task_id in self.repeat_occurrences(template.id).await? {
             let Ok(task) = self.get_task(task_id).await else {
                 continue;
             };
-            if task.deadline == Some(deadline) && task.deleted_at.is_none() {
+            if task.deadline == Some(deadline) {
                 return Ok(false);
             }
-            latest = Some(task);
-        }
-        // The next occurrence replaces previous open ones.
-        for task_id in self.repeat_occurrences(template.id).await? {
-            let Ok(task) = self.get_task(task_id).await else {
-                continue;
-            };
-            if !task.done && task.deleted_at.is_none() {
-                self.tombstone_task(task_id).await?;
+            if task.deleted_at.is_none()
+                && latest.as_ref().is_none_or(|best: &crate::Task| {
+                    task.deadline.unwrap_or(0) > best.deadline.unwrap_or(0)
+                })
+            {
+                latest = Some(task);
             }
         }
         let (importance_factor, urgency_factor) = latest
@@ -354,6 +402,25 @@ fn civil_at(
         .map(|zoned| zoned.timestamp().as_second() as u64)
 }
 
+/// Occurrences materialize while startable (or due) within this horizon.
+const MATERIALIZE_WINDOW_SECS: u64 = 2 * 86400;
+
+/// `(blocked_until, deadline)` UTC epochs for one civil date in the
+/// template's timezone. `None` without a due time.
+pub fn occurrence_times_for_date(
+    template: &RepeatTaskTemplate,
+    zone: &jiff::tz::TimeZone,
+    date: jiff::civil::Date,
+) -> Option<(Option<u64>, u64)> {
+    let due = template.time_of_day?;
+    Some((
+        template
+            .start_time_of_day
+            .and_then(|start| civil_at(date, start, zone)),
+        civil_at(date, due, zone)?,
+    ))
+}
+
 /// Today's `(blocked_until, deadline)` UTC epochs for a daily template in
 /// its timezone: the start time hides the task until it becomes doable,
 /// the due time is the deadline. `None` without a due time.
@@ -361,18 +428,12 @@ pub fn occurrence_times(
     template: &RepeatTaskTemplate,
     now_secs: u64,
 ) -> Option<(Option<u64>, u64)> {
-    let due = template.time_of_day?;
     let zone = template_zone(template);
     let date = jiff::Timestamp::from_second(now_secs as i64)
         .ok()?
         .to_zoned(zone.clone())
         .date();
-    Some((
-        template
-            .start_time_of_day
-            .and_then(|start| civil_at(date, start, &zone)),
-        civil_at(date, due, &zone)?,
-    ))
+    occurrence_times_for_date(template, &zone, date)
 }
 
 #[cfg(test)]
@@ -474,18 +535,21 @@ mod tests {
             )
             .await?;
 
-        // Midday UTC: today's 5:50pm start is still in the future.
+        // Midday UTC: today and tomorrow fall inside the 2-day window
+        // (day+2's 5:50pm is ~54h out); both materialize at once.
         let noon = utc_midday();
-        assert_eq!(storage.materialize_daily_occurrences(noon).await?, 1);
+        assert_eq!(storage.materialize_daily_occurrences(noon).await?, 2);
 
         let template = storage.repeat_template_for_task(task.id).await?.unwrap();
         let occurrences = storage.repeat_occurrences(template.id).await?;
-        assert_eq!(occurrences.len(), 2);
+        assert_eq!(occurrences.len(), 3);
         let today = storage.get_task(occurrences[1]).await?;
         assert_eq!(today.title, "Feed dorito");
         assert_eq!(today.importance_factor, 3.0);
         assert_eq!(today.deadline, Some(noon + 6 * 3600 + 30 * 60));
         assert_eq!(today.blocked_until, Some(noon + 5 * 3600 + 50 * 60));
+        let tomorrow = storage.get_task(occurrences[2]).await?;
+        assert_eq!(tomorrow.deadline, Some(noon + 86400 + 6 * 3600 + 30 * 60));
         // Instances store UTC epochs only.
         assert!(today.timezone.is_none());
 
@@ -493,14 +557,16 @@ mod tests {
         let first = storage.get_task(occurrences[0]).await?;
         assert!(first.deleted_at.is_some());
 
-        // Hidden from lists until 5:50pm, then visible.
+        // Listed under Upcoming until 5:50pm: present, but sorted below
+        // doable tasks (it is the only row here).
         let listed = storage.list_tasks_by_priority().await?;
-        assert!(!listed.iter().any(|t| t.id == today.id));
+        assert!(listed.iter().any(|t| t.id == today.id));
 
         // Idempotent: a second run creates nothing.
         assert_eq!(storage.materialize_daily_occurrences(noon).await?, 0);
 
-        // Next day: a fresh occurrence replaces the previous one.
+        // Next day: day+2 slides into the window (1 created); the
+        // previous open occurrence is replaced.
         let tomorrow_noon = noon + 86400;
         assert_eq!(
             storage
@@ -512,7 +578,10 @@ mod tests {
         assert!(replaced.deleted_at.is_some());
         let occurrences = storage.repeat_occurrences(template.id).await?;
         let next = storage.get_task(*occurrences.last().unwrap()).await?;
-        assert_eq!(next.deadline, Some(tomorrow_noon + 6 * 3600 + 30 * 60));
+        assert_eq!(
+            next.deadline,
+            Some(tomorrow_noon + 86400 + 6 * 3600 + 30 * 60)
+        );
         assert!(next.deleted_at.is_none());
         Ok(())
     }

@@ -548,6 +548,15 @@ fn main() {
                 store.create_integration("todoist", None).await?;
             }
             let tasks = store.list_tasks_by_priority().await.unwrap_or_default();
+            // Occurrences startable or due in the next 2 days exist from
+            // here on; the daily timer keeps them coming.
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Err(e) = store.materialize_daily_occurrences(now_secs).await {
+                tracing::error!("Failed to materialize repeat occurrences: {e}");
+            }
             Ok::<_, anyhow::Error>((Store::new(store), tasks))
         });
 

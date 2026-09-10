@@ -186,7 +186,7 @@ impl TodoStore {
         let id_list: Vec<String> = task_ids.iter().map(|id| id.to_string()).collect();
         let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
         let rows = toasty::sql::query(format!(
-            "SELECT id, parent_id FROM tasks WHERE parent_id IN ({}) AND deleted_at IS NULL AND (blocked_until IS NULL OR blocked_until <= CAST(strftime('%s', 'now') AS INTEGER)) ORDER BY id",
+            "SELECT id, parent_id FROM tasks WHERE parent_id IN ({}) AND deleted_at IS NULL ORDER BY id",
             placeholders.join(",")
         ))
         .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
@@ -221,7 +221,7 @@ impl TodoStore {
     /// ordered by id.
     pub async fn list_subtasks(&mut self, parent_id: u64) -> QueryResult<Vec<crate::Task>> {
         let rows = toasty::sql::query(
-            r#"SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL AND (blocked_until IS NULL OR blocked_until <= CAST(strftime('%s', 'now') AS INTEGER)) ORDER BY id"#,
+            r#"SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL ORDER BY id"#,
         )
         .column_types([toasty::stmt::Type::I64])
         .bind(parent_id as i64)

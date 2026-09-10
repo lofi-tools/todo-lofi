@@ -542,7 +542,22 @@ impl Store {
         })
     }
 
-    /// Sync all linked Todoist projects of every Todoist integration.    /// Runs entirely on the Tokio runtime (network + DB).
+    /// Materialize repeat occurrences startable or due within the next
+    /// 2 days. Idempotent; safe to call on startup and date rollovers.
+    pub fn materialize_due_occurrences(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<usize>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Ok(s.materialize_daily_occurrences(now_secs).await?)
+        })
+    }    /// Runs entirely on the Tokio runtime (network + DB).
     pub fn sync_todoist(
         &self,
         cx: &impl AppContext,

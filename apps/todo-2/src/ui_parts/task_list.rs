@@ -121,6 +121,7 @@ impl TaskListView {
                 }
             });
 
+        let timer_store = store.clone();
         Self {
             task_views: Vec::new(),
             row_specs: Vec::new(),
@@ -142,42 +143,54 @@ impl TaskListView {
             input_needs_clear: false,
             locked_until: None,
             _fetch_tasks: None,
-            _reorder_timer: cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(60))
-                        .await;
-                    let shifted = this
-                        .update(cx, |this, cx| {
-                            // Never yank rows mid-edit or mid-animation;
-                            // skip this cycle instead.
-                            if this.editing || this.is_locked() {
-                                return false;
+            _reorder_timer: {
+                cx.spawn(async move |this, cx| {
+                    // Startup already materialized; the timer covers
+                    // date rollovers while the app stays open.
+                    let mut last_day = today_key();
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(60))
+                            .await;
+                        if today_key() != last_day {
+                            last_day = today_key();
+                            let materialize = timer_store.materialize_due_occurrences(cx);
+                            if let Err(e) = materialize.await {
+                                tracing::error!("Daily materialize failed: {e}");
                             }
-                            this.set_locked(true, cx);
-                            this.refresh(cx);
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !shifted {
-                        // View dropped: end the loop. Otherwise this was
-                        // a skipped cycle; wait out the next minute.
-                        if this.upgrade().is_none() {
+                        }
+                        let shifted = this
+                            .update(cx, |this, cx| {
+                                // Never yank rows mid-edit or mid-animation;
+                                // skip this cycle instead.
+                                if this.editing || this.is_locked() {
+                                    return false;
+                                }
+                                this.set_locked(true, cx);
+                                this.refresh(cx);
+                                true
+                            })
+                            .unwrap_or(false);
+                        if !shifted {
+                            // View dropped: end the loop. Otherwise this was
+                            // a skipped cycle; wait out the next minute.
+                            if this.upgrade().is_none() {
+                                break;
+                            }
+                            continue;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(1300))
+                            .await;
+                        if this
+                            .update(cx, |this, cx| this.set_locked(false, cx))
+                            .is_err()
+                        {
                             break;
                         }
-                        continue;
                     }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(1300))
-                        .await;
-                    if this
-                        .update(cx, |this, cx| this.set_locked(false, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }),
+                })
+            },
             _input_subscription: input_subscription,
             _nav_subscription: nav_subscription,
         }
@@ -824,7 +837,8 @@ mod tests {
                 .into_iter()
                 .collect();
         let order = vec!["A".to_string(), "B".to_string()];
-        let chunks = sectioned_order(5, &section_of, &order);
+        let indices: Vec<usize> = (0..5).collect();
+        let chunks = sectioned_order(&indices, &section_of, &order);
         assert_eq!(chunks.len(), 3);
         assert!(matches!(&chunks[0], RowChunk::Rows(rows) if rows == &[0, 3]));
         assert!(matches!(&chunks[1], RowChunk::Section(name, rows) if name == "A" && rows == &[2]));
@@ -833,7 +847,8 @@ mod tests {
 
     #[test]
     fn test_sectioned_order_flat_without_sections() {
-        let chunks = sectioned_order(2, &std::collections::HashMap::new(), &[]);
+        let indices: Vec<usize> = (0..2).collect();
+        let chunks = sectioned_order(&indices, &std::collections::HashMap::new(), &[]);
         assert!(matches!(&chunks[..], [RowChunk::Rows(rows)] if rows == &[0, 1]));
     }
 
@@ -1024,24 +1039,42 @@ impl Render for TaskListView {
 }
 
 impl TaskListView {
-    /// Rows for the list body: flat, or grouped under section headers when
-    /// the selected tag has sectioned tasks (Todoist-style).
+    /// Rows for the list body: flat by default, grouped under section
+    /// headers for sectioned tags (Todoist-style), with not-yet-doable
+    /// tasks always last under an "Upcoming" header.
     fn sectioned_rows(&self) -> Vec<gpui::AnyElement> {
-        if self.selected_path.is_empty() || self.section_order.is_empty() {
-            return self.task_views.iter().cloned().map(|v| v.into_any_element()).collect();
-        }
-        let section_of: std::collections::HashMap<usize, String> = self
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) = self
             .row_specs
             .iter()
             .enumerate()
-            .filter_map(|(index, spec)| {
+            .partition(|(_, spec)| spec.task.blocked_until.is_some_and(|until| until > now_secs));
+        let upcoming: Vec<usize> = upcoming_pairs.into_iter().map(|(i, _)| i).collect();
+        let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
+        if self.selected_path.is_empty() || self.section_order.is_empty() {
+            return current
+                .into_iter()
+                .chain(upcoming)
+                .map(|index| self.task_views[index].clone().into_any_element())
+                .collect();
+        }
+        let section_of: std::collections::HashMap<usize, String> = current
+            .iter()
+            .filter_map(|&index| {
                 self.task_section
-                    .get(&spec.task.id)
+                    .get(&self.row_specs[index].task.id)
                     .map(|name| (index, name.clone()))
             })
             .collect();
+        let mut chunks = sectioned_order(&current, &section_of, &self.section_order);
+        if !upcoming.is_empty() {
+            chunks.push(RowChunk::Upcoming(upcoming));
+        }
         let mut elements = Vec::new();
-        for chunk in sectioned_order(self.row_specs.len(), &section_of, &self.section_order) {
+        for chunk in chunks {
             match chunk {
                 RowChunk::Rows(indices) => {
                     for index in indices {
@@ -1062,24 +1095,52 @@ impl TaskListView {
                         elements.push(self.task_views[index].clone().into_any_element());
                     }
                 }
+                RowChunk::Upcoming(indices) => {
+                    // Separated from the doable list above, like a
+                    // Todoist section with a divider.
+                    elements.push(
+                        div()
+                            .mt_4()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(rgb(0x333333))
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xa3a3a3))
+                            .child("Upcoming")
+                            .into_any_element(),
+                    );
+                    for index in indices {
+                        elements.push(self.task_views[index].clone().into_any_element());
+                    }
+                }
             }
         }
         elements
     }
 }
 
+/// System-local civil date key (`YYYY-MM-DD`) for detecting date
+/// rollovers while the app stays open.
+fn today_key() -> String {
+    jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::system())
+        .date()
+        .to_string()
+}
+
 /// Order row indices for sectioned display: unsectioned rows first (in
 /// list order), then one group per section in display order. Pure so it
 /// can be unit-tested; `section_of` maps row index → section name.
 fn sectioned_order(
-    count: usize,
+    indices: &[usize],
     section_of: &std::collections::HashMap<usize, String>,
     section_order: &[String],
 ) -> Vec<RowChunk> {
     let mut plain = Vec::new();
     let mut by_section: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
-    for index in 0..count {
+    for &index in indices {
         match section_of.get(&index) {
             Some(name) => by_section.entry(name.clone()).or_default().push(index),
             None => plain.push(index),
@@ -1102,8 +1163,10 @@ fn sectioned_order(
     chunks
 }
 
-/// One flat run of rows, optionally under a section header.
+/// One flat run of rows, optionally under a section header. `Upcoming`
+/// is the trailing not-yet-doable group with its own divider styling.
 enum RowChunk {
     Rows(Vec<usize>),
     Section(String, Vec<usize>),
+    Upcoming(Vec<usize>),
 }
