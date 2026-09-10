@@ -401,13 +401,15 @@ impl Render for TaskRow {
 /// Right-pointing arrow separating a blocker from the task it blocks.
 /// Rendered as an alpha mask tinted by the given text color (same
 /// technique as the repeat icon), so it matches the blocked task's shade.
+/// The tint must be set on the svg element itself: gpui's `Svg` only
+/// paints when its own style has a text color, it does not inherit the
+/// parent's.
 fn arrow_svg(color: u32) -> impl IntoElement {
     div()
         .h_flex()
         .items_center()
         .mx_1()
-        .text_color(rgb(color))
-        .child(svg().size_3().data(ARROW_SVG))
+        .child(svg().size_3().data(ARROW_SVG).text_color(rgb(color)))
 }
 
 /// The text color of a blocked/blocking task title: the muted gray when
