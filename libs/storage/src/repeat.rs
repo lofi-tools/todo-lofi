@@ -19,6 +19,11 @@ pub struct RepeatTaskTemplate {
     /// Time of day for each occurrence, as minutes since midnight.
     /// `None` means no specific time.
     pub time_of_day: Option<u64>,
+    /// Start time of day for each occurrence, as minutes since midnight.
+    /// Each materialized occurrence is created with `blocked_until` set to
+    /// today's start time, so the task is hidden until it becomes doable.
+    /// `None` means occurrences start immediately.
+    pub start_time_of_day: Option<u64>,
     /// Weekdays for "every week on Mon/…" as JSON vec of 0=Mon..6=Sun.
     pub weekdays: Option<toasty::Json<Vec<u8>>>,
     /// Month day for "every Nth" (1-31, -1 = last day).
@@ -32,6 +37,9 @@ pub struct RepeatTaskTemplate {
     pub created_at: jiff::Timestamp,
 }
 
+/// Columns selected in template order below: id, name, interval_days,
+/// time_of_day, created_at, weekdays, month_day, strict, timezone,
+/// start_time_of_day.
 fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
     if let toasty::stmt::Value::Record(record) = row {
         let id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
@@ -43,21 +51,38 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
         let interval_days = record.get(2).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
         let time_of_day = record.get(3).and_then(|v| v.to_i64()).map(|m| m as u64);
         let created_at = record.get(4).and_then(|v| v.as_str())?.parse().ok()?;
+        let weekdays = record
+            .get(5)
+            .and_then(|v| v.as_str())
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .map(toasty::Json);
+        let month_day = record.get(6).and_then(|v| v.to_i64());
+        let strict = record.get(7).and_then(|v| v.to_i64()).unwrap_or(0) != 0;
+        let timezone = record
+            .get(8)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let start_time_of_day = record.get(9).and_then(|v| v.to_i64()).map(|m| m as u64);
         Some(RepeatTaskTemplate {
             id,
             name,
             interval_days,
             time_of_day,
-            weekdays: None,
-            month_day: None,
-            strict: false,
-            timezone: None,
+            start_time_of_day,
+            weekdays,
+            month_day,
+            strict,
+            timezone,
             created_at,
         })
     } else {
         None
     }
 }
+
+const TEMPLATE_COLUMNS: &str = "rtt.id, rtt.name, rtt.interval_days, rtt.time_of_day, \
+     rtt.created_at, rtt.weekdays, rtt.month_day, rtt.strict, rtt.timezone, rtt.start_time_of_day";
 
 impl TodoStore {
     /// The repeat template that `task_id` is an occurrence of, if any.
@@ -67,11 +92,12 @@ impl TodoStore {
     ) -> QueryResult<Option<RepeatTaskTemplate>> {
         let rows = toasty::sql::query(
             r#"
-            SELECT rtt.id, rtt.name, rtt.interval_days, rtt.time_of_day, rtt.created_at
+            SELECT {TEMPLATE_COLUMNS}
             FROM repeat_task_occurrences rto
             JOIN repeat_task_templates rtt ON rtt.id = rto.template_id
             WHERE rto.task_id = ?1
-            "#,
+            "#
+            .replace("{TEMPLATE_COLUMNS}", TEMPLATE_COLUMNS),
         )
         .column_types([
             toasty::stmt::Type::I64,
@@ -79,6 +105,11 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
         ])
         .bind(task_id as i64)
         .exec(&mut self.db)
@@ -98,12 +129,14 @@ impl TodoStore {
         name: String,
         interval_days: u64,
         time_of_day: Option<u64>,
+        start_time_of_day: Option<u64>,
     ) -> QueryResult<RepeatTaskTemplate> {
         if let Some(existing) = self.repeat_template_for_task(task_id).await? {
             RepeatTaskTemplate::update_by_id(existing.id)
                 .name(name.clone())
                 .interval_days(interval_days)
                 .time_of_day(time_of_day)
+                .start_time_of_day(start_time_of_day)
                 .exec(&mut self.db)
                 .await
                 .context(crate::error::QueryTagsSnafu {
@@ -114,6 +147,7 @@ impl TodoStore {
                 name,
                 interval_days,
                 time_of_day,
+                start_time_of_day,
                 weekdays: existing.weekdays,
                 month_day: existing.month_day,
                 strict: existing.strict,
@@ -125,6 +159,7 @@ impl TodoStore {
             .name(name)
             .interval_days(interval_days)
             .time_of_day(time_of_day)
+            .start_time_of_day(start_time_of_day)
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -158,11 +193,192 @@ impl TodoStore {
             })?;
         Ok(())
     }
+
+    /// All repeat templates, e.g. for the daily materializer.
+    pub async fn list_repeat_templates(&mut self) -> QueryResult<Vec<RepeatTaskTemplate>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id, name, interval_days, time_of_day, created_at,
+                      weekdays, month_day, strict, timezone, start_time_of_day
+               FROM repeat_task_templates ORDER BY id"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+        ])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list repeat templates",
+        })?;
+        // `parse_template_row` reads `rtt.`-prefixed rows positionally, so
+        // the column order above must match `TEMPLATE_COLUMNS`.
+        Ok(rows.iter().filter_map(parse_template_row).collect())
+    }
+
+    /// Occurrence task ids of a template, oldest first.
+    async fn repeat_occurrences(&mut self, template_id: u64) -> QueryResult<Vec<u64>> {
+        let rows = toasty::sql::query(
+            r#"SELECT task_id FROM repeat_task_occurrences
+               WHERE template_id = ?1 ORDER BY occurrence_index"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(template_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list repeat occurrences",
+        })?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row
+                && let Some(id) = record.first().and_then(|v| v.to_i64())
+            {
+                ids.push(id as u64);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Materialize today's occurrence for every daily template that is
+    /// missing one, keyed by date in the template's timezone. The new
+    /// occurrence replaces previous open ones (tombstoned, never
+    /// completed) and inherits weights and tags from the latest
+    /// occurrence. Returns the number of tasks created.
+    pub async fn materialize_daily_occurrences(
+        &mut self,
+        now_secs: u64,
+    ) -> QueryResult<usize> {
+        let templates = self.list_repeat_templates().await?;
+        let mut created = 0;
+        for template in templates
+            .into_iter()
+            .filter(|t| t.interval_days == 1 && t.time_of_day.is_some())
+        {
+            if self.materialize_daily_occurrence(&template, now_secs).await? {
+                created += 1;
+            }
+        }
+        Ok(created)
+    }
+
+    async fn materialize_daily_occurrence(
+        &mut self,
+        template: &RepeatTaskTemplate,
+        now_secs: u64,
+    ) -> QueryResult<bool> {
+        let Some((blocked_until, deadline)) = occurrence_times(template, now_secs) else {
+            return Ok(false);
+        };
+        let mut latest: Option<crate::Task> = None;
+        for task_id in self.repeat_occurrences(template.id).await? {
+            let Ok(task) = self.get_task(task_id).await else {
+                continue;
+            };
+            if task.deadline == Some(deadline) && task.deleted_at.is_none() {
+                return Ok(false);
+            }
+            latest = Some(task);
+        }
+        // The next occurrence replaces previous open ones.
+        for task_id in self.repeat_occurrences(template.id).await? {
+            let Ok(task) = self.get_task(task_id).await else {
+                continue;
+            };
+            if !task.done && task.deleted_at.is_none() {
+                self.tombstone_task(task_id).await?;
+            }
+        }
+        let (importance_factor, urgency_factor) = latest
+            .as_ref()
+            .map(|task| (task.importance_factor, task.urgency_factor))
+            .unwrap_or((1.0, 1.0));
+        let created = self
+            .create_task(
+                crate::Task::create()
+                    .title(template.name.clone())
+                    .deadline(Some(deadline))
+                    .blocked_until(blocked_until)
+                    .importance_factor(importance_factor)
+                    .urgency_factor(urgency_factor),
+            )
+            .await?;
+        if let Some(source) = latest {
+            for tag in self.get_direct_task_tags(source.id).await? {
+                self.assign_tag_to_task(created.id, &tag.name).await?;
+            }
+        }
+        let index = self.repeat_occurrences(template.id).await?.len() as i64;
+        toasty::sql::statement(
+            r#"INSERT INTO repeat_task_occurrences (template_id, task_id, occurrence_index)
+               VALUES (?1, ?2, ?3)
+               ON CONFLICT (template_id, task_id) DO NOTHING"#,
+        )
+        .bind(template.id as i64)
+        .bind(created.id as i64)
+        .bind(index)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "link repeat occurrence",
+        })?;
+        Ok(true)
+    }
+}
+
+/// Timezone for recurrence evaluation: the template's zone, else UTC.
+/// Task instances store UTC epochs only.
+fn template_zone(template: &RepeatTaskTemplate) -> jiff::tz::TimeZone {
+    template
+        .timezone
+        .as_deref()
+        .and_then(|name| jiff::tz::TimeZone::get(name).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC)
+}
+
+fn civil_at(
+    date: jiff::civil::Date,
+    minutes: u64,
+    zone: &jiff::tz::TimeZone,
+) -> Option<u64> {
+    date.at((minutes / 60) as i8, (minutes % 60) as i8, 0, 0)
+        .to_zoned(zone.clone())
+        .ok()
+        .map(|zoned| zoned.timestamp().as_second() as u64)
+}
+
+/// Today's `(blocked_until, deadline)` UTC epochs for a daily template in
+/// its timezone: the start time hides the task until it becomes doable,
+/// the due time is the deadline. `None` without a due time.
+pub fn occurrence_times(
+    template: &RepeatTaskTemplate,
+    now_secs: u64,
+) -> Option<(Option<u64>, u64)> {
+    let due = template.time_of_day?;
+    let zone = template_zone(template);
+    let date = jiff::Timestamp::from_second(now_secs as i64)
+        .ok()?
+        .to_zoned(zone.clone())
+        .date();
+    Some((
+        template
+            .start_time_of_day
+            .and_then(|start| civil_at(date, start, &zone)),
+        civil_at(date, due, &zone)?,
+    ))
 }
 
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
+    use super::occurrence_times;
     use crate::TodoStore;
     use crate::prelude::*;
 
@@ -176,11 +392,12 @@ mod tests {
         assert!(storage.repeat_template_for_task(task.id).await?.is_none());
 
         let template = storage
-            .set_repeat(task.id, "Water plants".to_string(), 7, Some(18 * 60))
+            .set_repeat(task.id, "Water plants".to_string(), 7, Some(18 * 60), None)
             .await?;
         assert_eq!(template.name, "Water plants");
         assert_eq!(template.interval_days, 7);
         assert_eq!(template.time_of_day, Some(18 * 60));
+        assert_eq!(template.start_time_of_day, None);
 
         let found = storage.repeat_template_for_task(task.id).await?;
         let found = found.unwrap();
@@ -189,11 +406,12 @@ mod tests {
 
         // Re-linking updates the frequency instead of creating a duplicate.
         let updated = storage
-            .set_repeat(task.id, "Water plants".to_string(), 14, None)
+            .set_repeat(task.id, "Water plants".to_string(), 14, None, Some(8 * 60))
             .await?;
         assert_eq!(updated.id, template.id);
         assert_eq!(updated.interval_days, 14);
         assert_eq!(updated.time_of_day, None);
+        assert_eq!(updated.start_time_of_day, Some(8 * 60));
         assert_eq!(
             storage
                 .repeat_template_for_task(task.id)
@@ -214,7 +432,7 @@ mod tests {
         let mut storage = TodoStore::for_test().await?;
         let task = storage.create_task(Task::create().title("Repeating")).await?;
         storage
-            .set_repeat(task.id, "Repeating".to_string(), 1, None)
+            .set_repeat(task.id, "Repeating".to_string(), 1, None, None)
             .await?;
         assert!(storage.repeat_template_for_task(task.id).await?.is_some());
 
@@ -224,5 +442,107 @@ mod tests {
         // Removing again is a no-op.
         storage.remove_repeat(task.id).await?;
         Ok(())
+    }
+
+    fn utc_midday() -> u64 {
+        let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+        now.date()
+            .at(12, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
+            .as_second() as u64
+    }
+
+    #[tokio::test]
+    async fn test_materialize_daily_occurrence() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let task = storage
+            .create_task(
+                Task::create()
+                    .title("Feed dorito")
+                    .importance_factor(3.0),
+            )
+            .await?;
+        storage
+            .set_repeat(
+                task.id,
+                "Feed dorito".to_string(),
+                1,
+                Some(18 * 60 + 30),
+                Some(17 * 60 + 50),
+            )
+            .await?;
+
+        // Midday UTC: today's 5:50pm start is still in the future.
+        let noon = utc_midday();
+        assert_eq!(storage.materialize_daily_occurrences(noon).await?, 1);
+
+        let template = storage.repeat_template_for_task(task.id).await?.unwrap();
+        let occurrences = storage.repeat_occurrences(template.id).await?;
+        assert_eq!(occurrences.len(), 2);
+        let today = storage.get_task(occurrences[1]).await?;
+        assert_eq!(today.title, "Feed dorito");
+        assert_eq!(today.importance_factor, 3.0);
+        assert_eq!(today.deadline, Some(noon + 6 * 3600 + 30 * 60));
+        assert_eq!(today.blocked_until, Some(noon + 5 * 3600 + 50 * 60));
+        // Instances store UTC epochs only.
+        assert!(today.timezone.is_none());
+
+        // The first task (no deadline yet) was replaced.
+        let first = storage.get_task(occurrences[0]).await?;
+        assert!(first.deleted_at.is_some());
+
+        // Hidden from lists until 5:50pm, then visible.
+        let listed = storage.list_tasks_by_priority().await?;
+        assert!(!listed.iter().any(|t| t.id == today.id));
+
+        // Idempotent: a second run creates nothing.
+        assert_eq!(storage.materialize_daily_occurrences(noon).await?, 0);
+
+        // Next day: a fresh occurrence replaces the previous one.
+        let tomorrow_noon = noon + 86400;
+        assert_eq!(
+            storage
+                .materialize_daily_occurrences(tomorrow_noon)
+                .await?,
+            1
+        );
+        let replaced = storage.get_task(today.id).await?;
+        assert!(replaced.deleted_at.is_some());
+        let occurrences = storage.repeat_occurrences(template.id).await?;
+        let next = storage.get_task(*occurrences.last().unwrap()).await?;
+        assert_eq!(next.deadline, Some(tomorrow_noon + 6 * 3600 + 30 * 60));
+        assert!(next.deleted_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_occurrence_times_uses_template_timezone() {
+        let template = RepeatTaskTemplate {
+            id: 1,
+            name: "x".to_string(),
+            interval_days: 1,
+            time_of_day: Some(18 * 60 + 30),
+            start_time_of_day: Some(17 * 60 + 50),
+            weekdays: None,
+            month_day: None,
+            strict: false,
+            timezone: Some("America/New_York".to_string()),
+            created_at: jiff::Timestamp::now(),
+        };
+        // Noon UTC = 8am in New York (EDT): same civil date.
+        let noon_utc: u64 = "2026-09-10T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_second() as u64;
+        let (start, deadline) = occurrence_times(&template, noon_utc).unwrap();
+        // 17:50 / 18:30 EDT = 21:50 / 22:30 UTC.
+        let day: u64 = "2026-09-10T00:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_second() as u64;
+        assert_eq!(start, Some(day + 21 * 3600 + 50 * 60));
+        assert_eq!(deadline, day + 22 * 3600 + 30 * 60);
     }
 }

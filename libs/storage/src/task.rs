@@ -58,14 +58,24 @@ pub struct Task {
 impl Task {
     /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
     pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
-        let deadline_factor = match self.deadline {
+        self.importance_factor * self.urgency_factor * Self::deadline_pressure(self.deadline, now_secs)
+    }
+
+    /// Deadline pressure: 86400 / seconds-remaining while approaching,
+    /// then keeps growing past the deadline (86400 at the deadline, +1
+    /// per overdue second) instead of plateauing.
+    fn deadline_pressure(deadline: Option<u64>, now_secs: u64) -> f64 {
+        match deadline {
             None => 1.0,
             Some(dl) => {
                 let diff = dl as f64 - now_secs as f64;
-                86400.0_f64 / diff.max(1.0)
+                if diff >= 1.0 {
+                    86400.0_f64 / diff
+                } else {
+                    86400.0_f64 + (1.0 - diff)
+                }
             }
-        };
-        self.importance_factor * self.urgency_factor * deadline_factor
+        }
     }
 }
 
@@ -100,13 +110,7 @@ impl TaskWithMeta {
     }
 
     pub fn deadline_factor(&self, now_secs: u64) -> f64 {
-        match self.deadline {
-            None => 1.0,
-            Some(dl) => {
-                let diff = dl as f64 - now_secs as f64;
-                86400.0 / diff.max(1.0)
-            }
-        }
+        Task::deadline_pressure(self.deadline, now_secs)
     }
 }
 
@@ -296,8 +300,9 @@ impl TodoStore {
     pub const COMPLETED_TASK_VISIBLE_SECS: u64 = 24 * 60 * 60;
 
     /// ORDER BY clause shared by the list queries: open tasks by priority
-    /// score (`importance × urgency × deadline pressure`), then completed
-    /// tasks at the bottom (most recently completed first).
+    /// score (`importance × urgency × deadline pressure`, still growing
+    /// past the deadline), then completed tasks at the bottom (most
+    /// recently completed first).
     fn priority_order_sql() -> &'static str {
         r#"
             ORDER BY
@@ -305,8 +310,12 @@ impl TodoStore {
                 CASE WHEN done THEN completed_at ELSE 0 END DESC,
                 importance_factor * urgency_factor * CASE
                     WHEN deadline IS NULL THEN 1.0
-                    ELSE 86400.0 / MAX(1.0,
-                        CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
+                    WHEN CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL) >= 1.0
+                        THEN 86400.0 / MAX(1.0,
+                            CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
+                        )
+                    ELSE 86400.0 + (1.0 -
+                        (CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL))
                     )
                 END DESC
         "#
@@ -327,6 +336,16 @@ impl TodoStore {
         format!("AND {table}deleted_at IS NULL")
     }
 
+    /// WHERE fragment hiding tasks that are not doable yet: a future
+    /// `blocked_until` (e.g. a recurring start time) keeps the task out
+    /// of lists until it becomes actionable.
+    fn doable_where_sql(table: &str) -> String {
+        format!(
+            "AND ({table}blocked_until IS NULL \
+             OR {table}blocked_until <= CAST(strftime('%s', 'now') AS INTEGER))"
+        )
+    }
+
     #[fastrace::trace]
     pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let rows = toasty::sql::query(format!(
@@ -340,9 +359,11 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql(""),
+            Self::doable_where_sql(""),
             Self::priority_order_sql(),
         ))
         .column_types([
@@ -453,10 +474,12 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             task_placeholders.join(","),
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql("t."),
+            Self::doable_where_sql("t."),
             Self::priority_order_sql()
                 .replace("importance_factor", "t.importance_factor")
                 .replace("urgency_factor", "t.urgency_factor"),
@@ -754,10 +777,10 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(2 * 60)).await;
         let prio_score_after = task.compute_priority_score(start.elapsed().as_secs());
-        let max_score = task.importance_factor * 86400.0;
+        // Past the deadline the score keeps growing instead of plateauing.
         assert!(
-            prio_score_after <= max_score,
-            "past-deadline score {prio_score_after} should be <= {max_score}"
+            prio_score_after > score_closer,
+            "overdue score {prio_score_after} should keep growing past {score_closer}"
         );
 
         let no_deadline = storage
@@ -773,8 +796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_urgency_factor_moves_ordering() -> anyhow::Result<()> {
-        let mut storage = TodoStore::for_test().await?;
+    async fn test_urgency_factor_moves_ordering() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
 
         storage
             .create_task(
@@ -805,6 +827,122 @@ mod tests {
             "urgent score should exceed normal score"
         );
 
+        Ok(())
+    }
+
+    fn real_now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[tokio::test]
+    async fn test_overdue_score_keeps_increasing() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let now = real_now_secs();
+
+        // Same weight, different overdue depths: the longer overdue sorts
+        // first, in SQL order and in Rust-side scores alike.
+        storage
+            .create_task(
+                Task::create()
+                    .title("Overdue an hour")
+                    .importance_factor(1.0)
+                    .deadline(Some(now - 3600)),
+            )
+            .await?;
+        storage
+            .create_task(
+                Task::create()
+                    .title("Overdue two hours")
+                    .importance_factor(1.0)
+                    .deadline(Some(now - 7200)),
+            )
+            .await?;
+
+        let tasks = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Overdue two hours", "Overdue an hour"]);
+        assert!(tasks[0].priority_score(now) > tasks[1].priority_score(now));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_not_doable_tasks_hidden_from_lists() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let now = real_now_secs();
+
+        let waiting = storage
+            .create_task(Task::create().title("Not yet doable"))
+            .await?;
+        storage.update_blocked_until(waiting.id, Some(now + 3600)).await?;
+        let ready = storage
+            .create_task(Task::create().title("Doable"))
+            .await?;
+
+        // Future blocked_until: hidden from every list query …
+        let listed = storage.list_tasks_by_priority().await?;
+        assert!(!listed.iter().any(|t| t.id == waiting.id));
+        assert!(listed.iter().any(|t| t.id == ready.id));
+
+        // … including the subtask tree …
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Waiting child")
+                    .parent_id(Some(ready.id)),
+            )
+            .await?;
+        storage.update_blocked_until(child.id, Some(now + 3600)).await?;
+        assert!(storage.list_subtasks(ready.id).await?.is_empty());
+
+        // … but visible again once the start time passes.
+        storage.update_blocked_until(waiting.id, Some(now - 10)).await?;
+        storage.update_blocked_until(child.id, Some(now - 10)).await?;
+        let listed = storage.list_tasks_by_priority().await?;
+        assert!(listed.iter().any(|t| t.id == waiting.id));
+        assert_eq!(storage.list_subtasks(ready.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_dorito_sorts_to_top_as_deadline_nears() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let now = real_now_secs();
+
+        // Evening chores far out; dorito due in two hours at high
+        // importance — still behind the one-hour errand.
+        storage
+            .create_task(
+                Task::create()
+                    .title("Take out trash")
+                    .importance_factor(2.0)
+                    .deadline(Some(now + 3600)),
+            )
+            .await?;
+        let dorito = storage
+            .create_task(
+                Task::create()
+                    .title("feed dorito")
+                    .importance_factor(3.0)
+                    .deadline(Some(now + 7200)),
+            )
+            .await?;
+
+        let listed = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = listed.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Take out trash", "feed dorito"]);
+
+        // 30 minutes to the 6:30pm deadline: dorito's priority_score jumps
+        // past the errand and it sorts to the top.
+        crate::Task::update_by_id(dorito.id)
+            .deadline(Some(now + 1800))
+            .exec(&mut storage.db)
+            .await?;
+        let listed = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = listed.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["feed dorito", "Take out trash"]);
         Ok(())
     }
 

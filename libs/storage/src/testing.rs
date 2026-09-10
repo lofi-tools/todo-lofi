@@ -1,4 +1,6 @@
 use crate::prelude::*;
+use snafu::ResultExt;
+use toasty::Model;
 
 struct SeedTask {
     title: String,
@@ -6,6 +8,7 @@ struct SeedTask {
     branch_name: Option<String>,
     labels: Vec<String>,
     deadline: Option<u64>,
+    blocked_until: Option<u64>,
     importance_factor: f64,
     urgency_factor: f64,
     parent_title: Option<String>,
@@ -68,6 +71,21 @@ fn seed_tasks() -> Vec<SeedTask> {
         .unwrap()
         .as_secs();
 
+    /// Today's `minutes` (since midnight) in the system timezone, as a UTC
+    /// epoch. Used for the "feed dorito" start (5:50pm) and deadline
+    /// (6:30pm).
+    let today_at = |minutes: u64| {
+        let zone = jiff::tz::TimeZone::system();
+        let date = jiff::Timestamp::from_second(now_secs as i64)
+            .unwrap()
+            .to_zoned(zone.clone())
+            .date();
+        date.at((minutes / 60) as i8, (minutes % 60) as i8, 0, 0)
+            .to_zoned(zone)
+            .map(|zoned| zoned.timestamp().as_second() as u64)
+            .unwrap_or(now_secs)
+    };
+
     vec![
         SeedTask {
             title: "Implement task CRUD".to_string(),
@@ -78,6 +96,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 2.0,
             urgency_factor: 1.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Add tag filtering".to_string(),
@@ -88,6 +107,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.5,
             urgency_factor: 1.0,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Fix date display".to_string(),
@@ -98,6 +118,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 2.0,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Write migration tests".to_string(),
@@ -108,6 +129,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 0.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Plan weekend trip".to_string(),
@@ -118,6 +140,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 0.5,
             urgency_factor: 0.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Grocery shopping".to_string(),
@@ -128,6 +151,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 1.0,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Migrate database schema".to_string(),
@@ -138,6 +162,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.5,
             urgency_factor: 1.0,
             parent_title: Some("Implement task CRUD".to_string()),
+            blocked_until: None,
         },
         SeedTask {
             title: "Code review PRs".to_string(),
@@ -148,6 +173,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 1.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Deploy to production".to_string(),
@@ -158,16 +184,18 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.5,
             urgency_factor: 1.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "feed dorito".to_string(),
             description: Some("Feed the cat every evening".to_string()),
             branch_name: None,
             labels: vec!["chore".to_string()],
-            deadline: None,
-            importance_factor: 1.0,
+            deadline: Some(today_at(18 * 60 + 30)),
+            importance_factor: 3.0,
             urgency_factor: 1.0,
             parent_title: None,
+            blocked_until: Some(today_at(17 * 60 + 50)),
         },
         // Parent with three subtasks, demoing the collapsed subtask row:
         // the first subtask renders inline right of the title and the
@@ -181,6 +209,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.5,
             urgency_factor: 0.5,
             parent_title: None,
+            blocked_until: None,
         },
         SeedTask {
             title: "Sketch the new layout".to_string(),
@@ -191,6 +220,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 0.5,
             parent_title: Some("Rewrite the details panel".to_string()),
+            blocked_until: None,
         },
         SeedTask {
             title: "Implement the sidebar".to_string(),
@@ -201,6 +231,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.5,
             urgency_factor: 0.5,
             parent_title: Some("Rewrite the details panel".to_string()),
+            blocked_until: None,
         },
         SeedTask {
             title: "Migrate existing actions".to_string(),
@@ -211,6 +242,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             importance_factor: 1.0,
             urgency_factor: 0.5,
             parent_title: Some("Rewrite the details panel".to_string()),
+            blocked_until: None,
         },
     ]
 }
@@ -322,6 +354,7 @@ impl TodoStore {
                         .branch_name(seed.branch_name.clone())
                         .labels(Some(toasty::Json(seed.labels.clone())))
                         .deadline(seed.deadline)
+                        .blocked_until(seed.blocked_until)
                         .importance_factor(seed.importance_factor)
                         .urgency_factor(seed.urgency_factor)
                         .parent_id(parent_id),
@@ -360,10 +393,28 @@ impl TodoStore {
             self.add_blocker(deploy_id, review_id).await?;
         }
 
-        // "feed dorito" repeats every day at 6pm.
+        // "feed dorito" repeats daily: starts 5:50pm, due 6:30pm, in the
+        // system timezone. The occurrence hides until its start time via
+        // `blocked_until`.
         if let Some(&task_id) = task_map.get("feed dorito") {
-            self.set_repeat(task_id, "feed dorito".to_string(), 1, Some(18 * 60))
+            let template = self
+                .set_repeat(
+                    task_id,
+                    "feed dorito".to_string(),
+                    1,
+                    Some(18 * 60 + 30),
+                    Some(17 * 60 + 50),
+                )
                 .await?;
+            let zone = jiff::tz::TimeZone::system();
+            let timezone = zone.iana_name().unwrap_or("UTC").to_string();
+            crate::RepeatTaskTemplate::update_by_id(template.id)
+                .timezone(Some(timezone))
+                .exec(&mut self.db)
+                .await
+                .context(crate::error::QueryTagsSnafu {
+                    context: "seed repeat timezone",
+                })?;
         }
 
         tracing::info!(
@@ -408,11 +459,15 @@ mod tests {
             "all three subtasks must point back at the parent"
         );
 
-        // "feed dorito" repeats every day at 6pm.
+        // "feed dorito" repeats daily: starts 5:50pm, due 6:30pm, high
+        // importance, hidden until its start time.
         let feed = tasks.iter().find(|t| t.title == "feed dorito").unwrap();
+        assert_eq!(feed.importance_factor, 3.0);
         let template = store.repeat_template_for_task(feed.id).await?.unwrap();
         assert_eq!(template.interval_days, 1);
-        assert_eq!(template.time_of_day, Some(18 * 60));
+        assert_eq!(template.time_of_day, Some(18 * 60 + 30));
+        assert_eq!(template.start_time_of_day, Some(17 * 60 + 50));
+        assert!(template.timezone.is_some());
 
         // "Write migration tests" and "Add tag filtering" are blocked by
         // "Implement task CRUD" (the blocked flag is computed by the meta

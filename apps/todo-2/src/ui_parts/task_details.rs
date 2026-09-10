@@ -931,9 +931,18 @@ impl TaskDetails {
                 };
                 let task_id = task.id;
                 let name = task.title.clone();
-                let set = this
-                    .store
-                    .set_repeat(task_id, name, *interval_days, *time_of_day, cx);
+                // The picker edits interval and due time only; keep any
+                // existing start time.
+                let start_time_of_day =
+                    this.repeat_template.clone().and_then(|t| t.start_time_of_day);
+                let set = this.store.set_repeat(
+                    task_id,
+                    name,
+                    *interval_days,
+                    *time_of_day,
+                    start_time_of_day,
+                    cx,
+                );
                 cx.spawn(async move |this, cx| match set.await {
                     Ok(template) => {
                         this.update(cx, |this, cx| {
