@@ -54,7 +54,9 @@ struct ClientFile {
     from_env: bool,
 }
 
-fn config_dir() -> anyhow::Result<std::path::PathBuf> {
+/// Config root: `~/.config/my-todo` (`MY_TODO_CONFIG_DIR` overrides for
+/// tests). Holds `todoist.json` and the app database.
+pub(crate) fn config_dir() -> anyhow::Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
         if !dir.is_empty() {
             return Ok(std::path::PathBuf::from(dir));
@@ -156,6 +158,20 @@ async fn register_client() -> anyhow::Result<ClientFile> {
         registered.client_id
     );
     Ok(registered)
+}
+
+/// True when `~/.config/my-todo/todoist.json` holds tokens from a previous
+/// connect. The integration DB row itself is in-memory, so the app calls
+/// this at startup to re-register the connection row without bothering
+/// the user. Pure file read; safe on any executor.
+pub fn has_stored_credentials() -> bool {
+    load_client_file()
+        .map(|file| {
+            file.is_some_and(|client| {
+                client.access_token.is_some() || client.refresh_token.is_some()
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Load the registered client, registering (and saving to

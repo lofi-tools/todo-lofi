@@ -162,47 +162,61 @@ impl ProjectPicker {
 
     /// Ask the store whether Todoist is connected; if so, reveal the tab
     /// and fetch its projects on the Tokio runtime (network must never run
-    /// on GPUI's executor).
+    /// on GPUI's executor). Each hop is awaited on its own executor:
+    /// store tasks on GPUI, network on Tokio.
     fn check_todoist(&mut self, cx: &mut Context<Self>) {
         let integrations = self.store.list_integrations(cx);
-        let fetch = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let connected = integrations
-                .await?
-                .into_iter()
-                .any(|i| i.provider == "todoist");
-            if !connected {
-                return Ok::<_, anyhow::Error>(None);
-            }
-            Ok(Some(todoist_auth::list_projects().await?))
-        });
         self.todoist_state = TodoistState::Loading;
-        self._load = Some(cx.spawn(async move |this, cx| match fetch.await {
-            Ok(Some(projects)) => {
-                this.update(cx, |this, cx| {
-                    this.todoist_projects = projects;
-                    this.todoist_visible = (0..this.todoist_projects.len()).collect();
-                    this.todoist_state = TodoistState::Loaded;
-                    this._load = None;
-                    cx.notify();
-                })
-                .ok();
-            }
-            Ok(None) => {
+        cx.notify();
+        self._load = Some(cx.spawn(async move |this, cx| {
+            let connected = match integrations.await {
+                Ok(list) => list.into_iter().any(|i| i.provider == "todoist"),
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.todoist_state = TodoistState::Failed(format!(
+                            "Could not load integrations: {e}"
+                        ));
+                        this._load = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            if !connected {
                 this.update(cx, |this, cx| {
                     this.todoist_state = TodoistState::Hidden;
                     this._load = None;
                     cx.notify();
                 })
                 .ok();
+                return;
             }
-            Err(e) => {
-                this.update(cx, |this, cx| {
-                    this.todoist_state =
-                        TodoistState::Failed(format!("Could not load Todoist projects: {e}"));
-                    this._load = None;
-                    cx.notify();
-                })
-                .ok();
+            let fetch =
+                gpui_tokio::Tokio::spawn_result(cx, async move {
+                    todoist_auth::list_projects().await
+                });
+            match fetch.await {
+                Ok(projects) => {
+                    this.update(cx, |this, cx| {
+                        this.todoist_visible = (0..projects.len()).collect();
+                        this.todoist_projects = projects;
+                        this.todoist_state = TodoistState::Loaded;
+                        this._load = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.todoist_state = TodoistState::Failed(format!(
+                            "Could not load Todoist projects: {e}"
+                        ));
+                        this._load = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
             }
         }));
     }

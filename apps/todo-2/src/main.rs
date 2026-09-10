@@ -507,6 +507,17 @@ fn main() {
             };
             let mut store = TodoStore::new(&config).await?;
             store.seed().await?;
+            // The database is in-memory, so re-register the Todoist
+            // connection row when tokens survived in ~/.config/my-todo.
+            if todoist_auth::has_stored_credentials()
+                && !store
+                    .list_integrations()
+                    .await?
+                    .into_iter()
+                    .any(|i| i.provider == "todoist")
+            {
+                store.create_integration("todoist", None).await?;
+            }
             let tasks = store.list_tasks_by_priority().await.unwrap_or_default();
             Ok::<_, anyhow::Error>((Store::new(store), tasks))
         });

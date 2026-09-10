@@ -4,10 +4,10 @@
 //! integration.
 
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, rgb,
+    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
     prelude::FluentBuilder,
 };
-use gpui_component::StyledExt;
+use gpui_component::{Sizable, Size, StyledExt};
 use gpui_component::button::{Button, ButtonVariants};
 
 use crate::store::Store;
@@ -149,6 +149,54 @@ impl IntegrationsView {
 
 impl EventEmitter<IntegrationsEvent> for IntegrationsView {}
 
+/// Brand logo for Todoist (vendored SVG): the shared asset bundle only
+/// ships the kit's default icon list, so brand art renders from bytes,
+/// like the navbar's integrations icon.
+fn todoist_icon() -> gpui_component::Icon {
+    gpui_component::Icon::default()
+        .data(include_bytes!("../../assets/icons/todoist.svg"))
+        .with_size(Size::Large)
+}
+
+/// Subtle card shell for one integration row. `dimmed` grays the whole
+/// card out for integrations that are not available yet.
+fn integration_card(dimmed: bool) -> gpui::Div {
+    div()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(0x2e2e2e))
+        .bg(rgb(0x232323))
+        .p_4()
+        .when(dimmed, |this| this.opacity(0.55))
+}
+
+/// Small pill badge, e.g. "Coming soon".
+fn badge(label: &'static str) -> gpui::Div {
+    div()
+        .rounded_full()
+        .bg(rgb(0x2a2a2a))
+        .border_1()
+        .border_color(rgb(0x3a3a3a))
+        .px_2()
+        .py_0p5()
+        .text_xs()
+        .text_color(rgb(0xa3a3a3))
+        .child(label)
+}
+
+fn provider_icon(icon: impl IntoElement) -> gpui::Div {
+    div()
+        .w(px(40.))
+        .h(px(40.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(rgb(0x1e1e1e))
+        .child(icon)
+}
+
 impl Render for IntegrationsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let connected = self.todoist_connected();
@@ -163,23 +211,21 @@ impl Render for IntegrationsView {
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Integrations"))
                     .child(
-                        div()
+                        integration_card(false)
                             .h_flex()
                             .items_center()
-                            .justify_between()
-                            .gap_4()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_0p5()
-                            .child(div().font_semibold().child("Todoist"))
+                            .gap_3()
+                            .child(provider_icon(todoist_icon()))
                             .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
-                                    .child("Sync projects both ways with Todoist."),
-                            ),
-                    )
+                                div().v_flex().flex_1().gap_0p5().child(
+                                    div().font_semibold().child("Todoist"),
+                                ).child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child("Sync projects both ways with Todoist."),
+                                ),
+                            )
                     .child(
                         div()
                             .h_flex()
@@ -217,6 +263,30 @@ impl Render for IntegrationsView {
                                     }))
                             }),
                     )
+                    )
+                    .child(
+                        integration_card(true)
+                            .h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(provider_icon(
+                                gpui_component_assets::IconName::Github,
+                            ))
+                            .child(
+                                div().v_flex().flex_1().gap_0p5().child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().font_semibold().child("GitHub"))
+                                        .child(badge("Coming soon")),
+                                ).child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child("Turn issues and PRs into tasks."),
+                                ),
+                            ),
                     )
                     .when_some(self.status.clone(), |this, status| {
                         this.child(
