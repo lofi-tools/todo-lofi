@@ -422,8 +422,8 @@ impl TaskListView {
         let create_task = store.insert_task(TaskCreate::default().title(title), tag_name, cx);
 
         self._fetch_tasks = Some(cx.spawn(async move |this, cx| {
-            let new_tasks = match create_task.await {
-                Ok(new_tasks) => new_tasks,
+            let (new_task_id, new_tasks) = match create_task.await {
+                Ok(result) => result,
                 Err(e) => {
                     tracing::error!("Failed to insert task: {e}");
                     return;
@@ -431,6 +431,13 @@ impl TaskListView {
             };
             let (blockers_map, blocking_map) =
                 Self::fetch_blocking_maps(&store, &new_tasks, cx).await;
+            // Select the fresh task so its details are one keypress/click
+            // away without hunting for it in the list (works even when the
+            // task nests inside another row's blocker chain).
+            let created = new_tasks
+                .iter()
+                .find(|task| task.id == new_task_id)
+                .cloned();
             this.update(cx, |this, cx| {
                 this.set_tasks_with_path(
                     new_tasks,
@@ -440,6 +447,9 @@ impl TaskListView {
                     blocking_map,
                     cx,
                 );
+                if let Some(task) = created {
+                    this.select(task, true, cx);
+                }
                 this.input_needs_clear = true;
                 cx.notify();
             })

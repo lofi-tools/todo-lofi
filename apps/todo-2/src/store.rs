@@ -11,15 +11,16 @@ impl Store {
         Store(Arc::new(tokio::sync::Mutex::new(store)))
     }
 
-    /// Create a task and return the task list for the view the caller is
-    /// on. When a tag is selected the new task is assigned to it and the
-    /// result is that tag's task list; otherwise all tasks are returned.
+    /// Create a task and return its id plus the task list for the view the
+    /// caller is on. When a tag is selected the new task is assigned to it
+    /// and the result is that tag's task list; otherwise all tasks are
+    /// returned. The id lets the caller auto-select the new task.
     pub fn insert_task(
         &self,
         create: TaskCreate,
         tag_name: Option<String>,
         cx: &impl AppContext,
-    ) -> gpui::Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
+    ) -> gpui::Task<anyhow::Result<(u64, Vec<storage::TaskWithMeta>)>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -36,7 +37,7 @@ impl Store {
                 }
                 None => s.list_tasks_by_priority().await.unwrap_or_default(),
             };
-            Ok(tasks)
+            Ok((task.id, tasks))
         })
     }
 
