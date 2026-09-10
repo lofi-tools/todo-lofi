@@ -44,6 +44,12 @@ pub struct Task {
     /// The task this one was created as a follow-up of. Only set for
     /// follow-up tasks; plain tasks and subtasks leave it empty.
     pub source_task_id: Option<u64>,
+    /// Tombstone for mirrored deletions; rows with this set are hidden.
+    pub deleted_at: Option<jiff::Timestamp>,
+    /// Original remote timezone string for recurrence/display.
+    pub timezone: Option<String>,
+    /// One-way imported remote comments as JSON.
+    pub comments: Option<toasty::Json<Vec<crate::external::ExternalComment>>>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -173,6 +179,9 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         updated_at,
         parent_id,
         source_task_id,
+        deleted_at: None,
+        timezone: None,
+        comments: None,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };

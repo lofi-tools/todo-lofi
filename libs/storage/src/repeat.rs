@@ -19,6 +19,15 @@ pub struct RepeatTaskTemplate {
     /// Time of day for each occurrence, as minutes since midnight.
     /// `None` means no specific time.
     pub time_of_day: Option<u64>,
+    /// Weekdays for "every week on Mon/…" as JSON vec of 0=Mon..6=Sun.
+    pub weekdays: Option<toasty::Json<Vec<u8>>>,
+    /// Month day for "every Nth" (1-31, -1 = last day).
+    pub month_day: Option<i64>,
+    /// Strict `every!` flag: no skipping of missed dates.
+    #[default(false)]
+    pub strict: bool,
+    /// Original timezone for recurrence evaluation.
+    pub timezone: Option<String>,
     #[default(jiff::Timestamp::now())]
     pub created_at: jiff::Timestamp,
 }
@@ -39,6 +48,10 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
             name,
             interval_days,
             time_of_day,
+            weekdays: None,
+            month_day: None,
+            strict: false,
+            timezone: None,
             created_at,
         })
     } else {
@@ -101,6 +114,10 @@ impl TodoStore {
                 name,
                 interval_days,
                 time_of_day,
+                weekdays: existing.weekdays,
+                month_day: existing.month_day,
+                strict: existing.strict,
+                timezone: existing.timezone,
                 created_at: existing.created_at,
             });
         }

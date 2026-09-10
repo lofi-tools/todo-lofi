@@ -132,15 +132,31 @@ marker label (§3.2).
 
 ## 4. Sync semantics
 
-### 4.1 Identity
+### 4.1 Identity — generic external links (multiple integrations)
 
-- Each synced local task stores the **Todoist task id** (new `external_id`
-  column) so re-syncs update in place instead of duplicating.
-- Projects and labels likewise keep their Todoist ids so tag creation is
-  idempotent.
-- Tag mapping is tracked explicitly (a tag created from a Todoist project/section/label
-  remembers its source), which also makes the namespaced-collision rule (§4.5)
-  deterministic.
+- The app supports **multiple integrations** (Todoist today, others later),
+  so identity is not a single `external_id` column. It is a generic
+  many-to-many mapping:
+  - `integrations` table: one row per connected account
+    (`id`, `provider` e.g. `"todoist"`, `account_label`, OAuth
+    token/refresh storage location, `created_at`). The `id` is the
+    **integration id**; every link below is scoped to it.
+  - `external_task_links` table: `(integration_id, external_id, task_id,
+    external_updated_at)` with a unique constraint on
+    `(integration_id, external_id)`. One local task may link to **several**
+    external tasks (one per integration), and re-syncs update in place
+    instead of duplicating.
+  - `external_tag_links` table: `(integration_id, external_id, tag_id,
+    source_kind, namespaced)` with a unique constraint on
+    `(integration_id, external_id)`. Projects/sections/labels keep their
+    remote ids so tag creation is idempotent.
+- Tag mapping is tracked explicitly (a tag created from a Todoist
+  project/section/label remembers its `(integration_id, source id, kind)`),
+  which also makes the namespaced-collision rule (§4.5) deterministic per
+  integration.
+- Per-field merge (§4.2) compares the link's `external_updated_at` against
+  the local `updated_at`; the timestamp lives on the **link row**, not on
+  the task, so two integrations never overwrite each other's merge state.
 
 ### 4.2 Conflict resolution — per-field merge
 
@@ -196,19 +212,31 @@ marker label (§3.2).
 
 ## 5. Data model changes (draft)
 
-- `tasks`:
-  - `external_id` (Todoist task id, nullable)
-  - `external_updated_at` (Todoist-side updated timestamp, nullable)
+- `tasks` (generic, provider-agnostic):
   - `deleted_at` (tombstone, nullable; UI hides rows with `deleted_at` set)
-  - `timezone` (original Todoist timezone string, nullable metadata)
+  - `timezone` (original remote timezone string, nullable metadata)
   - `comments` (`Json<Vec<Comment>>`, nullable) — one-way imported comments
-- `tags` (or a new mapping table):
-  - Todoist source id and source kind (project / section / label)
-  - flag for namespaced copies
+- `integrations` (new table, one row per connected account):
+  - `id` (autoincrement PK — the **integration id**)
+  - `provider` (e.g. `"todoist"`; more providers later)
+  - `account_label` (human label, e.g. account name)
+  - `created_at`
+- `external_task_links` (new table, the multi-integration identity map):
+  - `integration_id` → `integrations.id`
+  - `external_id` (remote task id, opaque string)
+  - `task_id` (local task id)
+  - `external_updated_at` (remote-side updated timestamp, nullable)
+  - unique on `(integration_id, external_id)`
+- `external_tag_links` (new table):
+  - `integration_id`, `external_id` (remote project/section/label id)
+  - `tag_id` (local tag id)
+  - `source_kind` (project / section / label)
+  - `namespaced` flag for collision copies (§4.5)
+  - unique on `(integration_id, external_id)`
 - `repeat_task_templates`:
   - weekday rule, month-day rule, strict flag, timezone (see §3.4)
 - A sync-state table:
-  - per selected Todoist project: last successful sync watermark
+  - per `(integration_id, project_id)`: last successful sync watermark
   - OAuth token + refresh token storage location (see §8)
 
 ## 6. todo-2 UI (thin)

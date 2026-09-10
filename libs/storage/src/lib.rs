@@ -2,6 +2,7 @@ use snafu::ResultExt;
 use toasty_driver_turso::Turso;
 
 pub mod error;
+pub mod external;
 pub mod link;
 pub mod migrations;
 pub mod repeat;
@@ -12,6 +13,7 @@ pub mod tracing_setup;
 
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
+    pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
     pub use crate::link::LinkKind;
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::repeat::RepeatTaskTemplate;
