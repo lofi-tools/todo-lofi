@@ -11584,6 +11584,7 @@ name = "todo-2"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 6.0.0",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",

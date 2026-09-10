@@ -11,7 +11,7 @@ use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 
 use crate::store::Store;
-use crate::todoist_auth::{self, OAuthConfig};
+use crate::todoist_auth;
 
 pub enum IntegrationsEvent {
     Changed,
@@ -75,21 +75,35 @@ impl IntegrationsView {
         cx.notify();
 
         let store = self.store.clone();
+        // Network I/O must run on the Tokio runtime: `cx.spawn` polls on
+        // GPUI's own executor, where reqwest/tokio panic with "there is no
+        // reactor running". `Tokio::spawn_result` hops to Tokio and hands
+        // the result back as a GPUI task.
+        let network = gpui_tokio::Tokio::spawn_result(cx, async move {
+            todoist_auth::connect().await
+        });
         self._connect = Some(cx.spawn(async move |this, cx| {
-            let result = async {
-                let config = OAuthConfig::load()?;
-                let _token = todoist_auth::connect(&config).await?;
-                // Token storage (keychain vs config) is still open per the
-                // spec; record the connection so links can scope to it.
-                let created = store
-                    .create_integration("todoist".to_string(), None, cx)
-                    .await?;
-                Ok::<_, anyhow::Error>(created)
-            }
-            .await;
+            let token = match network.await {
+                Ok(token) => token,
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.connecting = false;
+                        this.status = Some(format!("Todoist connect failed: {e}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let _ = token;
+            // Token storage (keychain vs config) is still open per the
+            // spec; record the connection so links can scope to it.
+            let created = store
+                .create_integration("todoist".to_string(), None, cx)
+                .await;
             this.update(cx, |this, cx| {
                 this.connecting = false;
-                match result {
+                match created {
                     Ok(_) => {
                         this.status = Some("Todoist connected.".to_string());
                         cx.emit(IntegrationsEvent::Changed);

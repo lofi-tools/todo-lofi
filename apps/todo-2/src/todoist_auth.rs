@@ -1,34 +1,30 @@
 //! Todoist OAuth connection as a PKCE public client.
 //!
 //! The desktop app ships to users, so it cannot hold a client secret —
-//! anything in the binary is extractable. The client ID is public by
-//! design and hardcoded below; authentication uses PKCE
-//! (`token_endpoint_auth_method: none`) instead of a secret, which is
-//! the flow Todoist documents for desktop apps.
+//! anything in the binary is extractable. Instead the app registers
+//! itself at runtime (RFC 7591 dynamic client registration) as a PKCE
+//! public client and saves the issued credentials to
+//! `~/.config/my-todo/todoist.json`.
 //!
-//! Flow: open the Todoist authorize page in the browser (with
-//! `code_challenge`), capture the `code` through a loopback redirect on
-//! a fixed port, then exchange it with the `code_verifier`.
+//! Flow: ensure registration, open the Todoist authorize page in the
+//! browser (with `code_challenge`), capture the `code` through a
+//! loopback redirect on a fixed port, then exchange it with the
+//! `code_verifier`.
 
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-const AUTHORIZE_URL: &str = "https://todoist.com/oauth/authorize";
-const TOKEN_URL: &str = "https://todoist.com/oauth/access_token";
+const AUTHORIZE_URL: &str = "https://app.todoist.com/oauth/authorize";
+const TOKEN_URL: &str = "https://api.todoist.com/oauth/access_token";
+const REGISTER_URL: &str = "https://api.todoist.com/oauth/register";
 const SCOPE: &str = "data:read_write";
+const APP_NAME: &str = "my-todo";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Todoist client ID. Public identifier, safe to distribute — but replace
-/// the placeholder with the real ID from the App Management Console
-/// (registered as a PKCE public client) before release. `TODOIST_CLIENT_ID`
-/// in the environment overrides it for local development.
-pub const TODOIST_CLIENT_ID: &str = "YOUR_TODOIST_CLIENT_ID";
-
-/// Fixed loopback redirect. The port is part of the redirect URI
-/// pre-registered in the App Management Console, so it must not be
-/// ephemeral. If the port is taken, connecting fails with a message
-/// instead of silently using a URI Todoist would reject.
+/// Fixed loopback redirect. The URI is sent at registration, so the port
+/// must not be ephemeral. If the port is taken, connecting fails with a
+/// message instead of using a URI the registered client would reject.
 pub const REDIRECT_URI: &str = "http://127.0.0.1:53682/callback";
 
 pub struct OAuthConfig {
@@ -36,22 +32,145 @@ pub struct OAuthConfig {
     pub redirect_uri: String,
 }
 
-impl OAuthConfig {
-    pub fn load() -> anyhow::Result<Self> {
-        let client_id = std::env::var("TODOIST_CLIENT_ID")
-            .ok()
-            .filter(|id| !id.is_empty())
-            .unwrap_or_else(|| TODOIST_CLIENT_ID.to_string());
-        if client_id == "YOUR_TODOIST_CLIENT_ID" {
-            return Err(anyhow::anyhow!(
-                "Todoist is not registered yet: set TODOIST_CLIENT_ID or bake the client ID into todoist_auth.rs"
-            ));
+/// Registered client details persisted to `~/.config/my-todo/todoist.json`.
+/// Tokens live here too (file created with owner-only permissions);
+/// moving them to the keychain is future work.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ClientFile {
+    client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
+    redirect_uris: Vec<String>,
+    scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<i64>,
+    /// True when the client ID came from the environment rather than the
+    /// file/registration; tokens are then kept in memory, never written.
+    #[serde(skip)]
+    from_env: bool,
+}
+
+fn config_dir() -> anyhow::Result<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Ok(std::path::PathBuf::from(dir));
         }
-        Ok(Self {
-            client_id,
-            redirect_uri: REDIRECT_URI.to_string(),
-        })
     }
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not locate the home directory"))?;
+    Ok(home.join(".config").join("my-todo"))
+}
+
+fn client_file_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(config_dir()?.join("todoist.json"))
+}
+
+fn load_client_file() -> anyhow::Result<Option<ClientFile>> {
+    let path = client_file_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Could not read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("Could not parse {}: {e}", path.display()))
+}
+
+fn save_client_file(client: &ClientFile) -> anyhow::Result<()> {
+    let path = client_file_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("Could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(client)?)
+        .map_err(|e| anyhow::anyhow!("Could not write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+    Ok(())
+}
+
+/// Register this installation as a PKCE public client (RFC 7591). No
+/// authentication is required; the endpoint is rate-limited per caller.
+async fn register_client() -> anyhow::Result<ClientFile> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(REGISTER_URL)
+        .json(&serde_json::json!({
+            "client_name": APP_NAME,
+            "redirect_uris": [REDIRECT_URI],
+            "scope": SCOPE,
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Client registration failed: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Registration response was not JSON: {e}"))?;
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "Client registration failed ({status}): {body}"
+        ));
+    }
+    let registered = ClientFile {
+        client_id: body
+            .get("client_id")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("Registration response had no client_id: {body}"))?,
+        client_secret: body
+            .get("client_secret")
+            .and_then(|s| s.as_str())
+            .map(str::to_owned),
+        redirect_uris: vec![REDIRECT_URI.to_string()],
+        scope: SCOPE.to_string(),
+        access_token: None,
+        refresh_token: None,
+        expires_at: None,
+        from_env: false,
+    };
+    save_client_file(&registered)?;
+    tracing::info!(
+        "Registered Todoist OAuth client {}",
+        registered.client_id
+    );
+    Ok(registered)
+}
+
+/// Load the registered client, registering (and saving to
+/// `~/.config/my-todo/todoist.json`) on first use. `TODOIST_CLIENT_ID` in
+/// the environment overrides the file for local development.
+async fn ensure_client() -> anyhow::Result<ClientFile> {
+    if let Ok(id) = std::env::var("TODOIST_CLIENT_ID") {
+        if !id.is_empty() {
+            return Ok(ClientFile {
+                client_id: id,
+                client_secret: None,
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                scope: SCOPE.to_string(),
+                access_token: None,
+                refresh_token: None,
+                expires_at: None,
+                from_env: true,
+            });
+        }
+    }
+    if let Some(client) = load_client_file()? {
+        return Ok(client);
+    }
+    register_client().await
 }
 
 /// PKCE code verifier: 64 random unreserved characters.
@@ -112,10 +231,16 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
     out
 }
 
-/// Run the full connect flow: open the browser, wait for the loopback
-/// callback, exchange the code with the PKCE verifier. Returns the access
-/// token. No client secret is involved at any point.
-pub async fn connect(config: &OAuthConfig) -> anyhow::Result<String> {
+/// Run the full connect flow: ensure client registration, open the
+/// browser, wait for the loopback callback, exchange the code with the
+/// PKCE verifier. Persists tokens to `~/.config/my-todo/todoist.json`
+/// and returns the access token. No client secret is involved.
+pub async fn connect() -> anyhow::Result<String> {
+    let mut registered = ensure_client().await?;
+    let config = OAuthConfig {
+        client_id: registered.client_id.clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:53682")
         .await
         .map_err(|e| {
@@ -136,7 +261,16 @@ pub async fn connect(config: &OAuthConfig) -> anyhow::Result<String> {
     open_browser(&url);
 
     let code = wait_for_code(listener, &state).await?;
-    exchange_code(config, &code, &verifier).await
+    let tokens = exchange_code(&config, &code, &verifier).await?;
+    registered.access_token = Some(tokens.access_token.clone());
+    if tokens.refresh_token.is_some() {
+        registered.refresh_token = tokens.refresh_token;
+    }
+    registered.expires_at = tokens.expires_at;
+    if !registered.from_env {
+        save_client_file(&registered).ok();
+    }
+    Ok(tokens.access_token)
 }
 
 fn url_encode(raw: &str) -> String {
@@ -265,13 +399,48 @@ fn url_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Exchange the code for a token as a PKCE public client: client ID, code,
+/// Tokens from the token endpoint. `expires_at` is a unix epoch when
+/// `expires_in` was present; `refresh_token` rotates on every refresh.
+pub struct Tokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<i64>,
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn parse_tokens(body: &serde_json::Value, status: reqwest::StatusCode) -> anyhow::Result<Tokens> {
+    let access_token = body
+        .get("access_token")
+        .and_then(|token| token.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Token request failed ({status}): {body}"))?;
+    Ok(Tokens {
+        access_token,
+        // Grace-window retries omit `refresh_token`; callers keep the old one.
+        refresh_token: body
+            .get("refresh_token")
+            .and_then(|token| token.as_str())
+            .map(str::to_owned),
+        expires_at: body
+            .get("expires_in")
+            .and_then(|secs| secs.as_i64())
+            .map(|secs| now_epoch() + secs),
+    })
+}
+
+/// Exchange the code for tokens as a PKCE public client: client ID, code,
 /// redirect URI and verifier — no client secret.
 async fn exchange_code(
     config: &OAuthConfig,
     code: &str,
     verifier: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Tokens> {
     let client = reqwest::Client::new();
     let body = format!(
         "client_id={}&code={}&redirect_uri={}&code_verifier={}",
@@ -295,10 +464,35 @@ async fn exchange_code(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("Token response was not JSON: {e}"))?;
-    body.get("access_token")
-        .and_then(|token| token.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Token exchange failed ({status}): {body}"))
+    parse_tokens(&body, status)
+}
+
+/// Refresh an expiring access token. Refresh tokens rotate: the response's
+/// token replaces the stored one. A grace-window retry omits
+/// `refresh_token`, in which case the stored one is kept.
+pub async fn refresh_access_token(client_id: &str, refresh_token: &str) -> anyhow::Result<Tokens> {
+    let client = reqwest::Client::new();
+    let body = format!(
+        "client_id={}&grant_type=refresh_token&refresh_token={}",
+        url_encode(client_id),
+        url_encode(refresh_token),
+    );
+    let response = client
+        .post(TOKEN_URL)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Token refresh failed: {e}"))?;
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Refresh response was not JSON: {e}"))?;
+    parse_tokens(&body, status)
 }
 
 #[cfg(test)]
@@ -330,5 +524,51 @@ mod tests {
         let encoded = base64url_no_pad(&Sha256::digest(b"hello"));
         assert_eq!(encoded.len(), 43);
         assert!(!encoded.contains(['+', '/', '=']));
+    }
+
+    #[test]
+    fn client_file_roundtrips_through_json() {
+        let dir = std::env::temp_dir().join(format!("my-todo-test-{}", std::process::id()));
+        unsafe { std::env::set_var("MY_TODO_CONFIG_DIR", &dir) };
+        let client = ClientFile {
+            client_id: "tdd_abc".to_string(),
+            client_secret: None,
+            redirect_uris: vec![REDIRECT_URI.to_string()],
+            scope: SCOPE.to_string(),
+            access_token: Some("at".to_string()),
+            refresh_token: Some("rt".to_string()),
+            expires_at: Some(123),
+            from_env: false,
+        };
+        save_client_file(&client).unwrap();
+        let loaded = load_client_file().unwrap().unwrap();
+        assert_eq!(loaded.client_id, "tdd_abc");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("rt"));
+        assert!(!loaded.from_env);
+        // Secrets must not leak through file permissions or debug output.
+        let raw = std::fs::read_to_string(client_file_path().unwrap()).unwrap();
+        assert!(raw.contains("tdd_abc"));
+        std::fs::remove_dir_all(&dir).ok();
+        unsafe { std::env::remove_var("MY_TODO_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn parse_tokens_keeps_grace_window_refresh() {
+        let full = serde_json::json!({
+            "access_token": "at",
+            "refresh_token": "rt",
+            "expires_in": 3600,
+        });
+        let tokens =
+            parse_tokens(&full, reqwest::StatusCode::OK).unwrap();
+        assert_eq!(tokens.refresh_token.as_deref(), Some("rt"));
+        assert!(tokens.expires_at.is_some());
+
+        // Grace-window retry: no refresh_token means "keep the stored one".
+        let retry = serde_json::json!({ "access_token": "at2" });
+        let tokens =
+            parse_tokens(&retry, reqwest::StatusCode::OK).unwrap();
+        assert_eq!(tokens.access_token, "at2");
+        assert!(tokens.refresh_token.is_none());
     }
 }
