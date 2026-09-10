@@ -406,8 +406,7 @@ impl Store {
         })
     }
 
-    pub fn list_tasks_by_tag_name_with_labels(
-        &self,
+    pub fn list_tasks_by_tag_name_with_labels(        &self,
         tag_name: &str,
         path: &[String],
         cx: &impl AppContext,
@@ -433,6 +432,42 @@ impl Store {
                 labels.push(label);
             }
             Ok((tasks, labels))
+        })
+    }
+
+    pub fn list_integrations(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::Integration>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_integrations().await?)
+        })
+    }
+
+    pub fn create_integration(
+        &self,
+        provider: String,
+        account_label: Option<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Integration>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.create_integration(&provider, account_label).await?)
+        })
+    }
+
+    pub fn delete_integration(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.delete_integration(integration_id).await?)
         })
     }
 }

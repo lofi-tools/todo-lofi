@@ -7,6 +7,8 @@ edition.workspace = true
 storage = { path = "../../libs/storage" }
 tokio = { workspace = true, features = ["sync", "rt"] }
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+reqwest.workspace = true
 jiff = "0.2"
 anyhow.workspace = true
 tracing.workspace = true

@@ -103,9 +103,11 @@ impl TaskListView {
                     this.selected_labels.clear();
                     this.refresh(cx);
                 }
-                NavBarEvent::OpenProjectPicker => {
-                    // Picker open is handled by the Layout; the task list is
-                    // unaffected.
+                NavBarEvent::OpenProjectPicker
+                | NavBarEvent::OpenIntegrations
+                | NavBarEvent::OpenSettings => {
+                    // Picker/dialog open is handled by the Layout; the task
+                    // list is unaffected.
                 }
             });
 
@@ -710,6 +712,9 @@ mod tests {
                 updated_at: jiff::Timestamp::now(),
                 parent_id: None,
                 source_task_id: None,
+                deleted_at: None,
+                timezone: None,
+                comments: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },

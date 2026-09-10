@@ -15,7 +15,9 @@ use tracing_subscriber::prelude::*;
 use projects::Project;
 use store::Store;
 use theme::APP_BG;
-use ui_parts::navbar::{NavBar, NavBarEvent};
+use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
+use ui_parts::settings::SettingsView;
+use ui_parts::integrations::IntegrationsView;
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
@@ -24,8 +26,11 @@ mod components;
 mod projects;
 mod store;
 mod theme;
+mod todoist_auth;
 mod ui_parts {
+    pub mod integrations;
     pub mod navbar;
+    pub mod settings;
     pub mod project_picker;
     pub mod repeat_picker;
     pub mod task_details;
@@ -38,6 +43,10 @@ struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
     details: Entity<TaskDetails>,
+    integrations: Entity<IntegrationsView>,
+    settings: Entity<SettingsView>,
+    /// Main panel shown next to the navbar (task list by default).
+    panel: NavPanel,
     store: Store,
     /// Repos found by the home-directory scan, shown in the project picker
     /// modal opened by the + button.
@@ -85,7 +94,8 @@ impl Layout {
             |this, _nav, event, window, cx| match event {
                 NavBarEvent::TagSelected(_) | NavBarEvent::AllTasks => {
                     // Tag navigation is handled by the TaskListView's own
-                    // subscription.
+                    // subscription; make sure the task panel is visible.
+                    this.show_panel(NavPanel::Tasks, cx);
                 }
                 NavBarEvent::OpenProjectPicker => {
                     let projects = this._projects.clone();
@@ -120,10 +130,19 @@ impl Layout {
                             .content(move |content, _, _| content.child(picker.clone()))
                     });
                 }
+                NavBarEvent::OpenIntegrations => {
+                    this.show_panel(NavPanel::Integrations, cx);
+                }
+                NavBarEvent::OpenSettings => {
+                    this.show_panel(NavPanel::Settings, cx);
+                }
             },
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
+        let integrations =
+            cx.new(|cx| IntegrationsView::new(store.clone(), cx));
+        let settings = cx.new(|cx| SettingsView::new(cx));
         let details_for_list = details.clone();
         let list_for_deselect = task_list.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
@@ -200,6 +219,10 @@ impl Layout {
                     if layout._picker_subscription.is_some() {
                         return;
                     }
+                    if layout.panel != NavPanel::Tasks {
+                        layout.show_panel(NavPanel::Tasks, cx);
+                        return;
+                    }
                     if layout.details.read(cx).adding_subtask() {
                         layout
                             .details
@@ -261,12 +284,22 @@ impl Layout {
             task_list,
             nav_bar,
             details,
+            integrations,
+            settings,
+            panel: NavPanel::Tasks,
             store: store.clone(),
             _projects: Vec::new(),
             _project_subscription: project_subscription,
             _picker_subscription: None,
             _escape_observer: escape_observer,
         }
+    }
+
+    /// Swap the main panel, keeping the navbar footer highlight in sync.
+    fn show_panel(&mut self, panel: NavPanel, cx: &mut Context<Self>) {
+        self.panel = panel;
+        self.nav_bar.update(cx, |nav, cx| nav.set_panel(panel, cx));
+        cx.notify();
     }
 
     fn handle_pick_project(
@@ -339,8 +372,8 @@ impl Render for Layout {
                     .flex_row()
                     .flex_1()
                     .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
-                    .child(
-                        div()
+                    .child(match self.panel {
+                        NavPanel::Tasks => div()
                             .id("right-column")
                             .flex_1()
                             .flex()
@@ -358,8 +391,21 @@ impl Render for Layout {
                             .child(div().flex_1().child(self.task_list.clone()))
                             .when(self.details.read(cx).has_selection(), |this| {
                                 this.child(div().flex_1().child(self.details.clone()))
-                            }),
-                    ),
+                            })
+                            .into_any_element(),
+                        NavPanel::Integrations => div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().child(self.integrations.clone()))
+                            .into_any_element(),
+                        NavPanel::Settings => div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().child(self.settings.clone()))
+                            .into_any_element(),
+                    }),
             )
             .children(dialog_layer)
     }

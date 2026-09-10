@@ -17,6 +17,20 @@ pub enum NavBarEvent {
     AllTasks,
     /// The + button was clicked; the parent should open the project picker.
     OpenProjectPicker,
+    /// The footer "Integrations" row was clicked.
+    OpenIntegrations,
+    /// The footer "Settings" row was clicked.
+    OpenSettings,
+}
+
+/// Which main panel is shown next to the navbar. The navbar highlights
+/// the matching footer row.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum NavPanel {
+    #[default]
+    Tasks,
+    Integrations,
+    Settings,
 }
 
 pub struct NavBar {
@@ -24,6 +38,7 @@ pub struct NavBar {
     top_level_tags: Vec<Tag>,
     children_cache: HashMap<u64, Vec<Tag>>,
     selected_path: Vec<String>,
+    active_panel: NavPanel,
     _fetch_tags: Option<Task<()>>,
     _fetch_children: Option<Task<()>>,
 }
@@ -52,8 +67,17 @@ impl NavBar {
             top_level_tags: Vec::new(),
             children_cache: HashMap::new(),
             selected_path: Vec::new(),
+            active_panel: NavPanel::Tasks,
             _fetch_tags,
             _fetch_children: None,
+        }
+    }
+
+    /// Highlight the footer row matching the visible main panel.
+    pub fn set_panel(&mut self, panel: NavPanel, cx: &mut Context<Self>) {
+        if self.active_panel != panel {
+            self.active_panel = panel;
+            cx.notify();
         }
     }
 
@@ -200,113 +224,191 @@ impl Render for NavBar {
             .p_4()
             .v_flex()
             .gap_0p5()
-            // Deep tag trees can exceed the viewport height, so make the nav
-            // scrollable.
-            .overflow_y_scrollbar()
             .child(
                 div()
-                    .h_flex()
-                    .items_center()
-                    .justify_between()
-                    .mb_2()
-                    .mt_4()
+                    .flex_1()
+                    // Deep tag trees can exceed the viewport height, so make
+                    // the nav scrollable while the footer stays pinned.
+                    .overflow_y_scrollbar()
+                    .v_flex()
+                    .gap_0p5()
                     .child(
                         div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xa3a3a3))
-                            .child("Tags"),
+                            .h_flex()
+                            .items_center()
+                            .justify_between()
+                            .mb_2()
+                            .mt_4()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_semibold()
+                                    .text_color(rgb(0xa3a3a3))
+                                    .child("Tags"),
+                            )
+                            .child(
+                                Button::new("add-project-tag")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::Plus)
+                                    .tooltip("Tag a local project")
+                                    .on_click(cx.listener(|_this, _, _, cx| {
+                                        cx.emit(NavBarEvent::OpenProjectPicker);
+                                    })),
+                            ),
                     )
                     .child(
-                        Button::new("add-project-tag")
-                            .ghost()
-                            .compact()
-                            .icon(IconName::Plus)
-                            .tooltip("Tag a local project")
-                            .on_click(cx.listener(|_this, _, _, cx| {
-                                cx.emit(NavBarEvent::OpenProjectPicker);
+                        div()
+                            .id("all-tasks")
+                            .child("All Tasks")
+                            .px_3()
+                            .py_1()
+                            .rounded_md()
+                            .bg(if is_all_tasks {
+                                rgb(0x2a2a2a)
+                            } else {
+                                rgb(0x1e1e1e)
+                            })
+                            .hover(|s| s.bg(rgb(0x2a2a2a)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected_path.clear();
+                                cx.emit(NavBarEvent::AllTasks);
+                                cx.notify();
                             })),
-                    ),
+                    )
+                    .children(visible_tags.into_iter().map(
+                        |(tag_name, tag_label, tag_id, depth, _has_children, path, is_project)| {
+                            let tag_for_click = tag_name.clone();
+                            let path_for_click = path;
+                            let is_selected = selected_tag.as_deref() == Some(&tag_name);
+
+                            let prefix: gpui::AnyElement = if is_project {
+                                div()
+                                    .w(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0x737373))
+                                    .child(IconName::Folder)
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .w(px(16.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(0x737373))
+                                    .child("#")
+                                    .into_any_element()
+                            };
+
+                            div()
+                                .h_flex()
+                                .items_center()
+                                .ml(px(depth as f32 * 8.0))
+                                .child(
+                                    div()
+                                        .id(("tag", tag_id))
+                                        .flex_1()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(prefix)
+                                        .child(tag_label)
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .bg(if is_selected {
+                                            rgb(0x2a2a2a)
+                                        } else {
+                                            rgb(0x1e1e1e)
+                                        })
+                                        .hover(|s| s.bg(rgb(0x2a2a2a)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.navigate_to_tag(
+                                                &tag_for_click,
+                                                tag_id,
+                                                &path_for_click,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                        },
+                    )),
             )
             .child(
                 div()
-                    .id("all-tasks")
-                    .child("All Tasks")
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(if is_all_tasks {
-                        rgb(0x2a2a2a)
-                    } else {
-                        rgb(0x1e1e1e)
-                    })
-                    .hover(|s| s.bg(rgb(0x2a2a2a)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.selected_path.clear();
-                        cx.emit(NavBarEvent::AllTasks);
-                        cx.notify();
-                    })),
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(rgb(0x333333))
+                    .pt_2()
+                    .v_flex()
+                    .gap_0p5()
+                    .child(nav_footer_row(
+                        "nav-integrations",
+                        integrations_icon(),
+                        "Integrations",
+                        self.active_panel == NavPanel::Integrations,
+                        NavBarEvent::OpenIntegrations,
+                        cx,
+                    ))
+                    .child(nav_footer_row(
+                        "nav-settings",
+                        gpui_component_assets::IconName::Settings,
+                        "Settings",
+                        self.active_panel == NavPanel::Settings,
+                        NavBarEvent::OpenSettings,
+                        cx,
+                    )),
             )
-            .children(visible_tags.into_iter().map(
-                |(tag_name, tag_label, tag_id, depth, _has_children, path, is_project)| {
-                    let tag_for_click = tag_name.clone();
-                    let path_for_click = path;
-                    let is_selected = selected_tag.as_deref() == Some(&tag_name);
-
-                    let prefix: gpui::AnyElement = if is_project {
-                        div()
-                            .w(px(16.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(0x737373))
-                            .child(IconName::Folder)
-                            .into_any_element()
-                    } else {
-                        div()
-                            .w(px(16.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(0x737373))
-                            .child("#")
-                            .into_any_element()
-                    };
-
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .ml(px(depth as f32 * 8.0))
-                        .child(
-                            div()
-                                .id(("tag", tag_id))
-                                .flex_1()
-                                .h_flex()
-                                .items_center()
-                                .gap_1p5()
-                                .child(prefix)
-                                .child(tag_label)
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(if is_selected {
-                                    rgb(0x2a2a2a)
-                                } else {
-                                    rgb(0x1e1e1e)
-                                })
-                                .hover(|s| s.bg(rgb(0x2a2a2a)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.navigate_to_tag(
-                                        &tag_for_click,
-                                        tag_id,
-                                        &path_for_click,
-                                        cx,
-                                    );
-                                })),
-                        )
-                },
-            ))
     }
+}
+
+/// The integrations icon (Lucide `blocks`): three blocks piled up with a
+/// fourth one being added.
+///
+/// Rendered from vendored SVG bytes instead of the shared asset bundle:
+/// the app bundle only ships the icons in the kit's `default-icons.txt`
+/// list, which does not include `blocks`, so a bundled path would resolve
+/// to nothing and render blank.
+fn integrations_icon() -> gpui_component::Icon {
+    gpui_component::Icon::default().data(include_bytes!("../../assets/icons/blocks.svg"))
+}
+
+/// A footer row pinned at the bottom of the navbar (Integrations,
+/// Settings): icon + label, same hover treatment as the tag rows.
+fn nav_footer_row(
+    id: &'static str,
+    icon: impl IntoElement,
+    label: &'static str,
+    active: bool,
+    event: NavBarEvent,
+    cx: &mut Context<NavBar>,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h_flex()
+        .items_center()
+        .gap_1p5()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_color(rgb(0xa3a3a3))
+        .bg(if active { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
+        .hover(|s| s.bg(rgb(0x2a2a2a)))
+        .child(
+            div()
+                .w(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon),
+        )
+        .child(label)
+        .on_click(cx.listener(move |_this, _, _, cx| {
+            cx.emit(event.clone());
+        }))
 }
