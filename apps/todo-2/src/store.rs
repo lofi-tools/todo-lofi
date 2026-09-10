@@ -559,6 +559,89 @@ impl Store {
         })
     }
 
+    /// Recipe summaries (id, slug, name) for the run picker.
+    pub fn list_recipe_metas(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RecipeMeta>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_recipe_metas().await?)
+        })
+    }
+
+    /// Start a run of `recipe_id` with default params.
+    pub fn start_workflow_run(
+        &self,
+        recipe_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.create_run(recipe_id, serde_json::json!({}), None).await?;
+            Ok(())
+        })
+    }
+
+    /// Active runs with their steps, for the run banner.
+    pub fn list_active_run_views(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RunView>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_active_run_views().await?)
+        })
+    }
+
+    /// Complete a workflow step with a result (approve/reject, …).
+    pub fn complete_workflow_step(
+        &self,
+        task_id: u64,
+        result: serde_json::Value,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.complete_workflow_step(task_id, result).await?;
+            Ok(())
+        })
+    }
+
+    /// Fire an event wait (webhook/button): resolves matching "Await …"
+    /// steps and continues the run.
+    pub fn fire_workflow_event(
+        &self,
+        run_id: u64,
+        event_name: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.trigger_event(run_id, &event_name).await?;
+            Ok(())
+        })
+    }
+
+    /// Cancel a run: tombstones its steps and marks the run cancelled.
+    pub fn cancel_workflow_run(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.cancel_run(run_id).await?;
+            Ok(())
+        })
+    }
+
     /// Materialize repeat occurrences startable or due within the next
     /// 2 days. Idempotent; safe to call on startup and date rollovers.
     pub fn materialize_due_occurrences(

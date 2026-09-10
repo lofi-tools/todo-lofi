@@ -28,6 +28,9 @@ pub struct RepeatTaskTemplate {
     /// occurrences (per-generation dependence, e.g. daily "shower" waits
     /// for daily "gym"). Wired by the materializer, never by hand.
     pub blocked_by_template_id: Option<u64>,
+    /// When set, this template is a workflow schedule: each occurrence is
+    /// a new workflow run of the referenced recipe instead of a task.
+    pub recipe_id: Option<u64>,
     /// Weekdays for "every week on Mon/…" as JSON vec of 0=Mon..6=Sun.
     pub weekdays: Option<toasty::Json<Vec<u8>>>,
     /// Month day for "every Nth" (1-31, -1 = last day).
@@ -69,6 +72,7 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
             .map(str::to_owned);
         let start_time_of_day = record.get(9).and_then(|v| v.to_i64()).map(|m| m as u64);
         let blocked_by_template_id = record.get(10).and_then(|v| v.to_i64()).map(|id| id as u64);
+        let recipe_id = record.get(11).and_then(|v| v.to_i64()).map(|id| id as u64);
         Some(RepeatTaskTemplate {
             id,
             name,
@@ -76,6 +80,7 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
             time_of_day,
             start_time_of_day,
             blocked_by_template_id,
+            recipe_id,
             weekdays,
             month_day,
             strict,
@@ -89,7 +94,7 @@ fn parse_template_row(row: &toasty::stmt::Value) -> Option<RepeatTaskTemplate> {
 
 const TEMPLATE_COLUMNS: &str = "rtt.id, rtt.name, rtt.interval_days, rtt.time_of_day, \
      rtt.created_at, rtt.weekdays, rtt.month_day, rtt.strict, rtt.timezone, \
-     rtt.start_time_of_day, rtt.blocked_by_template_id";
+     rtt.start_time_of_day, rtt.blocked_by_template_id, rtt.recipe_id";
 
 impl TodoStore {
     /// The repeat template that `task_id` is an occurrence of, if any.
@@ -116,6 +121,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
@@ -157,6 +163,7 @@ impl TodoStore {
                 time_of_day,
                 start_time_of_day,
                 blocked_by_template_id: existing.blocked_by_template_id,
+                recipe_id: existing.recipe_id,
                 weekdays: existing.weekdays,
                 month_day: existing.month_day,
                 strict: existing.strict,
@@ -237,7 +244,7 @@ impl TodoStore {
         let rows = toasty::sql::query(
             r#"SELECT id, name, interval_days, time_of_day, created_at,
                       weekdays, month_day, strict, timezone, start_time_of_day,
-                      blocked_by_template_id
+                      blocked_by_template_id, recipe_id
                FROM repeat_task_templates ORDER BY id"#,
         )
         .column_types([
@@ -250,6 +257,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
@@ -301,6 +309,16 @@ impl TodoStore {
     ) -> QueryResult<usize> {
         let templates = self.list_repeat_templates().await?;
         let mut created = 0;
+        // Workflow schedules first: each occurrence is a new run of the
+        // referenced recipe, not a task.
+        for template in templates
+            .iter()
+            .filter(|t| t.recipe_id.is_some())
+        {
+            created += self
+                .materialize_recipe_schedule(template, now_secs)
+                .await?;
+        }
         for template in templates
             .into_iter()
             .filter(|t| t.interval_days >= 1 && t.time_of_day.is_some())
@@ -310,6 +328,94 @@ impl TodoStore {
                 .await?;
         }
         self.link_repeat_dependencies().await?;
+        Ok(created)
+    }
+
+    /// Create workflow runs for a recipe schedule (`recipe_id` set). The
+    /// recurrence grid advances in `interval_days` steps from the latest
+    /// scheduled run's creation date (or today); runs are created for
+    /// dates within the materialize window, plus missed past dates when
+    /// the recipe's `missed_policy` is `"catch_up"`. Idempotent: a run is
+    /// never created twice for the same civil date.
+    async fn materialize_recipe_schedule(
+        &mut self,
+        template: &RepeatTaskTemplate,
+        now_secs: u64,
+    ) -> QueryResult<usize> {
+        use jiff::ToSpan;
+        let zone = template_zone(template);
+        let today = jiff::Timestamp::from_second(now_secs as i64)
+            .map(|stamp| stamp.to_zoned(zone.clone()).date())
+            .unwrap_or_else(|_| jiff::Timestamp::now().to_zoned(zone.clone()).date());
+        let recipe_id = match template.recipe_id {
+            Some(id) => id,
+            None => return Ok(0),
+        };
+        let recipe = match self.get_recipe(recipe_id).await {
+            Ok(recipe) => recipe,
+            Err(_) => return Ok(0),
+        };
+        let parsed = crate::workflow::parse_recipe(&recipe.recipe_json.0);
+        let catch_up = parsed
+            .as_ref()
+            .map(|recipe| recipe.missed_policy == "catch_up")
+            .unwrap_or(false);
+
+        // Anchor: the latest scheduled run's civil date, else today.
+        let runs = self.runs_for_schedule(template.id).await?;
+        let anchor = runs
+            .iter()
+            .filter_map(|run| {
+                jiff::Timestamp::from_second(run.created_at.as_second())
+                    .ok()
+                    .map(|stamp| stamp.to_zoned(zone.clone()).date())
+            })
+            .max()
+            .unwrap_or(today);
+        let step = template.interval_days.max(1) as i64;
+        let mut created = 0;
+        for k in 0..1000 {
+            let date = anchor.checked_add((k * step).days()).unwrap_or(anchor);
+            if date < today {
+                if !catch_up {
+                    continue;
+                }
+                // Catch-up: create a run for every missed occurrence.
+            } else if date == today {
+                // Due today: fire.
+            } else {
+                let hour = template.time_of_day.map(|m| (m / 60) as i8).unwrap_or(0);
+                let minute = template.time_of_day.map(|m| (m % 60) as i8).unwrap_or(0);
+                let due_epoch = date
+                    .at(hour, minute, 0, 0)
+                    .to_zoned(zone.clone())
+                    .ok()
+                    .map(|zoned| zoned.timestamp().as_second() as u64)
+                    .unwrap_or(now_secs);
+                if due_epoch > now_secs + MATERIALIZE_WINDOW_SECS {
+                    break;
+                }
+            }
+            if runs.iter().any(|run| {
+                jiff::Timestamp::from_second(run.created_at.as_second())
+                    .ok()
+                    .map(|stamp| stamp.to_zoned(zone.clone()).date())
+                    == Some(date)
+            }) {
+                continue;
+            }
+            self.create_run(recipe_id, serde_json::json!({}), Some(template.id))
+                .await?;
+            created += 1;
+        }
+        // Keep catch-up bounded so a long-gap schedule can't flood.
+        if created > 20 {
+            tracing::warn!(
+                template = template.id,
+                created,
+                "recipe schedule catch-up created many runs"
+            );
+        }
         Ok(created)
     }
 
@@ -870,6 +976,7 @@ mod tests {
             month_day: None,
             strict: false,
             timezone: Some("America/New_York".to_string()),
+            recipe_id: None,
             created_at: jiff::Timestamp::now(),
         };
         // Noon UTC = 8am in New York (EDT): same civil date.

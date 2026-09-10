@@ -542,11 +542,191 @@ impl TodoStore {
             }
         }
 
+        self.seed_workflows().await?;
+
         tracing::info!(
             tasks = task_map.len(),
             tags = tag_map.len(),
             "Seed data inserted"
         );
+        Ok(())
+    }
+
+    /// Seed the eight workflow recipes from the spec's acceptance cases
+    /// (v2 form: timer waits live on the edge, no `time` nodes) and start
+    /// one demo run of each so every case is visible in the UI. The
+    /// Birthday recipe also gets a yearly schedule template.
+    pub async fn seed_workflows(&mut self) -> crate::QueryResult<()> {
+        use serde_json::json;
+        if !self.list_recipes().await?.is_empty() {
+            return Ok(());
+        }
+        let recipes: [(&str, serde_json::Value); 8] = [
+            // Case 1: instant dump of three start nodes.
+            (
+                "packing-list",
+                json!({
+                    "name": "Packing List",
+                    "nodes": [
+                        { "id": "swimsuit", "kind": "action", "title": "Pack swimsuit" },
+                        { "id": "sunscreen", "kind": "action", "title": "Pack sunscreen" },
+                        { "id": "towel", "kind": "action", "title": "Pack towel" }
+                    ],
+                    "edges": []
+                }),
+            ),
+            // Case 2: relative timer — the follow-up appears 4 days after
+            // the application is submitted, not at run creation.
+            (
+                "follow-up",
+                json!({
+                    "name": "Follow-up",
+                    "nodes": [
+                        { "id": "submit", "kind": "action", "title": "Submit application" },
+                        { "id": "followup", "kind": "action", "title": "Follow up" }
+                    ],
+                    "edges": [
+                        { "from": "submit", "to": "followup", "condition_type": "timer", "condition_value": "4 days" }
+                    ]
+                }),
+            ),
+            // Case 3: annual birthday workflow, isolated runs per year.
+            (
+                "birthday",
+                json!({
+                    "name": "Birthday",
+                    "missed_policy": "skip",
+                    "nodes": [
+                        { "id": "greet", "kind": "action", "title": "Send birthday greeting" },
+                        { "id": "call", "kind": "action", "title": "Call for birthday" }
+                    ],
+                    "edges": [
+                        { "from": "greet", "to": "call", "condition_type": "on_complete" }
+                    ]
+                }),
+            ),
+            // Case 4: AI draft, human approval as a subtask, rejection
+            // spawns Edit and re-opens the draft for another pass.
+            (
+                "gatekeeper",
+                json!({
+                    "name": "Gatekeeper",
+                    "nodes": [
+                        { "id": "draft", "kind": "action", "title": "Draft the email", "ai": true, "description": "An AI or script can pick this up and write a draft." },
+                        { "id": "approve", "kind": "action", "title": "Approve draft", "approval": true, "retrigger_on_reject": true },
+                        { "id": "send", "kind": "action", "title": "Send message" },
+                        { "id": "edit", "kind": "action", "title": "Edit draft" }
+                    ],
+                    "edges": [
+                        { "from": "draft", "to": "approve", "condition_type": "on_result", "condition_value": {} },
+                        { "from": "approve", "to": "send", "condition_type": "on_result", "condition_value": { "approved": true } },
+                        { "from": "approve", "to": "edit", "condition_type": "on_result", "condition_value": { "approved": false } }
+                    ]
+                }),
+            ),
+            // Case 5: parallel research, summary only when all three are
+            // done, in any order.
+            (
+                "parallel-research",
+                json!({
+                    "name": "Parallel Research",
+                    "nodes": [
+                        { "id": "research_a", "kind": "action", "title": "Research topic A" },
+                        { "id": "research_b", "kind": "action", "title": "Research topic B" },
+                        { "id": "research_c", "kind": "action", "title": "Research topic C" },
+                        { "id": "final_summary", "kind": "action", "title": "Write final summary" }
+                    ],
+                    "edges": [
+                        { "from": "research_a", "to": "final_summary", "condition_type": "on_complete" },
+                        { "from": "research_b", "to": "final_summary", "condition_type": "on_complete" },
+                        { "from": "research_c", "to": "final_summary", "condition_type": "on_complete" }
+                    ]
+                }),
+            ),
+            // Case 6: runtime param picks an immediate or delayed call.
+            (
+                "conditional-urgency",
+                json!({
+                    "name": "Conditional Urgency",
+                    "params": { "urgent": { "type": "boolean", "default": false, "description": "Call immediately when true" } },
+                    "nodes": [
+                        { "id": "review", "kind": "action", "title": "Review the lead" },
+                        { "id": "call_client", "kind": "action", "title": "Call client" }
+                    ],
+                    "edges": [
+                        { "from": "review", "to": "call_client", "condition_type": "timer", "condition_value": { "if": "param:urgent", "then": "0 days", "else": "3 days" } }
+                    ]
+                }),
+            ),
+            // Case 7: external event — an "Await reply" task is visible and
+            // tickable; the webhook/button fires the same signal.
+            (
+                "contract-follow-up",
+                json!({
+                    "name": "Contract Follow-up",
+                    "nodes": [
+                        { "id": "send_email", "kind": "action", "title": "Send email" },
+                        { "id": "await_reply", "kind": "event", "title": "Await reply from client" },
+                        { "id": "draft_contract", "kind": "action", "title": "Draft contract" }
+                    ],
+                    "edges": [
+                        { "from": "send_email", "to": "await_reply", "condition_type": "event", "condition_value": "client_replied" },
+                        { "from": "await_reply", "to": "draft_contract", "condition_type": "on_complete" }
+                    ]
+                }),
+            ),
+            // Case 8: manual real-world await — mark received appears after
+            // a 3-day wait and is ticked by hand when the package arrives.
+            (
+                "order-delivery",
+                json!({
+                    "name": "Order Delivery",
+                    "nodes": [
+                        { "id": "place_order", "kind": "action", "title": "Place order" },
+                        { "id": "mark_received", "kind": "action", "title": "Mark package as received" }
+                    ],
+                    "edges": [
+                        { "from": "place_order", "to": "mark_received", "condition_type": "timer", "condition_value": "3 days" }
+                    ]
+                }),
+            ),
+        ];
+        let mut ids = std::collections::HashMap::new();
+        for (slug, recipe_json) in recipes {
+            let recipe = self.create_recipe(slug, recipe_json).await?;
+            ids.insert(slug, recipe.id);
+        }
+        // One demo run of each use case. Conditional Urgency runs with its
+        // default params (not urgent → 3-day wait).
+        self.create_run(ids["packing-list"], json!({}), None).await?;
+        self.create_run(ids["follow-up"], json!({}), None).await?;
+        self.create_run(ids["birthday"], json!({}), None).await?;
+        self.create_run(ids["gatekeeper"], json!({}), None).await?;
+        self.create_run(ids["parallel-research"], json!({}), None).await?;
+        self.create_run(ids["conditional-urgency"], json!({}), None).await?;
+        self.create_run(ids["contract-follow-up"], json!({}), None).await?;
+        self.create_run(ids["order-delivery"], json!({}), None).await?;
+
+        // Yearly schedule for the Birthday recipe: fires March 1 each year
+        // via the repeat materializer, creating a brand new isolated run.
+        let birthday_id = ids["birthday"];
+        let zone = jiff::tz::TimeZone::system();
+        let timezone = zone.iana_name().unwrap_or("UTC").to_string();
+        crate::RepeatTaskTemplate::create()
+            .name("Birthday".to_string())
+            .interval_days(365)
+            .time_of_day(None)
+            .start_time_of_day(None)
+            .weekdays(None)
+            .month_day(Some(1))
+            .strict(false)
+            .timezone(Some(timezone))
+            .recipe_id(Some(birthday_id))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "seed birthday workflow schedule",
+            })?;
         Ok(())
     }
 }
@@ -561,13 +741,16 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 18);
+        // 18 demo tasks plus 12 workflow step tasks spawned by the 8 demo
+        // runs (packing-list 3, parallel-research 3, one each elsewhere).
+        assert_eq!(tasks.len(), 30);
 
         let tags = store.list_tags().await?;
         assert_eq!(tags.len(), 9);
 
-        // Every seed row is marked so sync never touches it.
-        assert!(tasks.iter().all(|t| t.is_seed));
+        // Every seed row is marked so sync never touches it; workflow
+        // steps are covered by the workflow_run_id sync guard instead.
+        assert!(tasks.iter().all(|t| t.is_seed || t.workflow_run_id.is_some()));
         assert!(tags.iter().all(|t| t.is_seed));
 
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");

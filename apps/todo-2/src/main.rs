@@ -21,6 +21,7 @@ use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
+use ui_parts::workflows::{WorkflowPanel, WorkflowPanelEvent};
 
 mod components;
 mod projects;
@@ -37,12 +38,14 @@ mod ui_parts {
     pub mod task_list;
     pub mod task_picker;
     pub mod task_row;
+    pub mod workflows;
 }
 
 struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
     details: Entity<TaskDetails>,
+    workflows: Entity<WorkflowPanel>,
     integrations: Entity<IntegrationsView>,
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
@@ -145,6 +148,9 @@ impl Layout {
                 NavBarEvent::OpenIntegrations => {
                     this.show_panel(NavPanel::Integrations, cx);
                 }
+                NavBarEvent::OpenWorkflows => {
+                    this.show_panel(NavPanel::Workflows, cx);
+                }
                 NavBarEvent::OpenSettings => {
                     this.show_panel(NavPanel::Settings, cx);
                 }
@@ -152,6 +158,16 @@ impl Layout {
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
+        let workflows = cx.new(|cx| WorkflowPanel::new(store.clone(), cx));
+        // A workflow action (start run, approve/reject, fire event) can
+        // spawn or complete tasks: reload the task list.
+        let list_for_workflow = task_list.clone();
+        cx.subscribe(&workflows, move |_this, _panel, event, cx| match event {
+            WorkflowPanelEvent::Changed => {
+                list_for_workflow.update(cx, |list, cx| list.refresh(cx));
+            }
+        })
+        .detach();
         let integrations =
             cx.new(|cx| IntegrationsView::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsView::new(cx));
@@ -195,6 +211,7 @@ impl Layout {
         let list_for_toggle = task_list.clone();
         let list_for_pending = task_list.clone();
         let details_for_pending = details.clone();
+        let workflows_for_toggle = workflows.clone();
         cx.subscribe_in(
             &details,
             window,
@@ -203,6 +220,9 @@ impl Layout {
                     list_for_toggle.update(cx, |list, cx| {
                         list.on_task_done_toggled(*task_id, *done, cx)
                     });
+                    // Steps can be ticked from the task list too; keep the
+                    // run cards in sync.
+                    workflows_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
                 }
                 TaskDetailsEvent::TitleCommitted { task_id, title } => {
                     list_for_toggle.update(cx, |list, cx| {
@@ -307,6 +327,7 @@ impl Layout {
             task_list,
             nav_bar,
             details,
+            workflows,
             integrations,
             settings,
             panel: NavPanel::Tasks,
@@ -506,6 +527,12 @@ impl Render for Layout {
                             .flex()
                             .flex_row()
                             .child(div().flex_1().child(self.integrations.clone()))
+                            .into_any_element(),
+                        NavPanel::Workflows => div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().child(self.workflows.clone()))
                             .into_any_element(),
                         NavPanel::Settings => div()
                             .flex_1()

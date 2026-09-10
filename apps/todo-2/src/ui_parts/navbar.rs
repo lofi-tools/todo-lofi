@@ -19,6 +19,8 @@ pub enum NavBarEvent {
     OpenProjectPicker,
     /// The footer "Integrations" row was clicked.
     OpenIntegrations,
+    /// The footer "Workflows" row was clicked.
+    OpenWorkflows,
     /// The footer "Settings" row was clicked.
     OpenSettings,
 }
@@ -30,6 +32,7 @@ pub enum NavPanel {
     #[default]
     Tasks,
     Integrations,
+    Workflows,
     Settings,
 }
 
@@ -377,6 +380,14 @@ impl Render for NavBar {
                         "Integrations",
                         self.active_panel == NavPanel::Integrations,
                         NavBarEvent::OpenIntegrations,
+                        cx,
+                    ))
+                    .child(nav_footer_row(
+                        "nav-workflows",
+                        gpui_component_assets::IconName::Play,
+                        "Workflows",
+                        self.active_panel == NavPanel::Workflows,
+                        NavBarEvent::OpenWorkflows,
                         cx,
                     ))
                     .child(nav_footer_row(

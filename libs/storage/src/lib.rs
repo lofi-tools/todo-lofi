@@ -12,6 +12,7 @@ pub mod task;
 pub mod todoist;
 pub mod testing;
 pub mod tracing_setup;
+pub mod workflow;
 
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
@@ -23,6 +24,10 @@ pub mod prelude {
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta};
+    pub use crate::workflow::{
+        Recipe, RecipeEdge, RecipeMeta, RecipeNode, RunStepView, RunView, WorkflowRecipe,
+        WorkflowRun,
+    };
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;
 }
@@ -46,7 +51,13 @@ impl TodoStore {
         let driver = Turso::new(&config.db_uri).context(error::TursoDriverSnafu)?;
 
         let db = toasty::Db::builder()
-            .models(toasty::models!(task::Task, tag::Tag, repeat::RepeatTaskTemplate))
+            .models(toasty::models!(
+                task::Task,
+                tag::Tag,
+                repeat::RepeatTaskTemplate,
+                workflow::WorkflowRecipe,
+                workflow::WorkflowRun
+            ))
             .build(driver)
             .await
             .context(error::DbBuildSnafu)?;

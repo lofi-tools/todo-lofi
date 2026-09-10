@@ -119,6 +119,7 @@ impl TaskListView {
                 }
                 NavBarEvent::OpenProjectPicker
                 | NavBarEvent::OpenIntegrations
+                | NavBarEvent::OpenWorkflows
                 | NavBarEvent::OpenSettings => {
                     // Picker/dialog open is handled by the Layout; the task
                     // list is unaffected.

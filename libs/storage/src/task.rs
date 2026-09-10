@@ -54,6 +54,13 @@ pub struct Task {
     /// integration (push skips it, import never relinks it).
     #[default(false)]
     pub is_seed: bool,
+    /// The workflow run this task is a step of, if it was created by the
+    /// workflow engine. `NULL` for ordinary user tasks. Workflow steps
+    /// never sync to any integration.
+    pub workflow_run_id: Option<u64>,
+    /// The recipe node this task materializes (engine bookkeeping for edge
+    /// evaluation and event lookup). Only set on workflow steps.
+    pub node_id: Option<String>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -170,6 +177,8 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let blocked_until = record.get(13).and_then(|v| v.to_u64());
     let source_task_id = record.get(14).and_then(|v| v.to_i64()).map(|id| id as u64);
     let completed_at = record.get(15).and_then(|v| v.to_u64());
+    let workflow_run_id = record.get(16).and_then(|v| v.to_i64()).map(|id| id as u64);
+    let node_id = record.get(17).and_then(|v| v.as_str()).map(str::to_owned);
 
     let task = Task {
         id,
@@ -193,6 +202,8 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         // Raw list queries don't select the seed marker; only `get_task`
         // (used by sync guards) needs it accurate.
         is_seed: false,
+        workflow_run_id,
+        node_id,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };
@@ -235,6 +246,17 @@ impl TodoStore {
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;
         tracing::info!(id, done, "update_task_done: done");
+        // Workflow steps evaluate their outgoing edges on completion
+        // (spawning downstream steps, recording results, auto-completing
+        // the run). Reopening just flips the flag back; the engine does
+        // not un-spawn.
+        if done {
+            if let Ok(task) = self.get_task(id).await
+                && task.workflow_run_id.is_some()
+            {
+                self.evaluate_workflow_completion(&task).await?;
+            }
+        }
         Ok(())
     }
 
@@ -384,7 +406,8 @@ impl TodoStore {
             SELECT
                 id, title, description, branch_name, labels, blocked_by,
                 deadline, importance_factor, urgency_factor, done, created_at, updated_at,
-                parent_id, blocked_until, source_task_id, completed_at
+                parent_id, blocked_until, source_task_id, completed_at,
+                workflow_run_id, node_id
             FROM tasks
             WHERE 1 = 1
             {}
@@ -414,6 +437,8 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
         ])
         .exec(&mut self.db)
         .await
@@ -516,7 +541,8 @@ impl TodoStore {
             SELECT
                 t.id, t.title, t.description, t.branch_name, t.labels, t.blocked_by,
                 t.deadline, t.importance_factor, t.urgency_factor, t.done, t.created_at, t.updated_at,
-                t.parent_id, t.blocked_until, t.source_task_id, t.completed_at
+                t.parent_id, t.blocked_until, t.source_task_id, t.completed_at,
+                t.workflow_run_id, t.node_id
             FROM tasks t
             WHERE t.id IN ({})
             {}
@@ -552,13 +578,15 @@ impl TodoStore {
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::I64,
-                toasty::stmt::Type::I64,
-                toasty::stmt::Type::I64,
-                toasty::stmt::Type::I64,
-            ])
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::ListTasksByTagSnafu { tag_id })?;
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+        ])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::ListTasksByTagSnafu { tag_id })?;
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {

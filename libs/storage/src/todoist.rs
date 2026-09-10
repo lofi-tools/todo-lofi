@@ -539,8 +539,9 @@ impl TodoStore {
     /// Push a field delta for one linked task via Sync commands
     /// (`item_update` for partial fields, `item_close`/`item_uncomplete`
     /// for completion — `item_update` explicitly does not support those).
-    /// Seed rows never sync: silently skips them. Refreshes the link
-    /// timestamp so the next import sees remote state as current.
+    /// Seed rows and workflow steps never sync: silently skips them.
+    /// Refreshes the link timestamp so the next import sees remote state
+    /// as current.
     pub async fn push_todoist_patch(
         &mut self,
         token: &str,
@@ -549,7 +550,8 @@ impl TodoStore {
         task_id: u64,
         patch: &TaskPatch,
     ) -> QueryResult<()> {
-        if self.get_task(task_id).await?.is_seed {
+        let task = self.get_task(task_id).await?;
+        if task.is_seed || task.workflow_run_id.is_some() {
             return Ok(());
         }
         let mut update_args = serde_json::Map::new();
