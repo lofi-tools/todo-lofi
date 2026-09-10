@@ -528,6 +528,17 @@ impl Store {
         })
     }
 
+    pub fn tag_link_providers(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<std::collections::HashMap<u64, String>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_link_providers().await?)
+        })
+    }
+
     /// Sync all linked Todoist projects of every Todoist integration.    /// Runs entirely on the Tokio runtime (network + DB).
     pub fn sync_todoist(
         &self,

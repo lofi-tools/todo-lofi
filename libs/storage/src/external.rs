@@ -444,6 +444,33 @@ impl TodoStore {
             .collect())
     }
 
+    /// Provider per linked tag (`tag_id → provider`), for badging synced
+    /// tags in the UI. Unlinked tags are absent from the map.
+    pub async fn tag_link_providers(
+        &mut self,
+    ) -> QueryResult<std::collections::HashMap<u64, String>> {
+        let rows = toasty::sql::query(
+            r#"SELECT l.tag_id, i.provider FROM external_tag_links l
+               JOIN integrations i ON i.id = l.integration_id"#,
+        )
+        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "tag link providers",
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            if let toasty::stmt::Value::Record(record) = row {
+                let tag_id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
+                if let Some(provider) = record.get(1).and_then(|v| v.as_str()) {
+                    map.insert(tag_id, provider.to_string());
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// Record a per-project sync watermark after success (§4.7).
     pub async fn record_watermark(
         &mut self,

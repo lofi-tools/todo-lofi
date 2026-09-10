@@ -1,6 +1,6 @@
 use gpui::{
     Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
+    StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -39,6 +39,9 @@ pub struct NavBar {
     children_cache: HashMap<u64, Vec<Tag>>,
     selected_path: Vec<String>,
     active_panel: NavPanel,
+    /// Provider per synced tag (`tag_id → provider`), for the corner badge
+    /// on synced tag icons. Unlinked tags are absent.
+    linked_providers: HashMap<u64, String>,
     _fetch_tags: Option<Task<()>>,
     _fetch_children: Option<Task<()>>,
 }
@@ -46,20 +49,25 @@ pub struct NavBar {
 impl NavBar {
     pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
         let fetch_store = store.clone();
-        let fetch_task = fetch_store.list_top_level_tags(cx);
+        let tags_task = fetch_store.list_top_level_tags(cx);
+        let providers_task = fetch_store.tag_link_providers(cx);
 
-        let _fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
-            Ok(tags) => {
-                this.update(cx, |this, cx| {
-                    this.top_level_tags = tags;
-                    this._fetch_tags = None;
-                    cx.notify();
-                })
-                .ok();
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch tags: {e}");
-            }
+        let _fetch_tags = Some(cx.spawn(async move |this, cx| {
+            let tags = match tags_task.await {
+                Ok(tags) => tags,
+                Err(e) => {
+                    tracing::error!("Failed to fetch tags: {e}");
+                    return;
+                }
+            };
+            let providers = providers_task.await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.top_level_tags = tags;
+                this.linked_providers = providers;
+                this._fetch_tags = None;
+                cx.notify();
+            })
+            .ok();
         }));
 
         Self {
@@ -68,6 +76,7 @@ impl NavBar {
             children_cache: HashMap::new(),
             selected_path: Vec::new(),
             active_panel: NavPanel::Tasks,
+            linked_providers: HashMap::new(),
             _fetch_tags,
             _fetch_children: None,
         }
@@ -84,20 +93,25 @@ impl NavBar {
     /// Re-fetch the tag tree after a new tag was created elsewhere (e.g. the
     /// project picker modal).
     pub fn refresh_tags(&mut self, cx: &mut Context<Self>) {
-        let fetch_task = self.store.list_top_level_tags(cx);
-        self._fetch_tags = Some(cx.spawn(async move |this, cx| match fetch_task.await {
-            Ok(tags) => {
-                this.update(cx, |this, cx| {
-                    this.top_level_tags = tags;
-                    this.children_cache.clear();
-                    this._fetch_tags = None;
-                    cx.notify();
-                })
-                .ok();
-            }
-            Err(e) => {
-                tracing::error!("Failed to refresh tags: {e}");
-            }
+        let tags_task = self.store.list_top_level_tags(cx);
+        let providers_task = self.store.tag_link_providers(cx);
+        self._fetch_tags = Some(cx.spawn(async move |this, cx| {
+            let tags = match tags_task.await {
+                Ok(tags) => tags,
+                Err(e) => {
+                    tracing::error!("Failed to refresh tags: {e}");
+                    return;
+                }
+            };
+            let providers = providers_task.await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.top_level_tags = tags;
+                this.linked_providers = providers;
+                this.children_cache.clear();
+                this._fetch_tags = None;
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
@@ -293,6 +307,10 @@ impl Render for NavBar {
                                     .child(IconName::Folder)
                                     .into_any_element()
                             } else {
+                                let badge = self
+                                    .linked_providers
+                                    .get(&tag_id)
+                                    .map(|provider| provider.as_str());
                                 div()
                                     .w(px(16.))
                                     .flex_none()
@@ -300,7 +318,14 @@ impl Render for NavBar {
                                     .items_center()
                                     .justify_center()
                                     .text_color(rgb(0x737373))
-                                    .child("#")
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .child("#")
+                                            .when_some(badge, |this, provider| {
+                                                this.child(sync_badge(provider))
+                                            }),
+                                    )
                                     .into_any_element()
                             };
 
@@ -375,6 +400,27 @@ impl Render for NavBar {
 /// to nothing and render blank.
 fn integrations_icon() -> gpui_component::Icon {
     gpui_component::Icon::default().data(include_bytes!("../../assets/icons/blocks.svg"))
+}
+
+/// Tiny provider badge overlaid on the bottom-right corner of a tag's `#`
+/// icon. Unknown providers get no badge.
+fn sync_badge(provider: &str) -> gpui::AnyElement {
+    let icon: gpui::AnyElement = match provider {
+        "todoist" => gpui_component::Icon::default()
+            .data(include_bytes!("../../assets/icons/todoist.svg"))
+            .size(px(7.))
+            .into_any_element(),
+        _ => return div().into_any_element(),
+    };
+    div()
+        .absolute()
+        .bottom(px(0.))
+        .right(px(-4.))
+        .rounded_full()
+        .bg(rgb(0x1e1e1e))
+        .p(px(2.))
+        .child(icon)
+        .into_any_element()
 }
 
 /// A footer row pinned at the bottom of the navbar (Integrations,
