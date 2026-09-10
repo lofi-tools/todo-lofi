@@ -124,6 +124,15 @@ async fn register_client() -> anyhow::Result<ClientFile> {
             "Client registration failed ({status}): {body}"
         ));
     }
+    if let Some(method) = body.get("token_endpoint_auth_method").and_then(|m| m.as_str()) {
+        tracing::info!("Registered client auth method: {method}");
+        if method != "none" {
+            return Err(anyhow::anyhow!(
+                "Todoist did not register a PKCE public client (got {method}); \
+                 delete ~/.config/my-todo/todoist.json and retry"
+            ));
+        }
+    }
     let registered = ClientFile {
         client_id: body
             .get("client_id")
@@ -259,6 +268,7 @@ pub async fn connect() -> anyhow::Result<String> {
         url_encode(&code_challenge(&verifier)),
     );
     open_browser(&url);
+    tracing::info!("Todoist authorize URL: {url}");
 
     let code = wait_for_code(listener, &state).await?;
     let tokens = exchange_code(&config, &code, &verifier).await?;
