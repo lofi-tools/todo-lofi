@@ -551,7 +551,7 @@ impl TodoStore {
         patch: &TaskPatch,
     ) -> QueryResult<()> {
         let task = self.get_task(task_id).await?;
-        if task.is_seed || task.workflow_run_id.is_some() {
+        if task.is_seed || task.workflow_run_id.is_some() || task.trip_id.is_some() {
             return Ok(());
         }
         let mut update_args = serde_json::Map::new();

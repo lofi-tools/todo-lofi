@@ -53,9 +53,14 @@ impl AutomationsPanel {
         }));
     }
 
-    /// Run an action that yields (), then re-fetch and tell the task list
-    /// to reload (enabling spawns steps, disabling tombstones them).
-    fn run_action(&mut self, action: Task<anyhow::Result<()>>, cx: &mut Context<Self>) {
+    /// Run an action, then re-fetch and tell the task list to reload
+    /// (enabling spawns steps, disabling tombstones them). The action's
+    /// success value (if any) is discarded.
+    fn run_action<T: Send + 'static>(
+        &mut self,
+        action: Task<anyhow::Result<T>>,
+        cx: &mut Context<Self>,
+    ) {
         let store = self.store.clone();
         self._fetch = Some(cx.spawn(async move |this, cx| {
             if let Err(e) = action.await {
@@ -72,9 +77,16 @@ impl AutomationsPanel {
         }));
     }
 
-    fn enable(&mut self, recipe_id: u64, cx: &mut Context<Self>) {
-        let start = self.store.start_workflow_run(recipe_id, cx);
-        self.run_action(start, cx);
+    fn enable(&mut self, recipe_id: u64, managed: bool, cx: &mut Context<Self>) {
+        // Managed-tag automations enable by creating their tag (their
+        // panel generates content on demand), not by starting a run.
+        if managed {
+            let enable = self.store.enable_managed_recipe(recipe_id, cx);
+            self.run_action(enable, cx);
+        } else {
+            let start = self.store.start_workflow_run(recipe_id, cx);
+            self.run_action(start, cx);
+        }
     }
 
     fn disable(&mut self, recipe_id: u64, cx: &mut Context<Self>) {
@@ -131,7 +143,29 @@ impl AutomationsPanel {
     ) -> gpui::AnyElement {
         let recipe_id = meta.id;
         let running = meta.active_runs > 0;
-        let toggle: gpui::AnyElement = if running {
+        let managed = meta.managed_tag.is_some();
+        let enabled = if managed { meta.managed_enabled } else { running };
+        let toggle: gpui::AnyElement = if enabled && managed {
+            Button::new(format!("disable-{}", recipe_id))
+                .ghost()
+                .compact()
+                .label("Disable")
+                .tooltip("Remove this automation's tag and its content")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.disable(recipe_id, cx);
+                }))
+                .into_any_element()
+        } else if managed {
+            Button::new(format!("enable-{}", recipe_id))
+                .ghost()
+                .compact()
+                .label("Enable")
+                .tooltip("Create the tag with its special panel")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enable(recipe_id, true, cx);
+                }))
+                .into_any_element()
+        } else if running {
             Button::new(format!("disable-{}", recipe_id))
                 .ghost()
                 .compact()
@@ -148,7 +182,7 @@ impl AutomationsPanel {
                 .label("Enable")
                 .tooltip("Start a run: its steps appear in the task list")
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.enable(recipe_id, cx);
+                    this.enable(recipe_id, false, cx);
                 }))
                 .into_any_element()
         };
@@ -196,12 +230,12 @@ impl AutomationsPanel {
                     .h_flex()
                     .items_center()
                     .gap_2()
-                    .when(running, |this| {
+                    .when(enabled, |this| {
                         this.child(
                             div()
                                 .text_sm()
                                 .text_color(rgb(0x4ade80))
-                                .child("Running"),
+                                .child(if managed { "Enabled" } else { "Running" }),
                         )
                     })
                     .child(toggle),

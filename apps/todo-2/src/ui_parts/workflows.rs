@@ -159,6 +159,9 @@ impl WorkflowPanel {
         let start_buttons: Vec<gpui::AnyElement> = self
             .recipes
             .iter()
+            // Managed-tag automations (travel checklists) are enabled from
+            // the Automations panel: they own a tag+panel, not a run.
+            .filter(|recipe| recipe.managed_tag.is_none())
             .map(|recipe| {
                 let recipe_id = recipe.id;
                 let name = recipe.name.clone();

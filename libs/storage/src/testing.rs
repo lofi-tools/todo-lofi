@@ -553,21 +553,24 @@ impl TodoStore {
     }
 
     /// Seed the eight workflow recipes from the spec's acceptance cases
-    /// (v2 form: timer waits live on the edge, no `time` nodes) and start
-    /// one demo run of each so every case is visible in the UI. The
-    /// Birthday recipe also gets a yearly schedule template.
+    /// (v2 form: timer waits live on the edge, no `time` nodes). No runs
+    /// are started: automations are disabled by default and the user
+    /// enables them from the Automations panel. The Birthday recipe also
+    /// gets a yearly schedule template.
     pub async fn seed_workflows(&mut self) -> crate::QueryResult<()> {
         use serde_json::json;
         if !self.list_recipes().await?.is_empty() {
             return Ok(());
         }
         let recipes: [(&str, serde_json::Value); 8] = [
-            // Case 1: instant dump of three start nodes.
+            // Case 1: instant dump of three start nodes. Enabled via its
+            // managed tag (the Travel panel), not by starting a run.
             (
                 "packing-list",
                 json!({
                     "name": "Travel checklists",
-                    "description": "Pack a checklist for your trip: three items appear at once.",
+                    "description": "Build a packing checklist per trip: pack and before-leaving sections.",
+                    "managed_tag": "managed:packing-list",
                     "nodes": [
                         { "id": "swimsuit", "kind": "action", "title": "Pack swimsuit" },
                         { "id": "sunscreen", "kind": "action", "title": "Pack sunscreen" },
@@ -704,16 +707,7 @@ impl TodoStore {
             let recipe = self.create_recipe(slug, recipe_json).await?;
             ids.insert(slug, recipe.id);
         }
-        // One demo run of each use case. Conditional Urgency runs with its
-        // default params (not urgent → 3-day wait).
-        self.create_run(ids["packing-list"], json!({}), None).await?;
-        self.create_run(ids["follow-up"], json!({}), None).await?;
-        self.create_run(ids["birthday"], json!({}), None).await?;
-        self.create_run(ids["gatekeeper"], json!({}), None).await?;
-        self.create_run(ids["parallel-research"], json!({}), None).await?;
-        self.create_run(ids["conditional-urgency"], json!({}), None).await?;
-        self.create_run(ids["contract-follow-up"], json!({}), None).await?;
-        self.create_run(ids["order-delivery"], json!({}), None).await?;
+        // No runs are created: every automation starts disabled.
 
         // Yearly schedule for the Birthday recipe: fires March 1 each year
         // via the repeat materializer, creating a brand new isolated run.
@@ -749,17 +743,28 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        // 18 demo tasks plus 12 workflow step tasks spawned by the 8 demo
-        // runs (packing-list 3, parallel-research 3, one each elsewhere).
-        assert_eq!(tasks.len(), 30);
+        assert_eq!(tasks.len(), 18);
 
         let tags = store.list_tags().await?;
         assert_eq!(tags.len(), 9);
 
         // Every seed row is marked so sync never touches it; workflow
         // steps are covered by the workflow_run_id sync guard instead.
-        assert!(tasks.iter().all(|t| t.is_seed || t.workflow_run_id.is_some()));
+        assert!(tasks.iter().all(|t| t.is_seed));
         assert!(tags.iter().all(|t| t.is_seed));
+
+        // Automations start disabled: no runs exist until enabled.
+        assert!(store.list_workflow_runs().await?.is_empty());
+        // The travel automation is a managed-tag recipe but its tag is not
+        // created until the automation is enabled.
+        assert!(
+            store
+                .list_recipe_metas()
+                .await?
+                .into_iter()
+                .find(|m| m.slug == "packing-list")
+                .is_some_and(|m| m.managed_tag.is_some())
+        );
 
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
         assert!(task_with_parent.is_some());

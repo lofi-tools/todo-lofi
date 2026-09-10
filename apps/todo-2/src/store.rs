@@ -559,6 +559,75 @@ impl Store {
         })
     }
 
+    /// Look up a tag by name (used to detect managed tags on selection).
+    pub fn get_tag_by_name(
+        &self,
+        name: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::Tag>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_tag_by_name(&name).await?)
+        })
+    }
+
+    /// The recipe that manages `tag_id`, if the tag is owned by an
+    /// automation (drives the special panel in the Layout).
+    pub fn managed_recipe_for_tag(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<u64>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.managed_recipe_for_tag(tag_id).await?)
+        })
+    }
+
+    /// Enable a managed-tag automation: create its tag (idempotent).
+    pub fn enable_managed_recipe(
+        &self,
+        recipe_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Tag>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.enable_managed_recipe(recipe_id).await?)
+        })
+    }
+
+    /// Trips of the managed tag with their checklist sections.
+    pub fn list_trips_with_items(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::TripWithItems>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_trips_with_items(tag_id).await?)
+        })
+    }
+
+    /// Add a trip: stores it and spawns its checklist items as tasks.
+    pub fn add_trip(
+        &self,
+        tag_id: u64,
+        name: String,
+        days: String,
+        activities: Vec<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::Trip>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.create_trip(tag_id, name, days, activities).await?)
+        })
+    }
+
     /// Recipe summaries (id, slug, name) for the run picker.
     pub fn list_recipe_metas(
         &self,

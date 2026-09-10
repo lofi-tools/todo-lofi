@@ -1,5 +1,5 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    App, AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
@@ -22,6 +22,7 @@ use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
+use ui_parts::travel::TravelPanel;
 use ui_parts::workflows::{WorkflowPanel, WorkflowPanelEvent};
 
 mod components;
@@ -40,7 +41,16 @@ mod ui_parts {
     pub mod task_list;
     pub mod task_picker;
     pub mod task_row;
+    pub mod travel;
     pub mod workflows;
+}
+
+/// The selected tag that is owned by an automation: the Layout swaps the
+/// task list for the automation's special panel while it is selected.
+#[derive(Clone)]
+struct ManagedTag {
+    tag_id: u64,
+    label: String,
 }
 
 struct Layout {
@@ -48,6 +58,11 @@ struct Layout {
     nav_bar: Entity<NavBar>,
     details: Entity<TaskDetails>,
     workflows: Entity<WorkflowPanel>,
+    /// Special panel for the managed tag in `managed_tag`, if any.
+    travel_panel: Entity<TravelPanel>,
+    /// The managed tag currently selected (if the selected tag is owned
+    /// by an automation).
+    managed_tag: Option<ManagedTag>,
     integrations: Entity<IntegrationsView>,
     automations: Entity<AutomationsPanel>,
     settings: Entity<SettingsView>,
@@ -72,6 +87,15 @@ impl Layout {
         cx: &mut Context<Self>,
     ) -> Self {
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+        // The managed-tag panel is created up front (it needs a window for
+        // its input) and reconfigured when a managed tag is selected.
+        let travel_panel = cx.new(|cx| {
+            TravelPanel::new(store.clone(), 0, String::new(), window, cx)
+        });
+        // Captured by the nav subscription below: managed-tag detection is
+        // async (a DB lookup), so it spawns on the app executor and
+        // updates this entity when the lookup lands.
+        let layout_weak = cx.weak_entity();
 
         // Kick off the home-directory repo scan in the background; the nav
         // repo list for the picker modal when it lands.
@@ -97,10 +121,15 @@ impl Layout {
         let project_subscription = cx.subscribe_in(
             &nav_bar,
             window,
-            |this, _nav, event, window, cx| match event {
-                NavBarEvent::TagSelected(_) | NavBarEvent::AllTasks => {
+            move |this, _nav, event, window, cx| match event {
+                NavBarEvent::TagSelected(path) => {
                     // Tag navigation is handled by the TaskListView's own
                     // subscription; make sure the task panel is visible.
+                    this.show_panel(NavPanel::Tasks, cx);
+                    this.check_managed_tag(path, &layout_weak, cx);
+                }
+                NavBarEvent::AllTasks => {
+                    this.managed_tag = None;
                     this.show_panel(NavPanel::Tasks, cx);
                 }
                 NavBarEvent::OpenProjectPicker => {
@@ -169,9 +198,13 @@ impl Layout {
         // Enabling/disabling an automation spawns or tombstones tasks:
         // reload the task list.
         let list_for_automations = task_list.clone();
+        let nav_for_automations = nav_bar.clone();
         cx.subscribe(&automations, move |_this, _panel, event, cx| match event {
             AutomationsEvent::Changed => {
                 list_for_automations.update(cx, |list, cx| list.refresh(cx));
+                // Enabling creates the managed tag, disabling removes it:
+                // the tag tree must reflect that.
+                nav_for_automations.update(cx, |nav, cx| nav.refresh_tags(cx));
             }
         })
         .detach();
@@ -344,6 +377,8 @@ impl Layout {
             nav_bar,
             details,
             workflows,
+            travel_panel,
+            managed_tag: None,
             integrations,
             automations,
             settings,
@@ -354,6 +389,50 @@ impl Layout {
             _picker_subscription: None,
             _escape_observer: escape_observer,
         }
+    }
+
+    /// Look up the selected tag; if an automation owns it, show its
+    /// special panel instead of the task list. Async so the navbar keeps
+    /// working while the lookup runs.
+    fn check_managed_tag(
+        &self,
+        path: &[String],
+        layout_weak: &gpui::WeakEntity<Self>,
+        cx: &mut App,
+    ) {
+        let Some(tag_name) = path.last().cloned() else {
+            return;
+        };
+        let store = self.store.clone();
+        let layout = layout_weak.clone();
+        cx.spawn(async move |cx| {
+            let managed = async {
+                let Ok(Some(tag)) = store.get_tag_by_name(tag_name, cx).await else {
+                    return None;
+                };
+                let recipe = store.managed_recipe_for_tag(tag.id, cx).await.ok().flatten();
+                recipe.map(|_recipe_id| ManagedTag {
+                    tag_id: tag.id,
+                    label: tag.label(),
+                })
+            }
+            .await;
+            layout.update(cx, |this, cx| {
+                let changed = this.managed_tag.as_ref().map(|m| m.tag_id)
+                    != managed.as_ref().map(|m| m.tag_id);
+                this.managed_tag = managed;
+                if let Some(managed) = &this.managed_tag {
+                    this.travel_panel.update(cx, |panel, cx| {
+                        panel.set_tag(managed.tag_id, managed.label.clone(), cx);
+                    });
+                }
+                if changed {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Swap the main panel, keeping the navbar footer highlight in sync.
@@ -524,6 +603,14 @@ impl Render for Layout {
                     .min_h_0()
                     .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(match self.panel {
+                        NavPanel::Tasks if self.managed_tag.is_some() => div()
+                            .id("managed-panel")
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .min_h_0()
+                            .child(div().flex_1().child(self.travel_panel.clone()))
+                            .into_any_element(),
                         NavPanel::Tasks => div()
                             .id("right-column")
                             .flex_1()

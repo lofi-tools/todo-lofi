@@ -79,6 +79,9 @@ pub struct ParamSchema {
 pub struct Recipe {
     pub name: String,
     pub description: Option<String>,
+    /// When set, the automation owns a managed tag of this name: enabling
+    /// creates it, disabling removes it (see `trip::enable_managed_recipe`).
+    pub managed_tag: Option<String>,
     pub params: HashMap<String, ParamSchema>,
     pub missed_policy: String,
     pub nodes: Vec<RecipeNode>,
@@ -88,13 +91,17 @@ pub struct Recipe {
 /// Recipe summary for UI recipe pickers (the full graph lives in
 /// `recipe_json`). `active_runs` is the number of runs currently in
 /// `active` status, so the automations panel can show enable/disable
-/// state without fetching the runs themselves.
+/// state without fetching the runs themselves. `managed_tag` is set for
+/// automations that own a managed tag instead of spawning runs, and
+/// `managed_enabled` tells whether that tag currently exists.
 #[derive(Debug, Clone)]
 pub struct RecipeMeta {
     pub id: u64,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+    pub managed_tag: Option<String>,
+    pub managed_enabled: bool,
     pub active_runs: usize,
 }
 
@@ -184,6 +191,11 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
 
     let description = root
         .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let managed_tag = root
+        .get("managed_tag")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -430,6 +442,7 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
     Ok(Recipe {
         name: name.to_string(),
         description,
+        managed_tag,
         params,
         missed_policy,
         nodes,
@@ -581,16 +594,23 @@ impl TodoStore {
                 .unwrap_or_else(|_| Recipe {
                     name: recipe.slug.clone(),
                     description: None,
+                    managed_tag: None,
                     params: HashMap::new(),
                     missed_policy: "skip".to_string(),
                     nodes: Vec::new(),
                     edges: Vec::new(),
                 });
+            let managed_enabled = match &parsed.managed_tag {
+                Some(tag_name) => self.get_tag_by_name(tag_name).await?.is_some(),
+                None => false,
+            };
             metas.push(RecipeMeta {
                 id: recipe.id,
                 slug: recipe.slug,
                 name: parsed.name,
                 description: parsed.description,
+                managed_tag: parsed.managed_tag,
+                managed_enabled,
                 active_runs: active.get(&recipe.id).copied().unwrap_or(0),
             });
         }
@@ -869,7 +889,8 @@ impl TodoStore {
     }
 
     /// Cancel every active run of a recipe (the automations panel's
-    /// "Disable"). Returns how many runs were cancelled.
+    /// "Disable"), and remove the managed tag the recipe owns, if any.
+    /// Returns how many runs were cancelled.
     pub async fn cancel_active_runs(&mut self, recipe_id: u64) -> QueryResult<usize> {
         let run_ids: Vec<u64> = self
             .list_workflow_runs()
@@ -882,6 +903,7 @@ impl TodoStore {
         for run_id in run_ids {
             self.cancel_run(run_id).await?;
         }
+        self.remove_managed_tag_content(recipe_id).await?;
         Ok(cancelled)
     }
 
@@ -915,6 +937,7 @@ impl TodoStore {
         let recipe = parse_recipe(&recipe_row.recipe_json.0).unwrap_or_else(|_| Recipe {
             name: recipe_row.slug.clone(),
             description: None,
+            managed_tag: None,
             params: HashMap::new(),
             missed_policy: "skip".to_string(),
             nodes: Vec::new(),
