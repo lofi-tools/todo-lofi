@@ -463,6 +463,27 @@ impl Store {
         path: &[String],
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
+        self.list_tasks_by_tag_name_with_labels_impl(tag_name, path, false, cx)
+    }
+
+    /// Tag view including tasks that start more than 2 days out (the
+    /// "show all" toggle reveals them from the fetched rows).
+    pub fn list_tasks_by_tag_name_with_labels_including_distant(
+        &self,
+        tag_name: &str,
+        path: &[String],
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
+        self.list_tasks_by_tag_name_with_labels_impl(tag_name, path, true, cx)
+    }
+
+    fn list_tasks_by_tag_name_with_labels_impl(
+        &self,
+        tag_name: &str,
+        path: &[String],
+        include_distant: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<(Vec<storage::TaskWithMeta>, Vec<String>)>> {
         let store = self.0.clone();
         let tag_name = tag_name.to_string();
         let path = path.to_vec();
@@ -473,7 +494,11 @@ impl Store {
                 .await?
                 .map(|t| t.id)
                 .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
-            let tasks = s.list_tasks_by_tag(tag_id).await?;
+            let tasks = if include_distant {
+                s.list_tasks_by_tag_including_distant(tag_id).await?
+            } else {
+                s.list_tasks_by_tag(tag_id).await?
+            };
             let mut labels = Vec::with_capacity(path.len());
             for name in &path {
                 let label = s

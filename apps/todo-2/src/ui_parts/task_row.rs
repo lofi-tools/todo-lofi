@@ -438,11 +438,12 @@ impl Render for TaskRow {
                         )
                     })
             })
-            .child(
-                div()
-                    .h_flex()
-                    .gap_1()
-                    .children(visible_tags.into_iter().map(|tag| {
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_1()
+                            .when_some(start_chip(&self.task), |this, chip| this.child(chip))
+                            .children(visible_tags.into_iter().map(|tag| {
                         div()
                             .text_size(px(10.))
                             .px(px(4.))
@@ -533,6 +534,56 @@ fn arrow_svg(color: u32) -> impl IntoElement {
         .h_flex()
         .items_center()
         .child(svg().size_3().data(ARROW_SVG).text_color(rgb(color)))
+}
+
+/// "Starts …" chip for not-yet-doable rows: relative day plus time in
+/// the system timezone ("Starts today, 5:50 PM"). `None` for doable
+/// tasks, which show no chip.
+fn start_chip(task: &TaskWithMeta) -> Option<impl IntoElement> {
+    let start = task.blocked_until?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let label = start_day_label(start, now_secs)?;
+    Some(
+        div()
+            .text_size(px(10.))
+            .px(px(4.))
+            .rounded(px(2.))
+            .bg(rgb(0x2a2a2a))
+            .text_color(rgb(0xa3a3a3))
+            .child(format!("Starts {label}")),
+    )
+}
+
+/// Relative start label ("today, 5:50 PM") for a future epoch, or `None`
+/// when already started.
+fn start_day_label(start: u64, now_secs: u64) -> Option<String> {
+    if start <= now_secs {
+        return None;
+    }
+    let zone = jiff::tz::TimeZone::system();
+    let day = jiff::Timestamp::from_second(start as i64)
+        .ok()?
+        .to_zoned(zone.clone());
+    let today = jiff::Timestamp::from_second(now_secs as i64)
+        .ok()?
+        .to_zoned(zone)
+        .date();
+    let date = day.date();
+    let days_out = date.duration_since(today).as_secs() / 86400;
+    let day_label = if days_out <= 0 {
+        "today".to_string()
+    } else if days_out == 1 {
+        "tomorrow".to_string()
+    } else if days_out < 7 {
+        day.strftime("%a").to_string()
+    } else {
+        day.strftime("%b %-d").to_string()
+    };
+    let time = day.strftime("%-I:%M %p").to_string();
+    Some(format!("{day_label}, {time}"))
 }
 
 /// The text color of a blocked/blocking task title: the muted gray when
@@ -704,3 +755,44 @@ const ARROW_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24"
 /// classic "indent list" icon). Opaque stroke so the alpha-mask rendering
 /// tints it with the element's text color.
 const SUBTASK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M8 12h12"/><path d="M12 18h8"/></svg>"##;
+
+#[cfg(test)]
+mod tests {
+    use super::start_day_label;
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn test_start_day_label_relative_days() {
+        let now = now_secs();
+        assert!(start_day_label(now - 10, now).is_none());
+        assert!(start_day_label(now, now).is_none());
+
+        let today = start_day_label(now + 3600, now).unwrap();
+        assert!(today.starts_with("today, "), "got {today}");
+
+        // Tomorrow 10am local is unambiguously "tomorrow".
+        let zone = jiff::tz::TimeZone::system();
+        let tomorrow_10am = jiff::Timestamp::from_second(now as i64)
+            .unwrap()
+            .to_zoned(zone.clone())
+            .date()
+            .at(10, 0, 0, 0)
+            .to_zoned(zone)
+            .unwrap()
+            .timestamp()
+            .as_second() as u64
+            + 86400;
+        let tomorrow = start_day_label(tomorrow_10am, now).unwrap();
+        assert!(tomorrow.starts_with("tomorrow, "), "got {tomorrow}");
+
+        let far = start_day_label(now + 10 * 86400, now).unwrap();
+        assert!(!far.starts_with("today"), "got {far}");
+        assert!(!far.starts_with("tomorrow"), "got {far}");
+    }
+}

@@ -347,8 +347,38 @@ impl TodoStore {
         format!("AND {table}deleted_at IS NULL")
     }
 
+    /// WHERE fragment hiding tasks that start more than 2 days out. Near
+    /// upcoming tasks stay listed (bottom group); the full list is
+    /// available through the `including_distant` variants.
+    fn near_only_where_sql(table: &str) -> String {
+        format!(
+            "AND ({table}blocked_until IS NULL \
+             OR {table}blocked_until <= CAST(strftime('%s', 'now') AS INTEGER) + 172800)"
+        )
+    }
+
     #[fastrace::trace]
     pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        self.list_tasks_by_priority_impl(false).await
+    }
+
+    /// Full list including tasks that start more than 2 days out (for the
+    /// "show all" toggle).
+    pub async fn list_tasks_by_priority_including_distant(
+        &mut self,
+    ) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        self.list_tasks_by_priority_impl(true).await
+    }
+
+    async fn list_tasks_by_priority_impl(
+        &mut self,
+        include_distant: bool,
+    ) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        let near = if include_distant {
+            String::new()
+        } else {
+            Self::near_only_where_sql("")
+        };
         let rows = toasty::sql::query(format!(
             r#"
             SELECT
@@ -360,9 +390,11 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql(""),
+            near,
             Self::priority_order_sql(),
         ))
         .column_types([
@@ -401,6 +433,23 @@ impl TodoStore {
     pub async fn list_tasks_by_tag(
         &mut self,
         tag_id: u64,
+    ) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        self.list_tasks_by_tag_impl(tag_id, false).await
+    }
+
+    /// Full tag list including tasks that start more than 2 days out (for
+    /// the "show all" toggle).
+    pub async fn list_tasks_by_tag_including_distant(
+        &mut self,
+        tag_id: u64,
+    ) -> crate::QueryResult<Vec<TaskWithMeta>> {
+        self.list_tasks_by_tag_impl(tag_id, true).await
+    }
+
+    async fn list_tasks_by_tag_impl(
+        &mut self,
+        tag_id: u64,
+        include_distant: bool,
     ) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let mut tag_ids = vec![tag_id];
         let descendants = self.get_all_descendants(tag_id).await?;
@@ -473,10 +522,16 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             task_placeholders.join(","),
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql("t."),
+            if include_distant {
+                String::new()
+            } else {
+                Self::near_only_where_sql("t.")
+            },
             Self::priority_order_sql()
                 .replace("importance_factor", "t.importance_factor")
                 .replace("urgency_factor", "t.urgency_factor"),
@@ -832,6 +887,35 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    #[tokio::test]
+    async fn test_distant_upcoming_hidden_by_default() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let now = real_now_secs();
+
+        let near = storage.create_task(Task::create().title("Starts tomorrow")).await?;
+        storage.update_blocked_until(near.id, Some(now + 86400)).await?;
+        let far = storage.create_task(Task::create().title("Starts in a week")).await?;
+        storage.update_blocked_until(far.id, Some(now + 7 * 86400)).await?;
+
+        let listed = storage.list_tasks_by_priority().await?;
+        assert!(listed.iter().any(|t| t.id == near.id));
+        assert!(!listed.iter().any(|t| t.id == far.id));
+
+        let full = storage.list_tasks_by_priority_including_distant().await?;
+        assert!(full.iter().any(|t| t.id == near.id));
+        assert!(full.iter().any(|t| t.id == far.id));
+
+        // Same cap inside tag views.
+        let tag = storage.create_tag("Trip").await?;
+        storage.assign_tag_to_task(near.id, &tag.name).await?;
+        storage.assign_tag_to_task(far.id, &tag.name).await?;
+        let tagged = storage.list_tasks_by_tag(tag.id).await?;
+        assert!(!tagged.iter().any(|t| t.id == far.id));
+        let tagged_full = storage.list_tasks_by_tag_including_distant(tag.id).await?;
+        assert!(tagged_full.iter().any(|t| t.id == far.id));
+        Ok(())
     }
 
     #[tokio::test]

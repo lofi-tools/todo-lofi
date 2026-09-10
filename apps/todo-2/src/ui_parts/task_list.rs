@@ -1,8 +1,10 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    prelude::FluentBuilder, rgb,
 };
 use gpui_component::StyledExt;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
@@ -56,6 +58,9 @@ pub struct TaskListView {
     /// without sectioned tasks: rows render flat.
     section_order: Vec<String>,
     task_section: std::collections::HashMap<u64, String>,
+    /// Reveal tasks starting more than 2 days out (hidden by default so
+    /// far-future occurrences don't flood the list).
+    show_all: bool,
     /// The task whose subtask list is expanded, or None. Only one row's
     /// subtasks can be expanded at a time.
     expanded_subtask: Option<u64>,
@@ -130,6 +135,7 @@ impl TaskListView {
             subtasks_map: std::collections::HashMap::new(),
             section_order: Vec::new(),
             task_section: std::collections::HashMap::new(),
+            show_all: false,
             _fetch_sections: None,
             expanded_subtask: None,
             input,
@@ -438,6 +444,31 @@ impl TaskListView {
         (blockers, blocking, subtasks)
     }
 
+    /// Tasks starting more than 2 days out, hidden unless "show all" is
+    /// on. Count drives the toggle button label.
+    fn distant_count(&self) -> usize {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.row_specs
+            .iter()
+            .filter(|spec| {
+                !spec.task.done
+                    && spec
+                        .task
+                        .blocked_until
+                        .is_some_and(|until| until > now_secs + DISTANT_SECS)
+            })
+            .count()
+    }
+
+    /// Toggle revealing far-future tasks (for editing them early).
+    fn toggle_show_all(&mut self, cx: &mut Context<Self>) {
+        self.show_all = !self.show_all;
+        cx.notify();
+    }
+
     /// Load section grouping for the selected tag (Todoist-style headers).
     /// No-op in the All-tasks view. Runs after the rows are set so every
     /// visible task id is known.
@@ -485,7 +516,7 @@ impl TaskListView {
             let path = selected_path.clone();
             cx.spawn(async move |this, cx| {
                 let (tasks, labels) =
-                    match store.list_tasks_by_tag_name_with_labels(&last, &path, cx).await {
+                    match store.list_tasks_by_tag_name_with_labels_including_distant(&last, &path, cx).await {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to fetch tasks by tag: {e}");
@@ -515,7 +546,9 @@ impl TaskListView {
             cx.spawn(async move |this, cx| {
                 let tasks = {
                     let mut s = store.0.lock().await;
-                    s.list_tasks_by_priority().await.unwrap_or_default()
+                    s.list_tasks_by_priority_including_distant()
+                        .await
+                        .unwrap_or_default()
                 };
                 let (blockers_map, blocking_map, subtasks) =
                     Self::fetch_list_data(&store, &tasks, cx).await;
@@ -1039,6 +1072,8 @@ impl Render for TaskListView {
             .last()
             .cloned()
             .unwrap_or_else(|| "Tasks".to_string());
+        let distant = self.distant_count();
+        let show_all = self.show_all;
 
         div()
             .id("task-list")
@@ -1053,10 +1088,32 @@ impl Render for TaskListView {
             }))
             .child(
                 div()
-                    .text_2xl()
-                    .font_bold()
-                    .text_color(rgb(0xe5e5e5))
-                    .child(heading),
+                    .h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_bold()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(heading),
+                    )
+                    .when(distant > 0, |this| {
+                        this.child(
+                            Button::new("show-all-tasks")
+                                .ghost()
+                                .compact()
+                                .label(if show_all {
+                                    "Show less".to_string()
+                                } else {
+                                    format!("Show all ({distant})")
+                                })
+                                .tooltip("Reveal tasks starting more than 2 days out")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_show_all(cx);
+                                })),
+                        )
+                    }),
             )
             .child(Input::new(&self.input))
             .child(
@@ -1072,7 +1129,8 @@ impl Render for TaskListView {
 impl TaskListView {
     /// Rows for the list body: flat by default, grouped under section
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
-    /// tasks always last under an "Upcoming" header.
+    /// tasks last under an "Upcoming" header. Tasks starting more than 2
+    /// days out only render when "show all" is on.
     fn sectioned_rows(&self) -> Vec<gpui::AnyElement> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1087,7 +1145,19 @@ impl TaskListView {
         let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) = rest_pairs
             .into_iter()
             .partition(|(_, spec)| spec.task.blocked_until.is_some_and(|until| until > now_secs));
-        let upcoming: Vec<usize> = upcoming_pairs.into_iter().map(|(i, _)| i).collect();
+        let (near_upcoming, distant): (Vec<usize>, Vec<usize>) = upcoming_pairs
+            .into_iter()
+            .map(|(i, _)| i)
+            .partition(|&i| {
+                self.row_specs[i]
+                    .task
+                    .blocked_until
+                    .is_some_and(|until| until <= now_secs + DISTANT_SECS)
+            });
+        let mut upcoming = near_upcoming;
+        if self.show_all {
+            upcoming.extend(distant);
+        }
         let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
         // No sections here: doable rows flat, then Upcoming, then Completed.
         if self.selected_path.is_empty() || self.section_order.is_empty() {
@@ -1196,6 +1266,10 @@ fn today_key() -> String {
         .date()
         .to_string()
 }
+
+/// Tasks starting later than this stay out of list queries unless the
+/// "show all" toggle reveals them. Mirrors the SQL `+ 172800` cap.
+const DISTANT_SECS: u64 = 2 * 86400;
 
 /// Order row indices for sectioned display: unsectioned rows first (in
 /// list order), then one group per section in display order. Pure so it
