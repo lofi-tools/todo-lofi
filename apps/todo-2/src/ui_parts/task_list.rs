@@ -51,6 +51,9 @@ pub struct TaskListView {
     /// task_id -> its direct subtasks (with meta), collapsed under the
     /// parent's row (inline first title + expandable "N/M" list).
     subtasks_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    /// The task whose subtask list is expanded, or None. Only one row's
+    /// subtasks can be expanded at a time.
+    expanded_subtask: Option<u64>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -112,6 +115,7 @@ impl TaskListView {
             blockers_map: std::collections::HashMap::new(),
             blocking_map: std::collections::HashMap::new(),
             subtasks_map: std::collections::HashMap::new(),
+            expanded_subtask: None,
             input,
             store,
             selected_path: Vec::new(),
@@ -500,6 +504,7 @@ impl TaskListView {
             .iter()
             .map(|spec| {
                 let is_selected = Some(spec.task.id) == selected_task_id;
+                let subtasks_expanded = self.expanded_subtask == Some(spec.task.id);
                 let row = cx.new(|cx| {
                     TaskRow::new(
                         spec.task.clone(),
@@ -512,6 +517,7 @@ impl TaskListView {
                         selected_path.to_vec(),
                         selected_labels.to_vec(),
                         is_selected,
+                        subtasks_expanded,
                         cx,
                     )
                 });
@@ -535,11 +541,31 @@ impl TaskListView {
                     TaskRowEvent::DoneToggled { task_id, done } => {
                         this.on_task_done_toggled(*task_id, *done, cx);
                     }
+                    TaskRowEvent::SubtasksToggled { task_id } => {
+                        this.toggle_subtask_expansion(*task_id, cx);
+                    }
                 })
                 .detach();
                 row
             })
             .collect();
+    }
+
+    /// Toggle which row's subtask list is expanded. Only one row is
+    /// expanded at a time: expanding another row collapses the previous
+    /// one, and clicking the expanded row's counter collapses it.
+    pub fn toggle_subtask_expansion(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        self.expanded_subtask = if self.expanded_subtask == Some(task_id) {
+            None
+        } else {
+            Some(task_id)
+        };
+        let expanded = self.expanded_subtask;
+        for row in self.task_views.clone() {
+            row.update(cx, |row, cx| {
+                row.set_subtasks_expanded(Some(row.task_id()) == expanded, cx);
+            });
+        }
     }
 
     pub fn set_tasks(&mut self, tasks: Vec<TaskWithMeta>, cx: &mut Context<Self>) {

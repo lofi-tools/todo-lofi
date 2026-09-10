@@ -20,6 +20,9 @@ pub enum TaskRowEvent {
     EditEnded,
     TitleCommitted { task_id: u64, title: String },
     DoneToggled { task_id: u64, done: bool },
+    /// The row's N/M counter was clicked; the list decides which row (if
+    /// any) stays expanded, since only one may be expanded at a time.
+    SubtasksToggled { task_id: u64 },
 }
 
 /// One level of a "task blocks X (which blocks Y)" chain, rendered inline
@@ -73,6 +76,7 @@ impl TaskRow {
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
         selected: bool,
+        subtasks_expanded: bool,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -85,7 +89,7 @@ impl TaskRow {
             editing: false,
             locked: false,
             blocks_expanded: false,
-            subtasks_expanded: false,
+            subtasks_expanded,
             subtasks,
             edit_input: None,
             _edit_subscription: None,
@@ -162,12 +166,13 @@ impl TaskRow {
         cx.notify();
     }
 
-    pub fn toggle_subtasks(&mut self, cx: &mut Context<Self>) {
-        if self.subtasks.is_empty() {
-            return;
+    /// The list view owns which row is expanded (only one at a time); this
+    /// just mirrors that decision onto this row's render.
+    pub fn set_subtasks_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        if self.subtasks_expanded != expanded {
+            self.subtasks_expanded = expanded;
+            cx.notify();
         }
-        self.subtasks_expanded = !self.subtasks_expanded;
-        cx.notify();
     }
 
     /// Update the done flag of a subtask shown under this row (e.g. the
@@ -262,6 +267,9 @@ impl Render for TaskRow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {        let task_id = self.task.id;
         let done = self.task.done;
         let store = self.store.clone();
+        // The checkbox closure needs its own copy: it is `move`, so it
+        // would otherwise consume `store` before the subtask list uses it.
+        let store_for_checkbox = store.clone();
         let entity = cx.entity().clone();
         let entity_for_checkbox = entity.clone();
 
@@ -320,7 +328,7 @@ impl Render for TaskRow {
                         if locked {
                             return;
                         }
-                        let store = store.clone();
+                        let store = store_for_checkbox.clone();
                         let entity = entity_for_checkbox.clone();
                         let new_done = *new_done;
                         cx.spawn(async move |cx| {
@@ -429,17 +437,6 @@ impl Render for TaskRow {
                             })),
                     )
             })
-            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
-                this                    .child(
-                        div()
-                            .id(("subtask-list", task_id))
-                            .v_flex()
-                            .pl_4()
-                            .children(self.subtasks.iter().map(|task| {
-                                subtask_title(task.clone(), &entity)
-                            })),
-                    )
-            })
                     .child(
                         div()
                             .h_flex()
@@ -459,7 +456,7 @@ impl Render for TaskRow {
                                 let total = self.subtasks.len();
                                 // Subtask progress, right of the tags; the
                                 // N/M counter expands/collapses the subtask
-                                // list under the row.
+                                // list under the row (one row at a time).
                                 this.child(
                                     div()
                                         .id(("subtask-progress", task_id))
@@ -471,14 +468,28 @@ impl Render for TaskRow {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
-                                            this.toggle_subtasks(cx);
+                                            let task_id = this.task.id;
+                                            cx.emit(TaskRowEvent::SubtasksToggled { task_id });
                                         }))
                                         .child(subtask_icon(0xa3a3a3))
                                         .child(format!("{done}/{total}"))
                                         .child(if self.subtasks_expanded { "▾" } else { "▸" }),
                                 )
                             }),
-                    ),
+                    )
+            // Expanded subtasks sit below the tags sub-row, so the main
+            // task's title/tags stay visible above them.
+            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
+                this                    .child(
+                        div()
+                            .id(("subtask-list", task_id))
+                            .v_flex()
+                            .pl_2()
+                            .children(self.subtasks.iter().map(|task| {
+                                subtask_title(task.clone(), &entity, &store)
+                            })),
+                    )
+            })
             )
     }
 }
@@ -529,13 +540,18 @@ fn subtask_inline(task: TaskWithMeta) -> impl IntoElement {
         .child(task.title.clone())
 }
 
-/// One expanded subtask row: subtask icon + title, indented under the
-/// main task. Clicking selects the subtask.
-fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoElement {
+/// One expanded subtask row: checkbox + title, indented under the main
+/// task. The checkbox ticks the subtask complete; clicking the title
+/// selects the subtask.
+fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>, store: &Store) -> impl IntoElement {
     let muted = task.done || task.blocked;
     let color = blocked_color(muted);
+    let task_id = task.id;
+    let done = task.done;
     let row_entity = row_entity.clone();
+    let row_entity_for_checkbox = row_entity.clone();
     let row_entity_for_click = row_entity.clone();
+    let store = store.clone();
     div()
         .id(("subtask-row", task.id))
         .h_flex()
@@ -544,7 +560,29 @@ fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoE
         .px_3()
         .py_0p5()
         .rounded_md()
-        .child(subtask_icon(color))
+        .child(
+            Checkbox::new(("subtask-checkbox", task_id))
+                .with_size(px(18.))
+                .checked(done)
+                .disabled(task.blocked && !done)
+                .on_click(move |new_done, _window, cx| {
+                    // Ticking a subtask must not also select the main task.
+                    cx.stop_propagation();
+                    let store = store.clone();
+                    let entity = row_entity_for_checkbox.clone();
+                    let new_done = *new_done;
+                    cx.spawn(async move |cx| {
+                        if let Err(e) = store.toggle_task_done(task_id, new_done, cx).await {
+                            tracing::error!(?e, "Failed toggle_task_done");
+                        }
+                        entity.update(cx, |_this, cx| {
+                            cx.emit(TaskRowEvent::DoneToggled { task_id, done: new_done });
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }),
+        )
         .child(
             div()
                 .id(("subtask-title-text", task.id))
