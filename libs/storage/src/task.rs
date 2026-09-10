@@ -65,7 +65,7 @@ impl Task {
                 86400.0_f64 / diff.max(1.0)
             }
         };
-        self.importance_factor * deadline_factor
+        self.importance_factor * self.urgency_factor * deadline_factor
     }
 }
 
@@ -96,7 +96,7 @@ impl std::ops::Deref for TaskWithMeta {
 }
 impl TaskWithMeta {
     pub fn priority_score(&self, now_secs: u64) -> f64 {
-        self.importance_factor * self.deadline_factor(now_secs)
+        self.importance_factor * self.urgency_factor * self.deadline_factor(now_secs)
     }
 
     pub fn deadline_factor(&self, now_secs: u64) -> f64 {
@@ -296,14 +296,14 @@ impl TodoStore {
     pub const COMPLETED_TASK_VISIBLE_SECS: u64 = 24 * 60 * 60;
 
     /// ORDER BY clause shared by the list queries: open tasks by priority
-    /// score, then completed tasks at the bottom (most recently completed
-    /// first).
+    /// score (`importance × urgency × deadline pressure`), then completed
+    /// tasks at the bottom (most recently completed first).
     fn priority_order_sql() -> &'static str {
         r#"
             ORDER BY
                 done ASC,
                 CASE WHEN done THEN completed_at ELSE 0 END DESC,
-                importance_factor * CASE
+                importance_factor * urgency_factor * CASE
                     WHEN deadline IS NULL THEN 1.0
                     ELSE 86400.0 / MAX(1.0,
                         CAST(deadline AS REAL) - CAST(strftime('%s', 'now') AS REAL)
@@ -457,7 +457,9 @@ impl TodoStore {
             task_placeholders.join(","),
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql("t."),
-            Self::priority_order_sql().replace("importance_factor", "t.importance_factor"),
+            Self::priority_order_sql()
+                .replace("importance_factor", "t.importance_factor")
+                .replace("urgency_factor", "t.urgency_factor"),
         );
 
         let rows = toasty::sql::query(&query)
@@ -766,6 +768,42 @@ mod tests {
             )
             .await?;
         assert_eq!(no_deadline.compute_priority_score(start_timestamp), 3.0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_urgency_factor_moves_ordering() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        storage
+            .create_task(
+                Task::create()
+                    .title("Normal no deadline".to_string())
+                    .importance_factor(1.0)
+                    .urgency_factor(1.0),
+            )
+            .await?;
+        // Same weight, higher urgency (Todoist P1 → 2.0): floats above.
+        storage
+            .create_task(
+                Task::create()
+                    .title("Urgent no deadline".to_string())
+                    .importance_factor(1.0)
+                    .urgency_factor(2.0),
+            )
+            .await?;
+
+        let tasks = storage.list_tasks_by_priority().await?;
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Urgent no deadline", "Normal no deadline"]);
+
+        // Rust-side score agrees with the SQL order.
+        let now = TodoStore::now_secs();
+        assert!(
+            tasks[0].priority_score(now) > tasks[1].priority_score(now),
+            "urgent score should exceed normal score"
+        );
 
         Ok(())
     }
