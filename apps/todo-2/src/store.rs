@@ -477,4 +477,33 @@ impl Store {
             Ok(s.create_tag(&name).await?)
         })
     }
+
+    /// Sync all linked Todoist projects of every Todoist integration.
+    /// Runs entirely on the Tokio runtime (network + DB).
+    pub fn sync_todoist(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::SyncSummary>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let token = crate::todoist_auth::access_token().await?;
+            let mut backend = store.lock().await;
+            let ids: Vec<u64> = backend
+                .list_integrations()
+                .await?
+                .into_iter()
+                .filter(|i| i.provider == "todoist")
+                .map(|i| i.id)
+                .collect();
+            let mut total = storage::SyncSummary::default();
+            for id in ids {
+                let summary = backend.sync_todoist_integration(&token, id).await?;
+                total.projects += summary.projects;
+                total.sections += summary.sections;
+                total.tasks_upserted += summary.tasks_upserted;
+                total.tasks_tombstoned += summary.tasks_tombstoned;
+            }
+            Ok(total)
+        })
+    }
 }

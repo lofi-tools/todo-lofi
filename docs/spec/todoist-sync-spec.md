@@ -1,6 +1,7 @@
 # Todoist Integration Spec
 
-Status: Draft v1 (gathered from interview, no implementation yet)
+Status: Draft v1 (import direction implemented in `libs/storage/src/todoist.rs`;
+push direction and recurrence engine still open)
 
 Purpose: Define how Todoist concepts map onto the todo-lofi data model and how a
 bidirectional sync between Todoist and the app behaves.

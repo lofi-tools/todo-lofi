@@ -21,9 +21,11 @@ pub struct IntegrationsView {
     store: Store,
     connected: Vec<storage::Integration>,
     connecting: bool,
+    syncing: bool,
     status: Option<String>,
     _load: Option<gpui::Task<()>>,
     _connect: Option<gpui::Task<()>>,
+    _sync: Option<gpui::Task<()>>,
 }
 
 impl IntegrationsView {
@@ -32,9 +34,11 @@ impl IntegrationsView {
             store,
             connected: Vec::new(),
             connecting: false,
+            syncing: false,
             status: None,
             _load: None,
             _connect: None,
+            _sync: None,
         };
         this.reload(cx);
         this
@@ -114,6 +118,41 @@ impl IntegrationsView {
                 cx.notify();
             })
             .ok();
+        }));
+    }
+
+    fn sync_now(&mut self, cx: &mut Context<Self>) {
+        if self.syncing || !self.todoist_connected() {
+            return;
+        }
+        self.syncing = true;
+        self.status = Some("Syncing Todoist…".to_string());
+        cx.notify();
+        let sync = self.store.sync_todoist(cx);
+        self._sync = Some(cx.spawn(async move |this, cx| match sync.await {
+            Ok(summary) => {
+                this.update(cx, |this, cx| {
+                    this.syncing = false;
+                    this.status = Some(format!(
+                        "Synced {} project(s): {} task(s), {} section(s), {} removed.",
+                        summary.projects,
+                        summary.tasks_upserted,
+                        summary.sections,
+                        summary.tasks_tombstoned,
+                    ));
+                    cx.emit(IntegrationsEvent::Changed);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                this.update(cx, |this, cx| {
+                    this.syncing = false;
+                    this.status = Some(format!("Sync failed: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
         }));
     }
 
@@ -242,13 +281,33 @@ impl Render for IntegrationsView {
                                     .child(if connected { "Connected" } else { "Not connected" }),
                             )
                             .child(if connected {
-                                Button::new("todoist-disconnect")
-                                    .ghost()
-                                    .compact()
-                                    .label("Disconnect")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.disconnect_todoist(cx);
-                                    }))
+                                div()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("todoist-sync")
+                                            .ghost()
+                                            .compact()
+                                            .label(if self.syncing {
+                                                "Syncing…"
+                                            } else {
+                                                "Sync now"
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.sync_now(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("todoist-disconnect")
+                                            .ghost()
+                                            .compact()
+                                            .label("Disconnect")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.disconnect_todoist(cx);
+                                            })),
+                                    )
+                                    .into_any_element()
                             } else {
                                 Button::new("todoist-connect")
                                     .ghost()
@@ -261,6 +320,7 @@ impl Render for IntegrationsView {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.start_todoist_connect(cx);
                                     }))
+                                    .into_any_element()
                             }),
                     )
                     )

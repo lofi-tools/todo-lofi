@@ -358,6 +358,92 @@ impl TodoStore {
         }))
     }
 
+    /// All tag links for one integration (projects/sections/labels).
+    /// Used by sync to find which remote projects are selected.
+    pub async fn tag_links_for_integration(
+        &mut self,
+        integration_id: u64,
+    ) -> QueryResult<Vec<TagLink>> {
+        let rows = toasty::sql::query(
+            r#"SELECT integration_id, external_id, tag_id, source_kind, namespaced
+               FROM external_tag_links WHERE integration_id = ?1"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+        ])
+        .bind(integration_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list tag links for integration",
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => Some(TagLink {
+                    integration_id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
+                    external_id: record
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    tag_id: record.get(2).and_then(|v| v.to_i64()).unwrap_or(0) as u64,
+                    source_kind: record
+                        .get(3)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    namespaced: record.get(4).and_then(|v| v.to_i64()).unwrap_or(0) != 0,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// All task links for one integration. Used by sync to tombstone tasks
+    /// deleted on the remote side.
+    pub async fn task_links_for_integration(
+        &mut self,
+        integration_id: u64,
+    ) -> QueryResult<Vec<TaskLink>> {
+        let rows = toasty::sql::query(
+            r#"SELECT integration_id, external_id, task_id, external_updated_at
+               FROM external_task_links WHERE integration_id = ?1"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+        ])
+        .bind(integration_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list task links for integration",
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => Some(TaskLink {
+                    integration_id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
+                    external_id: record
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    task_id: record.get(2).and_then(|v| v.to_i64()).unwrap_or(0) as u64,
+                    external_updated_at: record.get(3).and_then(parse_timestamp),
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// Record a per-project sync watermark after success (§4.7).
     pub async fn record_watermark(
         &mut self,

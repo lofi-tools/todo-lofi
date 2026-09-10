@@ -9,6 +9,7 @@ pub mod repeat;
 pub mod tag;
 pub mod tag_settings;
 pub mod task;
+pub mod todoist;
 pub mod testing;
 pub mod tracing_setup;
 
@@ -20,6 +21,7 @@ pub mod prelude {
     pub use crate::repeat::RepeatTaskTemplate;
     pub use crate::tag::{Tag, TagId, TagNode};
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
+    pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta};
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;

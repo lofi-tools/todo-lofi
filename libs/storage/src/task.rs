@@ -321,6 +321,12 @@ impl TodoStore {
         "
     }
 
+    /// WHERE fragment hiding tombstoned rows (mirrored deletions, §4.3).
+    /// Takes the table qualifier used by the query (`""` or `"t."`).
+    fn not_deleted_where_sql(table: &str) -> String {
+        format!("AND {table}deleted_at IS NULL")
+    }
+
     #[fastrace::trace]
     pub async fn list_tasks_by_priority(&mut self) -> crate::QueryResult<Vec<TaskWithMeta>> {
         let rows = toasty::sql::query(format!(
@@ -333,8 +339,10 @@ impl TodoStore {
             WHERE 1 = 1
             {}
             {}
+            {}
             "#,
             Self::completed_visible_where_sql(),
+            Self::not_deleted_where_sql(""),
             Self::priority_order_sql(),
         ))
         .column_types([
@@ -444,9 +452,11 @@ impl TodoStore {
             WHERE t.id IN ({})
             {}
             {}
+            {}
             "#,
             task_placeholders.join(","),
             Self::completed_visible_where_sql(),
+            Self::not_deleted_where_sql("t."),
             Self::priority_order_sql().replace("importance_factor", "t.importance_factor"),
         );
 

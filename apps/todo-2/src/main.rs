@@ -17,7 +17,7 @@ use store::Store;
 use theme::APP_BG;
 use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
-use ui_parts::integrations::IntegrationsView;
+use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
@@ -155,6 +155,17 @@ impl Layout {
         let integrations =
             cx.new(|cx| IntegrationsView::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsView::new(cx));
+        // Syncs create tags (sections, labels): refresh the tag tree.
+        cx.subscribe_in(
+            &integrations,
+            window,
+            |this, _view, event, _window, cx| match event {
+                IntegrationsEvent::Changed => {
+                    this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                }
+            },
+        )
+        .detach();
         let details_for_list = details.clone();
         let list_for_deselect = task_list.clone();
         cx.subscribe(&task_list, move |_this, _list, event, cx| match event {
@@ -366,34 +377,52 @@ impl Layout {
         window.close_dialog(cx);
         self._picker_subscription = None;
         let store = self.store.clone();
-        let create = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut backend = store.0.lock().await;
-            let integration = backend
-                .list_integrations()
-                .await?
-                .into_iter()
-                .find(|i| i.provider == "todoist")
-                .ok_or_else(|| anyhow::anyhow!("Todoist is not connected"))?;
-            let (tag, namespaced) = match backend.get_tag_by_name(&name).await? {
-                Some(_) => {
-                    let scoped = format!("todoist/{name}");
-                    let tag = match backend.get_tag_by_name(&scoped).await? {
-                        Some(tag) => tag,
-                        None => backend.create_tag(&scoped).await?,
-                    };
-                    (tag, true)
-                }
-                None => (backend.create_tag(&name).await?, false),
+        // Link the tag, then pull the project's sections and tasks right
+        // away so the new tag is populated without waiting for a manual
+        // sync. One Tokio hop: token fetch and network must never run on
+        // GPUI's executor.
+        let flow = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let integration_id = {
+                let mut backend = store.0.lock().await;
+                let integration = backend
+                    .list_integrations()
+                    .await?
+                    .into_iter()
+                    .find(|i| i.provider == "todoist")
+                    .ok_or_else(|| anyhow::anyhow!("Todoist is not connected"))?;
+                let (tag, namespaced) = match backend.get_tag_by_name(&name).await? {
+                    Some(_) => {
+                        let scoped = format!("todoist/{name}");
+                        let tag = match backend.get_tag_by_name(&scoped).await? {
+                            Some(tag) => tag,
+                            None => backend.create_tag(&scoped).await?,
+                        };
+                        (tag, true)
+                    }
+                    None => (backend.create_tag(&name).await?, false),
+                };
+                backend
+                    .link_tag(integration.id, &id, tag.id, "project", namespaced)
+                    .await?;
+                integration.id
             };
-            backend
-                .link_tag(integration.id, &id, tag.id, "project", namespaced)
-                .await?;
-            Ok::<_, anyhow::Error>(())
+            let token = crate::todoist_auth::access_token().await?;
+            let summary = {
+                let mut backend = store.0.lock().await;
+                backend
+                    .sync_todoist_integration(&token, integration_id)
+                    .await?
+            };
+            Ok::<_, anyhow::Error>(summary)
         });
         cx.spawn(async move |this, cx| {
-            if let Err(e) = create.await {
-                tracing::error!("Failed to create Todoist project tag: {e}");
-                return;
+            match flow.await {
+                Ok(summary) => tracing::info!(
+                    "Todoist project synced: {} task(s), {} section(s)",
+                    summary.tasks_upserted,
+                    summary.sections,
+                ),
+                Err(e) => tracing::error!("Todoist sync after project pick failed: {e}"),
             }
             this.update(cx, |this, cx| {
                 this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
