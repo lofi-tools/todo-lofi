@@ -563,18 +563,22 @@ impl TodoStore {
             return Ok(());
         }
         let recipes: [(&str, serde_json::Value); 8] = [
-            // Case 1: instant dump of three start nodes. Enabled via its
-            // managed tag (the Travel panel), not by starting a run.
+            // Case 1: travel checklists. Enabled via its managed tag; each
+            // trip is a workflow run whose items the builder generates into
+            // the Pack / Before leaving sections (nodes are a formality).
             (
                 "packing-list",
                 json!({
                     "name": "Travel checklists",
                     "description": "Build a packing checklist per trip: pack and before-leaving sections.",
                     "managed_tag": "managed:packing-list",
+                    "params": {
+                        "name": { "type": "string", "default": "" },
+                        "days": { "type": "string", "default": "5" },
+                        "activities": { "type": "string", "default": "" }
+                    },
                     "nodes": [
-                        { "id": "swimsuit", "kind": "action", "title": "Pack swimsuit" },
-                        { "id": "sunscreen", "kind": "action", "title": "Pack sunscreen" },
-                        { "id": "towel", "kind": "action", "title": "Pack towel" }
+                        { "id": "trip", "kind": "action", "title": "Trip checklist" }
                     ],
                     "edges": []
                 }),

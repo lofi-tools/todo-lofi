@@ -22,7 +22,7 @@ use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
-use ui_parts::travel::TravelPanel;
+use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 use ui_parts::workflows::{WorkflowPanel, WorkflowPanelEvent};
 
 mod components;
@@ -50,6 +50,7 @@ mod ui_parts {
 #[derive(Clone)]
 struct ManagedTag {
     tag_id: u64,
+    recipe_id: u64,
     label: String,
 }
 
@@ -214,6 +215,15 @@ impl Layout {
         cx.subscribe(&workflows, move |_this, _panel, event, cx| match event {
             WorkflowPanelEvent::Changed => {
                 list_for_workflow.update(cx, |list, cx| list.refresh(cx));
+            }
+        })
+        .detach();
+        // A new trip spawns checklist items under the managed tag: reload
+        // the task list so the Pack / Before leaving sections appear.
+        let list_for_trip = task_list.clone();
+        cx.subscribe(&travel_panel, move |_this, _panel, event, cx| match event {
+            TravelPanelEvent::TripAdded => {
+                list_for_trip.update(cx, |list, cx| list.refresh(cx));
             }
         })
         .detach();
@@ -411,8 +421,9 @@ impl Layout {
                     return None;
                 };
                 let recipe = store.managed_recipe_for_tag(tag.id, cx).await.ok().flatten();
-                recipe.map(|_recipe_id| ManagedTag {
+                recipe.map(|recipe_id| ManagedTag {
                     tag_id: tag.id,
+                    recipe_id,
                     label: tag.label(),
                 })
             }
@@ -423,7 +434,7 @@ impl Layout {
                 this.managed_tag = managed;
                 if let Some(managed) = &this.managed_tag {
                     this.travel_panel.update(cx, |panel, cx| {
-                        panel.set_tag(managed.tag_id, managed.label.clone(), cx);
+                        panel.set_tag(managed.recipe_id, managed.label.clone(), cx);
                     });
                 }
                 if changed {
@@ -607,9 +618,13 @@ impl Render for Layout {
                             .id("managed-panel")
                             .flex_1()
                             .flex()
-                            .flex_row()
+                            .flex_col()
                             .min_h_0()
-                            .child(div().flex_1().child(self.travel_panel.clone()))
+                            // The travel header ("+ New trip" + popover)
+                            // sits on top; the checklist items below use
+                            // the normal task list with its sections.
+                            .child(self.travel_panel.clone())
+                            .child(div().flex_1().min_h_0().child(self.task_list.clone()))
                             .into_any_element(),
                         NavPanel::Tasks => div()
                             .id("right-column")

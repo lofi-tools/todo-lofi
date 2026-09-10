@@ -25,7 +25,6 @@ pub mod prelude {
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta};
-    pub use crate::trip::{Trip, TripSection, TripWithItems};
     pub use crate::workflow::{
         Recipe, RecipeEdge, RecipeMeta, RecipeNode, RunStepView, RunView, WorkflowRecipe,
         WorkflowRun,
@@ -58,8 +57,7 @@ impl TodoStore {
                 tag::Tag,
                 repeat::RepeatTaskTemplate,
                 workflow::WorkflowRecipe,
-                workflow::WorkflowRun,
-                trip::Trip
+                workflow::WorkflowRun
             ))
             .build(driver)
             .await

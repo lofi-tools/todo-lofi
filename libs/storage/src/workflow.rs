@@ -731,14 +731,14 @@ impl TodoStore {
         Ok(rows.iter().filter_map(parse_run_row).collect())
     }
 
-    /// Instantiate a recipe: insert the run row, validate/merge params,
-    /// and materialize every start node as a task.
-    pub async fn create_run(
+    /// Insert the run row for a recipe: validate/merge params and record
+    /// the run. Returns the run and its parsed recipe.
+    async fn insert_run_row(
         &mut self,
         recipe_id: u64,
         params: Value,
         schedule_id: Option<u64>,
-    ) -> QueryResult<WorkflowRun> {
+    ) -> QueryResult<(WorkflowRun, Recipe)> {
         let recipe_row = self.get_recipe(recipe_id).await?;
         let recipe = parse_recipe(&recipe_row.recipe_json.0)
             .map_err(|message| invalid(format!("recipe {recipe_id}: {message}")))?;
@@ -754,6 +754,18 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "create workflow run",
             })?;
+        Ok((run, recipe))
+    }
+
+    /// Instantiate a recipe: insert the run row, validate/merge params,
+    /// and materialize every start node as a task.
+    pub async fn create_run(
+        &mut self,
+        recipe_id: u64,
+        params: Value,
+        schedule_id: Option<u64>,
+    ) -> QueryResult<WorkflowRun> {
+        let (run, recipe) = self.insert_run_row(recipe_id, params, schedule_id).await?;
 
         let start_ids: HashSet<&str> = recipe
             .nodes
@@ -767,6 +779,14 @@ impl TodoStore {
                     .await?;
             }
         }
+        Ok(run)
+    }
+
+    /// Create the run row for a managed-tag recipe without materializing
+    /// start nodes: the tag's own flow (e.g. the travel trip builder)
+    /// generates the run's content instead.
+    pub async fn create_managed_run(&mut self, recipe_id: u64, params: Value) -> QueryResult<WorkflowRun> {
+        let (run, _) = self.insert_run_row(recipe_id, params, None).await?;
         Ok(run)
     }
 
@@ -907,12 +927,23 @@ impl TodoStore {
         Ok(cancelled)
     }
 
-    /// Active runs with their steps, for the run banner in the UI.
+    /// Active runs with their steps, for the run banner in the UI. Runs of
+    /// managed-tag recipes are skipped: their content lives in the tag's
+    /// task list (a travel trip is its checklist), not the workflow panel.
     pub async fn list_active_run_views(&mut self) -> QueryResult<Vec<RunView>> {
         let runs = self.list_workflow_runs().await?;
         let mut views = Vec::new();
         for run in runs {
             if run.status != "active" {
+                continue;
+            }
+            let managed = match self.get_recipe(run.recipe_id).await {
+                Ok(recipe) => parse_recipe(&recipe.recipe_json.0)
+                    .map(|parsed| parsed.managed_tag.is_some())
+                    .unwrap_or(false),
+                Err(_) => true,
+            };
+            if managed {
                 continue;
             }
             if let Some(view) = self.workflow_run_view(run.id).await? {

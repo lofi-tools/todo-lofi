@@ -61,13 +61,6 @@ pub struct Task {
     /// The recipe node this task materializes (engine bookkeeping for edge
     /// evaluation and event lookup). Only set on workflow steps.
     pub node_id: Option<String>,
-    /// The trip this task is an item of (travel-checklists managed tag).
-    /// `NULL` for ordinary tasks. Trip items never sync to any
-    /// integration.
-    pub trip_id: Option<u64>,
-    /// Which checklist of the trip this item belongs to: "Pack" or
-    /// "Before leaving". Only set on trip items.
-    pub trip_section: Option<String>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -211,10 +204,6 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         is_seed: false,
         workflow_run_id,
         node_id,
-        // Raw list queries don't select the trip columns; only the trip
-        // panel's dedicated queries need them accurate.
-        trip_id: None,
-        trip_section: None,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };

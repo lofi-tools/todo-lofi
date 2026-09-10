@@ -599,32 +599,20 @@ impl Store {
         })
     }
 
-    /// Trips of the managed tag with their checklist sections.
-    pub fn list_trips_with_items(
+    /// Create a trip of the travel automation: starts a workflow run and
+    /// spawns its checklist items into the Pack / Before leaving sections.
+    pub fn create_trip(
         &self,
-        tag_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<storage::TripWithItems>>> {
-        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            Ok(s.list_trips_with_items(tag_id).await?)
-        })
-    }
-
-    /// Add a trip: stores it and spawns its checklist items as tasks.
-    pub fn add_trip(
-        &self,
-        tag_id: u64,
+        recipe_id: u64,
         name: String,
         days: String,
         activities: Vec<String>,
         cx: &impl AppContext,
-    ) -> Task<anyhow::Result<storage::Trip>> {
+    ) -> Task<anyhow::Result<storage::WorkflowRun>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.create_trip(tag_id, name, days, activities).await?)
+            Ok(s.create_trip(recipe_id, name, days, activities).await?)
         })
     }
 
