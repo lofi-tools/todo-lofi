@@ -294,20 +294,15 @@ impl Render for TaskRow {
                 .iter()
                 .any(|task| !task.done && !task.blocked);
         let locked = self.locked;
-        // The row grows with its content: fixed 44px when collapsed, auto
-        // height when editing or when the "blocks N" or subtask list is
-        // expanded so the extra rows get their own vertical space.
-        let expanded = (self.blocks_expanded && self.blocking.blocks.len() > 1)
-            || (self.subtasks_expanded && !self.subtasks.is_empty());
+        // The row is a vertical stack: a fixed-height header carrying the
+        // whole unexpanded row (checkbox, titles, tags), with the expanded
+        // "blocks N" and subtask lists below it — so expanding never moves
+        // the header's checkbox or title.
 
         div()
             .id(("task", task_id))
-            .h_flex()
-            .when(self.editing || expanded, |this| this.h_auto().py_0p5())
-            .when(!self.editing && !expanded, |this| this.h(px(44.)))
-            .items_center()
-            .when(expanded, |this| this.items_start())
-            .gap_3()
+            .v_flex()
+            .gap_1()
             .px_3()
             .rounded_md()
             .opacity(if muted && !live_chain { 0.55 } else { 1.0 })
@@ -330,7 +325,14 @@ impl Render for TaskRow {
                 }
             }))
             .child(
-                Checkbox::new(("checkbox", task_id))
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .when(self.editing, |this| this.h_auto().py_0p5())
+                    .when(!self.editing, |this| this.h(px(44.)))
+                    .child(
+                        Checkbox::new(("checkbox", task_id))
                     .with_size(px(22.))
                     .checked(done)
                     .disabled(self.task.blocked && !done)
@@ -356,12 +358,12 @@ impl Render for TaskRow {
                         })
                         .detach();
                     }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .v_flex()
-                    .gap_0p5()
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .v_flex()
+                            .gap_0p5()
             .child(if let Some(input) = self.edit_input.clone() {
                 div().id(("task-title-edit", task_id)).pt_1().child(
                     Input::new(&input)
@@ -436,71 +438,87 @@ impl Render for TaskRow {
                         )
                     })
             })
-            .when(self.blocks_expanded && self.blocking.blocks.len() > 1, |this| {
-                this                    .child(
+            .child(
+                div()
+                    .h_flex()
+                    .gap_1()
+                    .children(visible_tags.into_iter().map(|tag| {
                         div()
-                            .id(("blocks-list", task_id))
-                            .v_flex()
-                            .pl_4()
-                            .children(self.blocking.blocks.iter().map(|task| {
-                                blocked_title(task.clone(), &entity)
-                            })),
-                    )
-            })
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_1()
-                            .children(visible_tags.into_iter().map(|tag| {
-                                div()
-                                    .text_size(px(10.))
-                                    .px(px(4.))
-                                    .rounded(px(2.))
-                                    .bg(rgb(0x2a2a2a))
-                                    .text_color(rgb(0xa3a3a3))
-                                    .child(format!("#{tag}"))
-                            }))
-                            .when(!self.subtasks.is_empty(), |this| {
-                                let done =
-                                    self.subtasks.iter().filter(|task| task.done).count();
-                                let total = self.subtasks.len();
-                                // Subtask progress, right of the tags; the
-                                // N/M counter expands/collapses the subtask
-                                // list under the row (one row at a time).
-                                this.child(
-                                    div()
-                                        .id(("subtask-progress", task_id))
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_0p5()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(0xa3a3a3))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            let task_id = this.task.id;
-                                            cx.emit(TaskRowEvent::SubtasksToggled { task_id });
-                                        }))
-                                        .child(subtask_icon(0xa3a3a3))
-                                        .child(format!("{done}/{total}"))
-                                        .child(if self.subtasks_expanded { "▾" } else { "▸" }),
-                                )
+                            .text_size(px(10.))
+                            .px(px(4.))
+                            .rounded(px(2.))
+                            .bg(rgb(0x2a2a2a))
+                            .text_color(rgb(0xa3a3a3))
+                            .child(format!("#{tag}"))
+                    }))
+                    .when(!self.subtasks.is_empty(), |this| {
+                        let done =
+                            self.subtasks.iter().filter(|task| task.done).count();
+                        let total = self.subtasks.len();
+                        // Subtask progress, right of the tags; the
+                        // N/M counter expands/collapses the subtask
+                        // list under the row (one row at a time).
+                        this.child(
+                            div()
+                                .id(("subtask-progress", task_id))
+                                .h_flex()
+                                .items_center()
+                                .gap_0p5()
+                                .text_size(px(10.))
+                                .text_color(rgb(0xa3a3a3))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    let task_id = this.task.id;
+                                    cx.emit(TaskRowEvent::SubtasksToggled { task_id });
+                                }))
+                                .child(subtask_icon(0xa3a3a3))
+                                .child(format!("{done}/{total}"))
+                                .child(if self.subtasks_expanded { "▾" } else { "▸" }),
+                        )
                             }),
                     )
-            // Expanded subtasks sit below the tags sub-row, so the main
-            // task's title/tags stay visible above them.
-            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
-                this                    .child(
-                        div()
-                            .id(("subtask-list", task_id))
-                            .v_flex()
-                            .pl_2()
-                            .children(self.subtasks.iter().map(|task| {
-                                subtask_title(task.clone(), &entity, &store)
-                            })),
-                    )
-            })
+                )
             )
+            // Expanded lists sit below the header, stacked vertically in
+            // the row — never beside it — so the header never moves.
+            .when(self.blocks_expanded && self.blocking.blocks.len() > 1, |this| {
+                this.child(
+                    div()
+                        .h_flex()
+                        .gap_3()
+                        .child(div().w(px(22.)).flex_none())
+                        .child(
+                            div()
+                                .flex_1()
+                                .v_flex()
+                                .child(
+                                    div()
+                                        .id(("blocks-list", task_id))
+                                        .v_flex()
+                                        .pl_4()
+                                        .children(self.blocking.blocks.iter().map(|task| {
+                                            blocked_title(task.clone(), &entity)
+                                        })),
+                                ),
+                        ),
+                )
+            })
+            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .v_flex()
+                        .child(
+                            div()
+                                .id(("subtask-list", task_id))
+                                .v_flex()
+                                .children(self.subtasks.iter().map(|task| {
+                                    subtask_title(task.clone(), &entity, &store)
+                                })),
+                        ),
+                )
+            })
     }
 }
 
@@ -572,7 +590,7 @@ fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>, store: &Store
         .rounded_md()
         .child(
             Checkbox::new(("subtask-checkbox", task_id))
-                .with_size(px(18.))
+                .with_size(px(16.))
                 .checked(done)
                 .disabled(task.blocked && !done)
                 .on_click(move |new_done, _window, cx| {
@@ -596,7 +614,7 @@ fn subtask_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>, store: &Store
         .child(
             div()
                 .id(("subtask-title-text", task.id))
-                .text_base()
+                .text_sm()
                 .text_color(rgb(color))
                 .when(task.done, |this| this.line_through())
                 .child(task.title.clone())
