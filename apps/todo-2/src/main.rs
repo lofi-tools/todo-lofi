@@ -17,6 +17,7 @@ use store::Store;
 use theme::APP_BG;
 use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
+use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
@@ -29,6 +30,7 @@ mod store;
 mod theme;
 mod todoist_auth;
 mod ui_parts {
+    pub mod automations;
     pub mod integrations;
     pub mod navbar;
     pub mod settings;
@@ -47,6 +49,7 @@ struct Layout {
     details: Entity<TaskDetails>,
     workflows: Entity<WorkflowPanel>,
     integrations: Entity<IntegrationsView>,
+    automations: Entity<AutomationsPanel>,
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
     panel: NavPanel,
@@ -148,6 +151,9 @@ impl Layout {
                 NavBarEvent::OpenIntegrations => {
                     this.show_panel(NavPanel::Integrations, cx);
                 }
+                NavBarEvent::OpenAutomations => {
+                    this.show_panel(NavPanel::Automations, cx);
+                }
                 NavBarEvent::OpenWorkflows => {
                     this.show_panel(NavPanel::Workflows, cx);
                 }
@@ -158,7 +164,17 @@ impl Layout {
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
+        let automations = cx.new(|cx| AutomationsPanel::new(store.clone(), cx));
         let workflows = cx.new(|cx| WorkflowPanel::new(store.clone(), cx));
+        // Enabling/disabling an automation spawns or tombstones tasks:
+        // reload the task list.
+        let list_for_automations = task_list.clone();
+        cx.subscribe(&automations, move |_this, _panel, event, cx| match event {
+            AutomationsEvent::Changed => {
+                list_for_automations.update(cx, |list, cx| list.refresh(cx));
+            }
+        })
+        .detach();
         // A workflow action (start run, approve/reject, fire event) can
         // spawn or complete tasks: reload the task list.
         let list_for_workflow = task_list.clone();
@@ -329,6 +345,7 @@ impl Layout {
             details,
             workflows,
             integrations,
+            automations,
             settings,
             panel: NavPanel::Tasks,
             store: store.clone(),
@@ -527,6 +544,12 @@ impl Render for Layout {
                             .flex()
                             .flex_row()
                             .child(div().flex_1().child(self.integrations.clone()))
+                            .into_any_element(),
+                        NavPanel::Automations => div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .child(div().flex_1().child(self.automations.clone()))
                             .into_any_element(),
                         NavPanel::Workflows => div()
                             .flex_1()

@@ -78,6 +78,7 @@ pub struct ParamSchema {
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub name: String,
+    pub description: Option<String>,
     pub params: HashMap<String, ParamSchema>,
     pub missed_policy: String,
     pub nodes: Vec<RecipeNode>,
@@ -85,12 +86,16 @@ pub struct Recipe {
 }
 
 /// Recipe summary for UI recipe pickers (the full graph lives in
-/// `recipe_json`).
+/// `recipe_json`). `active_runs` is the number of runs currently in
+/// `active` status, so the automations panel can show enable/disable
+/// state without fetching the runs themselves.
 #[derive(Debug, Clone)]
 pub struct RecipeMeta {
     pub id: u64,
     pub slug: String,
     pub name: String,
+    pub description: Option<String>,
+    pub active_runs: usize,
 }
 
 /// One step of a run, as the UI renders it: the task plus the recipe node
@@ -177,6 +182,11 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
         }
     }
 
+    let description = root
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let missed_policy = root
         .get("missed_policy")
         .and_then(|v| v.as_str())
@@ -419,6 +429,7 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
 
     Ok(Recipe {
         name: name.to_string(),
+        description,
         params,
         missed_policy,
         nodes,
@@ -555,15 +566,32 @@ impl TodoStore {
     }
 
     pub async fn list_recipe_metas(&mut self) -> QueryResult<Vec<RecipeMeta>> {
+        let active = self
+            .list_workflow_runs()
+            .await?
+            .into_iter()
+            .filter(|run| run.status == "active")
+            .fold(HashMap::<u64, usize>::new(), |mut counts, run| {
+                *counts.entry(run.recipe_id).or_default() += 1;
+                counts
+            });
         let mut metas = Vec::new();
         for recipe in self.list_recipes().await? {
-            let name = parse_recipe(&recipe.recipe_json.0)
-                .map(|parsed| parsed.name)
-                .unwrap_or_else(|_| recipe.slug.clone());
+            let parsed = parse_recipe(&recipe.recipe_json.0)
+                .unwrap_or_else(|_| Recipe {
+                    name: recipe.slug.clone(),
+                    description: None,
+                    params: HashMap::new(),
+                    missed_policy: "skip".to_string(),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                });
             metas.push(RecipeMeta {
                 id: recipe.id,
                 slug: recipe.slug,
-                name,
+                name: parsed.name,
+                description: parsed.description,
+                active_runs: active.get(&recipe.id).copied().unwrap_or(0),
             });
         }
         Ok(metas)
@@ -840,6 +868,23 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Cancel every active run of a recipe (the automations panel's
+    /// "Disable"). Returns how many runs were cancelled.
+    pub async fn cancel_active_runs(&mut self, recipe_id: u64) -> QueryResult<usize> {
+        let run_ids: Vec<u64> = self
+            .list_workflow_runs()
+            .await?
+            .into_iter()
+            .filter(|run| run.recipe_id == recipe_id && run.status == "active")
+            .map(|run| run.id)
+            .collect();
+        let cancelled = run_ids.len();
+        for run_id in run_ids {
+            self.cancel_run(run_id).await?;
+        }
+        Ok(cancelled)
+    }
+
     /// Active runs with their steps, for the run banner in the UI.
     pub async fn list_active_run_views(&mut self) -> QueryResult<Vec<RunView>> {
         let runs = self.list_workflow_runs().await?;
@@ -869,6 +914,7 @@ impl TodoStore {
         let recipe_row = self.get_recipe(run.recipe_id).await?;
         let recipe = parse_recipe(&recipe_row.recipe_json.0).unwrap_or_else(|_| Recipe {
             name: recipe_row.slug.clone(),
+            description: None,
             params: HashMap::new(),
             missed_policy: "skip".to_string(),
             nodes: Vec::new(),

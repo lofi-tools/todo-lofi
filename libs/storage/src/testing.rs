@@ -566,7 +566,8 @@ impl TodoStore {
             (
                 "packing-list",
                 json!({
-                    "name": "Packing List",
+                    "name": "Travel checklists",
+                    "description": "Pack a checklist for your trip: three items appear at once.",
                     "nodes": [
                         { "id": "swimsuit", "kind": "action", "title": "Pack swimsuit" },
                         { "id": "sunscreen", "kind": "action", "title": "Pack sunscreen" },
@@ -580,7 +581,8 @@ impl TodoStore {
             (
                 "follow-up",
                 json!({
-                    "name": "Follow-up",
+                    "name": "Job application tracker",
+                    "description": "Submit an application, then get a nudge to follow up 4 days later.",
                     "nodes": [
                         { "id": "submit", "kind": "action", "title": "Submit application" },
                         { "id": "followup", "kind": "action", "title": "Follow up" }
@@ -594,7 +596,8 @@ impl TodoStore {
             (
                 "birthday",
                 json!({
-                    "name": "Birthday",
+                    "name": "Birthday reminders",
+                    "description": "Send greetings and call once a year, on schedule.",
                     "missed_policy": "skip",
                     "nodes": [
                         { "id": "greet", "kind": "action", "title": "Send birthday greeting" },
@@ -611,6 +614,7 @@ impl TodoStore {
                 "gatekeeper",
                 json!({
                     "name": "Gatekeeper",
+                    "description": "AI drafts, you approve; rejection opens an edit loop.",
                     "nodes": [
                         { "id": "draft", "kind": "action", "title": "Draft the email", "ai": true, "description": "An AI or script can pick this up and write a draft." },
                         { "id": "approve", "kind": "action", "title": "Approve draft", "approval": true, "retrigger_on_reject": true },
@@ -629,7 +633,8 @@ impl TodoStore {
             (
                 "parallel-research",
                 json!({
-                    "name": "Parallel Research",
+                    "name": "Parallel research",
+                    "description": "Three research tasks in parallel; the summary waits for all of them.",
                     "nodes": [
                         { "id": "research_a", "kind": "action", "title": "Research topic A" },
                         { "id": "research_b", "kind": "action", "title": "Research topic B" },
@@ -647,7 +652,8 @@ impl TodoStore {
             (
                 "conditional-urgency",
                 json!({
-                    "name": "Conditional Urgency",
+                    "name": "Conditional urgency",
+                    "description": "Call now when marked urgent, otherwise wait 3 days.",
                     "params": { "urgent": { "type": "boolean", "default": false, "description": "Call immediately when true" } },
                     "nodes": [
                         { "id": "review", "kind": "action", "title": "Review the lead" },
@@ -663,7 +669,8 @@ impl TodoStore {
             (
                 "contract-follow-up",
                 json!({
-                    "name": "Contract Follow-up",
+                    "name": "Contract follow-up",
+                    "description": "Send an email, then wait for the reply before drafting the contract.",
                     "nodes": [
                         { "id": "send_email", "kind": "action", "title": "Send email" },
                         { "id": "await_reply", "kind": "event", "title": "Await reply from client" },
@@ -680,7 +687,8 @@ impl TodoStore {
             (
                 "order-delivery",
                 json!({
-                    "name": "Order Delivery",
+                    "name": "Order delivery",
+                    "description": "Place an order, then mark the package received once it arrives.",
                     "nodes": [
                         { "id": "place_order", "kind": "action", "title": "Place order" },
                         { "id": "mark_received", "kind": "action", "title": "Mark package as received" }

@@ -5,6 +5,7 @@ use gpui::{
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
+use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
@@ -119,6 +120,7 @@ impl TaskListView {
                 }
                 NavBarEvent::OpenProjectPicker
                 | NavBarEvent::OpenIntegrations
+                | NavBarEvent::OpenAutomations
                 | NavBarEvent::OpenWorkflows
                 | NavBarEvent::OpenSettings => {
                     // Picker/dialog open is handled by the Layout; the task
@@ -1076,6 +1078,9 @@ impl Render for TaskListView {
             .child(
                 div()
                     .flex_1()
+                    // Long lists scroll instead of growing past the window;
+                    // the flex-1 body gives the scrollable a definite height.
+                    .overflow_y_scrollbar()
                     .v_flex()
                     .gap_2()
                     .children(self.sectioned_rows(cx)),

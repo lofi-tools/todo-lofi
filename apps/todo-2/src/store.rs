@@ -585,6 +585,19 @@ impl Store {
         })
     }
 
+    /// Disable an automation: cancel every active run of its recipe.
+    pub fn disable_automation(
+        &self,
+        recipe_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<usize>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.cancel_active_runs(recipe_id).await?)
+        })
+    }
+
     /// Active runs with their steps, for the run banner.
     pub fn list_active_run_views(
         &self,
