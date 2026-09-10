@@ -18,6 +18,7 @@ use snafu::ResultExt;
 use std::collections::{HashMap, HashSet};
 
 const API_BASE: &str = "https://api.todoist.com/api/v1";
+const SYNC_URL: &str = "https://api.todoist.com/api/v1/sync";
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct RemoteSection {
@@ -81,6 +82,27 @@ pub fn urgency_for_priority(priority: i64) -> f64 {
     }
 }
 
+/// Inverse of [`urgency_for_priority`] for push: nearest Todoist priority
+/// at or below the local urgency.
+pub fn priority_for_urgency(urgency: f64) -> i64 {
+    if urgency >= 2.0 {
+        4
+    } else if urgency >= 1.5 {
+        3
+    } else if urgency >= 1.25 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Local deadline (UTC epoch) → Todoist due `date` (`YYYY-MM-DD`).
+pub fn due_date_for_deadline(deadline: u64) -> Option<String> {
+    jiff::Timestamp::from_second(deadline as i64)
+        .ok()
+        .map(|stamp| stamp.to_string()[..10].to_string())
+}
+
 /// Due date → UTC epoch seconds. Prefers `datetime`, falls back to `date`
 /// at midnight UTC. Returns `None` when nothing parses.
 pub fn deadline_for_due(due: &RemoteDue) -> Option<u64> {
@@ -103,6 +125,19 @@ fn parse_updated(value: Option<&str>) -> Option<jiff::Timestamp> {
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
+}
+
+fn url_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 async fn get_json(
@@ -431,9 +466,186 @@ impl TodoStore {
     }
 }
 
+/// Delta of mapped fields to push for one task. `None` = leave untouched;
+/// `Some(None)` (where applicable) = clear on the remote side.
+#[derive(Debug, Default)]
+pub struct TaskPatch {
+    pub content: Option<String>,
+    pub description: Option<Option<String>>,
+    pub due_date: Option<Option<String>>,
+    pub priority: Option<i64>,
+    pub done: Option<bool>,
+}
+
+fn sync_command(command_type: &str, args: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": command_type,
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "args": args,
+    })
+}
+
+/// Send Sync commands and fail unless every `sync_status[uuid]` is `"ok"`.
+/// UUIDs make retries idempotent: the server never re-executes a UUID.
+async fn send_commands(
+    token: &str,
+    commands: Vec<serde_json::Value>,
+) -> anyhow::Result<()> {
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let body: serde_json::Value = client()
+        .post(SYNC_URL)
+        .bearer_auth(token)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(format!(
+            "commands={}",
+            url_encode(&serde_json::to_string(&commands).unwrap_or_else(|_| "[]".to_string()))
+        ))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Todoist sync request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Todoist sync request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Todoist sync response was not JSON: {e}"))?;
+    let status = body.get("sync_status").cloned().unwrap_or_default();
+    let failures: Vec<String> = commands
+        .iter()
+        .filter_map(|command| command.get("uuid")?.as_str())
+        .filter(|uuid| status.get(*uuid).and_then(|s| s.as_str()) != Some("ok"))
+        .map(|uuid| {
+            format!(
+                "{uuid}: {}",
+                status.get(uuid).cloned().unwrap_or_default()
+            )
+        })
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "Todoist rejected sync commands: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+impl TodoStore {
+    /// Push a field delta for one linked task via Sync commands
+    /// (`item_update` for partial fields, `item_close`/`item_uncomplete`
+    /// for completion — `item_update` explicitly does not support those).
+    /// Refreshes the link timestamp so the next import sees remote state
+    /// as current.
+    pub async fn push_todoist_patch(
+        &mut self,
+        token: &str,
+        integration_id: u64,
+        external_id: &str,
+        task_id: u64,
+        patch: &TaskPatch,
+    ) -> QueryResult<()> {
+        let mut update_args = serde_json::Map::new();
+        update_args.insert(
+            "id".to_string(),
+            serde_json::Value::String(external_id.to_string()),
+        );
+        if let Some(content) = &patch.content {
+            update_args.insert(
+                "content".to_string(),
+                serde_json::Value::String(content.clone()),
+            );
+        }
+        if let Some(description) = &patch.description {
+            update_args.insert(
+                "description".to_string(),
+                description
+                    .clone()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(due) = &patch.due_date {
+            update_args.insert(
+                "due".to_string(),
+                due.clone()
+                    .map(|date| serde_json::json!({ "date": date }))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if let Some(priority) = patch.priority {
+            update_args.insert(
+                "priority".to_string(),
+                serde_json::Value::from(priority),
+            );
+        }
+        let mut commands = Vec::new();
+        if update_args.len() > 1 {
+            commands.push(sync_command(
+                "item_update",
+                serde_json::Value::Object(update_args),
+            ));
+        }
+        if let Some(done) = patch.done {
+            commands.push(sync_command(
+                if done { "item_close" } else { "item_uncomplete" },
+                serde_json::json!({ "id": external_id }),
+            ));
+        }
+        send_commands(token, commands)
+            .await
+            .map_err(|e| crate::QueryErr::UnexpectedValue {
+                message: format!("Todoist push failed for task {task_id}: {e}"),
+            })?;
+        self.link_task(
+            integration_id,
+            external_id,
+            task_id,
+            Some(jiff::Timestamp::now()),
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_priority_roundtrip() {
+        assert_eq!(priority_for_urgency(2.0), 4);
+        assert_eq!(priority_for_urgency(1.5), 3);
+        assert_eq!(priority_for_urgency(1.25), 2);
+        assert_eq!(priority_for_urgency(1.0), 1);
+        assert_eq!(priority_for_urgency(0.5), 1);
+        // Round-trips through the import mapping.
+        for priority in 1..=4 {
+            assert_eq!(priority_for_urgency(urgency_for_priority(priority)), priority);
+        }
+    }
+
+    #[test]
+    fn test_due_date_format() {
+        let stamp: jiff::Timestamp = "2026-09-12T00:00:00Z".parse().unwrap();
+        assert_eq!(
+            due_date_for_deadline(stamp.as_second() as u64).as_deref(),
+            Some("2026-09-12")
+        );
+    }
+
+    #[test]
+    fn test_sync_command_shape() {
+        let command = sync_command("item_update", serde_json::json!({"id": "x"}));
+        assert_eq!(command.get("type").and_then(|t| t.as_str()), Some("item_update"));
+        assert!(command.get("uuid").and_then(|u| u.as_str()).is_some_and(|u| !u.is_empty()));
+        // UUIDs must differ per command for idempotent retries.
+        let other = sync_command("item_update", serde_json::json!({"id": "x"}));
+        assert_ne!(command.get("uuid"), other.get("uuid"));
+    }
 
     #[test]
     fn test_urgency_mapping() {

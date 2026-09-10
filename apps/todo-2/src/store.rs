@@ -6,6 +6,40 @@ use storage::task::TaskCreate;
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
 
+/// Push a field delta to every Todoist task linked to `task_id`. No links
+/// (or no token) → no-op, so purely local tasks never touch the network.
+/// Must run on the Tokio runtime. A push failure fails the whole edit so
+/// the UI reports it; the local edit itself is already saved.
+async fn push_patch(
+    store: &mut TodoStore,
+    task_id: u64,
+    patch: storage::todoist::TaskPatch,
+) -> anyhow::Result<()> {
+    let todoist_ids: std::collections::HashSet<u64> = store
+        .list_integrations()
+        .await?
+        .into_iter()
+        .filter(|i| i.provider == "todoist")
+        .map(|i| i.id)
+        .collect();
+    let links: Vec<storage::TaskLink> = store
+        .task_links_for_task(task_id)
+        .await?
+        .into_iter()
+        .filter(|link| todoist_ids.contains(&link.integration_id))
+        .collect();
+    if links.is_empty() {
+        return Ok(());
+    }
+    let token = crate::todoist_auth::access_token().await?;
+    for link in links {
+        store
+            .push_todoist_patch(&token, link.integration_id, &link.external_id, task_id, &patch)
+            .await?;
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn new(store: TodoStore) -> Self {
         Store(Arc::new(tokio::sync::Mutex::new(store)))
@@ -94,6 +128,11 @@ impl Store {
             let mut s = store.lock().await;
             s.update_task_done(task_id, done).await?;
             tracing::info!(task_id, done, "toggle_task_done: after update, ok");
+            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
+                done: Some(done),
+                ..Default::default()
+            })
+            .await?;
             Ok(())
         })
     }
@@ -108,6 +147,11 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             s.update_task_title(task_id, &title).await?;
+            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
+                content: Some(title),
+                ..Default::default()
+            })
+            .await?;
             Ok(())
         })
     }
@@ -121,7 +165,13 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            s.update_task_description(task_id, description).await?;
+            s.update_task_description(task_id, description.clone())
+                .await?;
+            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
+                description: Some(description),
+                ..Default::default()
+            })
+            .await?;
             Ok(())
         })
     }
