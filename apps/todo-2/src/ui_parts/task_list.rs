@@ -1,7 +1,7 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, rgb,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -1719,9 +1719,13 @@ impl TaskListView {
             && pending.below_id == below_id
         {
             let input = pending.input.clone();
+            // Align with row titles/tags: row px_3 (12) + checkbox (22) +
+            // title gap_3 (12) = 46px; right side matches the row px_3.
             return div()
                 .id(key)
-                .py_1()
+                .py_2()
+                .pl(px(46.))
+                .pr_3()
                 .child(Input::new(&input).small())
                 .into_any_element();
         }
@@ -1732,30 +1736,42 @@ impl TaskListView {
                 .bg(rgb(0x333333))
                 .into_any_element()
         };
+        // Zero-height row: the 16px padded hover strip is cancelled by
+        // the outer negative margins, and the 20px content box by the
+        // inner one's, so surrounding rows never shift. The "+" sits left
+        // of the line.
         div()
             .id(key.clone())
             .w_full()
-            .py_1()
-            .my_neg_1()
-            .h_flex()
-            .items_center()
-            .gap_2()
+            .py_2()
+            .my_neg_2()
             .opacity(0.0)
             .hover(|style| style.opacity(1.0))
-            .child(line())
             .child(
                 div()
-                    .id(format!("{key}-plus"))
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .cursor_pointer()
-                    .child("+")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.begin_insert(above_id, below_id, window, cx);
-                    })),
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .my_neg_2p5()
+                    .child(
+                        div()
+                            .id(format!("{key}-plus"))
+                            .h_5()
+                            .w_5()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_base()
+                            .text_color(rgb(0xa3a3a3))
+                            .cursor_pointer()
+                            .child("+")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.begin_insert(above_id, below_id, window, cx);
+                            })),
+                    )
+                    .child(line()),
             )
-            .child(line())
             .into_any_element()
     }
 }
