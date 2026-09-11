@@ -631,6 +631,19 @@ impl ProjectAgent {
         }
         command
     }
+
+    fn spawn_child(&self) -> std::io::Result<async_process::Child> {
+        // NB: `async_process::Command::from` resets its internal
+        // stdin/stdout/stderr-configured flags, and `spawn()` overwrites any
+        // unflagged stream with `inherit()`. Re-assert piped stdio through
+        // the async API so the flags (and the pipes) survive.
+        let mut command = async_process::Command::from(self.command());
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.spawn()
+    }
 }
 
 impl ConnectTo<Client> for ProjectAgent {
@@ -638,12 +651,10 @@ impl ConnectTo<Client> for ProjectAgent {
         self,
         client: impl ConnectTo<Agent>,
     ) -> Result<(), acp::Error> {
-        let mut child = async_process::Command::from(self.command())
-            .spawn()
-            .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("failed to launch {}: {error}", self.spec.command_line()))
-            })?;
+        let mut child = self.spawn_child().map_err(|error| {
+            acp::Error::internal_error()
+                .data(format!("failed to launch {}: {error}", self.spec.command_line()))
+        })?;
 
         let stdin = child
             .stdin
@@ -699,4 +710,28 @@ impl ConnectTo<Client> for ProjectAgent {
 /// The trailing stderr lines worth showing in an error state.
 pub fn stderr_summary(lines: &[String]) -> String {
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: converting the std command via
+    /// `async_process::Command::from` used to silently replace the piped
+    /// stdio with inherited stdio, so `connect_to` failed with "agent stdin
+    /// unavailable" and the UI reported a handshake failure.
+    #[test]
+    fn spawn_child_keeps_stdio_piped() {
+        let agent = ProjectAgent::new(SpawnSpec {
+            program: "cat".into(),
+            args: Vec::new(),
+            cwd: std::env::temp_dir(),
+            env: Default::default(),
+        });
+        let mut child = agent.spawn_child().expect("spawn cat");
+        assert!(child.stdin.is_some(), "stdin must stay piped");
+        assert!(child.stdout.is_some(), "stdout must stay piped");
+        assert!(child.stderr.is_some(), "stderr must stay piped");
+        let _ = child.kill();
+    }
 }
