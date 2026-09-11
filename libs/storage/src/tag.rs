@@ -90,6 +90,25 @@ impl TodoStore {
         Ok(tag)
     }
 
+    /// Seed project tag: a `project:{path}` tag with a human-friendly display
+    /// name, marked as seed data so sync never touches it.
+    pub async fn create_seed_project_tag(
+        &mut self,
+        path: &std::path::Path,
+        label: impl Into<String>,
+    ) -> QueryResult<Tag> {
+        let name = format!("project:{}", path.display());
+        let display_name = label.into();
+        let tag = Tag::create()
+            .name(name.clone())
+            .display_name(Some(display_name))
+            .is_seed(true)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::CreateTagSnafu { name })?;
+        Ok(tag)
+    }
+
     pub async fn create_tag_with_display_name(
         &mut self,
         name: impl Into<String>,

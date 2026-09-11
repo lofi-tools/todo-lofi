@@ -2614,23 +2614,36 @@ fn render_error(
     detail: &str,
     retryable: bool,
 ) -> AnyElement {
-    let mut children = vec![
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(icon(IconName::CircleX, DANGER))
-            .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(TEXT_STRONG))
-                    .child(title.to_string()),
+    let mut children = vec![div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(icon(IconName::CircleX, DANGER))
+        .child(
+            div()
+                .min_w_0()
+                .text_sm()
+                .font_semibold()
+                .text_color(rgb(TEXT_STRONG))
+                .child(title.to_string()),
+        )
+        .child(div().flex_1())
+        .when(!detail.trim().is_empty(), |this| {
+            let detail = detail.to_string();
+            this.child(
+                Button::new("agent-error-copy")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Copy)
+                    .tooltip("Copy the error text")
+                    .on_click(move |_, _, cx: &mut App| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.clone()));
+                    }),
             )
-            .into_any_element(),
-    ];
+        })
+        .into_any_element()];
     if !detail.trim().is_empty() {
-        children.push(block(detail, Some(ERROR_TAIL_LINES)));
+        children.push(render_error_detail(detail));
     }
     if retryable {
         children.push(
@@ -2650,6 +2663,27 @@ fn render_error(
         );
     }
     card(children)
+}
+
+/// The error payload as a selectable, mono block so it can be copy-pasted. The
+/// text view handles selection and double/triple-click; the row's copy button
+/// copies the full (untruncated) detail.
+fn render_error_detail(detail: &str) -> AnyElement {
+    let body = tail_lines(detail, ERROR_TAIL_LINES);
+    div()
+        .w_full()
+        .p_2()
+        .bg(rgb(PANEL_BG))
+        .rounded_md()
+        .font_family(MONO_FONT)
+        .text_xs()
+        .text_color(rgb(TEXT_MUTED))
+        .child(
+            TextView::markdown("agent-error-detail", body)
+                .selectable(true)
+                .max_lines(ERROR_TAIL_LINES),
+        )
+        .into_any_element()
 }
 
 fn render_auth(weak: &WeakEntity<AgentPane>, methods: &[AuthMethodRow]) -> AnyElement {

@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -522,9 +523,23 @@ where
     let (requester, info) = match ready_rx.await {
         Ok((connection, info)) => (Requester { connection }, info),
         Err(_) => {
-            return Err(AcpError::Launch(
-                "the agent exited before completing the handshake".to_string(),
-            ));
+            // The ready channel and the stderr drain task race on the process's
+            // final output; give the drain a moment to flush before capturing
+            // the diagnostic context.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stderr = match stderr_buffer.lock() {
+                Ok(mut buffer) => buffer.drain(..).collect::<Vec<_>>(),
+                Err(poisoned) => poisoned.into_inner().drain(..).collect::<Vec<_>>(),
+            };
+            let summary = stderr_summary(&stderr);
+            let detail = if summary.trim().is_empty() {
+                "the agent exited before completing the handshake".to_string()
+            } else {
+                format!(
+                    "the agent exited before completing the handshake; captured stderr:\n{summary}"
+                )
+            };
+            return Err(AcpError::Launch(detail));
         }
     };
 

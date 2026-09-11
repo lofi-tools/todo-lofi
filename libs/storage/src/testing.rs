@@ -544,6 +544,21 @@ impl TodoStore {
 
         self.seed_workflows().await?;
 
+        // Seed a couple of project folders by default so the agent pane has
+        // directory-backed projects available immediately.
+        for (path, label) in [
+            (
+                std::path::Path::new("/Users/me/src/me/accounting"),
+                "accounting",
+            ),
+            (
+                std::path::Path::new("/Users/me/src/me/about-me"),
+                "about-me",
+            ),
+        ] {
+            self.create_seed_project_tag(path, label).await?;
+        }
+
         tracing::info!(
             tasks = task_map.len(),
             tags = tag_map.len(),
@@ -773,9 +788,9 @@ mod tests {
         assert_eq!(tasks.len(), 18);
 
         let tags = store.list_tags().await?;
-        // 9 seed tags plus the travel managed tag and its 8 checklist
-        // sections, enabled by default.
-        assert_eq!(tags.len(), 18);
+        // 9 seed tags, 2 project tags, plus the travel managed tag and
+        // its 8 checklist sections, enabled by default.
+        assert_eq!(tags.len(), 20);
 
         // Every seed row is marked so sync never touches it; workflow
         // steps are covered by the workflow_run_id sync guard instead.
