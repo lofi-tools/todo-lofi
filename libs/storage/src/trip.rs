@@ -18,12 +18,54 @@ use snafu::ResultExt;
 
 pub const PACK_SECTION: &str = "Pack";
 pub const LEAVE_SECTION: &str = "Before leaving";
+/// Sub-sections of Pack, one level only: display names carry the top
+/// section plus the sub name after a slash, e.g. "Pack / food".
+pub const PACK_SLEEP_SECTION: &str = "Pack / sleep & bathroom";
+pub const PACK_TRAVEL_SECTION: &str = "Pack / travel";
+pub const PACK_OUTDOORS_SECTION: &str = "Pack / outdoors";
+pub const PACK_WEDDING_SECTION: &str = "Pack / wedding";
+pub const PACK_STAY_SECTION: &str = "Pack / stay";
 
-/// The managed tag's checklist sections: (tag-key suffix, display name).
-const SECTION_DEFS: [(&str, &str); 2] = [("pack", PACK_SECTION), ("before-leaving", LEAVE_SECTION)];
+/// The managed tag's checklist sections: (tag-key suffix, display name),
+/// in display order (sub-sections nested under Pack).
+const SECTION_DEFS: [(&str, &str); 7] = [
+    ("pack", PACK_SECTION),
+    ("pack-sleep-bathroom", PACK_SLEEP_SECTION),
+    ("pack-travel", PACK_TRAVEL_SECTION),
+    ("pack-outdoors", PACK_OUTDOORS_SECTION),
+    ("pack-wedding", PACK_WEDDING_SECTION),
+    ("pack-stay", PACK_STAY_SECTION),
+    ("before-leaving", LEAVE_SECTION),
+];
 
 fn add(items: &mut Vec<(String, String)>, section: &str, title: &str) {
     items.push((section.to_string(), title.to_string()));
+}
+
+/// Everyday clothes for the "Pack / stay" sub-section, scaled to the
+/// trip length: one set per day, capped at a week's worth plus a laundry
+/// plan for longer trips. `days` is the trip-length chip ("5", "30+",
+/// or a custom number); anything unparseable falls back to 5.
+fn stay_items(days: &str) -> Vec<String> {
+    let parsed: u32 = days
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(5);
+    let days = parsed.clamp(1, 30);
+    // A week's worth is the most anyone packs; beyond that laundry
+    // covers the rest.
+    let sets = days.min(7);
+    let mut items = vec![
+        format!("Underwear × {sets}"),
+        format!("Socks × {sets}"),
+        format!("T-shirts and tops × {}", sets.min(5).max(2)),
+    ];
+    if days > 7 {
+        items.push("Plan laundry mid-trip".to_string());
+    }
+    items
 }
 
 /// The checklist a trip generates: `(section, title)` pairs. Base items
@@ -74,6 +116,26 @@ pub fn travel_items(days: &str, activities: &[String]) -> Vec<(String, String)> 
         add(&mut items, PACK_SECTION, "Travel adapter");
     }
 
+    add(&mut items, PACK_SLEEP_SECTION, "Travel pillow");
+    add(&mut items, PACK_SLEEP_SECTION, "Sleep mask and earplugs");
+    add(&mut items, PACK_SLEEP_SECTION, "Travel towel");
+
+    add(&mut items, PACK_TRAVEL_SECTION, "Offline copies of tickets");
+    add(&mut items, PACK_TRAVEL_SECTION, "Power bank");
+    add(&mut items, PACK_TRAVEL_SECTION, "Reusable water bottle");
+
+    if activities.iter().any(|a| a == "hiking" || a == "camping") {
+        add(&mut items, PACK_OUTDOORS_SECTION, "Bug spray");
+        add(&mut items, PACK_OUTDOORS_SECTION, "Trail snacks");
+    }
+    if activities.iter().any(|a| a == "wedding") {
+        add(&mut items, PACK_WEDDING_SECTION, "Wrinkle-release spray");
+        add(&mut items, PACK_WEDDING_SECTION, "Mini sewing kit");
+    }
+    for title in stay_items(days) {
+        add(&mut items, PACK_STAY_SECTION, &title);
+    }
+
     add(&mut items, LEAVE_SECTION, "Confirm bookings (flights, accommodation)");
     add(&mut items, LEAVE_SECTION, "Arrange house care (pets, plants)");
     add(&mut items, LEAVE_SECTION, "Lock up and set the alarm");
@@ -110,10 +172,16 @@ fn section_tag_name(managed_tag_name: &str, section_key: &str) -> String {
     format!("{managed_tag_name}:{section_key}")
 }
 
-/// Tag-key suffix for a checklist section ("Pack" -> "pack").
+/// Tag-key suffix for a checklist section ("Pack / stay" ->
+/// "pack-stay").
 fn section_key(section: &str) -> &'static str {
     match section {
         "Before leaving" => "before-leaving",
+        "Pack / sleep & bathroom" => "pack-sleep-bathroom",
+        "Pack / travel" => "pack-travel",
+        "Pack / outdoors" => "pack-outdoors",
+        "Pack / wedding" => "pack-wedding",
+        "Pack / stay" => "pack-stay",
         _ => "pack",
     }
 }
@@ -375,6 +443,47 @@ mod tests {
     }
 
     #[test]
+    fn test_travel_items_subsections() {
+        // Always-packed sub-sections land under Pack with slash names.
+        let items = travel_items("5", &[]);
+        let titles: Vec<(&str, &str)> = items
+            .iter()
+            .map(|(section, title)| (section.as_str(), title.as_str()))
+            .collect();
+        assert!(titles.contains(&("Pack / sleep & bathroom", "Travel pillow")));
+        assert!(titles.contains(&("Pack / travel", "Power bank")));
+        assert!(titles.contains(&("Pack / stay", "Underwear × 5")));
+        assert!(titles.contains(&("Pack / stay", "Socks × 5")));
+        // Optional sub-sections only appear with their activity.
+        assert!(!titles.iter().any(|(s, _)| *s == "Pack / outdoors"));
+        assert!(!titles.iter().any(|(s, _)| *s == "Pack / wedding"));
+
+        let hike = travel_items("3", &["hiking".to_string()]);
+        let hike_sections: Vec<&str> =
+            hike.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(hike_sections.contains(&"Pack / outdoors"));
+        assert!(!hike_sections.contains(&"Pack / wedding"));
+
+        let wedding = travel_items("2", &["wedding".to_string()]);
+        let wedding_sections: Vec<&str> =
+            wedding.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(wedding_sections.contains(&"Pack / wedding"));
+        assert!(!wedding_sections.contains(&"Pack / outdoors"));
+    }
+
+    #[test]
+    fn test_stay_items_scale_with_days() {
+        assert!(stay_items("1").contains(&"Underwear × 1".to_string()));
+        assert!(stay_items("5").contains(&"Socks × 5".to_string()));
+        // Capped at a week, with a laundry plan beyond it.
+        let long = stay_items("30+");
+        assert!(long.contains(&"Underwear × 7".to_string()));
+        assert!(long.contains(&"Plan laundry mid-trip".to_string()));
+        let short = stay_items("3");
+        assert!(!short.contains(&"Plan laundry mid-trip".to_string()));
+    }
+
+    #[test]
     fn test_travel_items_long_trips_add_extras() {
         let long = travel_items("30+", &[]);
         let long_titles: Vec<&str> = long.iter().map(|(_, t)| t.as_str()).collect();
@@ -397,14 +506,26 @@ mod tests {
         // Idempotent: enabling twice keeps the same tag and sections.
         let again = store.enable_managed_recipe(recipe_id).await?;
         assert_eq!(again.id, tag.id);
-        assert_eq!(store.list_tags().await?.len(), 3); // managed + 2 sections
+        assert_eq!(store.list_tags().await?.len(), 8); // managed + 7 sections
 
-        // Section children exist, ordered for display.
+        // Section children exist, ordered for display (sub-sections nested
+        // under Pack).
         let children = store.get_children(tag.id).await?;
-        assert_eq!(children.len(), 2);
+        assert_eq!(children.len(), 7);
         let sections = store.tag_sections(tag.id).await?;
         let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["Pack", "Before leaving"]);
+        assert_eq!(
+            names,
+            vec![
+                "Pack",
+                "Pack / sleep & bathroom",
+                "Pack / travel",
+                "Pack / outdoors",
+                "Pack / wedding",
+                "Pack / stay",
+                "Before leaving",
+            ]
+        );
 
         // A trip is a workflow run: items carry its run id and land in the
         // section tags, so the task list groups them like any tag.
@@ -422,11 +543,22 @@ mod tests {
         assert!(items.iter().all(|t| t.workflow_run_id == Some(run.id)));
         assert!(items.iter().all(|t| t.direct_tags.len() == 1));
 
-        // Sectioned display: Pack items under Pack, leave items under
-        // Before leaving, in the tag's section order.
+        // Sectioned display: Pack items under Pack, sub-section items
+        // under their slash group, leave items under Before leaving, in
+        // the tag's section order.
         let ids: Vec<u64> = items.iter().map(|t| t.task.id).collect();
         let (order, map) = store.section_groups_for_tasks(tag.id, &ids).await?;
-        assert_eq!(order, vec!["Pack".to_string(), "Before leaving".to_string()]);
+        assert_eq!(
+            order,
+            vec![
+                "Pack".to_string(),
+                "Pack / sleep & bathroom".to_string(),
+                "Pack / travel".to_string(),
+                "Pack / outdoors".to_string(),
+                "Pack / stay".to_string(),
+                "Before leaving".to_string(),
+            ]
+        );
         let pack_ids: Vec<u64> = ids
             .iter()
             .filter(|id| map.get(id).map(String::as_str) == Some("Pack"))

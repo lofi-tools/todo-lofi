@@ -887,6 +887,50 @@ mod tests {
     }
 
     #[test]
+    fn test_split_subsection_one_level_only() {
+        assert_eq!(split_subsection("Pack"), ("Pack", None));
+        assert_eq!(
+            split_subsection("Pack / food"),
+            ("Pack", Some("food".to_string()))
+        );
+        assert_eq!(
+            split_subsection("Pack/food"),
+            ("Pack", Some("food".to_string()))
+        );
+        // A second slash never nests deeper: the remainder stays whole.
+        assert_eq!(
+            split_subsection("Pack / a / b"),
+            ("Pack", Some("a / b".to_string()))
+        );
+        assert_eq!(split_subsection("Pack /"), ("Pack /", None));
+    }
+
+    #[test]
+    fn test_sectioned_order_nests_subsections() {
+        let section_of: std::collections::HashMap<usize, String> = [
+            (0, "Pack".to_string()),
+            (1, "Pack / stay".to_string()),
+            (2, "Before leaving".to_string()),
+            (3, "Pack / food".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let order = vec![
+            "Pack".to_string(),
+            "Pack / stay".to_string(),
+            "Pack / food".to_string(),
+            "Before leaving".to_string(),
+        ];
+        let indices: Vec<usize> = (0..4).collect();
+        let chunks = sectioned_order(&indices, &section_of, &order);
+        assert_eq!(chunks.len(), 4);
+        assert!(matches!(&chunks[0], RowChunk::Section(name, rows) if name == "Pack" && rows == &[0]));
+        assert!(matches!(&chunks[1], RowChunk::Section(name, rows) if name == "Pack / stay" && rows == &[1]));
+        assert!(matches!(&chunks[2], RowChunk::Section(name, rows) if name == "Pack / food" && rows == &[3]));
+        assert!(matches!(&chunks[3], RowChunk::Section(name, rows) if name == "Before leaving" && rows == &[2]));
+    }
+
+    #[test]
     fn test_sectioned_order_flat_without_sections() {
         let indices: Vec<usize> = (0..2).collect();
         let chunks = sectioned_order(&indices, &std::collections::HashMap::new(), &[]);
@@ -1064,11 +1108,34 @@ impl EventEmitter<TaskListEvent> for TaskListView {}
 /// "Upcoming", "Completed", or `None` for an unlabelled run) plus the
 /// rows in it. Each row carries its top-level task, the tasks it blocks
 /// (dependent tasks: inline chain + blocks-N list), and its subtasks.
+/// `sub` is the one allowed sub-section level: `header` names the top
+/// section and `sub` the group below it (e.g. "Pack" / "food"), rendered
+/// with a grayed-out slash between them.
 pub struct TaskListSection {
     pub header: Option<String>,
+    pub sub: Option<String>,
     pub divided: bool,
     pub header_extra: Option<gpui::AnyElement>,
     pub rows: Vec<RowSpec>,
+}
+
+/// Split a section name into its top section and optional sub-section.
+/// Only one level is supported: the split happens at the first slash,
+/// so "Pack / food" becomes ("Pack", Some("food")) while "Pack" becomes
+/// ("Pack", None). A sub name containing another slash is kept whole —
+/// it never nests deeper.
+pub fn split_subsection(name: &str) -> (&str, Option<String>) {
+    match name.split_once('/') {
+        Some((top, sub)) => {
+            let sub = sub.trim().to_string();
+            if sub.is_empty() {
+                (name.trim(), None)
+            } else {
+                (top.trim(), Some(sub))
+            }
+        }
+        None => (name.trim(), None),
+    }
 }
 
 /// Reusable scrollable task-list component. Takes sectioned data (each
@@ -1109,13 +1176,30 @@ impl ScrollableTaskList {
                     } else {
                         div().h_flex().items_center().justify_between().mt_2()
                     };
-                    header_el = header_el.child(
-                        div()
+                    // A sub-section renders as "Top / sub" with the slash
+                    // and sub name grayed out next to the top section.
+                    let title = match &section.sub {
+                        Some(sub) => div()
+                            .h_flex()
+                            .items_baseline()
+                            .gap_1()
+                            .text_sm()
+                            .font_semibold()
+                            .child(div().text_color(rgb(0xa3a3a3)).child(header))
+                            .child(
+                                div()
+                                    .text_color(rgb(0x525252))
+                                    .child(format!("/ {sub}")),
+                            )
+                            .into_any_element(),
+                        None => div()
                             .text_sm()
                             .font_semibold()
                             .text_color(rgb(0xa3a3a3))
-                            .child(header),
-                    );
+                            .child(header)
+                            .into_any_element(),
+                    };
+                    header_el = header_el.child(title);
                     if let Some(extra) = section.header_extra {
                         header_el = header_el.child(extra);
                     }
@@ -1308,6 +1392,7 @@ impl TaskListView {
                     sections.push((
                         TaskListSection {
                             header: None,
+                            sub: None,
                             divided: false,
                             header_extra: None,
                             rows: specs,
@@ -1324,9 +1409,11 @@ impl TaskListView {
                         .iter()
                         .map(|index| self.task_views[*index].clone().into_any_element())
                         .collect::<Vec<_>>();
+                    let (top, sub) = split_subsection(name);
                     sections.push((
                         TaskListSection {
-                            header: Some(name.clone()),
+                            header: Some(top.to_string()),
+                            sub,
                             divided: false,
                             header_extra: None,
                             rows: specs,
@@ -1365,6 +1452,7 @@ impl TaskListView {
                     sections.push((
                         TaskListSection {
                             header: Some("Upcoming".to_string()),
+                            sub: None,
                             divided: true,
                             header_extra,
                             rows: specs,
@@ -1384,6 +1472,7 @@ impl TaskListView {
                     sections.push((
                         TaskListSection {
                             header: Some("Completed".to_string()),
+                            sub: None,
                             divided: true,
                             header_extra: None,
                             rows: specs,
@@ -1411,8 +1500,11 @@ fn today_key() -> String {
 const DISTANT_SECS: u64 = 2 * 86400;
 
 /// Order row indices for sectioned display: unsectioned rows first (in
-/// list order), then one group per section in display order. Pure so it
-/// can be unit-tested; `section_of` maps row index → section name.
+/// list order), then one group per section in display order, with
+/// sub-sections nested directly under their top section (the top's own
+/// rows first, then each sub in display order). Pure so it can be
+/// unit-tested; `section_of` maps row index → section name, which may
+/// carry one "Top / sub" level.
 fn sectioned_order(
     indices: &[usize],
     section_of: &std::collections::HashMap<usize, String>,
@@ -1427,19 +1519,47 @@ fn sectioned_order(
             None => plain.push(index),
         }
     }
+    // Display position of each full section name; unknown names sort
+    // after the known ones.
+    let position_of = |name: &str| {
+        section_order
+            .iter()
+            .position(|ordered| ordered == name)
+            .unwrap_or(usize::MAX)
+    };
+    // Group full section names by top section, keeping the top's own
+    // rows (full name == top) first and sub-sections in display order.
+    let mut by_top: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for name in by_section.keys() {
+        let (top, _) = split_subsection(name);
+        by_top.entry(top.to_string()).or_default().push(name.clone());
+    }
+    for names in by_top.values_mut() {
+        names.sort_by_key(|name| {
+            let (top, sub) = split_subsection(name);
+            (sub.is_some(), position_of(name), name.clone(), top.to_string())
+        });
+    }
+    let mut tops: Vec<String> = by_top.keys().cloned().collect();
+    tops.sort_by_key(|top| {
+        let first = by_top[top]
+            .iter()
+            .map(|name| position_of(name))
+            .min()
+            .unwrap_or(usize::MAX);
+        (first, top.clone())
+    });
     let mut chunks = Vec::new();
     if !plain.is_empty() {
         chunks.push(RowChunk::Rows(plain));
     }
-    for name in section_order {
-        if let Some(rows) = by_section.remove(name) {
-            chunks.push(RowChunk::Section(name.clone(), rows));
+    for top in tops {
+        for name in by_top.remove(&top).unwrap_or_default() {
+            if let Some(rows) = by_section.remove(&name) {
+                chunks.push(RowChunk::Section(name, rows));
+            }
         }
-    }
-    let mut rest: Vec<(String, Vec<usize>)> = by_section.into_iter().collect();
-    rest.sort_by(|a, b| a.0.cmp(&b.0));
-    for (name, rows) in rest {
-        chunks.push(RowChunk::Section(name, rows));
     }
     chunks
 }
