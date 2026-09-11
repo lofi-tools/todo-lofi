@@ -1,5 +1,5 @@
 //! Durable per-project agent state: the ACP session id used to resume a
-//! conversation after a restart, and the project's approval preference.
+//! conversation after a restart, and the project's tool approval policy.
 //!
 //! The app's database is in-memory, so this lives in the same config directory
 //! as the Todoist token (`$MY_TODO_CONFIG_DIR`, else `~/.config/my-todo`).
@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::permissions::{PermissionRule, ToolPermissions};
 
 const STORE_VERSION: u32 = 1;
 const FILE_NAME: &str = "acp-sessions.json";
@@ -28,9 +30,9 @@ pub struct StoredSession {
     /// Unix seconds of the last update.
     #[serde(default)]
     pub updated_at: i64,
-    /// Whether tool calls are auto-approved for this project.
+    /// The project's tool approval policy, in Zed's `tool_permissions` shape.
     #[serde(default)]
-    pub auto_approve: bool,
+    pub tool_permissions: ToolPermissions,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -39,6 +41,16 @@ struct StoreFile {
     version: u32,
     #[serde(default)]
     sessions: Vec<StoredSession>,
+}
+
+/// Previous file shape, for the one-shot migration in `load`: the old single
+/// `auto_approve` toggle becomes a global allow when no policy exists yet.
+#[derive(Debug, Deserialize)]
+struct LegacyStoredSession {
+    #[serde(default)]
+    auto_approve: bool,
+    #[serde(flatten)]
+    session: StoredSession,
 }
 
 /// JSON-file-backed store. Every operation reads and rewrites the file, which
@@ -85,18 +97,22 @@ impl SessionStore {
         self.save(&file)
     }
 
-    /// Update only the approval preference, creating an entry when needed.
-    pub fn set_auto_approve(&self, project_path: &str, auto_approve: bool) -> anyhow::Result<()> {
+    /// Update only the approval policy, creating an entry when needed.
+    pub fn set_tool_permissions(
+        &self,
+        project_path: &str,
+        permissions: ToolPermissions,
+    ) -> anyhow::Result<()> {
         let mut file = self.load();
         match file
             .sessions
             .iter_mut()
             .find(|existing| existing.project_path == project_path)
         {
-            Some(existing) => existing.auto_approve = auto_approve,
+            Some(existing) => existing.tool_permissions = permissions,
             None => file.sessions.push(StoredSession {
                 project_path: project_path.to_string(),
-                auto_approve,
+                tool_permissions: permissions,
                 ..Default::default()
             }),
         }
@@ -115,8 +131,37 @@ impl SessionStore {
         let Ok(raw) = std::fs::read_to_string(&self.path) else {
             return StoreFile::default();
         };
-        match serde_json::from_str(&raw) {
-            Ok(file) => file,
+        // Parse through the legacy shape so a stored `auto_approve: true`
+        // with no policy yet migrates to a global allow instead of being
+        // silently dropped. Unknown keys are ignored, so this also reads
+        // current files.
+        #[derive(Deserialize)]
+        struct LegacyFile {
+            #[serde(default)]
+            version: u32,
+            #[serde(default)]
+            sessions: Vec<LegacyStoredSession>,
+        }
+        match serde_json::from_str::<LegacyFile>(&raw) {
+            Ok(legacy) => {
+                let sessions = legacy
+                    .sessions
+                    .into_iter()
+                    .map(|entry| {
+                        let mut session = entry.session;
+                        if entry.auto_approve
+                            && session.tool_permissions == ToolPermissions::default()
+                        {
+                            session.tool_permissions.default = PermissionRule::Allow;
+                        }
+                        session
+                    })
+                    .collect();
+                StoreFile {
+                    version: legacy.version,
+                    sessions,
+                }
+            }
             Err(error) => {
                 // A corrupt store must not stop the agent panel from working;
                 // starting from empty loses only resume ids.
@@ -157,4 +202,40 @@ pub fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_auto_approve_migrates_to_a_global_allow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("acp-sessions.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"sessions":[
+                {"project_path":"/x","tag_id":1,"agent_id":"opencode","session_id":"s","updated_at":0,"auto_approve":true},
+                {"project_path":"/y","tag_id":2,"agent_id":"opencode","session_id":"t","updated_at":0}
+            ]}"#,
+        )
+        .expect("write legacy file");
+        let store = SessionStore::new(&path);
+        let migrated = store.get("/x").expect("entry");
+        assert_eq!(migrated.tool_permissions.default, PermissionRule::Allow);
+        let untouched = store.get("/y").expect("entry");
+        assert_eq!(untouched.tool_permissions, ToolPermissions::default());
+        // Policies round-trip through the new shape.
+        store
+            .set_tool_permissions(
+                "/z",
+                ToolPermissions {
+                    default: PermissionRule::Deny,
+                    ..Default::default()
+                },
+            )
+            .expect("save");
+        let reread = SessionStore::new(&path).get("/z").expect("entry");
+        assert_eq!(reread.tool_permissions.default, PermissionRule::Deny);
+    }
 }

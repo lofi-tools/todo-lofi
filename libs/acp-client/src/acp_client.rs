@@ -29,7 +29,10 @@ use agent_client_protocol as acp;
 pub use agent::{AgentServer, OpenCodeAgent, SpawnSpec};
 pub use connection::{AcpConnection, AgentInfo, ConnectOptions, Requester, connect};
 pub use fs::SessionRoots;
-pub use permissions::{ApprovalMode, PermissionDecision, PermissionReply};
+pub use permissions::{
+    PatternRule, PermissionDecision, PermissionReply, PermissionRule, ToolPermissions, ToolRule,
+    Verdict, haystack, tool_key,
+};
 pub use session_store::{SessionStore, StoredSession};
 pub use thread::{
     AuthMethodRow, Entry, EntryKind, NoticeLevel, PermissionChoice, PermissionRecord, PlanRow,
@@ -72,9 +75,9 @@ pub enum AcpEvent {
         options: Vec<PermissionOption>,
         decision: PermissionReply,
     },
-    /// Auto-approve answered a request without the UI, reported so the
-    /// transcript can still record that the approval was granted.
-    PermissionAutoApproved {
+    /// The client answered a permission request from the project's policy,
+    /// without asking.
+    PermissionAutoDecided {
         tool_call: ToolCallUpdate,
         choice: thread::PermissionChoice,
     },
@@ -117,8 +120,8 @@ impl std::fmt::Debug for AcpEvent {
                 .field("terminal_id", terminal_id)
                 .field("exit_code", exit_code)
                 .finish(),
-            Self::PermissionAutoApproved { tool_call, choice } => f
-                .debug_struct("PermissionAutoApproved")
+            Self::PermissionAutoDecided { tool_call, choice } => f
+                .debug_struct("PermissionAutoDecided")
                 .field("tool_call", tool_call)
                 .field("choice", choice)
                 .finish(),

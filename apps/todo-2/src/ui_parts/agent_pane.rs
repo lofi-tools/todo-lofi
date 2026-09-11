@@ -19,7 +19,8 @@ use acp_client::schema::{
 use acp_client::{
     AcpConnection, AcpEvent, AgentServer, AuthMethodRow, ConnectOptions, EntryKind, NoticeLevel,
     OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord, PermissionReply,
-    SessionRoots, SessionSpec, SessionStore, StoredSession, ToolStatus, Transcript, connect,
+    PermissionRule, SessionRoots, SessionSpec, SessionStore, StoredSession, ToolPermissions,
+    ToolStatus, Transcript, connect,
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -34,7 +35,6 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
-use crate::components::Checkbox;
 use crate::theme::{
     APP_BG, CARD_BG, DANGER, DIFF_ADD_BG, DIFF_DEL_BG, HAIRLINE, PANEL_BG, PANEL_HOVER, SUCCESS,
     TEXT_FAINT, TEXT_MUTED, TEXT_STRONG,
@@ -125,9 +125,12 @@ struct ProjectEntry {
     transcript: Transcript,
     busy: bool,
     queue: VecDeque<String>,
-    auto_approve: bool,
+    /// The project's tool approval policy, in Zed's `tool_permissions` shape.
+    tool_permissions: ToolPermissions,
     /// Answers waiting for a user decision, keyed by transcript entry id.
     permission_replies: HashMap<u64, PermissionReply>,
+    /// Tool rule key per pending permission request, keyed the same way.
+    permission_tools: HashMap<u64, String>,
     /// Live terminal output per terminal id.
     terminals: HashMap<String, TerminalRow>,
     /// Rows the user expanded to their full content.
@@ -145,7 +148,7 @@ struct ProjectEntry {
 }
 
 impl ProjectEntry {
-    fn new(project: AgentProject, auto_approve: bool) -> Self {
+    fn new(project: AgentProject, tool_permissions: ToolPermissions) -> Self {
         Self {
             project,
             state: PaneState::NoDirectory {
@@ -154,8 +157,9 @@ impl ProjectEntry {
             transcript: Transcript::default(),
             busy: false,
             queue: VecDeque::new(),
-            auto_approve,
+            tool_permissions,
             permission_replies: HashMap::new(),
+            permission_tools: HashMap::new(),
             terminals: HashMap::new(),
             expanded: HashSet::new(),
             stored_path: None,
@@ -420,14 +424,14 @@ impl AgentPane {
     ) {
         let tag_name = project.tag_name.clone();
         let resolution = project.resolve();
-        let auto_approve = self
+        let tool_permissions = self
             .projects
             .get(&tag_name)
-            .map(|entry| entry.auto_approve)
-            .unwrap_or_else(|| self.stored_auto_approve(&project));
+            .map(|entry| entry.tool_permissions.clone())
+            .unwrap_or_else(|| self.stored_tool_permissions(&project));
 
         let Some(existing) = self.projects.get(&tag_name) else {
-            let mut entry = ProjectEntry::new(project, auto_approve);
+            let mut entry = ProjectEntry::new(project, tool_permissions);
             entry.state = match &resolution {
                 Some((cwd, _)) => {
                     let command = self.agent.command_line(cwd);
@@ -474,7 +478,7 @@ impl AgentPane {
         // leaving an agent editing a directory that is gone.
         let candidates = existing.project.candidates.clone();
         self.teardown(&tag_name, cx);
-        let mut entry = ProjectEntry::new(project, auto_approve);
+        let mut entry = ProjectEntry::new(project, tool_permissions);
         entry.state = PaneState::NoDirectory { candidates };
         self.projects.insert(tag_name, entry);
     }
@@ -493,13 +497,13 @@ impl AgentPane {
         self.start_session(tag_name, resumable, cx);
     }
 
-    /// Read the project's stored auto-approve preference, if any.
-    fn stored_auto_approve(&self, project: &AgentProject) -> bool {
+    /// Read the project's stored tool approval policy, if any.
+    fn stored_tool_permissions(&self, project: &AgentProject) -> ToolPermissions {
         project
             .resolve()
             .and_then(|(cwd, _)| self.session_store.get(&cwd.display().to_string()))
-            .map(|stored| stored.auto_approve)
-            .unwrap_or(false)
+            .map(|stored| stored.tool_permissions)
+            .unwrap_or_default()
     }
 
     /// Start (or restart) the agent process and session for a project.
@@ -509,6 +513,7 @@ impl AgentPane {
         };
         entry.transcript.clear();
         entry.permission_replies.clear();
+        entry.permission_tools.clear();
         entry.terminals.clear();
         entry.expanded.clear();
         entry.queue.clear();
@@ -529,7 +534,7 @@ impl AgentPane {
         let spec = SessionSpec::new(entry.project.candidates.clone());
         let project_path = entry.stored_path.clone().unwrap_or_default();
         let tag_id = entry.project.tag_id;
-        let auto_approve = entry.auto_approve;
+        let tool_permissions = entry.tool_permissions.clone();
         let agent = self.agent.clone();
         let agent_id = self.agent.id().to_string();
         let store = self.session_store.clone();
@@ -539,7 +544,7 @@ impl AgentPane {
                 SessionRoots::new(std::iter::once(cwd.clone()).chain(additional.iter().cloned()));
             let connection = connect(agent, &spec, |_| ConnectOptions {
                 roots,
-                auto_approve,
+                tool_permissions: tool_permissions.clone(),
             })
             .await?;
             let stored = if resume {
@@ -600,7 +605,7 @@ impl AgentPane {
                 agent_id,
                 session_id: session_id.0.to_string(),
                 updated_at: acp_client::session_store::now_secs(),
-                auto_approve,
+                tool_permissions,
             };
             if let Err(error) = store.put(record) {
                 tracing::warn!("could not persist the ACP session id: {error}");
@@ -935,24 +940,66 @@ impl AgentPane {
         cx.notify();
     }
 
-    /// Toggle auto-approve for the project on screen, persisting it.
-    fn set_auto_approve(&mut self, auto_approve: bool, cx: &mut Context<Self>) {
+    /// Remember an allow/deny rule for the tool behind a pending permission
+    /// request: answer it with the strongest matching option, store the
+    /// tool-level default, persist it, and apply it to the live connection.
+    fn remember_permission(&mut self, entry_id: u64, allow: bool, cx: &mut Context<Self>) {
         let Some(tag_name) = self.active.clone() else {
             return;
         };
-        let stored_path = {
+        let (tool, choice) = {
+            let Some(entry) = self.projects.get(&tag_name) else {
+                return;
+            };
+            let tool = entry
+                .permission_tools
+                .get(&entry_id)
+                .cloned()
+                .unwrap_or_else(|| "other".to_string());
+            let options = entry
+                .transcript
+                .index_of(entry_id)
+                .and_then(|index| entry.transcript.entry(index))
+                .and_then(|row| match &row.kind {
+                    EntryKind::Permission { options, .. } => Some(options.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let sticky = if allow { "AllowAlways" } else { "RejectAlways" };
+            let once = if allow { "AllowOnce" } else { "RejectOnce" };
+            let choice = options
+                .iter()
+                .find(|option| option.kind == sticky)
+                .or_else(|| options.iter().find(|option| option.kind == once))
+                .cloned();
+            (tool, choice)
+        };
+        if let Some(choice) = choice {
+            self.answer_permission(entry_id, choice, cx);
+        }
+        let rule = if allow {
+            PermissionRule::Allow
+        } else {
+            PermissionRule::Deny
+        };
+        let persisted = {
             let Some(entry) = self.projects.get_mut(&tag_name) else {
                 return;
             };
-            entry.auto_approve = auto_approve;
+            entry.tool_permissions.set_tool_default(&tool, rule);
+            entry.permission_tools.remove(&entry_id);
             if let Some(live) = entry.live() {
-                live.connection.set_auto_approve(auto_approve);
+                live.connection
+                    .set_tool_permissions(entry.tool_permissions.clone());
             }
-            entry.stored_path.clone()
+            entry
+                .stored_path
+                .clone()
+                .map(|path| (path, entry.tool_permissions.clone()))
         };
-        if let Some(path) = stored_path {
-            if let Err(error) = self.session_store.set_auto_approve(&path, auto_approve) {
-                tracing::warn!("could not persist the auto-approve preference: {error}");
+        if let Some((path, permissions)) = persisted {
+            if let Err(error) = self.session_store.set_tool_permissions(&path, permissions) {
+                tracing::warn!("could not persist the tool approval policy: {error}");
             }
         }
         cx.notify();
@@ -990,9 +1037,12 @@ impl AgentPane {
                     let choices = PermissionChoice::from_options(&options);
                     let entry_id = entry.transcript.push_permission(title, choices);
                     entry.permission_replies.insert(entry_id, decision);
+                    entry
+                        .permission_tools
+                        .insert(entry_id, acp_client::tool_key(&tool_call));
                     appended = true;
                 }
-                AcpEvent::PermissionAutoApproved { tool_call, choice } => {
+                AcpEvent::PermissionAutoDecided { tool_call, choice } => {
                     let entry_id = entry
                         .transcript
                         .push_permission(permission_title(&tool_call), vec![choice.clone()]);
@@ -1489,12 +1539,6 @@ impl AgentPane {
             .into_iter()
             .find(|chip| chip.is_model)
             .map(|chip| chip.current_label)
-    }
-
-    fn auto_approve(&self) -> bool {
-        self.active_entry()
-            .map(|entry| entry.auto_approve)
-            .unwrap_or(false)
     }
 }
 
@@ -2266,7 +2310,6 @@ impl AgentPane {
                     .unwrap_or_else(|| current.clone());
                 (current, label)
             });
-        let auto_approve = self.auto_approve();
 
         div()
             .flex()
@@ -2313,13 +2356,6 @@ impl AgentPane {
                     }))
                     .into_any_element()
             }))
-            .child(
-                Checkbox::new("agent-auto-approve")
-                    .checked(auto_approve)
-                    .on_click(cx.listener(|this, checked, _, cx| {
-                        this.set_auto_approve(*checked, cx);
-                    })),
-            )
             .child(div().flex_1())
             .when(queue_len > 0, |this| {
                 this.child(
@@ -2741,7 +2777,7 @@ fn render_permission(
             format!("Rejected · {}", decision.name)
         };
         if decision.automatic {
-            label.push_str(" (auto-approved)");
+            label.push_str(" (automatic)");
         }
         return div()
             .w_full()
@@ -2816,12 +2852,53 @@ fn render_permission(
                         .into_any_element()
                 })),
         );
-    card_element = card_element.child(
-        div()
-            .text_xs()
-            .text_color(rgb(TEXT_FAINT))
-            .child("Nothing proceeds until you choose."),
-    );
+    card_element = card_element
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("permission-always-allow-{entry_id}")))
+                        .ghost()
+                        .compact()
+                        .with_size(gpui_component::Size::Small)
+                        .label("Always allow")
+                        .tooltip("Remember allow for this tool in this project")
+                        .on_click({
+                            let weak = weak.clone();
+                            move |_, _, cx: &mut App| {
+                                weak.update(cx, |pane, cx| {
+                                    pane.remember_permission(entry_id, true, cx)
+                                })
+                                .ok();
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("permission-always-deny-{entry_id}")))
+                        .ghost()
+                        .compact()
+                        .with_size(gpui_component::Size::Small)
+                        .label("Always deny")
+                        .tooltip("Remember deny for this tool in this project")
+                        .on_click({
+                            let weak = weak.clone();
+                            move |_, _, cx: &mut App| {
+                                weak.update(cx, |pane, cx| {
+                                    pane.remember_permission(entry_id, false, cx)
+                                })
+                                .ok();
+                            }
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(TEXT_FAINT))
+                .child("Nothing proceeds until you choose."),
+        );
     card_element.into_any_element()
 }
 

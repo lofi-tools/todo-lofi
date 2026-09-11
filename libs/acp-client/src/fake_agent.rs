@@ -19,7 +19,7 @@ use agent_client_protocol::schema::v1::{
 use crate::AcpEvent;
 use crate::connection::{ConnectOptions, connect_over};
 use crate::fs::SessionRoots;
-use crate::permissions::PermissionDecision;
+use crate::permissions::{PermissionDecision, PermissionRule, ToolPermissions};
 use crate::thread::{EntryKind, ToolStatus, Transcript};
 
 /// What the fake agent should do during a prompt.
@@ -269,21 +269,33 @@ async fn run_turn(
 /// Connect a client to a fresh fake agent using a temporary project directory.
 async fn connect_to_fake(
     script: FakeScript,
-    auto_approve: bool,
-) -> (crate::AcpConnection, Shared, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("temp dir");
+    tool_permissions: ToolPermissions,
+) -> (crate::AcpConnection, Shared, tempfile::TempDir) {    let dir = tempfile::tempdir().expect("temp dir");
     let roots = SessionRoots::new([dir.path().to_path_buf()]);
     let (client_side, observations) = spawn_fake_agent(script);
     let connection = connect_over(
         move |_events, _stderr| client_side,
         ConnectOptions {
             roots,
-            auto_approve,
+            tool_permissions,
         },
     )
     .await
     .expect("client should connect");
     (connection, observations, dir)
+}
+
+/// Ask for everything: the default policy.
+fn confirm_all() -> ToolPermissions {
+    ToolPermissions::default()
+}
+
+/// Auto-approve everything: the old toggle's "on" position, as a policy.
+fn allow_all() -> ToolPermissions {
+    ToolPermissions {
+        default: PermissionRule::Allow,
+        ..Default::default()
+    }
 }
 
 async fn new_session(connection: &crate::AcpConnection, dir: &tempfile::TempDir) -> acp::schema::v1::SessionId {
@@ -316,14 +328,14 @@ async fn wait_for(mut check: impl FnMut() -> bool) {
 
 #[tokio::test]
 async fn connects_and_reports_agent_info() {
-    let (connection, observations, _dir) = connect_to_fake(FakeScript::default(), false).await;
+    let (connection, observations, _dir) = connect_to_fake(FakeScript::default(), confirm_all()).await;
     assert_eq!(connection.info.name, "fake-agent");
     assert_eq!(observations.lock().unwrap().initialize_count, 1);
 }
 
 #[tokio::test]
 async fn new_session_carries_cwd_and_additional_roots() {
-    let (connection, observations, dir) = connect_to_fake(FakeScript::default(), false).await;
+    let (connection, observations, dir) = connect_to_fake(FakeScript::default(), confirm_all()).await;
     let extra = dir.path().join("extra");
     std::fs::create_dir_all(&extra).expect("extra dir");
     let session_id = connection
@@ -345,7 +357,7 @@ async fn load_session_reports_failure_so_the_caller_can_start_fresh() {
             fail_load: true,
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let result = connection
@@ -367,7 +379,7 @@ async fn prompt_streams_one_transcript_row() {
             chunks: vec!["Hello ".into(), "world".into()],
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;
@@ -409,7 +421,7 @@ async fn tool_call_update_mutates_the_existing_row() {
             tool_update: Some(ToolCallUpdate::new("call-1", fields)),
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;
@@ -445,7 +457,7 @@ async fn permission_request_reaches_the_ui_and_the_answer_goes_back() {
             permission_options: options,
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;
@@ -485,7 +497,7 @@ async fn permission_request_reaches_the_ui_and_the_answer_goes_back() {
 }
 
 #[tokio::test]
-async fn auto_approve_answers_without_asking_the_ui() {
+async fn allow_policy_answers_without_asking_the_ui() {
     let mut fields = acp::schema::v1::ToolCallUpdateFields::new();
     fields.title = Some("Write file".to_string());
     let options = vec![
@@ -498,7 +510,7 @@ async fn auto_approve_answers_without_asking_the_ui() {
             permission_options: options,
             ..Default::default()
         },
-        true,
+        allow_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;
@@ -514,7 +526,7 @@ async fn auto_approve_answers_without_asking_the_ui() {
             surfaced = true;
         }
     }
-    assert!(!surfaced, "auto-approve must not surface a prompt");
+    assert!(!surfaced, "allow policy must not surface a prompt");
     wait_for(|| {
         observations
             .lock()
@@ -527,8 +539,53 @@ async fn auto_approve_answers_without_asking_the_ui() {
 }
 
 #[tokio::test]
+async fn deny_policy_rejects_without_asking_the_ui() {
+    let mut fields = acp::schema::v1::ToolCallUpdateFields::new();
+    fields.title = Some("Delete everything".to_string());
+    let options = vec![
+        PermissionOption::new("once", "Once", PermissionOptionKind::AllowOnce),
+        PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+    ];
+    let (mut connection, observations, dir) = connect_to_fake(
+        FakeScript {
+            permission: Some(ToolCallUpdate::new("call-4", fields)),
+            permission_options: options,
+            ..Default::default()
+        },
+        ToolPermissions {
+            default: crate::permissions::PermissionRule::Deny,
+            ..Default::default()
+        },
+    )
+    .await;
+    let session_id = new_session(&connection, &dir).await;
+    connection
+        .requester
+        .prompt(&session_id, "go".into())
+        .await
+        .expect("turn");
+
+    let mut surfaced = false;
+    while let Ok(event) = connection.events.try_recv() {
+        if matches!(event, AcpEvent::PermissionRequested { .. }) {
+            surfaced = true;
+        }
+    }
+    assert!(!surfaced, "deny policy must not surface a prompt");
+    wait_for(|| {
+        observations
+            .lock()
+            .unwrap()
+            .permission_responses
+            .iter()
+            .any(|line| line.contains("reject"))
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn cancel_is_sent_as_a_notification() {
-    let (connection, observations, dir) = connect_to_fake(FakeScript::default(), false).await;
+    let (connection, observations, dir) = connect_to_fake(FakeScript::default(), confirm_all()).await;
     let session_id = new_session(&connection, &dir).await;
     connection
         .requester
@@ -550,7 +607,7 @@ async fn file_requests_are_confined_to_the_session_roots() {
             write: Some((target.clone(), "hello".to_string())),
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;
@@ -582,7 +639,7 @@ async fn terminals_round_trip_through_the_client() {
             terminal: Some(("echo".to_string(), vec!["terminal-ok".to_string()])),
             ..Default::default()
         },
-        false,
+        confirm_all(),
     )
     .await;
     let session_id = new_session(&connection, &dir).await;

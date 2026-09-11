@@ -8,12 +8,12 @@
 
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::schema::v1::{
     AuthMethod, AvailableCommand, ContentBlock, PermissionOption, SessionConfigOption,
-    SessionModeId, SessionModeState, SessionNotification, SessionUpdate, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, UsageUpdate,
+    SessionModeId, SessionModeState, SessionNotification, SessionUpdate, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
+use agent_client_protocol::schema::MaybeUndefined;
 
 /// Status of a tool call row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,7 +90,7 @@ pub struct PermissionRecord {
     pub option_id: String,
     pub name: String,
     pub kind: String,
-    /// True when the client answered without asking (auto-approve).
+    /// True when the client answered without asking (policy auto-decision).
     pub automatic: bool,
 }
 
@@ -404,10 +404,13 @@ impl Transcript {
 
     /// The most recent usage row, rendered next to the prompt box.
     pub fn latest_usage(&self) -> Option<(u64, u64, Option<f64>)> {
-        self.entries.iter().rev().find_map(|entry| match entry.kind {
-            EntryKind::Usage { used, size, cost } => Some((used, size, cost)),
-            _ => None,
-        })
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.kind {
+                EntryKind::Usage { used, size, cost } => Some((used, size, cost)),
+                _ => None,
+            })
     }
 
     fn append(&mut self, kind: EntryKind) -> usize {
@@ -451,7 +454,11 @@ impl Transcript {
                         status: format!("{:?}", entry.status),
                     })
                     .collect::<Vec<_>>();
-                match self.entries.iter().position(|entry| matches!(entry.kind, EntryKind::Plan { .. })) {
+                match self
+                    .entries
+                    .iter()
+                    .position(|entry| matches!(entry.kind, EntryKind::Plan { .. }))
+                {
                     Some(index) => {
                         if let Some(entry) = self.entries.get_mut(index) {
                             entry.kind = EntryKind::Plan { rows };
@@ -635,9 +642,8 @@ impl Transcript {
                 index
             }
         };
-        let (output, diffs, terminal_id) = collect_content(
-            update.fields.content.as_deref().unwrap_or_default(),
-        );
+        let (output, diffs, terminal_id) =
+            collect_content(update.fields.content.as_deref().unwrap_or_default());
         if let Some(EntryKind::ToolCall {
             title,
             kind,
@@ -717,9 +723,5 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
             _ => {}
         }
     }
-    (
-        (!output.is_empty()).then_some(output),
-        diffs,
-        terminal_id,
-    )
+    ((!output.is_empty()).then_some(output), diffs, terminal_id)
 }

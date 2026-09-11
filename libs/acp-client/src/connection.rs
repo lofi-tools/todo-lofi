@@ -14,8 +14,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1::{
@@ -37,7 +36,10 @@ use futures::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::{AgentServer, SpawnSpec};
 use crate::fs::{SessionRoots, read_text_file, write_text_file};
-use crate::permissions::{ApprovalMode, PermissionDecision, PermissionReply};
+use crate::permissions::{
+    PermissionDecision, PermissionReply, ToolPermissions, Verdict, haystack, strongest_allow,
+    strongest_reject, tool_key,
+};
 use crate::terminal::TerminalRegistry;
 use crate::{AcpError, AcpEvent, SessionSpec, schema};
 
@@ -191,8 +193,8 @@ pub struct AcpConnection {
     pub requester: Requester,
     /// Ask the agent to approve a tool call.
     pub events: tokio::sync::mpsc::UnboundedReceiver<AcpEvent>,
-    /// Whether tool calls are answered automatically for this project.
-    auto_approve: Arc<AtomicBool>,
+    /// The project's approval policy, consulted for every permission request.
+    tool_permissions: Arc<RwLock<ToolPermissions>>,
     /// Recent agent stderr, newest last.
     stderr: Arc<Mutex<VecDeque<String>>>,
     /// Dropping this ends the connection and terminates the process group.
@@ -200,9 +202,11 @@ pub struct AcpConnection {
 }
 
 impl AcpConnection {
-    /// Toggle automatic approval of permission requests.
-    pub fn set_auto_approve(&self, auto_approve: bool) {
-        self.auto_approve.store(auto_approve, Ordering::Relaxed);
+    /// Replace the approval policy consulted for permission requests.
+    pub fn set_tool_permissions(&self, permissions: ToolPermissions) {
+        if let Ok(mut policy) = self.tool_permissions.write() {
+            *policy = permissions;
+        }
     }
 
     /// Move the event stream out, leaving the connection usable for requests.
@@ -246,7 +250,7 @@ impl Drop for AcpConnection {
 #[derive(Clone)]
 pub struct ConnectOptions {
     pub roots: SessionRoots,
-    pub auto_approve: bool,
+    pub tool_permissions: ToolPermissions,
 }
 
 /// Connect to an agent process launched in the project directory.
@@ -282,8 +286,8 @@ where
     let transport = build_transport(events_tx.clone(), stderr_buffer.clone());
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let auto_approve = Arc::new(AtomicBool::new(options.auto_approve));
-    let auto_approve_for_handlers = auto_approve.clone();
+    let tool_permissions = Arc::new(RwLock::new(options.tool_permissions));
+    let policy_for_handlers = tool_permissions.clone();
 
     let roots = options.roots.clone();
     let roots_for_handlers = roots.clone();
@@ -328,20 +332,27 @@ where
             },
             acp::on_receive_notification!(),
         )
-        // Permissions: answer immediately when auto-approving, otherwise wait
-        // for the user without blocking the event loop.
+        // Permissions: answer from the project's policy when it allows or
+        // denies, otherwise wait for the user without blocking the event loop.
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                if let Some(option) = auto_approve_for_handlers
-                    .load(Ordering::Relaxed)
-                    .then(|| ApprovalMode::strongest_allow(&request.options))
-                    .flatten()
-                {
+                let tool = tool_key(&request.tool_call);
+                let text = haystack(&request.tool_call);
+                let verdict = policy_for_handlers
+                    .read()
+                    .map(|policy| policy.decide(&tool, &text))
+                    .unwrap_or(Verdict::Confirm);
+                let automatic = match verdict {
+                    Verdict::Allow => strongest_allow(&request.options),
+                    Verdict::Deny => strongest_reject(&request.options),
+                    Verdict::Confirm => None,
+                };
+                if let Some(option) = automatic {
                     responder.respond(permission_response(PermissionDecision::Selected(
                         option.option_id.clone(),
                     )))?;
-                    // Report the auto-grant so the transcript records it.
-                    drop(auto_approvals.send(AcpEvent::PermissionAutoApproved {
+                    // Report the automatic answer so the transcript records it.
+                    drop(auto_approvals.send(AcpEvent::PermissionAutoDecided {
                         tool_call: request.tool_call.clone(),
                         choice: crate::thread::PermissionChoice::from_option(option),
                     }));
@@ -547,7 +558,7 @@ where
         info,
         requester,
         events: events_rx,
-        auto_approve,
+        tool_permissions,
         stderr: stderr_buffer,
         shutdown: Some(shutdown_tx),
     })
