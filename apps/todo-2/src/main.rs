@@ -419,6 +419,27 @@ impl Layout {
         }
     }
 
+/// Resolve the selected tag to its managing automation, if any.
+async fn lookup_managed_tag(
+    store: &Store,
+    tag_name: &str,
+    cx: &mut AsyncApp,
+) -> Option<ManagedTag> {
+    let Ok(Some(tag)) = store.get_tag_by_name(tag_name.to_string(), cx).await else {
+        return None;
+    };
+    let recipe = store
+        .managed_recipe_for_tag(tag.id, cx)
+        .await
+        .ok()
+        .flatten()?;
+    Some(ManagedTag {
+        tag_id: tag.id,
+        recipe_id: recipe,
+        label: tag.label(),
+    })
+}
+
     /// Look up the selected tag; if an automation owns it, show its
     /// special panel instead of the task list. Async so the navbar keeps
     /// working while the lookup runs.
@@ -431,25 +452,35 @@ impl Layout {
         let Some(tag_name) = path.last().cloned() else {
             return;
         };
+        let path = path.to_vec();
         let store = self.store.clone();
         let layout = layout_weak.clone();
         cx.spawn(async move |cx| {
-            let managed = async {
-                let Ok(Some(tag)) = store.get_tag_by_name(tag_name, cx).await else {
-                    return None;
-                };
-                let recipe = store.managed_recipe_for_tag(tag.id, cx).await.ok().flatten();
-                recipe.map(|recipe_id| ManagedTag {
-                    tag_id: tag.id,
-                    recipe_id,
-                    label: tag.label(),
-                })
+            let mut managed = Self::lookup_managed_tag(&store, &tag_name, cx).await;
+            let mut retried = false;
+            if managed.is_none() {
+                // The tag may be mid-creation: enabling an automation then
+                // immediately opening its tag can lose the spawn-order race
+                // to the enable transaction. Resolve once more before
+                // settling on the plain task list.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(350))
+                    .await;
+                managed = Self::lookup_managed_tag(&store, &tag_name, cx).await;
+                retried = true;
             }
-            .await;
-            layout.update(cx, |this, cx| {
-                let changed = this.managed_tag.as_ref().map(|m| m.tag_id)
-                    != managed.as_ref().map(|m| m.tag_id);
-                this.managed_tag = managed;
+            layout
+                .update(cx, |this, cx| {
+                    // Drop a retried result if the user navigated elsewhere
+                    // while waiting.
+                    if retried
+                        && this.nav_bar.read(cx).selected_path() != path.as_slice()
+                    {
+                        return;
+                    }
+                    let changed = this.managed_tag.as_ref().map(|m| m.tag_id)
+                        != managed.as_ref().map(|m| m.tag_id);
+                    this.managed_tag = managed;
                 if let Some(managed) = &this.managed_tag {
                     this.travel_panel.update(cx, |panel, cx| {
                         panel.set_tag(managed.recipe_id, managed.label.clone(), cx);

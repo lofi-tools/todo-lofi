@@ -462,6 +462,43 @@ impl TaskListView {
         (blockers, blocking, subtasks)
     }
 
+    /// Fetch a tag's tasks plus display labels, tolerating a tag that is
+    /// being created concurrently: enabling an automation then immediately
+    /// opening its tag can lose the spawn-order race to the enable
+    /// transaction, so the first lookup runs before the tag row commits.
+    /// When the tag is missing, wait a beat and resolve once more before
+    /// giving up; any other error fails immediately.
+    async fn fetch_tagged_with_retry(
+        store: &Store,
+        tag_name: &str,
+        path: &[String],
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<(Vec<TaskWithMeta>, Vec<String>)> {
+        match store
+            .list_tasks_by_tag_name_with_labels_including_distant(tag_name, path, cx)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(first) => {
+                let missing = store
+                    .get_tag_by_name(tag_name.to_string(), cx)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none();
+                if !missing {
+                    return Err(first);
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(350))
+                    .await;
+                store
+                    .list_tasks_by_tag_name_with_labels_including_distant(tag_name, path, cx)
+                    .await
+            }
+        }
+    }
+
     /// Toggle revealing far-future tasks (for editing them early).
     fn toggle_show_all(&mut self, cx: &mut Context<Self>) {
         self.show_all = !self.show_all;
@@ -533,7 +570,7 @@ impl TaskListView {
             let path = selected_path.clone();
             cx.spawn(async move |this, cx| {
                 let (tasks, labels) =
-                    match store.list_tasks_by_tag_name_with_labels_including_distant(&last, &path, cx).await {
+                    match Self::fetch_tagged_with_retry(&store, &last, &path, cx).await {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to fetch tasks by tag: {e}");
@@ -543,6 +580,11 @@ impl TaskListView {
                 let (blockers_map, blocking_map, subtasks) =
                     Self::fetch_list_data(&store, &tasks, cx).await;
                 this.update(cx, |this, cx| {
+                    // Drop the result if the user navigated elsewhere while
+                    // the (possibly retried) fetch was in flight.
+                    if this.selected_path != path {
+                        return;
+                    }
                     this.selected_labels = labels;
                     this.set_tasks_with_path(
                         tasks,

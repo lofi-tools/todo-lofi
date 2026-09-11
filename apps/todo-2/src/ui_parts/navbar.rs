@@ -96,6 +96,12 @@ impl NavBar {
         }
     }
 
+    /// The currently selected tag path (used to drop stale async
+    /// navigation results).
+    pub fn selected_path(&self) -> &[String] {
+        &self.selected_path
+    }
+
     /// Re-fetch the tag tree after a new tag was created elsewhere (e.g. the
     /// project picker modal).
     pub fn refresh_tags(&mut self, cx: &mut Context<Self>) {
