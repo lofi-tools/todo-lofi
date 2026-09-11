@@ -554,8 +554,10 @@ impl TodoStore {
 
     /// Seed the eight workflow recipes from the spec's acceptance cases
     /// (v2 form: timer waits live on the edge, no `time` nodes). No runs
-    /// are started: automations are disabled by default and the user
-    /// enables them from the Automations panel. The Birthday recipe also
+    /// are started. The travel recipe is enabled by default — its managed
+    /// tag and checklist sections are created here and marked as seed
+    /// data — while every other automation stays disabled until the user
+    /// enables it from the Automations panel. The Birthday recipe also
     /// gets a yearly schedule template.
     pub async fn seed_workflows(&mut self) -> crate::QueryResult<()> {
         use serde_json::json;
@@ -711,7 +713,28 @@ impl TodoStore {
             let recipe = self.create_recipe(slug, recipe_json).await?;
             ids.insert(slug, recipe.id);
         }
-        // No runs are created: every automation starts disabled.
+        // No runs are created: every automation starts disabled, except
+        // travel checklists, which is enabled by default: its managed
+        // tag and checklist sections are created here (and marked as
+        // seed data, like the rest of the seed) so the travel panel
+        // shows up without a trip to the Automations panel.
+        let travel_id = ids["packing-list"];
+        let travel_tag = self.enable_managed_recipe(travel_id).await?;
+        let mut seed_tag_ids = vec![travel_tag.id];
+        for child in self.get_children(travel_tag.id).await? {
+            seed_tag_ids.push(child.id);
+        }
+        let id_list: Vec<String> = seed_tag_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
+        toasty::sql::statement(format!(
+            "UPDATE tags SET is_seed = 1 WHERE id IN ({})",
+            placeholders.join(",")
+        ))
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "mark travel tags as seed",
+        })?;
 
         // Yearly schedule for the Birthday recipe: fires March 1 each year
         // via the repeat materializer, creating a brand new isolated run.
@@ -750,24 +773,34 @@ mod tests {
         assert_eq!(tasks.len(), 18);
 
         let tags = store.list_tags().await?;
-        assert_eq!(tags.len(), 9);
+        // 9 seed tags plus the travel managed tag and its 7 checklist
+        // sections, enabled by default.
+        assert_eq!(tags.len(), 17);
 
         // Every seed row is marked so sync never touches it; workflow
         // steps are covered by the workflow_run_id sync guard instead.
         assert!(tasks.iter().all(|t| t.is_seed));
         assert!(tags.iter().all(|t| t.is_seed));
 
-        // Automations start disabled: no runs exist until enabled.
+        // Automations start disabled: no runs exist until enabled — except
+        // travel checklists, which is enabled by default: its managed tag
+        // exists straight after seeding.
         assert!(store.list_workflow_runs().await?.is_empty());
-        // The travel automation is a managed-tag recipe but its tag is not
-        // created until the automation is enabled.
+        // The travel automation is a managed-tag recipe whose tag is
+        // created (and marked as seed data) during seeding.
+        let travel_meta = store
+            .list_recipe_metas()
+            .await?
+            .into_iter()
+            .find(|m| m.slug == "packing-list")
+            .expect("travel recipe should be seeded");
+        assert!(travel_meta.managed_tag.is_some());
+        assert!(travel_meta.managed_enabled, "travel should be enabled by default");
         assert!(
             store
-                .list_recipe_metas()
+                .get_tag_by_name("managed:packing-list")
                 .await?
-                .into_iter()
-                .find(|m| m.slug == "packing-list")
-                .is_some_and(|m| m.managed_tag.is_some())
+                .is_some()
         );
 
         let task_with_parent = tasks.iter().find(|t| t.title == "Migrate database schema");
