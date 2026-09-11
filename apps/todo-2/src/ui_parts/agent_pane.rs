@@ -28,10 +28,11 @@ use gpui::{
     rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
-use gpui_component::{Disableable, IconName, StyledExt as _};
+use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
 use crate::components::Checkbox;
 use crate::theme::{
@@ -255,6 +256,9 @@ enum Overlay {
     Config(String),
 }
 
+/// Title, visible `(value, label)` rows and current value for an open dropdown.
+type OverlayRows = (String, Vec<(String, String)>, String);
+
 pub struct AgentPane {
     session_store: SessionStore,
     agent: Arc<dyn AgentServer>,
@@ -272,6 +276,11 @@ pub struct AgentPane {
     /// Highlighted row of the slash-command dropdown.
     slash_index: usize,
     overlay: Option<Overlay>,
+    /// Fuzzy-filter input for the model dropdown.
+    overlay_query: Entity<InputState>,
+    _overlay_query_events: Subscription,
+    /// Highlighted row of the open dropdown.
+    overlay_cursor: usize,
 }
 
 impl AgentPane {
@@ -293,6 +302,18 @@ impl AgentPane {
             },
         );
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        let overlay_query = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Filter models…", window, cx);
+            state
+        });
+        let _overlay_query_events = cx.subscribe_in(
+            &overlay_query,
+            window,
+            |this: &mut AgentPane, _, event, window, cx| {
+                this.on_overlay_query_event(event, window, cx);
+            },
+        );
         Self {
             session_store,
             agent: Arc::new(OpenCodeAgent),
@@ -305,6 +326,9 @@ impl AgentPane {
             _prompt_events,
             slash_index: 0,
             overlay: None,
+            overlay_query,
+            _overlay_query_events,
+            overlay_cursor: 0,
         }
     }
 
@@ -1214,12 +1238,156 @@ impl AgentPane {
         cx.notify();
     }
 
-    fn toggle_overlay(&mut self, overlay: Overlay, cx: &mut Context<Self>) {
+    /// Open (or close, when already open) a dropdown, clearing the model
+    /// filter and focusing it when the model dropdown opens.
+    fn open_overlay(
+        &mut self,
+        overlay: Overlay,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.overlay = if self.overlay.as_ref() == Some(&overlay) {
             None
         } else {
             Some(overlay)
         };
+        self.overlay_cursor = 0;
+        let focus_filter = matches!(self.overlay, Some(Overlay::Model));
+        if self.overlay.is_some() {
+            self.overlay_query.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+                if focus_filter {
+                    state.focus(window, cx);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    fn on_overlay_query_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.overlay_cursor = 0;
+                cx.notify();
+            }
+            // Enter picks the first visible row, then returns focus to the
+            // prompt box.
+            InputEvent::PressEnter { .. } => self.accept_overlay_first(window, cx),
+            InputEvent::Focus | InputEvent::Blur => {}
+        }
+    }
+
+    /// Title, visible `(value, label)` rows and current value for an open
+    /// dropdown. The model list is narrowed by the fuzzy filter; mode and
+    /// config lists are short enough to show whole. `None` when the backing
+    /// chip vanished.
+    fn overlay_rows(&self, overlay: &Overlay, cx: &App) -> Option<OverlayRows> {
+        let (title, values, current) = match overlay {
+            Overlay::Model => {
+                let chip = self
+                    .select_chips()
+                    .into_iter()
+                    .find(|chip| chip.is_model)?;
+                (chip.name.clone(), chip.values.clone(), chip.current.clone())
+            }
+            Overlay::Mode => {
+                let mode = self
+                    .active_entry()?
+                    .transcript
+                    .controls()
+                    .mode
+                    .clone()?;
+                (
+                    "Mode".to_string(),
+                    mode.available_modes
+                        .iter()
+                        .map(|available| {
+                            (available.id.0.to_string(), available.name.clone())
+                        })
+                        .collect(),
+                    mode.current_mode_id.0.to_string(),
+                )
+            }
+            Overlay::Config(id) => {
+                let chip = self
+                    .select_chips()
+                    .into_iter()
+                    .find(|chip| &chip.id == id)?;
+                (chip.name.clone(), chip.values.clone(), chip.current.clone())
+            }
+        };
+        let values = if *overlay == Overlay::Model {
+            let query = self.overlay_query.read(cx).value().to_string();
+            let mut ranked: Vec<(usize, (String, String))> = values
+                .into_iter()
+                .filter_map(|(value, label)| {
+                    fuzzy_rank(&query, &label).map(|score| (score, (value, label)))
+                })
+                .collect();
+            ranked.sort_by_key(|(score, _)| *score);
+            ranked.into_iter().map(|(_, row)| row).collect()
+        } else {
+            values
+        };
+        Some((title, values, current))
+    }
+
+    /// Pick the first visible dropdown row (Enter in the filter field).
+    fn accept_overlay_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(overlay) = self.overlay.clone() else {
+            return;
+        };
+        let Some((_, values, _)) = self.overlay_rows(&overlay, cx) else {
+            return;
+        };
+        let Some((value, _)) = values.into_iter().next() else {
+            return;
+        };
+        self.select_overlay_value(overlay, value, cx);
+        self.focus_prompt(window, cx);
+    }
+
+    /// Route a picked dropdown value to the session: modes go through
+    /// `select_mode`, everything else (models included) is a select-valued
+    /// config option on its chip.
+    fn select_overlay_value(
+        &mut self,
+        overlay: Overlay,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        match overlay {
+            Overlay::Mode => self.select_mode(value, cx),
+            Overlay::Config(config_id) => self.select_config_value(config_id, value, cx),
+            Overlay::Model => {
+                if let Some(chip) = self
+                    .select_chips()
+                    .into_iter()
+                    .find(|chip| chip.is_model)
+                {
+                    self.select_config_value(chip.id, value, cx);
+                }
+            }
+        }
+    }
+
+    fn move_overlay_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(overlay) = self.overlay.clone() else {
+            return;
+        };
+        let count = self
+            .overlay_rows(&overlay, cx)
+            .map(|(_, values, _)| values.len())
+            .unwrap_or(0) as isize;
+        if count == 0 {
+            return;
+        }
+        self.overlay_cursor = (self.overlay_cursor as isize + delta).rem_euclid(count) as usize;
         cx.notify();
     }
 
@@ -2001,18 +2169,34 @@ impl AgentPane {
             .border_t_1()
             .border_color(rgb(HAIRLINE))
             .key_context(AGENT_PANE_CONTEXT)
-            .on_action(cx.listener(|this, _: &SlashUp, _, cx| this.move_slash(-1, cx)))
-            .on_action(cx.listener(|this, _: &SlashDown, _, cx| this.move_slash(1, cx)))
+            .on_action(cx.listener(|this, _: &SlashUp, _, cx| {
+                if this.overlay.is_some() {
+                    this.move_overlay_cursor(-1, cx);
+                } else {
+                    this.move_slash(-1, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SlashDown, _, cx| {
+                if this.overlay.is_some() {
+                    this.move_overlay_cursor(1, cx);
+                } else {
+                    this.move_slash(1, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &DismissOverlay, _, cx| {
                 if this.dismiss_overlay(cx) {
                     cx.stop_propagation();
                 }
             }))
-            .child(self.render_controls(busy, can_send, queue_len, cx))
+            .child(
+                div()
+                    .relative()
+                    .child(self.render_controls(busy, can_send, queue_len, cx))
+                    .when_some(self.overlay.clone(), |this, overlay| {
+                        this.child(self.render_overlay(overlay, cx))
+                    }),
+            )
             .when(slash_open, |this| this.child(self.render_slash(cx)))
-            .when_some(self.overlay.clone(), |this, overlay| {
-                this.child(self.render_overlay(overlay, cx))
-            })
             .child(
                 div()
                     .rounded_lg()
@@ -2092,11 +2276,12 @@ impl AgentPane {
                 Button::new(SharedString::from(format!("agent-model-{}", chip.id)))
                     .ghost()
                     .compact()
+                    .with_size(gpui_component::Size::Small)
                     .icon(IconName::ChevronsUpDown)
                     .label(chip.current_label.clone())
                     .tooltip(format!("Model · {}", chip.name))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_overlay(Overlay::Model, cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_overlay(Overlay::Model, window, cx)
                     }))
                     .into_any_element()
             }))
@@ -2105,11 +2290,12 @@ impl AgentPane {
                     Button::new("agent-mode")
                         .ghost()
                         .compact()
+                        .with_size(gpui_component::Size::Small)
                         .icon(IconName::ChevronsUpDown)
                         .label(label)
                         .tooltip("Session mode")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_overlay(Overlay::Mode, cx)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_overlay(Overlay::Mode, window, cx)
                         })),
                 )
             })
@@ -2118,11 +2304,12 @@ impl AgentPane {
                 Button::new(SharedString::from(format!("agent-config-{config_id}")))
                     .ghost()
                     .compact()
+                    .with_size(gpui_component::Size::Small)
                     .icon(IconName::ChevronsUpDown)
                     .label(chip.current_label.clone())
                     .tooltip(chip.name.clone())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_overlay(Overlay::Config(config_id.clone()), cx)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_overlay(Overlay::Config(config_id.clone()), window, cx)
                     }))
                     .into_any_element()
             }))
@@ -2246,71 +2433,69 @@ impl AgentPane {
         list.into_any_element()
     }
 
+    /// Floating card above the controls row: a fuzzy filter for the model
+    /// list, then tight option rows. Absolutely positioned so it draws over
+    /// the transcript instead of pushing the prompt box down; closes on
+    /// outside click or Escape.
     fn render_overlay(&self, overlay: Overlay, cx: &mut Context<Self>) -> AnyElement {
-        let (title, values, current): (String, Vec<(String, String)>, String) = match &overlay {
-            Overlay::Model => {
-                let chip = self
-                    .select_chips()
-                    .into_iter()
-                    .find(|chip| chip.is_model);
-                match chip {
-                    Some(chip) => (chip.name.clone(), chip.values.clone(), chip.current.clone()),
-                    None => return div().into_any_element(),
-                }
-            }
-            Overlay::Mode => {
-                let Some(mode) = self
-                    .active_entry()
-                    .and_then(|entry| entry.transcript.controls().mode.clone())
-                else {
-                    return div().into_any_element();
-                };
-                (
-                    "Mode".to_string(),
-                    mode.available_modes
-                        .iter()
-                        .map(|available| {
-                            (available.id.0.to_string(), available.name.clone())
-                        })
-                        .collect(),
-                    mode.current_mode_id.0.to_string(),
-                )
-            }
-            Overlay::Config(id) => {
-                match self
-                    .select_chips()
-                    .into_iter()
-                    .find(|chip| &chip.id == id)
-                {
-                    Some(chip) => (chip.name.clone(), chip.values.clone(), chip.current.clone()),
-                    None => return div().into_any_element(),
-                }
-            }
+        let Some((title, values, current)) = self.overlay_rows(&overlay, cx) else {
+            return div().into_any_element();
         };
+        let cursor = self
+            .overlay_cursor
+            .min(values.len().saturating_sub(1));
+        let show_filter = overlay == Overlay::Model;
 
         let mut list = div()
+            .absolute()
+            .bottom_full()
+            .left_0()
+            .right_0()
+            .mb_1()
             .flex()
             .flex_col()
-            .gap_1()
-            .p_2()
+            .gap_0()
+            .p_1()
             .bg(rgb(PANEL_BG))
             .border_1()
             .border_color(rgb(HAIRLINE))
             .rounded_md()
+            .max_h(px(320.))
+            .overflow_y_scrollbar()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.overlay = None;
+                cx.notify();
+            }))
             .child(
                 div()
+                    .px_2()
+                    .py_0p5()
                     .text_xs()
                     .font_semibold()
                     .text_color(rgb(TEXT_MUTED))
                     .child(title),
             );
-        for (value, label) in values {
+        if show_filter {
+            list = list.child(
+                div()
+                    .px_1()
+                    .pb_1()
+                    .child(Input::new(&self.overlay_query).with_size(gpui_component::Size::Small)),
+            );
+        }
+        if values.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(TEXT_FAINT))
+                    .child("No matches"),
+            );
+        }
+        for (index, (value, label)) in values.into_iter().enumerate() {
             let selected = value == current;
-            let config_id = match &overlay {
-                Overlay::Config(id) => Some(id.clone()),
-                _ => None,
-            };
-            let mode_only = overlay == Overlay::Mode;
+            let highlighted = index == cursor;
             list = list.child(
                 div()
                     .id(SharedString::from(format!("agent-option-{value}")))
@@ -2318,15 +2503,17 @@ impl AgentPane {
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py_1()
+                    .py_0p5()
                     .rounded_md()
-                    .when(selected, |this| this.bg(rgb(PANEL_HOVER)))
+                    .when(highlighted, |this| this.bg(rgb(PANEL_HOVER)))
                     .hover(|this| this.bg(rgb(PANEL_HOVER)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if mode_only {
-                            this.select_mode(value.clone(), cx);
-                        } else if let Some(config_id) = &config_id {
-                            this.select_config_value(config_id.clone(), value.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // Clicks select immediately; the row's overlay value
+                        // is fixed at render time.
+                        let overlay = this.overlay.clone();
+                        if let Some(overlay) = overlay {
+                            this.select_overlay_value(overlay, value.clone(), cx);
+                            this.focus_prompt(window, cx);
                         }
                     }))
                     .child(
@@ -2343,6 +2530,36 @@ impl AgentPane {
         }
         list.into_any_element()
     }
+}
+
+/// Subsequence fuzzy match with a simple rank: consecutive prefix matches
+/// score best, plain subsequence matches after that. Shared shape with the
+/// project picker's filter, for narrowing the model list by typing.
+fn fuzzy_rank(query: &str, name: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let query = query.to_lowercase();
+    let name_lower = name.to_lowercase();
+    if let Some(prefix) = name_lower.strip_prefix(&query) {
+        return Some(prefix.len());
+    }
+    let mut search = name_lower.char_indices().peekable();
+    let mut matched: Vec<usize> = Vec::new();
+    for q in query.chars() {
+        loop {
+            match search.next() {
+                Some((index, c)) if c == q => {
+                    matched.push(index);
+                    break;
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    }
+    let spread = matched.last().copied().unwrap_or(0) - matched.first().copied().unwrap_or(0);
+    Some(name_lower.len() + spread)
 }
 
 fn icon(name: IconName, color: u32) -> AnyElement {
