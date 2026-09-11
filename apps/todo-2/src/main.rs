@@ -333,6 +333,12 @@ impl Layout {
                     if layout._picker_subscription.is_some() {
                         return;
                     }
+                    if layout.travel_panel.read(cx).is_adding() {
+                        layout
+                            .travel_panel
+                            .update(cx, |panel, cx| panel.close_add(cx));
+                        return;
+                    }
                     if layout.panel != NavPanel::Tasks {
                         layout.show_panel(NavPanel::Tasks, cx);
                         return;
@@ -448,13 +454,16 @@ impl Layout {
                     this.travel_panel.update(cx, |panel, cx| {
                         panel.set_tag(managed.recipe_id, managed.label.clone(), cx);
                     });
-                    // Empty managed tag: offer the "+ New trip" action
+                    // Managed tag: the "+ New trip" button moves into the
+                    // task list's title row, and the empty list offers it
                     // where the checklist rows would appear.
                     this.task_list.update(cx, |list, cx| {
+                        list.set_travel_panel(Some(this.travel_panel.clone()), cx);
                         list.set_empty_action(Some("+ New trip".to_string()), cx);
                     });
                 } else {
                     this.task_list.update(cx, |list, cx| {
+                        list.set_travel_panel(None, cx);
                         list.set_empty_action(None, cx);
                     });
                 }
@@ -642,15 +651,11 @@ impl Render for Layout {
                             .flex()
                             .flex_col()
                             .min_h_0()
-                            // The travel header ("+ New trip") sits on top;
-                            // the checklist items below use the normal task
-                            // list with its sections. The popover is the
-                            // LAST child so GPUI paints it above the task
-                            // list (paint order follows tree order).
-                            .child(
-                                self.travel_panel
-                                    .update(cx, |panel, cx| panel.header(window, cx).into_any_element()),
-                            )
+                            // The checklist items use the normal task list
+                            // with its sections; its title row carries the
+                            // "+ New trip" button at its end. The popover
+                            // is the LAST child so GPUI paints it above the
+                            // task list (paint order follows tree order).
                             .child(
                                 div()
                                     .flex_1()

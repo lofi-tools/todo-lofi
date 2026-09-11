@@ -1,6 +1,7 @@
 use gpui::{
     AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div, rgb,
+    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    prelude::FluentBuilder, rgb,
 };
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
@@ -73,6 +74,10 @@ pub struct TaskListView {
     /// would be (managed tags e.g. the travel checklists panel). Clicking
     /// it emits `EmptyActionRequested`.
     empty_action_label: Option<String>,
+    /// Optional action at the end of the title row: the travel panel,
+    /// whose "+ New trip" button renders there. `None` in the plain
+    /// tag/project view, which has no title-row action.
+    travel_panel: Option<Entity<super::travel::TravelPanel>>,
     input: Entity<InputState>,
     store: Store,
     selected_path: Vec<String>,
@@ -150,6 +155,7 @@ impl TaskListView {
             _fetch_sections: None,
             expanded_subtask: None,
             empty_action_label: None,
+            travel_panel: None,
             input,
             store,
             selected_path: Vec::new(),
@@ -502,6 +508,17 @@ impl TaskListView {
     /// tags); `None` restores the plain empty body.
     pub fn set_empty_action(&mut self, label: Option<String>, cx: &mut Context<Self>) {
         self.empty_action_label = label;
+        cx.notify();
+    }
+
+    /// Set the title-row travel panel (its "+ New trip" button renders
+    /// at the end of the title row); `None` restores the plain title.
+    pub fn set_travel_panel(
+        &mut self,
+        panel: Option<Entity<super::travel::TravelPanel>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.travel_panel = panel;
         cx.notify();
     }
 
@@ -1244,10 +1261,24 @@ impl Render for TaskListView {
             }))
             .child(
                 div()
-                    .text_2xl()
-                    .font_bold()
-                    .text_color(rgb(0xe5e5e5))
-                    .child(heading),
+                    .h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_bold()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(heading),
+                    )
+                    .when_some(
+                        self.travel_panel.clone(),
+                        |this, panel: Entity<super::travel::TravelPanel>| {
+                            this.child(panel.update(cx, |panel, cx| {
+                                panel.new_trip_button(cx)
+                            }))
+                        },
+                    ),
             )
             .child(Input::new(&self.input))
             .child(self.list_body(window, cx))

@@ -57,6 +57,11 @@ pub struct TravelPanel {
     tag_label: String,
     /// The add-trip popover is open.
     adding: bool,
+    /// When the popover closes from an outside mousedown, the matching
+    /// click on the "+ New trip" button still arrives afterwards: it must
+    /// not reopen the popover (that press was the toggle intent, already
+    /// fulfilled). Only presses within this window are swallowed.
+    last_outside_close: Option<std::time::Instant>,
     name: Entity<InputState>,
     /// Selected trip length: "1".."13", "30+", or "N" (custom).
     days: Option<String>,
@@ -80,6 +85,7 @@ impl TravelPanel {
             recipe_id,
             tag_label,
             adding: false,
+            last_outside_close: None,
             name: cx.new(|cx| {
                 let mut input = InputState::new(window, cx);
                 input.set_placeholder("Trip name (e.g. Costa Rica)", window, cx);
@@ -105,6 +111,32 @@ impl TravelPanel {
 
     pub fn open_add(&mut self) {
         self.adding = true;
+    }
+
+    /// Whether the add-trip popover is open (used by the window-wide
+    /// Escape observer to close it first).
+    pub fn is_adding(&self) -> bool {
+        self.adding
+    }
+
+    /// Toggle the popover. Swallows the click when it directly follows an
+    /// outside mousedown that already closed the popover (re-clicking the
+    /// button): that press was the close intent, not a reopen.
+    pub fn toggle_add(&mut self, cx: &mut Context<Self>) {
+        if self
+            .last_outside_close
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400))
+        {
+            self.last_outside_close = None;
+            return;
+        }
+        self.adding = !self.adding;
+        cx.notify();
+    }
+
+    fn close_add_outside(&mut self, cx: &mut Context<Self>) {
+        self.last_outside_close = Some(std::time::Instant::now());
+        self.close_add(cx);
     }
 
     pub fn close_add(&mut self, cx: &mut Context<Self>) {
@@ -172,36 +204,30 @@ impl TravelPanel {
 impl EventEmitter<TravelPanelEvent> for TravelPanel {}
 
 impl TravelPanel {
-    /// The header strip: the "+ New trip" button, rendered above the task
-    /// list by the Layout. Same treatment as the task-details buttons:
+    /// The "+ New trip" button, rendered by the Layout at the end of the
+    /// task list's title row. Same treatment as the task-details buttons:
     /// ghost, compact, small, hairline outline.
-    pub fn header(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h_flex()
-            .items_center()
-            .justify_end()
-            .px_8()
-            .pt_8()
-            .child(
-                Button::new("new-trip")
-                    .ghost()
-                    .compact()
-                    .with_size(Size::Small)
-                    .border_1()
-                    .border_color(rgb(HAIRLINE))
-                    .text_color(rgb(0xa3a3a3))
-                    .label("+ New trip")
-                    .tooltip("Add a trip: its checklist appears below in Pack and Before leaving sections")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.open_add();
-                        cx.notify();
-                    })),
-            )
+    pub fn new_trip_button(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        Button::new("new-trip")
+            .ghost()
+            .compact()
+            .with_size(Size::Small)
+            .border_1()
+            .border_color(rgb(HAIRLINE))
+            .text_color(rgb(0xa3a3a3))
+            .label("+ New trip")
+            .tooltip("Add a trip: its checklist appears below in Pack and Before leaving sections")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.toggle_add(cx);
+            }))
+            .into_any_element()
     }
 
     /// The add-trip popover: the same absolute card component the task
-    /// details pickers use, closed by an outside mousedown or Esc. Rendered
-    /// by the Layout as the LAST child of the managed panel so GPUI paints
+    /// details pickers use, anchored top-right under the "+ New trip"
+    /// button. Closed by toggling the button, an outside mousedown, or
+    /// Esc (via the Layout's window-wide keystroke observer). Rendered by
+    /// the Layout as the LAST child of the managed panel so GPUI paints
     /// it above the task list (paint order follows tree order; there is no
     /// z-index).
     pub fn popover(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -244,10 +270,14 @@ impl TravelPanel {
             .collect();
 
         div()
+            // Top-right card under the "+ New trip" button: fixed width
+            // aligned with the task list's right padding, pushed below the
+            // title row (32px list padding + ~32px title height + 8px gap)
+            // so it never overlaps the button.
             .absolute()
-            .top(px(60.))
-            .left(px(0.))
-            .right(px(0.))
+            .top(px(72.))
+            .right(px(32.))
+            .w(px(320.))
             .bg(rgb(CARD_BG))
             .border_1()
             .border_color(rgb(HAIRLINE))
@@ -255,7 +285,7 @@ impl TravelPanel {
             .px_3()
             .py_2()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_add(cx);
+                this.close_add_outside(cx);
             }))
             .v_flex()
             .gap_2()
