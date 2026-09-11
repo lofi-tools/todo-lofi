@@ -31,7 +31,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
@@ -41,6 +40,15 @@ use crate::theme::{
 };
 
 const AGENT_PANE_CONTEXT: &str = "AgentPane";
+/// How long after an outside-mousedown close a selector-button click is
+/// swallowed instead of reopening the dropdown.
+const OVERLAY_OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(300);
+/// Rows shown in a dropdown; the rest is reachable by typing. The card never
+/// scrolls: a scrollable wrapper would take the card out of the floating
+/// context (its styles don't transfer to the wrapper), so the list is
+/// bounded by construction instead.
+const OVERLAY_MAX_ROWS: usize = 12;
 /// Queued prompts are in-memory and session-scoped; beyond this, Send waits.
 const QUEUE_CAP: usize = 10;
 /// Lines of terminal output shown before the row needs expanding.
@@ -244,6 +252,9 @@ struct SelectChip {
     id: String,
     name: String,
     is_model: bool,
+    /// A `mode`-category option (opencode reports session mode this way
+    /// instead of session `modes`): rendered as the dedicated mode button.
+    is_mode: bool,
     current: String,
     current_label: String,
     values: Vec<(String, String)>,
@@ -280,6 +291,11 @@ pub struct AgentPane {
     /// Highlighted row of the slash-command dropdown.
     slash_index: usize,
     overlay: Option<Overlay>,
+    /// Which dropdown was last closed by an outside mousedown, and when. The
+    /// click that follows that mousedown (e.g. re-clicking the selector
+    /// button) must be swallowed instead of reopening it; clicking a
+    /// *different* selector still switches to it.
+    overlay_outside_closed: Option<(Overlay, std::time::Instant)>,
     /// Fuzzy-filter input for the model dropdown.
     overlay_query: Entity<InputState>,
     _overlay_query_events: Subscription,
@@ -330,6 +346,7 @@ impl AgentPane {
             _prompt_events,
             slash_index: 0,
             overlay: None,
+            overlay_outside_closed: None,
             overlay_query,
             _overlay_query_events,
             overlay_cursor: 0,
@@ -1289,18 +1306,24 @@ impl AgentPane {
     }
 
     /// Open (or close, when already open) a dropdown, clearing the model
-    /// filter and focusing it when the model dropdown opens.
+    /// filter and focusing it when the model dropdown opens. Re-clicking the
+    /// selector button works because the outside-mousedown that precedes the
+    /// click only closes; the click itself is swallowed when it arrives
+    /// within the ignore window (same idiom as the task-details pickers).
     fn open_overlay(
         &mut self,
         overlay: Overlay,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.overlay = if self.overlay.as_ref() == Some(&overlay) {
-            None
+        if self.overlay.as_ref() == Some(&overlay) {
+            self.overlay = None;
+        } else if self.take_recent_overlay_outside_close(&overlay) {
+            // The mousedown before this click already closed this same
+            // dropdown; don't reopen it. A different selector still opens.
         } else {
-            Some(overlay)
-        };
+            self.overlay = Some(overlay);
+        }
         self.overlay_cursor = 0;
         let focus_filter = matches!(self.overlay, Some(Overlay::Model));
         if self.overlay.is_some() {
@@ -1312,6 +1335,16 @@ impl AgentPane {
             });
         }
         cx.notify();
+    }
+
+    /// True when the given dropdown was closed by an outside mousedown
+    /// within the ignore window, consuming the marker so only that closing
+    /// click is swallowed.
+    fn take_recent_overlay_outside_close(&mut self, overlay: &Overlay) -> bool {
+        let Some((closed, closed_at)) = self.overlay_outside_closed.take() else {
+            return false;
+        };
+        closed == *overlay && closed_at.elapsed() < OVERLAY_OUTSIDE_CLOSE_IGNORE_WINDOW
     }
 
     fn on_overlay_query_event(
@@ -1346,22 +1379,29 @@ impl AgentPane {
                 (chip.name.clone(), chip.values.clone(), chip.current.clone())
             }
             Overlay::Mode => {
-                let mode = self
-                    .active_entry()?
-                    .transcript
-                    .controls()
-                    .mode
-                    .clone()?;
-                (
-                    "Mode".to_string(),
-                    mode.available_modes
-                        .iter()
-                        .map(|available| {
-                            (available.id.0.to_string(), available.name.clone())
-                        })
-                        .collect(),
-                    mode.current_mode_id.0.to_string(),
-                )
+                if let Some(mode) = self
+                    .active_entry()
+                    .and_then(|entry| entry.transcript.controls().mode.clone())
+                {
+                    (
+                        "Mode".to_string(),
+                        mode.available_modes
+                            .iter()
+                            .map(|available| {
+                                (available.id.0.to_string(), available.name.clone())
+                            })
+                            .collect(),
+                        mode.current_mode_id.0.to_string(),
+                    )
+                } else {
+                    // Agents like opencode report session mode as a
+                    // `mode`-category config option instead of session modes.
+                    let chip = self
+                        .select_chips()
+                        .into_iter()
+                        .find(|chip| chip.is_mode)?;
+                    (chip.name.clone(), chip.values.clone(), chip.current.clone())
+                }
             }
             Overlay::Config(id) => {
                 let chip = self
@@ -1387,7 +1427,8 @@ impl AgentPane {
         Some((title, values, current))
     }
 
-    /// Pick the first visible dropdown row (Enter in the filter field).
+    /// Pick the highlighted visible dropdown row (Enter in the filter
+    /// field), then return focus to the prompt box.
     fn accept_overlay_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(overlay) = self.overlay.clone() else {
             return;
@@ -1395,7 +1436,12 @@ impl AgentPane {
         let Some((_, values, _)) = self.overlay_rows(&overlay, cx) else {
             return;
         };
-        let Some((value, _)) = values.into_iter().next() else {
+        let visible = values.len().min(OVERLAY_MAX_ROWS);
+        let Some((value, _)) = values
+            .into_iter()
+            .take(visible)
+            .nth(self.overlay_cursor.min(visible.saturating_sub(1)))
+        else {
             return;
         };
         self.select_overlay_value(overlay, value, cx);
@@ -1430,9 +1476,10 @@ impl AgentPane {
         let Some(overlay) = self.overlay.clone() else {
             return;
         };
+        // The cursor only travels the visible (capped) rows.
         let count = self
             .overlay_rows(&overlay, cx)
-            .map(|(_, values, _)| values.len())
+            .map(|(_, values, _)| values.len().min(OVERLAY_MAX_ROWS))
             .unwrap_or(0) as isize;
         if count == 0 {
             return;
@@ -1649,6 +1696,7 @@ fn select_chip(option: &SessionConfigOption) -> Option<SelectChip> {
         id: option.id.0.to_string(),
         name: option.name.clone(),
         is_model: matches!(option.category, Some(SessionConfigOptionCategory::Model)),
+        is_mode: matches!(option.category, Some(SessionConfigOptionCategory::Mode)),
         current,
         current_label,
         values,
@@ -2232,14 +2280,7 @@ impl AgentPane {
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                div()
-                    .relative()
-                    .child(self.render_controls(busy, can_send, queue_len, cx))
-                    .when_some(self.overlay.clone(), |this, overlay| {
-                        this.child(self.render_overlay(overlay, cx))
-                    }),
-            )
+            .child(self.render_controls(busy, can_send, queue_len, cx))
             .when(slash_open, |this| this.child(self.render_slash(cx)))
             .child(
                 div()
@@ -2260,6 +2301,10 @@ impl AgentPane {
                     .flex()
                     .items_center()
                     .gap_2()
+                    // Fixed height: the overlay card hangs off the prompt
+                    // bottom by exact pixel math (see render_overlay), so
+                    // this row must not size to content.
+                    .h(px(22.))
                     .text_xs()
                     .text_color(rgb(TEXT_FAINT))
                     .when_some(cwd, |this, cwd| {
@@ -2293,33 +2338,46 @@ impl AgentPane {
             .collect();
         let others: Vec<SelectChip> = chips
             .iter()
-            .filter(|chip| !chip.is_model)
+            .filter(|chip| !chip.is_model && !chip.is_mode)
             .cloned()
             .collect();
-        let mode = self
+        // Session mode comes from session `modes` when the agent sends them;
+        // opencode reports it as a `mode`-category config option instead, so
+        // that chip backs the same dedicated button.
+        let mode_label: Option<String> = self
             .active_entry()
             .and_then(|entry| entry.transcript.controls().mode.clone())
             .filter(|mode| !mode.available_modes.is_empty())
             .map(|mode| {
                 let current = mode.current_mode_id.0.to_string();
-                let label = mode
-                    .available_modes
+                mode.available_modes
                     .iter()
                     .find(|available| available.id.0.to_string() == current)
                     .map(|available| available.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                (current, label)
+                    .unwrap_or_else(|| current.clone())
+            })
+            .or_else(|| {
+                chips
+                    .iter()
+                    .find(|chip| chip.is_mode)
+                    .map(|chip| chip.current_label.clone())
             });
 
         div()
             .flex()
             .items_center()
             .gap_1()
+            // Fixed height: the overlay card hangs off the prompt bottom by
+            // exact pixel math (see render_overlay), so this row must not
+            // size to content. 32px fits the tallest children (compact
+            // default-size icon/send buttons).
+            .h(px(32.))
             .children(models.into_iter().map(|chip| {
                 Button::new(SharedString::from(format!("agent-model-{}", chip.id)))
                     .ghost()
                     .compact()
-                    .with_size(gpui_component::Size::Small)
+                    .with_size(gpui_component::Size::XSmall)
+                    .text_color(rgb(TEXT_MUTED))
                     .icon(IconName::ChevronsUpDown)
                     .label(chip.current_label.clone())
                     .tooltip(format!("Model · {}", chip.name))
@@ -2328,12 +2386,13 @@ impl AgentPane {
                     }))
                     .into_any_element()
             }))
-            .when_some(mode, |this, (_, label)| {
+            .when_some(mode_label, |this, label| {
                 this.child(
                     Button::new("agent-mode")
                         .ghost()
                         .compact()
-                        .with_size(gpui_component::Size::Small)
+                        .with_size(gpui_component::Size::XSmall)
+                        .text_color(rgb(TEXT_MUTED))
                         .icon(IconName::ChevronsUpDown)
                         .label(label)
                         .tooltip("Session mode")
@@ -2470,13 +2529,19 @@ impl AgentPane {
     }
 
     /// Floating card above the controls row: a fuzzy filter for the model
-    /// list, then tight option rows. Absolutely positioned so it draws over
-    /// the transcript instead of pushing the prompt box down; closes on
-    /// outside click or Escape.
+    /// list, then tight option rows. Rendered last in the pane (so it paints
+    /// on top) and hung off the prompt bottom by exact pixel math — the rows
+    /// below the buttons have fixed heights, so it floats just above the
+    /// selector buttons spanning the pane width: bottom pad 8 + footer 22 +
+    /// gap 8 + prompt box 88 + its border 2 + gap 8 + controls row 32 = 168,
+    /// plus a tiny margin. Closes on outside click or Escape.
     fn render_overlay(&self, overlay: Overlay, cx: &mut Context<Self>) -> AnyElement {
-        let Some((title, values, current)) = self.overlay_rows(&overlay, cx) else {
+        let Some((title, all_values, current)) = self.overlay_rows(&overlay, cx) else {
             return div().into_any_element();
         };
+        let hidden = all_values.len().saturating_sub(OVERLAY_MAX_ROWS);
+        let values: Vec<(String, String)> =
+            all_values.into_iter().take(OVERLAY_MAX_ROWS).collect();
         let cursor = self
             .overlay_cursor
             .min(values.len().saturating_sub(1));
@@ -2484,9 +2549,9 @@ impl AgentPane {
 
         let mut list = div()
             .absolute()
-            .bottom_full()
-            .left_0()
-            .right_0()
+            .bottom(px(168.))
+            .left(px(8.))
+            .right(px(8.))
             .mb_1()
             .flex()
             .flex_col()
@@ -2496,10 +2561,10 @@ impl AgentPane {
             .border_1()
             .border_color(rgb(HAIRLINE))
             .rounded_md()
-            .max_h(px(320.))
-            .overflow_y_scrollbar()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.overlay = None;
+                if let Some(closed) = this.overlay.take() {
+                    this.overlay_outside_closed = Some((closed, std::time::Instant::now()));
+                }
                 cx.notify();
             }))
             .child(
@@ -2562,6 +2627,16 @@ impl AgentPane {
                             .child(label),
                     )
                     .when(selected, |this| this.child(icon(IconName::Check, SUCCESS))),
+            );
+        }
+        if hidden > 0 {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_0p5()
+                    .text_xs()
+                    .text_color(rgb(TEXT_FAINT))
+                    .child(format!("{hidden} more — keep typing to narrow")),
             );
         }
         list.into_any_element()
@@ -3119,12 +3194,19 @@ impl Render for AgentPane {
             .min_h_0()
             .flex()
             .flex_col()
+            .relative()
             .bg(rgb(APP_BG))
             .border_l_1()
             .border_color(rgb(HAIRLINE))
             .child(header)
             .child(div().flex_1().min_h_0().child(body))
             .child(prompt)
+            // The open dropdown renders last so GPUI paints it above the
+            // transcript and prompt (paint order follows tree order; there
+            // is no z-index). It takes no layout space.
+            .when_some(self.overlay.clone(), |this, overlay| {
+                this.child(self.render_overlay(overlay, cx))
+            })
     }
 }
 
@@ -3150,6 +3232,44 @@ mod tests {
             task_context_text("Only a title", Some("   "), &[]),
             "Task: Only a title"
         );
+    }
+
+    /// opencode's session mode arrives as a `mode`-category config option
+    /// (not session `modes`): it must map to a mode chip backing the
+    /// dedicated mode button, while the `model` category maps to a model
+    /// chip. Shapes mirror the live `session/new` payload.
+    #[test]
+    fn mode_and_model_categories_map_to_their_chips() {
+        let mode_option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "build",
+            "options": [
+                {"value": "build", "name": "build"},
+                {"value": "plan", "name": "plan"}
+            ]
+        }))
+        .expect("mode option");
+        let mode_chip = select_chip(&mode_option).expect("mode chip");
+        assert!(mode_chip.is_mode);
+        assert!(!mode_chip.is_model);
+        assert_eq!(mode_chip.current_label, "build");
+        assert_eq!(mode_chip.values.len(), 2);
+
+        let model_option: SessionConfigOption = serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "opencode/big-pickle",
+            "options": [{"value": "opencode/big-pickle", "name": "Big Pickle"}]
+        }))
+        .expect("model option");
+        let model_chip = select_chip(&model_option).expect("model chip");
+        assert!(model_chip.is_model);
+        assert!(!model_chip.is_mode);
     }
 
     #[test]

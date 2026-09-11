@@ -69,7 +69,9 @@ pub struct Task {
 impl Task {
     /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
     pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
-        self.importance_factor * self.urgency_factor * Self::deadline_pressure(self.deadline, now_secs)
+        self.importance_factor
+            * self.urgency_factor
+            * Self::deadline_pressure(self.deadline, now_secs)
     }
 
     /// Deadline pressure: 86400 / seconds-remaining while approaching,
@@ -106,7 +108,8 @@ pub fn factors_between(above: Option<&Task>, below: Option<&Task>) -> (f64, f64)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let score = |task: &Task| {
-        (task.importance_factor * task.urgency_factor
+        (task.importance_factor
+            * task.urgency_factor
             * Task::deadline_pressure(task.deadline, now_secs))
         .clamp(MIN, MAX)
     };
@@ -279,11 +282,7 @@ impl TodoStore {
     #[fastrace::trace]
     pub async fn update_task_done(&mut self, id: u64, done: bool) -> crate::QueryResult<()> {
         tracing::info!(id, done, "update_task_done: executing");
-        let completed_at = if done {
-            Some(Self::now_secs())
-        } else {
-            None
-        };
+        let completed_at = if done { Some(Self::now_secs()) } else { None };
         Task::update_by_id(id)
             .done(done)
             .completed_at(completed_at)
@@ -623,15 +622,15 @@ impl TodoStore {
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::String,
                 toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-        ])
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::ListTasksByTagSnafu { tag_id })?;
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::String,
+            ])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::ListTasksByTagSnafu { tag_id })?;
 
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
@@ -712,11 +711,7 @@ mod tests {
     use crate::prelude::*;
     use std::time::Duration;
 
-    async fn task_with_factors(
-        store: &mut TodoStore,
-        importance: f64,
-        urgency: f64,
-    ) -> Task {
+    async fn task_with_factors(store: &mut TodoStore, importance: f64, urgency: f64) -> Task {
         store
             .create_task(
                 Task::create()
@@ -752,11 +747,8 @@ mod tests {
 
         // End to end: the inserted row sorts between its neighbours.
         let listed = store.list_tasks_by_priority().await?;
-        let positions: std::collections::HashMap<u64, usize> = listed
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (t.id, i))
-            .collect();
+        let positions: std::collections::HashMap<u64, usize> =
+            listed.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
         assert!(positions[&above.id] < positions[&inserted.id]);
         assert!(positions[&inserted.id] < positions[&below.id]);
         Ok(())
@@ -1000,7 +992,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_urgency_factor_moves_ordering() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
+    async fn test_urgency_factor_moves_ordering() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
 
         storage
             .create_task(
@@ -1046,10 +1039,18 @@ mod tests {
         let mut storage = TodoStore::for_test().await?;
         let now = real_now_secs();
 
-        let near = storage.create_task(Task::create().title("Starts tomorrow")).await?;
-        storage.update_blocked_until(near.id, Some(now + 86400)).await?;
-        let far = storage.create_task(Task::create().title("Starts in a week")).await?;
-        storage.update_blocked_until(far.id, Some(now + 7 * 86400)).await?;
+        let near = storage
+            .create_task(Task::create().title("Starts tomorrow"))
+            .await?;
+        storage
+            .update_blocked_until(near.id, Some(now + 86400))
+            .await?;
+        let far = storage
+            .create_task(Task::create().title("Starts in a week"))
+            .await?;
+        storage
+            .update_blocked_until(far.id, Some(now + 7 * 86400))
+            .await?;
 
         let listed = storage.list_tasks_by_priority().await?;
         assert!(listed.iter().any(|t| t.id == near.id));
@@ -1113,10 +1114,10 @@ mod tests {
                     .importance_factor(2.0),
             )
             .await?;
-        storage.update_blocked_until(waiting.id, Some(now + 3600)).await?;
-        let ready = storage
-            .create_task(Task::create().title("Doable"))
+        storage
+            .update_blocked_until(waiting.id, Some(now + 3600))
             .await?;
+        let ready = storage.create_task(Task::create().title("Doable")).await?;
 
         // Future blocked_until: still listed, but below doable tasks …
         let listed = storage.list_tasks_by_priority().await?;
@@ -1131,11 +1132,15 @@ mod tests {
                     .parent_id(Some(ready.id)),
             )
             .await?;
-        storage.update_blocked_until(child.id, Some(now + 3600)).await?;
+        storage
+            .update_blocked_until(child.id, Some(now + 3600))
+            .await?;
         assert_eq!(storage.list_subtasks(ready.id).await?.len(), 1);
 
         // … and first again once the start time passes.
-        storage.update_blocked_until(waiting.id, Some(now - 10)).await?;
+        storage
+            .update_blocked_until(waiting.id, Some(now - 10))
+            .await?;
         let listed = storage.list_tasks_by_priority().await?;
         assert_eq!(listed[0].title, "Not yet doable");
         Ok(())
@@ -1185,9 +1190,15 @@ mod tests {
     async fn test_completed_tasks_sorted_to_bottom_and_hidden_after_24h() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
-        storage.create_task(Task::create().title("Open task")).await?;
-        let done_recent = storage.create_task(Task::create().title("Done recently")).await?;
-        let done_old = storage.create_task(Task::create().title("Done long ago")).await?;
+        storage
+            .create_task(Task::create().title("Open task"))
+            .await?;
+        let done_recent = storage
+            .create_task(Task::create().title("Done recently"))
+            .await?;
+        let done_old = storage
+            .create_task(Task::create().title("Done long ago"))
+            .await?;
 
         storage.update_task_done(done_recent.id, true).await?;
         storage.update_task_done(done_old.id, true).await?;
@@ -1199,26 +1210,22 @@ mod tests {
         // Backdate the older one slightly (still within the window) and
         // verify it sorts below the more recently completed task.
         let now = TodoStore::now_secs();
-        toasty::sql::query(
-            "UPDATE tasks SET completed_at = ?1 WHERE id = ?2",
-        )
-        .bind(now - 3600)
-        .bind(done_old.id as i64)
-        .exec(&mut storage.db)
-        .await?;
+        toasty::sql::query("UPDATE tasks SET completed_at = ?1 WHERE id = ?2")
+            .bind(now - 3600)
+            .bind(done_old.id as i64)
+            .exec(&mut storage.db)
+            .await?;
 
         let tasks = storage.list_tasks_by_priority().await?;
         let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, vec!["Open task", "Done recently", "Done long ago"]);
 
         // Backdate beyond the visibility window: hidden from the list.
-        toasty::sql::query(
-            "UPDATE tasks SET completed_at = ?1 WHERE id = ?2",
-        )
-        .bind(now - 25 * 60 * 60)
-        .bind(done_old.id as i64)
-        .exec(&mut storage.db)
-        .await?;
+        toasty::sql::query("UPDATE tasks SET completed_at = ?1 WHERE id = ?2")
+            .bind(now - 25 * 60 * 60)
+            .bind(done_old.id as i64)
+            .exec(&mut storage.db)
+            .await?;
 
         let tasks = storage.list_tasks_by_priority().await?;
         let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
