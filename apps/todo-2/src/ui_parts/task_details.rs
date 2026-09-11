@@ -4,6 +4,7 @@ use gpui::{
     div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Disableable;
+use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -2131,6 +2132,8 @@ impl Render for TaskDetails {
                             .child(
                                 div()
                                     .id(("details-description", task_id))
+                                    .w_full()
+                                    .min_w_0()
                                     .text_sm()
                                     .text_color(rgb(0xe5e5e5))
                                     .child(desc.clone())
@@ -2141,6 +2144,25 @@ impl Render for TaskDetails {
                                         }
                                     })),
                             ),
+                    );
+                } else {
+                    // No description yet: a grayed-out affordance row that
+                    // opens the editor on click.
+                    details = details.child(
+                        div()
+                            .id(("details-description-empty", task_id))
+                            .w_full()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(rgb(0x737373))
+                            .cursor_pointer()
+                            .child(div().flex_none().child(IconName::FileText))
+                            .child("Description")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_description_edit(window, cx);
+                            })),
                     );
                 }
                 if let Some(deadline) = task.deadline {
@@ -2176,6 +2198,7 @@ impl Render for TaskDetails {
             .id("task-details")
             .relative()
             .h_full()
+            .min_w_0()
             .v_flex()
             .p_4()
             .gap_4()
