@@ -24,7 +24,7 @@ pub mod prelude {
     pub use crate::tag::{Tag, TagId, TagNode};
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
     pub use crate::todoist::SyncSummary;
-    pub use crate::task::{Task, TaskWithMeta};
+    pub use crate::task::{Task, TaskWithMeta, factors_between};
     pub use crate::workflow::{
         Recipe, RecipeEdge, RecipeMeta, RecipeNode, RunStepView, RunView, WorkflowRecipe,
         WorkflowRun,

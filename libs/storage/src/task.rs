@@ -90,6 +90,51 @@ impl Task {
     }
 }
 
+/// Compute `(importance, urgency)` for a task inserted between `above`
+/// and `below` (list order: higher score first) so it sorts between
+/// them. The new task carries no deadline (pressure 1), so its score is
+/// just the factor product; the target is the geometric mean of the
+/// neighbours' live scores, split across the two factors following the
+/// neighbours' balance. Edges double/halve the single neighbour's score
+/// (`None`/`None` yields the defaults). Scores drift as neighbours'
+/// deadlines approach, so this places the task, it doesn't pin it.
+pub fn factors_between(above: Option<&Task>, below: Option<&Task>) -> (f64, f64) {
+    const MIN: f64 = 1e-3;
+    const MAX: f64 = 1e9;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let score = |task: &Task| {
+        (task.importance_factor * task.urgency_factor
+            * Task::deadline_pressure(task.deadline, now_secs))
+        .clamp(MIN, MAX)
+    };
+    let target = match (above, below) {
+        (Some(a), Some(b)) => (score(a) * score(b)).sqrt(),
+        (None, Some(b)) => score(b) * 2.0,
+        (Some(a), None) => score(a) / 2.0,
+        (None, None) => 1.0,
+    }
+    .clamp(MIN, MAX);
+    // Neighbours' per-factor balance (geometric mean; a missing side
+    // reuses the present one), scaled so the product hits the target.
+    let geo = |pick: fn(&Task) -> f64| match (above, below) {
+        (Some(a), Some(b)) => (pick(a).clamp(MIN, MAX) * pick(b).clamp(MIN, MAX)).sqrt(),
+        (Some(a), None) | (None, Some(a)) => pick(a).clamp(MIN, MAX),
+        (None, None) => 1.0,
+    };
+    let (base_imp, base_urg) = (
+        geo(|task| task.importance_factor),
+        geo(|task| task.urgency_factor),
+    );
+    let scale = (target / (base_imp * base_urg).clamp(MIN, MAX)).sqrt();
+    (
+        (base_imp * scale).clamp(MIN, MAX),
+        (base_urg * scale).clamp(MIN, MAX),
+    )
+}
+
 pub type TaskCreate = <Task as toasty::schema::Model>::Create;
 
 #[derive(Debug, Clone)]
@@ -666,6 +711,85 @@ mod tests {
 
     use crate::prelude::*;
     use std::time::Duration;
+
+    async fn task_with_factors(
+        store: &mut TodoStore,
+        importance: f64,
+        urgency: f64,
+    ) -> Task {
+        store
+            .create_task(
+                Task::create()
+                    .title("t".to_string())
+                    .importance_factor(importance)
+                    .urgency_factor(urgency),
+            )
+            .await
+            .expect("in-memory task")
+    }
+
+    fn score_of(task: &Task) -> f64 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        task.compute_priority_score(now_secs)
+    }
+
+    #[tokio::test]
+    async fn test_factors_between_lands_strictly_between() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let above = task_with_factors(&mut store, 2.0, 1.5).await;
+        let below = task_with_factors(&mut store, 1.0, 2.0).await;
+        let (imp, urg) = crate::factors_between(Some(&above), Some(&below));
+        let inserted = task_with_factors(&mut store, imp, urg).await;
+        let new_score = score_of(&inserted);
+        assert!(new_score < 3.0, "new score {new_score} below above (3.0)");
+        assert!(new_score > 2.0, "new score {new_score} above below (2.0)");
+        // Per-factor geometric split of the neighbours' balance.
+        assert!((imp - 2.0f64.sqrt()).abs() < 1e-9);
+        assert!((urg - 3.0f64.sqrt()).abs() < 1e-9);
+
+        // End to end: the inserted row sorts between its neighbours.
+        let listed = store.list_tasks_by_priority().await?;
+        let positions: std::collections::HashMap<u64, usize> = listed
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id, i))
+            .collect();
+        assert!(positions[&above.id] < positions[&inserted.id]);
+        assert!(positions[&inserted.id] < positions[&below.id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_factors_between_edges() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let only = task_with_factors(&mut store, 2.0, 2.0).await;
+        let (imp_top, urg_top) = crate::factors_between(None, Some(&only));
+        let top = task_with_factors(&mut store, imp_top, urg_top).await;
+        assert!(score_of(&top) > 4.0);
+        let (imp_bottom, urg_bottom) = crate::factors_between(Some(&only), None);
+        let bottom = task_with_factors(&mut store, imp_bottom, urg_bottom).await;
+        let bottom_score = score_of(&bottom);
+        assert!(bottom_score < 4.0);
+        assert!(bottom_score > 0.0);
+        let (imp_default, urg_default) = crate::factors_between(None, None);
+        assert_eq!((imp_default, urg_default), (1.0, 1.0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_factors_between_equal_neighbours() -> anyhow::Result<()> {
+        // No value sorts strictly between equal scores; the midpoint
+        // keeps the task adjacent instead of flinging it elsewhere.
+        let mut store = TodoStore::for_test().await?;
+        let task = task_with_factors(&mut store, 1.5, 1.5).await;
+        let (imp, urg) = crate::factors_between(Some(&task), Some(&task));
+        let inserted = task_with_factors(&mut store, imp, urg).await;
+        assert!((score_of(&inserted) - 2.25).abs() < 1e-9);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_create_get_task() -> anyhow::Result<()> {

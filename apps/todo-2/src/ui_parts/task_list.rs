@@ -45,6 +45,15 @@ pub struct RowSpec {
     pub subtasks: Vec<TaskWithMeta>,
 }
 
+/// An inline insert input open in an interstitial gap: the input plus
+/// the neighbouring row task ids that position the new task.
+struct PendingInsert {
+    above_id: Option<u64>,
+    below_id: Option<u64>,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
 pub struct TaskListView {
     task_views: Vec<Entity<TaskRow>>,
     /// The display shape of each visible row (top-level task + what it
@@ -89,6 +98,9 @@ pub struct TaskListView {
     forward: Vec<TaskWithMeta>,
     editing: bool,
     input_needs_clear: bool,
+    /// An inline insert input open in an interstitial gap, if any: the ids
+    /// of the rows above/below the gap (`None` at the list edges).
+    inserting: Option<PendingInsert>,
     /// While a completed task is jumping to the bottom of the list, clicks
     /// are disabled: from shortly before the jump until just after it.
     locked_until: Option<std::time::Instant>,
@@ -165,6 +177,7 @@ impl TaskListView {
             forward: Vec::new(),
             editing: false,
             input_needs_clear: false,
+            inserting: None,
             locked_until: None,
             _fetch_tasks: None,
             _reorder_timer: {
@@ -326,7 +339,7 @@ impl TaskListView {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.editing
+        self.editing || self.inserting.is_some()
     }
 
     pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
@@ -334,6 +347,9 @@ impl TaskListView {
             row.update(cx, |row, cx| row.cancel_edit(cx));
         }
         self.editing = false;
+        if self.inserting.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// A task's done state changed. Completed tasks gray out immediately,
@@ -631,11 +647,82 @@ impl TaskListView {
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
+        self.insert_task_with_factors(title, 1.0, 1.0, cx);
+    }
+
+    /// Open an inline input in the gap between two rows (`None` at the
+    /// list edges). Enter commits it via `commit_insert`; Esc cancels it
+    /// via `cancel_editing`.
+    pub fn begin_insert(
+        &mut self,
+        above_id: Option<u64>,
+        below_id: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("New task", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
+                this.commit_insert(cx);
+            }
+        });
+        self.inserting = Some(PendingInsert {
+            above_id,
+            below_id,
+            input: input.clone(),
+            _subscription: subscription,
+        });
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    /// Commit the inline gap input: insert the titled task with factors
+    /// placing it between the gap's neighbours, like `insert_task`.
+    fn commit_insert(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.inserting.take() else {
+            return;
+        };
+        let title = pending.input.read(cx).text().to_string();
+        let title = title.trim().to_string();
+        cx.notify();
+        if title.is_empty() {
+            return;
+        }
+        let spec = |id: Option<u64>| {
+            id.and_then(|id| self.row_specs.iter().find(|spec| spec.task.id == id))
+        };
+        let (importance, urgency) = storage::factors_between(
+            spec(pending.above_id).map(|spec| &spec.task.task),
+            spec(pending.below_id).map(|spec| &spec.task.task),
+        );
+        self.insert_task_with_factors(title, importance, urgency, cx);
+    }
+
+    fn insert_task_with_factors(
+        &mut self,
+        title: String,
+        importance: f64,
+        urgency: f64,
+        cx: &mut Context<Self>,
+    ) {
         // When a tag is selected the new task belongs to it, so it is
         // tagged and the view stays on that tag's task list.
         let tag_name = self.selected_path.last().cloned();
         let store = self.store.clone();
-        let create_task = store.insert_task(TaskCreate::default().title(title), tag_name, cx);
+        let create_task = store.insert_task(
+            TaskCreate::default()
+                .title(title)
+                .importance_factor(importance)
+                .urgency_factor(urgency),
+            tag_name,
+            cx,
+        );
 
         self._fetch_tasks = Some(cx.spawn(async move |this, cx| {
             let (new_task_id, new_tasks) = match create_task.await {
@@ -686,6 +773,8 @@ impl TaskListView {
         cx: &mut Context<Self>,
     ) {
         self.editing = false;
+        // A reload reorders rows, invalidating any open gap position.
+        self.inserting = None;
         self.blockers_map = blockers_map;
         self.blocking_map = blocking_map;
         self.subtasks_map = subtasks;
@@ -1458,10 +1547,15 @@ impl TaskListView {
                         .iter()
                         .map(|i| self.row_specs[*i].clone())
                         .collect::<Vec<_>>();
-                    let rows = indices
+                    let rows: Vec<(u64, gpui::AnyElement)> = indices
                         .iter()
-                        .map(|index| self.task_views[*index].clone().into_any_element())
-                        .collect::<Vec<_>>();
+                        .map(|index| {
+                            (
+                                self.row_specs[*index].task.id,
+                                self.task_views[*index].clone().into_any_element(),
+                            )
+                        })
+                        .collect();
                     sections.push((
                         TaskListSection {
                             header: None,
@@ -1478,10 +1572,15 @@ impl TaskListView {
                         .iter()
                         .map(|i| self.row_specs[*i].clone())
                         .collect::<Vec<_>>();
-                    let rows = indices
+                    let rows: Vec<(u64, gpui::AnyElement)> = indices
                         .iter()
-                        .map(|index| self.task_views[*index].clone().into_any_element())
-                        .collect::<Vec<_>>();
+                        .map(|index| {
+                            (
+                                self.row_specs[*index].task.id,
+                                self.task_views[*index].clone().into_any_element(),
+                            )
+                        })
+                        .collect();
                     let (top, sub) = split_subsection(name);
                     sections.push((
                         TaskListSection {
@@ -1518,10 +1617,15 @@ impl TaskListView {
                         .iter()
                         .map(|i| self.row_specs[*i].clone())
                         .collect::<Vec<_>>();
-                    let rows = indices
+                    let rows: Vec<(u64, gpui::AnyElement)> = indices
                         .iter()
-                        .map(|index| self.task_views[*index].clone().into_any_element())
-                        .collect::<Vec<_>>();
+                        .map(|index| {
+                            (
+                                self.row_specs[*index].task.id,
+                                self.task_views[*index].clone().into_any_element(),
+                            )
+                        })
+                        .collect();
                     sections.push((
                         TaskListSection {
                             header: Some("Upcoming".to_string()),
@@ -1538,10 +1642,15 @@ impl TaskListView {
                         .iter()
                         .map(|i| self.row_specs[*i].clone())
                         .collect::<Vec<_>>();
-                    let rows = indices
+                    let rows: Vec<(u64, gpui::AnyElement)> = indices
                         .iter()
-                        .map(|index| self.task_views[*index].clone().into_any_element())
-                        .collect::<Vec<_>>();
+                        .map(|index| {
+                            (
+                                self.row_specs[*index].task.id,
+                                self.task_views[*index].clone().into_any_element(),
+                            )
+                        })
+                        .collect();
                     sections.push((
                         TaskListSection {
                             header: Some("Completed".to_string()),
@@ -1555,7 +1664,99 @@ impl TaskListView {
                 }
             }
         }
+        self.interleave_gaps(sections, cx)
+    }
+
+    /// Interleave interstitial insert gaps between the rows: one before
+    /// the first row and one after every row (the last gap is the
+    /// after-all one), following display order across section headers.
+    fn interleave_gaps(
+        &self,
+        sections: Vec<(TaskListSection, Vec<(u64, gpui::AnyElement)>)>,
+        cx: &mut Context<Self>,
+    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
+        let order: Vec<u64> = sections
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().map(|(id, _)| *id))
+            .collect();
+        let mut position = 0;
         sections
+            .into_iter()
+            .map(|(section, rows)| {
+                let mut elements = Vec::new();
+                for (id, view) in rows {
+                    let above = (position > 0).then(|| order[position - 1]);
+                    elements.push(self.insert_gap(above, Some(id), cx));
+                    elements.push(view);
+                    position += 1;
+                }
+                if position == order.len() && !order.is_empty() {
+                    elements.push(self.insert_gap(order.last().copied(), None, cx));
+                }
+                (section, elements)
+            })
+            .collect()
+    }
+
+    /// One interstitial row: a hover-revealed + on a horizontal line,
+    /// or the inline insert input when this gap is being filled. The row
+    /// is effectively zero height (vertical padding cancelled by negative
+    /// margins) so it never shifts the surrounding layout; the padded
+    /// strip is the hover zone.
+    fn insert_gap(
+        &self,
+        above_id: Option<u64>,
+        below_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = format!(
+            "insert-gap-{}-{}",
+            above_id.unwrap_or(0),
+            below_id.unwrap_or(0)
+        );
+        if let Some(pending) = &self.inserting
+            && pending.above_id == above_id
+            && pending.below_id == below_id
+        {
+            let input = pending.input.clone();
+            return div()
+                .id(key)
+                .py_1()
+                .child(Input::new(&input).small())
+                .into_any_element();
+        }
+        let line = || {
+            div()
+                .h_px()
+                .flex_1()
+                .bg(rgb(0x333333))
+                .into_any_element()
+        };
+        div()
+            .id(key.clone())
+            .w_full()
+            .py_1()
+            .my_neg_1()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .opacity(0.0)
+            .hover(|style| style.opacity(1.0))
+            .child(line())
+            .child(
+                div()
+                    .id(format!("{key}-plus"))
+                    .text_sm()
+                    .text_color(rgb(0xa3a3a3))
+                    .cursor_pointer()
+                    .child("+")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.begin_insert(above_id, below_id, window, cx);
+                    })),
+            )
+            .child(line())
+            .into_any_element()
     }
 }
 
