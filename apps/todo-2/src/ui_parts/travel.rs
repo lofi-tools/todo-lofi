@@ -269,11 +269,12 @@ impl TravelPanel {
             .child(field_label("Activities"))
             .child(div().h_flex().items_center().gap_1p5().children(activity_chips))
             .child(
+                // No tooltip here: the popover unmounts the moment this is
+                // clicked, orphaning any visible tooltip on screen.
                 Button::new("add-trip-confirm")
                     .compact()
                     .label("Add trip")
                     .disabled(!can_add)
-                    .tooltip("Generate the pack and before-leaving checklists")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.add_trip(cx);
                     })),
