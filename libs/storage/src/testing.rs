@@ -313,6 +313,84 @@ fn seed_tasks() -> Vec<SeedTask> {
             parent_title: Some("Rewrite the details panel".to_string()),
             blocked_until: None,
         },
+        // Tally (the accounting project) backlog.
+        SeedTask {
+            title: "File the corporation tax return".to_string(),
+            description: Some(
+                "Prepare the CT600 and the iXBRL accounts, then submit to HMRC".to_string(),
+            ),
+            branch_name: Some("feat/ct600-filing".to_string()),
+            labels: vec!["tax".to_string(), "feature".to_string()],
+            deadline: Some(now_secs + 6 * 86400),
+            importance_factor: 2.0,
+            urgency_factor: 2.0,
+            parent_title: None,
+            blocked_until: None,
+        },
+        SeedTask {
+            title: "Classify the latest batch of transactions".to_string(),
+            description: Some(
+                "Pull the new bank feed and classify the transactions into the account tree"
+                    .to_string(),
+            ),
+            branch_name: None,
+            labels: vec!["chore".to_string()],
+            deadline: Some(now_secs + 2 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 1.5,
+            parent_title: None,
+            blocked_until: None,
+        },
+        SeedTask {
+            title: "Document the FRS 105 mappings".to_string(),
+            description: Some(
+                "Record how the account tree maps onto the iXBRL taxonomy for micro-entities"
+                    .to_string(),
+            ),
+            branch_name: None,
+            labels: vec!["docs".to_string()],
+            deadline: Some(now_secs + 9 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 0.5,
+            parent_title: None,
+            blocked_until: None,
+        },
+        // The about-me site.
+        SeedTask {
+            title: "Add the 2026 accounts to the site".to_string(),
+            description: Some("Publish the last accounts and a short write-up on the site".to_string()),
+            branch_name: Some("content/2026-accounts".to_string()),
+            labels: vec!["content".to_string()],
+            deadline: Some(now_secs + 4 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 1.0,
+            parent_title: None,
+            blocked_until: None,
+        },
+        SeedTask {
+            title: "Write a post about the Tally build".to_string(),
+            description: Some(
+                "Draft a blog entry covering how the accounts pipeline works".to_string(),
+            ),
+            branch_name: Some("content/tally-build".to_string()),
+            labels: vec!["blog".to_string()],
+            deadline: Some(now_secs + 5 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 0.5,
+            parent_title: None,
+            blocked_until: None,
+        },
+        SeedTask {
+            title: "Update the projects page".to_string(),
+            description: Some("Refresh project blurbs and links on the home page".to_string()),
+            branch_name: None,
+            labels: vec!["frontend".to_string()],
+            deadline: Some(now_secs + 3 * 86400),
+            importance_factor: 1.0,
+            urgency_factor: 1.0,
+            parent_title: None,
+            blocked_until: None,
+        },
     ]
 }
 
@@ -413,6 +491,23 @@ impl TodoStore {
             }
         }
 
+        // Seed a couple of project folders by default so the agent pane has
+        // directory-backed projects available immediately. Created before
+        // the tasks so the assignments below reuse the same display-named
+        // tags instead of `assign_tag_to_task` auto-creating plain ones.
+        for (path, label) in [
+            (
+                std::path::Path::new("/Users/me/src/me/accounting"),
+                "accounting",
+            ),
+            (
+                std::path::Path::new("/Users/me/src/me/about-me"),
+                "about-me",
+            ),
+        ] {
+            self.create_seed_project_tag(path, label).await?;
+        }
+
         let tasks = seed_tasks();
         let mut task_map = std::collections::HashMap::new();
 
@@ -447,6 +542,34 @@ impl TodoStore {
             if let Some(&task_id) = task_map.get(&assignment.task_title) {
                 self.assign_tag_to_task(task_id, &assignment.tag_name)
                     .await?;
+            }
+        }
+
+        // Tasks belonging to the seeded project folders, keyed by the same
+        // `project:{path}` tag names created above.
+        let project_tasks: &[(&str, &[&str])] = &[
+            (
+                "project:/Users/me/src/me/accounting",
+                &[
+                    "File the corporation tax return",
+                    "Classify the latest batch of transactions",
+                    "Document the FRS 105 mappings",
+                ],
+            ),
+            (
+                "project:/Users/me/src/me/about-me",
+                &[
+                    "Add the 2026 accounts to the site",
+                    "Write a post about the Tally build",
+                    "Update the projects page",
+                ],
+            ),
+        ];
+        for (tag_name, titles) in project_tasks {
+            for title in *titles {
+                if let Some(&task_id) = task_map.get(*title) {
+                    self.assign_tag_to_task(task_id, tag_name).await?;
+                }
             }
         }
 
@@ -543,21 +666,6 @@ impl TodoStore {
         }
 
         self.seed_workflows().await?;
-
-        // Seed a couple of project folders by default so the agent pane has
-        // directory-backed projects available immediately.
-        for (path, label) in [
-            (
-                std::path::Path::new("/Users/me/src/me/accounting"),
-                "accounting",
-            ),
-            (
-                std::path::Path::new("/Users/me/src/me/about-me"),
-                "about-me",
-            ),
-        ] {
-            self.create_seed_project_tag(path, label).await?;
-        }
 
         tracing::info!(
             tasks = task_map.len(),
@@ -785,7 +893,7 @@ mod tests {
         store.seed().await?;
 
         let tasks = store.list_tasks().await?;
-        assert_eq!(tasks.len(), 18);
+        assert_eq!(tasks.len(), 24);
 
         let tags = store.list_tags().await?;
         // 9 seed tags, 2 project tags, plus the travel managed tag and
