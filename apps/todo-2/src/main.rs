@@ -1,20 +1,24 @@
 use gpui::{
-    App, AppContext, AsyncApp, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, px, rgb,
+    AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
+    div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::StyledExt;
-use gpui_component::input::*;
-use gpui_component::{Disableable, Theme, ThemeMode, TitleBar};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::*;
+use gpui_component::{
+    Disableable, IconName, ResizableState, Theme, ThemeMode, TitleBar, h_resizable, resizable_panel,
+};
 use storage::prelude::*;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
+use acp_client::SessionStore;
 use projects::Project;
 use store::Store;
 use theme::APP_BG;
+use ui_parts::agent_pane::{AgentPane, AgentPaneEvent, AgentProject, build_task_context};
 use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
 use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
@@ -31,6 +35,7 @@ mod store;
 mod theme;
 mod todoist_auth;
 mod ui_parts {
+    pub mod agent_pane;
     pub mod automations;
     pub mod integrations;
     pub mod navbar;
@@ -43,6 +48,14 @@ mod ui_parts {
     pub mod task_row;
     pub mod travel;
     pub mod workflows;
+}
+
+/// Which pane fills the right-hand column of the Tasks panel.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum RightPane {
+    #[default]
+    Details,
+    Agent,
 }
 
 /// The selected tag that is owned by an automation: the Layout swaps the
@@ -58,6 +71,18 @@ struct Layout {
     pub task_list: Entity<TaskListView>,
     nav_bar: Entity<NavBar>,
     details: Entity<TaskDetails>,
+    /// The agent pane for the selected directory-backed project.
+    agent_pane: Entity<AgentPane>,
+    /// Which right-hand pane is showing (Details or Agent).
+    right_pane: RightPane,
+    /// Whether the selected tag is a directory-backed project, i.e. whether
+    /// the Agent switcher is enabled.
+    agent_available: bool,
+    /// Split geometry for the task list / right pane row. Keyed state would
+    /// also work; holding it makes the type nameable and keeps the width for
+    /// the app run without writing anything to disk.
+    split_state: Entity<ResizableState>,
+    _agent_events: Subscription,
     workflows: Entity<WorkflowPanel>,
     /// Special panel for the managed tag in `managed_tag`, if any.
     travel_panel: Entity<TravelPanel>,
@@ -88,6 +113,36 @@ impl Layout {
         cx: &mut Context<Self>,
     ) -> Self {
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+        // The agent pane keeps one session per project, so it is created once
+        // with the layout and merely stops being rendered when the details
+        // pane is showing.
+        let agent_pane = cx.new(|cx| AgentPane::new(SessionStore::default(), window, cx));
+        let split_state = cx.new(|_| ResizableState::default());
+        // A turn starting or ending flips the project's busy dot in the
+        // navbar; the pane does not know about the navbar itself.
+        let nav_for_agent = nav_bar.clone();
+        let _agent_events = cx.subscribe_in(
+            &agent_pane,
+            window,
+            move |this, _pane, event, window, cx| match event {
+                AgentPaneEvent::BusyChanged { tag_name, busy } => {
+                    let tag_name = tag_name.clone();
+                    let busy = *busy;
+                    nav_for_agent.update(cx, |nav, cx| {
+                        nav.set_agent_busy(&tag_name, busy, cx)
+                    });
+                }
+                // "Attach task" fills the prompt box; sending stays manual so
+                // the message can be edited first.
+                AgentPaneEvent::AttachTaskRequested => {
+                    if let Some(context) = this.task_context(cx) {
+                        this.agent_pane.update(cx, |pane, cx| {
+                            pane.insert_prompt_text(context, window, cx)
+                        });
+                    }
+                }
+            },
+        );
         // The managed-tag panel is created up front (it needs a window for
         // its input) and reconfigured when a managed tag is selected.
         let travel_panel = cx.new(|cx| {
@@ -128,10 +183,14 @@ impl Layout {
                     // subscription; make sure the task panel is visible.
                     this.show_panel(NavPanel::Tasks, cx);
                     this.check_managed_tag(path, &layout_weak, cx);
+                    this.sync_agent_project(path, window, cx);
                 }
                 NavBarEvent::AllTasks => {
                     this.managed_tag = None;
                     this.show_panel(NavPanel::Tasks, cx);
+                    this.agent_available = false;
+                    let agent_pane = this.agent_pane.clone();
+                    agent_pane.update(cx, |pane, cx| pane.set_project(None, cx));
                     this.task_list.update(cx, |list, cx| {
                         list.set_empty_action(None, cx);
                     });
@@ -333,6 +392,15 @@ impl Layout {
                     if layout._picker_subscription.is_some() {
                         return;
                     }
+                    // An open dropdown in the agent pane swallows the first
+                    // Escape; the next one deselects as usual.
+                    if layout.right_pane == RightPane::Agent
+                        && layout
+                            .agent_pane
+                            .update(cx, |pane, cx| pane.dismiss_overlay(cx))
+                    {
+                        return;
+                    }
                     if layout.travel_panel.read(cx).is_adding() {
                         layout
                             .travel_panel
@@ -404,6 +472,11 @@ impl Layout {
             task_list,
             nav_bar,
             details,
+            agent_pane,
+            right_pane: RightPane::Details,
+            agent_available: false,
+            split_state,
+            _agent_events,
             workflows,
             travel_panel,
             managed_tag: None,
@@ -505,6 +578,148 @@ async fn lookup_managed_tag(
             .ok();
         })
         .detach();
+    }
+
+    /// Show one of the two right-hand panes and focus the agent when it is
+    /// the one being opened.
+    fn show_right_pane(&mut self, pane: RightPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.right_pane = pane;
+        if pane == RightPane::Agent {
+            // The prompt box is not in the focus tree until the pane has
+            // rendered, so defer the focus one frame.
+            let agent_pane = self.agent_pane.clone();
+            window.on_next_frame(move |window, cx| {
+                agent_pane.update(cx, |pane, cx| pane.focus_prompt(window, cx));
+            });
+        }
+        cx.notify();
+    }
+
+    /// Whether the right-hand panel needs to be laid out: the details pane
+    /// has something to show, or the agent pane is the active one.
+    fn right_pane_open(&self, cx: &App) -> bool {
+        self.right_pane == RightPane::Agent || self.details.read(cx).has_selection()
+    }
+
+    /// Resolve the selected tag's launch directories and hand them to the
+    /// agent pane. Nothing is spawned here: the pane only starts a process
+    /// when its own state says a project is selected.
+    fn sync_agent_project(&self, path: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tag_name) = path.last().cloned() else {
+            return;
+        };
+        let store = self.store.clone();
+        let agent_pane = self.agent_pane.clone();
+        let busy = self.nav_bar.read(cx).is_agent_busy(&tag_name);
+        let layout = cx.weak_entity();
+        let tag_lookup = store.get_tag_by_name(tag_name.clone(), cx);
+        cx.spawn_in(window, async move |_this, cx| {
+            let tag = match tag_lookup.await {
+                Ok(Some(tag)) => tag,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::error!("Failed to resolve the selected tag: {error}");
+                    return;
+                }
+            };
+            let dirs = store.tag_dirs(tag.id, cx).await.unwrap_or_default();
+            let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(path) = tag.name.strip_prefix("project:") {
+                candidates.push(std::path::PathBuf::from(path));
+            }
+            candidates.extend(dirs.iter().map(std::path::PathBuf::from));
+            let directory_backed = tag.is_project() || !dirs.is_empty();
+            let project = directory_backed.then(|| AgentProject {
+                tag_id: tag.id,
+                tag_name: tag.name.clone(),
+                label: tag.label(),
+                candidates,
+            });
+            agent_pane.update(cx, |pane, cx| pane.set_project(project, cx));
+            // Clicking a busy project's row opens it with the agent focused.
+            if busy {
+                layout
+                    .update_in(cx, |layout, window, cx| {
+                        layout.agent_available = true;
+                        layout.show_right_pane(RightPane::Agent, window, cx);
+                    })
+                    .ok();
+            } else {
+                layout
+                    .update(cx, |layout, cx| {
+                        layout.agent_available = directory_backed;
+                        if !directory_backed && layout.right_pane == RightPane::Agent {
+                            layout.right_pane = RightPane::Details;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// The selected task as prompt text, or `None` when nothing is selected.
+    fn task_context(&self, cx: &App) -> Option<String> {
+        self.details
+            .read(cx)
+            .selected_task()
+            .map(|task| build_task_context(&task))
+    }
+
+    /// The right-hand pane's contents. Switching panes does not tear a
+    /// session down: the agent pane simply stops being rendered, and its
+    /// tasks live in its own fields.
+    fn render_right_pane(&self, cx: &App) -> AnyElement {
+        let _ = cx;
+        match self.right_pane {
+            RightPane::Details => self.details.clone().into_any_element(),
+            RightPane::Agent => self.agent_pane.clone().into_any_element(),
+        }
+    }
+
+    /// Window-wide footer: the two right-pane switchers and nothing else.
+    fn render_pane_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let agent_enabled = self.agent_available;
+        div()
+            .flex_none()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .border_t_1()
+            .border_color(rgb(theme::HAIRLINE))
+            .bg(rgb(theme::PANEL_BG))
+            .child(
+                Button::new("pane-switch-details")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::PanelRight)
+                    .toggled(self.right_pane == RightPane::Details)
+                    .tooltip("Show details pane")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_right_pane(RightPane::Details, window, cx)
+                    })),
+            )
+            .child(
+                Button::new("pane-switch-agent")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Bot)
+                    .toggled(self.right_pane == RightPane::Agent)
+                    .disabled(!agent_enabled)
+                    .tooltip(if agent_enabled {
+                        "Show agent pane".to_string()
+                    } else {
+                        "Select a project with a directory to use the agent".to_string()
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_right_pane(RightPane::Agent, window, cx)
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Swap the main panel, keeping the navbar footer highlight in sync.
@@ -707,6 +922,10 @@ impl Render for Layout {
                             .flex_row()
                             .min_h_0()
                             .on_click(cx.listener(|this, _, _, cx| {
+                                // Clicks inside the agent pane belong to it.
+                                if this.right_pane != RightPane::Details {
+                                    return;
+                                }
                                 let deferred = this
                                     .details
                                     .update(cx, |details, cx| details.request_clear(cx));
@@ -716,10 +935,33 @@ impl Render for Layout {
                                     cx.notify();
                                 }
                             }))
-                            .child(div().flex_1().min_h_0().flex().flex_col().child(self.task_list.clone()))
-                            .when(self.details.read(cx).has_selection(), |this| {
-                                this.child(div().flex_1().min_h_0().child(self.details.clone()))
-                            })
+                            // Always two panels: the right one collapses with
+                            // `.visible(false)` so the group's keyed state stays
+                            // coherent (and the width survives pane switching).
+                            .child(
+                                h_resizable(ElementId::Name("tasks-split".into()))
+                                    .with_state(&self.split_state)
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(640.))
+                                            .size_range(px(320.)..px(1200.))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(self.task_list.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .visible(self.right_pane_open(cx))
+                                            .size(px(420.))
+                                            .size_range(px(320.)..px(760.))
+                                            .child(self.render_right_pane(cx)),
+                                    ),
+                            )
                             .into_any_element(),
                         NavPanel::Integrations => div()
                             .flex_1()
@@ -751,6 +993,10 @@ impl Render for Layout {
                             .into_any_element(),
                     }),
             )
+            .when(self.panel == NavPanel::Tasks, |this| {
+                this.child(self.render_pane_footer(cx))
+            })
+            // Keep the dialog layer last so dialogs paint above everything.
             .children(dialog_layer)
     }
 }
@@ -765,6 +1011,7 @@ fn main() {
         gpui_component::init(cx);
         ui_parts::project_picker::init(cx);
         ui_parts::task_picker::init(cx);
+        ui_parts::agent_pane::init(cx);
 
         let init_store = gpui_tokio::Tokio::spawn_result(cx, async move {
             let config = StorageConfig {

@@ -559,6 +559,16 @@ impl Store {
         })
     }
 
+    /// Directories configured for a tag (`tag_settings.dirs`), used by the
+    /// agent pane to resolve a project's launch directory.
+    pub fn tag_dirs(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<String>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_settings(tag_id).await?.dirs)
+        })
+    }
+
     /// Look up a tag by name (used to detect managed tags on selection).
     pub fn get_tag_by_name(
         &self,

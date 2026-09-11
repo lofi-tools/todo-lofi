@@ -1,15 +1,17 @@
 use gpui::{
-    Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
+    Animation, AnimationExt, Context, EventEmitter, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::IconName;
 use gpui_component::scroll::ScrollableElement;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use storage::prelude::*;
 
 use crate::store::Store;
+use crate::theme::{PANEL_BG, PANEL_HOVER, SUCCESS, TEXT_FAINT, TEXT_MUTED};
 
 #[derive(Clone)]
 pub enum NavBarEvent {
@@ -48,6 +50,9 @@ pub struct NavBar {
     /// Provider per synced tag (`tag_id → provider`), for the corner badge
     /// on synced tag icons. Unlinked tags are absent.
     linked_providers: HashMap<u64, String>,
+    /// Project tags with a streaming agent turn, keyed by tag name. Each
+    /// row shows a pulsing dot while its project is busy.
+    busy_tags: HashSet<String>,
     _fetch_tags: Option<Task<()>>,
     _fetch_children: Option<Task<()>>,
 }
@@ -83,9 +88,28 @@ impl NavBar {
             selected_path: Vec::new(),
             active_panel: NavPanel::Tasks,
             linked_providers: HashMap::new(),
+            busy_tags: HashSet::new(),
             _fetch_tags,
             _fetch_children: None,
         }
+    }
+
+    /// Mark a project tag as running a turn (or not), so its row shows the
+    /// busy dot. `tag_name` is the tag's unique name, not its label.
+    pub fn set_agent_busy(&mut self, tag_name: &str, busy: bool, cx: &mut Context<Self>) {
+        let changed = if busy {
+            self.busy_tags.insert(tag_name.to_string())
+        } else {
+            self.busy_tags.remove(tag_name)
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Whether `tag_name` is a project tag with a turn currently running.
+    pub fn is_agent_busy(&self, tag_name: &str) -> bool {
+        self.busy_tags.contains(tag_name)
     }
 
     /// Highlight the footer row matching the visible main panel.
@@ -173,7 +197,7 @@ impl NavBar {
         cx.notify();
     }
 
-    fn collect_visible_tags(&self) -> Vec<(String, String, u64, usize, bool, Vec<String>, bool)> {
+    fn collect_visible_tags(&self) -> Vec<VisibleTag> {
         let mut result = Vec::new();
 
         fn walk(
@@ -182,21 +206,23 @@ impl NavBar {
             ancestors: &[String],
             selected_path: &[String],
             children_cache: &HashMap<u64, Vec<Tag>>,
-            result: &mut Vec<(String, String, u64, usize, bool, Vec<String>, bool)>,
+            busy_tags: &HashSet<String>,
+            result: &mut Vec<VisibleTag>,
         ) {
             let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
             let has_children = !children.is_empty();
             let mut path = ancestors.to_vec();
             path.push(tag.name.clone());
-            result.push((
-                tag.name.clone(),
-                tag_label(tag),
-                tag.id,
+            result.push(VisibleTag {
+                name: tag.name.clone(),
+                label: tag_label(tag),
+                id: tag.id,
                 depth,
                 has_children,
-                path.clone(),
-                tag.is_project(),
-            ));
+                path: path.clone(),
+                is_project: tag.is_project(),
+                busy: busy_tags.contains(&tag.name),
+            });
 
             let is_on_path = selected_path.iter().any(|p| p == &tag.name);
             if is_on_path {
@@ -207,6 +233,7 @@ impl NavBar {
                         &path,
                         selected_path,
                         children_cache,
+                        busy_tags,
                         result,
                     );
                 }
@@ -220,12 +247,43 @@ impl NavBar {
                 &[],
                 &self.selected_path,
                 &self.children_cache,
+                &self.busy_tags,
                 &mut result,
             );
         }
 
         result
     }
+}
+
+/// One rendered navbar row: the tag's identity plus the decorations the row
+/// needs (depth indent, project icon, busy dot).
+struct VisibleTag {
+    name: String,
+    label: String,
+    id: u64,
+    depth: usize,
+    has_children: bool,
+    path: Vec<String>,
+    is_project: bool,
+    busy: bool,
+}
+
+/// A small pulsing dot shown on a project row while its agent turn streams.
+/// The pulse is never the only signal — clicking the row also opens the pane.
+fn busy_dot() -> gpui::AnyElement {
+    div()
+        .w(px(6.))
+        .h(px(6.))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(SUCCESS))
+        .with_animation(
+            "agent-busy-dot",
+            Animation::new(Duration::from_millis(1100)).repeat(),
+            |dot, phase| dot.opacity(0.3 + 0.7 * phase),
+        )
+        .into_any_element()
 }
 
 /// The user-facing label of a tag: the display name when set (project
@@ -303,7 +361,16 @@ impl Render for NavBar {
                             })),
                     )
                     .children(visible_tags.into_iter().map(
-                        |(tag_name, tag_label, tag_id, depth, _has_children, path, is_project)| {
+                        |VisibleTag {
+                             name: tag_name,
+                             label: tag_label,
+                             id: tag_id,
+                             depth,
+                             has_children: _has_children,
+                             path,
+                             is_project,
+                             busy,
+                         }| {
                             let tag_for_click = tag_name.clone();
                             let path_for_click = path;
                             let is_selected = selected_tag.as_deref() == Some(&tag_name);
@@ -315,7 +382,7 @@ impl Render for NavBar {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(0x737373))
+                                    .text_color(rgb(TEXT_FAINT))
                                     .child(IconName::Folder)
                                     .into_any_element()
                             } else {
@@ -329,7 +396,7 @@ impl Render for NavBar {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(0x737373))
+                                    .text_color(rgb(TEXT_FAINT))
                                     .child(
                                         div()
                                             .relative()
@@ -354,6 +421,7 @@ impl Render for NavBar {
                                         .gap_1p5()
                                         .child(prefix)
                                         .child(tag_label)
+                                        .when(busy, |this| this.child(busy_dot()))
                                         .px_2()
                                         .py_0p5()
                                         .rounded_md()
@@ -469,9 +537,9 @@ fn nav_footer_row(
         .px_2()
         .py_1()
         .rounded_md()
-        .text_color(rgb(0xa3a3a3))
-        .bg(if active { rgb(0x2a2a2a) } else { rgb(0x1e1e1e) })
-        .hover(|s| s.bg(rgb(0x2a2a2a)))
+        .text_color(rgb(TEXT_MUTED))
+        .bg(if active { rgb(PANEL_HOVER) } else { rgb(PANEL_BG) })
+        .hover(|s| s.bg(rgb(PANEL_HOVER)))
         .child(
             div()
                 .w(px(16.))
