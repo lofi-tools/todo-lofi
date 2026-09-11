@@ -888,7 +888,7 @@ impl Render for Layout {
                     // push the navbar footer out of view; min_h_0 lets it
                     // clamp to the remaining window height instead.
                     .min_h_0()
-                    .child(div().w(px(256.)).flex_none().child(self.nav_bar.clone()))
+                    .child(div().w_auto().max_w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(match self.panel {
                         NavPanel::Tasks if self.managed_tag.is_some() => div()
                             .id("managed-panel")
@@ -949,6 +949,7 @@ impl Render for Layout {
                                                 div()
                                                     .flex_1()
                                                     .min_h_0()
+                                                    .min_w_0()
                                                     .flex()
                                                     .flex_col()
                                                     .child(self.task_list.clone()),

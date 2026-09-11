@@ -420,7 +420,13 @@ impl Render for NavBar {
                                         .items_center()
                                         .gap_1p5()
                                         .child(prefix)
-                                        .child(tag_label)
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(tag_label),
+                                        )
                                         .when(busy, |this| this.child(busy_dot()))
                                         .px_2()
                                         .py_0p5()

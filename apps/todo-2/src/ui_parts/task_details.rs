@@ -1,7 +1,7 @@
 use gpui::{
-    App, AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    prelude::FluentBuilder, px, rgb, svg,
+    App, AppContext, BoxShadow, ClickEvent, Context, Entity, EventEmitter, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
+    div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Disableable;
 use gpui_component::Sizable;
@@ -1423,6 +1423,21 @@ impl TaskDetails {
     /// editable HH:MM pair (created lazily, autofocused once after picking);
     /// other dates render as static text.
     fn until_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A stale time block (already past) shows nothing at all, mirroring
+        // `computed_blocked` which stops treating it as blocking.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let fresh = self
+            .selected
+            .as_ref()
+            .and_then(|task| task.blocked_until)
+            .is_some_and(|until| until > now_secs);
+        if !fresh {
+            return div();
+        }
+
         let clear_button = Button::new("clear-blocked-until")
             .ghost()
             .compact()
@@ -2131,7 +2146,14 @@ impl Render for TaskDetails {
                 if let Some(deadline) = task.deadline {
                     details = details.child(field("Deadline", format_deadline(deadline)));
                 }
-                if let Some(until) = task.blocked_until {
+                // Overdue time blocks show nowhere: same gate as `until_row`.
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Some(until) = task.blocked_until
+                    && until > now_secs
+                {
                     details = details.child(field("Blocked until", format_deadline(until)));
                 }
                 if let Some(template) = &self.repeat_template {
@@ -2157,8 +2179,16 @@ impl Render for TaskDetails {
             .v_flex()
             .p_4()
             .gap_4()
-            .border_l_1()
-            .border_color(rgb(0x333333))
+            .bg(rgb(APP_BG))
+            // Soft dark edge fully outside the left side so the pane reads
+            // as floating above the task list. No border: the shadow alone
+            // defines the edge, so there is a single surface, not nested
+            // boxes. Fully outside (offset beyond blur) means nothing
+            // bleeds back inside the pane.
+            .shadow(vec![
+                BoxShadow::new(px(-12.), px(0.), hsla(0., 0., 0., 0.12))
+                    .blur_radius(px(10.)),
+            ])
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
             }))

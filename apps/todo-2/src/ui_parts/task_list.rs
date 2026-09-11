@@ -1382,6 +1382,7 @@ impl Render for TaskListView {
             .id("task-list")
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .v_flex()
             .p_8()
             .gap_4()
@@ -1411,7 +1412,9 @@ impl Render for TaskListView {
                         },
                     ),
             )
-            .child(Input::new(&self.input))
+            // Shrink below the placeholder's intrinsic width when the right
+            // pane squeezes this panel, instead of overflowing it.
+            .child(Input::new(&self.input).min_w_0())
             .child(self.list_body(window, cx))
     }
 }
@@ -1726,7 +1729,7 @@ impl TaskListView {
                 .py_2()
                 .pl(px(46.))
                 .pr_3()
-                .child(Input::new(&input).small())
+                .child(Input::new(&input).small().focus_bordered(false))
                 .into_any_element();
         }
         let line = || {
@@ -1737,7 +1740,7 @@ impl TaskListView {
                 .into_any_element()
         };
         // Zero-height row: the 16px padded hover strip is cancelled by
-        // the outer negative margins, and the 20px content box by the
+        // the outer negative margins, and the 24px content box by the
         // inner one's, so surrounding rows never shift. The "+" sits left
         // of the line.
         div()
@@ -1752,16 +1755,16 @@ impl TaskListView {
                     .h_flex()
                     .items_center()
                     .gap_2()
-                    .my_neg_2p5()
+                    .my_neg_3()
                     .child(
                         div()
                             .id(format!("{key}-plus"))
-                            .h_5()
-                            .w_5()
+                            .h_6()
+                            .w_6()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_base()
+                            .text_lg()
                             .text_color(rgb(0xa3a3a3))
                             .cursor_pointer()
                             .child("+")
