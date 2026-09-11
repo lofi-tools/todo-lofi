@@ -29,6 +29,7 @@ pub enum TaskListEvent {
 /// blocker do not get their own row — they render inside that blocker's
 /// row instead (inline chain for a single one, a "blocks N" chip with an
 /// expandable list when there are several).
+#[derive(Clone)]
 pub struct RowSpec {
     pub task: TaskWithMeta,
     /// The single-task inline chain (arrow + grayed titles), when the task
@@ -857,6 +858,8 @@ mod tests {
                 timezone: None,
                 comments: None,
                 is_seed: false,
+                workflow_run_id: None,
+                node_id: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },
@@ -1057,6 +1060,74 @@ mod tests {
 
 impl EventEmitter<TaskListEvent> for TaskListView {}
 
+/// One section of the task list: an optional header (section name,
+/// "Upcoming", "Completed", or `None` for an unlabelled run) plus the
+/// rows in it. Each row carries its top-level task, the tasks it blocks
+/// (dependent tasks: inline chain + blocks-N list), and its subtasks.
+pub struct TaskListSection {
+    pub header: Option<String>,
+    pub divided: bool,
+    pub header_extra: Option<gpui::AnyElement>,
+    pub rows: Vec<RowSpec>,
+}
+
+/// Reusable scrollable task-list component. Takes sectioned data (each
+/// section with its tasks, dependent tasks, and subtasks) plus the live
+/// row views, and renders the scrollable list body. Used both by the
+/// main tag/project view (`TaskListView`) and by the travel checklist
+/// view (same `TaskListView` instance under the travel header).
+pub struct ScrollableTaskList {
+    sections: Vec<(TaskListSection, Vec<gpui::AnyElement>)>,
+}
+
+impl ScrollableTaskList {
+    pub fn new(sections: Vec<(TaskListSection, Vec<gpui::AnyElement>)>) -> Self {
+        Self { sections }
+    }
+
+    pub fn render_body(self) -> gpui::AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            // Long lists scroll instead of growing past the window;
+            // the flex-1 body gives the scrollable a definite height.
+            .overflow_y_scrollbar()
+            .v_flex()
+            .gap_2()
+            .children(self.sections.into_iter().flat_map(|(section, rows)| {
+                let mut elements = Vec::new();
+                if let Some(header) = section.header {
+                    let mut header_el = if section.divided {
+                        div()
+                            .mt_4()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(rgb(0x333333))
+                            .h_flex()
+                            .items_center()
+                            .justify_between()
+                    } else {
+                        div().h_flex().items_center().justify_between().mt_2()
+                    };
+                    header_el = header_el.child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(header),
+                    );
+                    if let Some(extra) = section.header_extra {
+                        header_el = header_el.child(extra);
+                    }
+                    elements.push(header_el.into_any_element());
+                }
+                elements.extend(rows);
+                elements
+            }))
+            .into_any_element()
+    }
+}
+
 impl Render for TaskListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.input_needs_clear {
@@ -1078,6 +1149,7 @@ impl Render for TaskListView {
         div()
             .id("task-list")
             .flex_1()
+            .min_h_0()
             .v_flex()
             .p_8()
             .gap_4()
@@ -1099,12 +1171,16 @@ impl Render for TaskListView {
 }
 
 impl TaskListView {
-    /// The list body: the sectioned rows, or the empty-list action button
-    /// centered where the rows would be (managed tags only).
+    /// The list body: the sectioned rows via the reusable scrollable
+    /// task-list component, or the empty-list action button centered
+    /// where the rows would be (managed tags only).
     fn list_body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.sectioned_rows(cx);
+        let sections = self.sectioned_rows(cx);
+        // The section data (tasks + dependents + subtasks) is the source
+        // of truth for emptiness; the views mirror it one-to-one.
+        let empty = sections.iter().all(|(section, _)| section.rows.is_empty());
         let empty_action = self.empty_action_label.clone();
-        if rows.is_empty()
+        if empty
             && let Some(label) = empty_action
         {
             return div()
@@ -1134,21 +1210,16 @@ impl TaskListView {
                 )
                 .into_any_element();
         }
-        div()
-            .flex_1()
-            // Long lists scroll instead of growing past the window;
-            // the flex-1 body gives the scrollable a definite height.
-            .overflow_y_scrollbar()
-            .v_flex()
-            .gap_2()
-            .children(rows)
-            .into_any_element()
+        ScrollableTaskList::new(sections).render_body()
     }
     /// Rows for the list body: flat by default, grouped under section
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
     /// tasks last under an "Upcoming" header. Tasks starting more than 2
     /// days out only render when "show all" is on.
-    fn sectioned_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    fn sectioned_rows(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1210,106 +1281,120 @@ impl TaskListView {
         self.render_chunks(&chunks, distant_count, show_all, cx)
     }
 
-    /// Turn row chunks into elements: plain runs, section headers, and the
-    /// divider-separated Upcoming/Completed groups. The Upcoming header
-    /// carries the "show all" toggle when far-future tasks exist.
+    /// Turn row chunks into task-list sections: plain runs, section
+    /// headers, and the divider-separated Upcoming/Completed groups. The
+    /// Upcoming header carries the "show all" toggle when far-future
+    /// tasks exist. Each section keeps its row specs (task + dependent
+    /// tasks + subtasks) alongside the live row views.
     fn render_chunks(
         &self,
         chunks: &[RowChunk],
         distant: usize,
         show_all: bool,
         cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let mut elements = Vec::new();
+    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
+        let mut sections = Vec::new();
         for chunk in chunks {
             match chunk {
                 RowChunk::Rows(indices) => {
-                    for index in indices {
-                        elements.push(self.task_views[*index].clone().into_any_element());
-                    }
+                    let specs = indices
+                        .iter()
+                        .map(|i| self.row_specs[*i].clone())
+                        .collect::<Vec<_>>();
+                    let rows = indices
+                        .iter()
+                        .map(|index| self.task_views[*index].clone().into_any_element())
+                        .collect::<Vec<_>>();
+                    sections.push((
+                        TaskListSection {
+                            header: None,
+                            divided: false,
+                            header_extra: None,
+                            rows: specs,
+                        },
+                        rows,
+                    ));
                 }
                 RowChunk::Section(name, indices) => {
-                    elements.push(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xa3a3a3))
-                            .mt_2()
-                            .child(name.clone())
-                            .into_any_element(),
-                    );
-                    for index in indices {
-                        elements.push(self.task_views[*index].clone().into_any_element());
-                    }
+                    let specs = indices
+                        .iter()
+                        .map(|i| self.row_specs[*i].clone())
+                        .collect::<Vec<_>>();
+                    let rows = indices
+                        .iter()
+                        .map(|index| self.task_views[*index].clone().into_any_element())
+                        .collect::<Vec<_>>();
+                    sections.push((
+                        TaskListSection {
+                            header: Some(name.clone()),
+                            divided: false,
+                            header_extra: None,
+                            rows: specs,
+                        },
+                        rows,
+                    ));
                 }
                 RowChunk::Upcoming(indices) => {
                     // Separated from the doable list above, like a
                     // Todoist section with a divider; the toggle sits at
                     // the end of the header row when far-future tasks
                     // exist.
-                    let mut header = div()
-                        .mt_4()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(rgb(0x333333))
-                        .h_flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_semibold()
-                                .text_color(rgb(0xa3a3a3))
-                                .child("Upcoming"),
-                        );
-                    if distant > 0 {
-                        header = header.child(
-                            Button::new("show-all-tasks")
-                                .ghost()
-                                .compact()
-                                .label(if show_all {
-                                    "Show less".to_string()
-                                } else {
-                                    format!("Show all ({distant})")
-                                })
-                                .tooltip("Reveal tasks starting more than 2 days out")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_show_all(cx);
-                                })),
-                        );
-                    }
-                    elements.push(header.into_any_element());
-                    for index in indices {
-                        elements.push(self.task_views[*index].clone().into_any_element());
-                    }
+                    let header_extra = (distant > 0).then(|| {
+                        Button::new("show-all-tasks")
+                            .ghost()
+                            .compact()
+                            .label(if show_all {
+                                "Show less".to_string()
+                            } else {
+                                format!("Show all ({distant})")
+                            })
+                            .tooltip("Reveal tasks starting more than 2 days out")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_show_all(cx);
+                            }))
+                            .into_any_element()
+                    });
+                    let specs = indices
+                        .iter()
+                        .map(|i| self.row_specs[*i].clone())
+                        .collect::<Vec<_>>();
+                    let rows = indices
+                        .iter()
+                        .map(|index| self.task_views[*index].clone().into_any_element())
+                        .collect::<Vec<_>>();
+                    sections.push((
+                        TaskListSection {
+                            header: Some("Upcoming".to_string()),
+                            divided: true,
+                            header_extra,
+                            rows: specs,
+                        },
+                        rows,
+                    ));
                 }
                 RowChunk::Completed(indices) => {
-                    elements.push(
-                        divided_header("Completed")
-                    );
-                    for index in indices {
-                        elements.push(self.task_views[*index].clone().into_any_element());
-                    }
+                    let specs = indices
+                        .iter()
+                        .map(|i| self.row_specs[*i].clone())
+                        .collect::<Vec<_>>();
+                    let rows = indices
+                        .iter()
+                        .map(|index| self.task_views[*index].clone().into_any_element())
+                        .collect::<Vec<_>>();
+                    sections.push((
+                        TaskListSection {
+                            header: Some("Completed".to_string()),
+                            divided: true,
+                            header_extra: None,
+                            rows: specs,
+                        },
+                        rows,
+                    ));
                 }
             }
         }
-        elements
+        sections
     }
-}
-
-/// Divider-separated group header ("Upcoming", "Completed"): detached
-/// from the doable list above like a Todoist section.
-fn divided_header(label: &'static str) -> gpui::AnyElement {
-    div()
-        .mt_4()
-        .pt_2()
-        .border_t_1()
-        .border_color(rgb(0x333333))
-        .text_sm()
-        .font_semibold()
-        .text_color(rgb(0xa3a3a3))
-        .child(label)
-        .into_any_element()
 }
 
 /// System-local civil date key (`YYYY-MM-DD`) for detecting date

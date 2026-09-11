@@ -651,7 +651,14 @@ impl Render for Layout {
                                 self.travel_panel
                                     .update(cx, |panel, cx| panel.header(window, cx).into_any_element()),
                             )
-                            .child(div().flex_1().min_h_0().child(self.task_list.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(self.task_list.clone()),
+                            )
                             .child(
                                 self.travel_panel
                                     .update(cx, |panel, cx| panel.popover(window, cx)),
@@ -673,9 +680,9 @@ impl Render for Layout {
                                     cx.notify();
                                 }
                             }))
-                            .child(div().flex_1().child(self.task_list.clone()))
+                            .child(div().flex_1().min_h_0().flex().flex_col().child(self.task_list.clone()))
                             .when(self.details.read(cx).has_selection(), |this| {
-                                this.child(div().flex_1().child(self.details.clone()))
+                                this.child(div().flex_1().min_h_0().child(self.details.clone()))
                             })
                             .into_any_element(),
                         NavPanel::Integrations => div()
