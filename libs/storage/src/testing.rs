@@ -773,9 +773,9 @@ mod tests {
         assert_eq!(tasks.len(), 18);
 
         let tags = store.list_tags().await?;
-        // 9 seed tags plus the travel managed tag and its 7 checklist
+        // 9 seed tags plus the travel managed tag and its 8 checklist
         // sections, enabled by default.
-        assert_eq!(tags.len(), 17);
+        assert_eq!(tags.len(), 18);
 
         // Every seed row is marked so sync never touches it; workflow
         // steps are covered by the workflow_run_id sync guard instead.
