@@ -160,7 +160,10 @@ fn phase_prompt(
                 if let Some(note) = last_rejection
                     && !note.body.trim().is_empty()
                 {
-                    target.push_str(&format!(" The last review rejected the result: {}", note.body));
+                    target.push_str(&format!(
+                        " The last review rejected the result: {}",
+                        note.body
+                    ));
                 }
             }
             format!("{INTERVIEW_BASE_PROMPT}{target}")
@@ -1120,7 +1123,11 @@ impl TaskDetails {
         if tag.is_empty() {
             return;
         }
-        if !self.tag_draft.iter().any(|draft| draft.to_lowercase() == tag) {
+        if !self
+            .tag_draft
+            .iter()
+            .any(|draft| draft.to_lowercase() == tag)
+        {
             self.tag_draft.push(tag);
         }
     }
@@ -1450,8 +1457,10 @@ impl TaskDetails {
                 let name = task.title.clone();
                 // The picker edits interval and due time only; keep any
                 // existing start time.
-                let start_time_of_day =
-                    this.repeat_template.clone().and_then(|t| t.start_time_of_day);
+                let start_time_of_day = this
+                    .repeat_template
+                    .clone()
+                    .and_then(|t| t.start_time_of_day);
                 let set = this.store.set_repeat(
                     task_id,
                     name,
@@ -2095,6 +2104,7 @@ impl TaskDetails {
                         div()
                             .id(("blocker-title", blocker_id))
                             .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .cursor_pointer()
                             .text_color(if blocker.done {
@@ -2159,6 +2169,7 @@ impl TaskDetails {
                         div()
                             .id(("after-title", after_id))
                             .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .cursor_pointer()
                             .text_color(if after.done {
@@ -2224,6 +2235,7 @@ impl TaskDetails {
                         div()
                             .id(("subtask-title", subtask_id))
                             .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .cursor_pointer()
                             .text_color(if subtask.done {
@@ -2272,6 +2284,7 @@ impl TaskDetails {
                         div()
                             .id(("linked-title", linked_id))
                             .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .cursor_pointer()
                             .text_color(if linked.done {
@@ -2322,120 +2335,121 @@ impl TaskDetails {
             );
         }
 
-        section = section.child(
-            div()
-                .relative()
-                .child(
-                    div()
-                        .v_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .h_flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    relation_button("add-blocker", "+ blocked by task")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.blocker_picker_open() {
-                                                this.close_blocker_picker_and_notify(cx);
-                                            } else if this.take_recent_blocker_outside_close() {
+        section =
+            section.child(
+                div()
+                    .relative()
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        relation_button("add-blocker", "+ blocked by task")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.blocker_picker_open() {
+                                                    this.close_blocker_picker_and_notify(cx);
+                                                } else if this.take_recent_blocker_outside_close() {
+                                                    // The mousedown before this click already
+                                                    // closed the picker; don't reopen it.
+                                                } else {
+                                                    this.open_blocker_picker(window, cx);
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        relation_button("add-blocked-until", "+ blocked until")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.until_panel_open() {
+                                                    this.close_until_panel_and_notify(cx);
+                                                } else if this.take_recent_until_outside_close() {
+                                                    // The mousedown before this click already
+                                                    // closed the card; don't reopen it.
+                                                } else {
+                                                    this.open_until_panel(window, cx);
+                                                }
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(relation_button("add-after", "+ after task").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            if this.after_picker_open() {
+                                                this.close_after_picker_and_notify(cx);
+                                            } else if this.take_recent_after_outside_close() {
                                                 // The mousedown before this click already
                                                 // closed the picker; don't reopen it.
                                             } else {
-                                                this.open_blocker_picker(window, cx);
+                                                this.open_after_picker(window, cx);
                                             }
-                                        })),
-                                )
-                                .child(
-                                    relation_button("add-blocked-until", "+ blocked until")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.until_panel_open() {
-                                                this.close_until_panel_and_notify(cx);
-                                            } else if this.take_recent_until_outside_close() {
-                                                // The mousedown before this click already
-                                                // closed the card; don't reopen it.
-                                            } else {
-                                                this.open_until_panel(window, cx);
-                                            }
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .h_flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(relation_button("add-after", "+ after task").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        if this.after_picker_open() {
-                                            this.close_after_picker_and_notify(cx);
-                                        } else if this.take_recent_after_outside_close() {
-                                            // The mousedown before this click already
-                                            // closed the picker; don't reopen it.
-                                        } else {
-                                            this.open_after_picker(window, cx);
-                                        }
-                                    }),
-                                ))
-                                .child(relation_button("add-subtask", "+ subtask").on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.begin_subtask(window, cx);
-                                    }),
-                                ))
-                                .child(
-                                    relation_button("add-follow-up", "+ follow-up task")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.begin_follow_up(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    // "repeat" button: an inline SVG icon left of the
-                                    // label, tinted the same color as the text.
-                                    div()
-                                        .id("repeat-task")
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .h_6()
-                                        .px_1p5()
-                                        .rounded_md()
-                                        .border_1()
-                                        .border_color(rgb(HAIRLINE))
-                                        .text_sm()
-                                        .text_color(rgb(0xa3a3a3))
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(rgb(0x2a2a2a)))
-                                        .child(
-                                            svg()
-                                                .data(REFRESH_ICON_SVG)
-                                                .size(px(14.))
-                                                .text_color(rgb(0xa3a3a3)),
-                                        )
-                                        .child("repeat")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            if this.repeat_picker_open() {
-                                                this.close_repeat_picker_and_notify(cx);
-                                            } else if this.take_recent_repeat_outside_close() {
-                                                // The mousedown before this click already
-                                                // closed the card; don't reopen it.
-                                            } else {
-                                                this.open_repeat_picker(window, cx);
-                                            }
-                                        })),
-                                ),
-                        ),
-                )
-                .child(lists)
-                .when(self.until_panel_open(), |this| {
-                    this.child(self.until_card(cx))
-                })
-                .child(self.blocker_card(cx))
-                .child(self.after_card(cx))
-                .child(self.repeat_card(cx)),
-        );
+                                        }),
+                                    ))
+                                    .child(relation_button("add-subtask", "+ subtask").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.begin_subtask(window, cx);
+                                        }),
+                                    ))
+                                    .child(
+                                        relation_button("add-follow-up", "+ follow-up task")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.begin_follow_up(window, cx);
+                                            })),
+                                    )
+                                    .child(
+                                        // "repeat" button: an inline SVG icon left of the
+                                        // label, tinted the same color as the text.
+                                        div()
+                                            .id("repeat-task")
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .h_6()
+                                            .px_1p5()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(rgb(HAIRLINE))
+                                            .text_sm()
+                                            .text_color(rgb(0xa3a3a3))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(rgb(0x2a2a2a)))
+                                            .child(
+                                                svg()
+                                                    .data(REFRESH_ICON_SVG)
+                                                    .size(px(14.))
+                                                    .text_color(rgb(0xa3a3a3)),
+                                            )
+                                            .child("repeat")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                if this.repeat_picker_open() {
+                                                    this.close_repeat_picker_and_notify(cx);
+                                                } else if this.take_recent_repeat_outside_close() {
+                                                    // The mousedown before this click already
+                                                    // closed the card; don't reopen it.
+                                                } else {
+                                                    this.open_repeat_picker(window, cx);
+                                                }
+                                            })),
+                                    ),
+                            ),
+                    )
+                    .child(lists)
+                    .when(self.until_panel_open(), |this| {
+                        this.child(self.until_card(cx))
+                    })
+                    .child(self.blocker_card(cx))
+                    .child(self.after_card(cx))
+                    .child(self.repeat_card(cx)),
+            );
 
         section
     }
@@ -2772,7 +2786,9 @@ impl TaskDetails {
             if let Some(error) = self.coding_error.clone() {
                 fallback = fallback.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
             }
-            return fallback.child(self.coding_start_card(task, cx)).into_any_element();
+            return fallback
+                .child(self.coding_start_card(task, cx))
+                .into_any_element();
         };
         let run_id = view.run.id;
         let task_id = task.id;
@@ -2826,13 +2842,8 @@ impl TaskDetails {
             );
         }
         section = section.child(meta);
-        section = section.child(self.coding_secondary_actions(
-            task,
-            &view,
-            current.as_ref(),
-            window,
-            cx,
-        ));
+        section =
+            section.child(self.coding_secondary_actions(task, &view, current.as_ref(), window, cx));
 
         if let Some(error) = self.coding_error.clone() {
             section = section.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
@@ -2857,7 +2868,9 @@ impl TaskDetails {
                 Button::new(format!("coding-start-{task_id}"))
                     .compact()
                     .label("Start coding workflow")
-                    .tooltip("Turn this task into an interview → spec → implement → review → merge run")
+                    .tooltip(
+                        "Turn this task into an interview → spec → implement → review → merge run",
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_coding_run(task_id, cx);
                     })),
@@ -2963,7 +2976,11 @@ impl TaskDetails {
     }
 
     /// The model's sub-tasks of one phase step, indented under its row.
-    fn coding_step_children(&mut self, children: &[TaskWithMeta], cx: &mut Context<Self>) -> AnyElement {
+    fn coding_step_children(
+        &mut self,
+        children: &[TaskWithMeta],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let rows: Vec<AnyElement> = children
             .iter()
             .map(|child| {
@@ -3090,45 +3107,42 @@ impl TaskDetails {
         let mut actions = div().h_flex().items_center().gap_2().flex_wrap();
         match current.map(|step| step.node.id.as_str()) {
             Some("interview") => {
-                actions = actions
-                    .child(
-                        Button::new(format!("coding-manual-spec-{task_id}"))
-                            .ghost()
-                            .compact()
-                            .label("Write spec manually")
-                            .tooltip("Skip the agent and write the spec yourself")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_coding_spec(window, cx);
-                            })),
-                    );
+                actions = actions.child(
+                    Button::new(format!("coding-manual-spec-{task_id}"))
+                        .ghost()
+                        .compact()
+                        .label("Write spec manually")
+                        .tooltip("Skip the agent and write the spec yourself")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_coding_spec(window, cx);
+                        })),
+                );
             }
             Some("spec") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
-                actions = actions
-                    .child(
-                        Button::new(format!("coding-reject-spec-{task_id}"))
-                            .ghost()
-                            .compact()
-                            .label("Reject…")
-                            .tooltip("Send the run back to the interview with notes")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_coding_notes(step_id, window, cx);
-                            })),
-                    );
+                actions = actions.child(
+                    Button::new(format!("coding-reject-spec-{task_id}"))
+                        .ghost()
+                        .compact()
+                        .label("Reject…")
+                        .tooltip("Send the run back to the interview with notes")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_coding_notes(step_id, window, cx);
+                        })),
+                );
             }
             Some("implement") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
-                actions = actions
-                    .child(
-                        Button::new(format!("coding-implement-done-{task_id}"))
-                            .ghost()
-                            .compact()
-                            .label("Mark implemented")
-                            .tooltip("Confirm the work is done and move to review")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.complete_coding_step(step_id, serde_json::json!({}), cx);
-                            })),
-                    );
+                actions = actions.child(
+                    Button::new(format!("coding-implement-done-{task_id}"))
+                        .ghost()
+                        .compact()
+                        .label("Mark implemented")
+                        .tooltip("Confirm the work is done and move to review")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.complete_coding_step(step_id, serde_json::json!({}), cx);
+                        })),
+                );
             }
             Some("review") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
@@ -3142,12 +3156,7 @@ impl TaskDetails {
                             .label("Ask for a summary")
                             .tooltip("Compose a summary request in the agent pane")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.launch_phase(
-                                    &task_for_prompt,
-                                    &view_for_prompt,
-                                    "review",
-                                    cx,
-                                );
+                                this.launch_phase(&task_for_prompt, &view_for_prompt, "review", cx);
                             })),
                     )
                     .child(
@@ -3317,7 +3326,11 @@ impl TaskDetails {
                             .cursor_pointer()
                             .child(format!(
                                 "{} Spec ({lines} lines)",
-                                if self.coding_spec_expanded { "▾" } else { "▸" }
+                                if self.coding_spec_expanded {
+                                    "▾"
+                                } else {
+                                    "▸"
+                                }
                             ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.coding_spec_expanded = !this.coding_spec_expanded;
@@ -3412,25 +3425,31 @@ impl Render for TaskDetails {
                                 this.h_flex()
                                     .items_center()
                                     .gap_1()
-                                    .children(self.tag_draft.iter().enumerate().map(|(idx, tag)| {
-                                        tag_chip(tag)
-                                            .id(("tag-chip", idx))
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .id(("tag-chip-remove", idx))
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(0x737373))
-                                                    .cursor_pointer()
-                                                    .hover(|this| this.text_color(rgb(0xe5e5e5)))
-                                                    .child("×")
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.remove_tag_draft(idx, cx);
-                                                    })),
-                                            )
-                                    }))
+                                    .children(self.tag_draft.iter().enumerate().map(
+                                        |(idx, tag)| {
+                                            tag_chip(tag)
+                                                .id(("tag-chip", idx))
+                                                .h_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .id(("tag-chip-remove", idx))
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(0x737373))
+                                                        .cursor_pointer()
+                                                        .hover(|this| {
+                                                            this.text_color(rgb(0xe5e5e5))
+                                                        })
+                                                        .child("×")
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.remove_tag_draft(idx, cx);
+                                                            },
+                                                        )),
+                                                )
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()
@@ -3566,17 +3585,15 @@ impl Render for TaskDetails {
                 if self.editing_description {
                     if let Some(input) = self.description_input.clone() {
                         details = details.child(
-                            div()
-                                .id(("details-description-edit", task_id))
-                                .child(
-                                    Input::new(&input)
-                                        .small()
-                                        .appearance(false)
-                                        .bg(rgb(APP_BG))
-                                        .border_1()
-                                        .border_color(rgb(HAIRLINE))
-                                        .rounded_md(),
-                                ),
+                            div().id(("details-description-edit", task_id)).child(
+                                Input::new(&input)
+                                    .small()
+                                    .appearance(false)
+                                    .bg(rgb(APP_BG))
+                                    .border_1()
+                                    .border_color(rgb(HAIRLINE))
+                                    .rounded_md(),
+                            ),
                         );
                     }
                 } else if let Some(desc) = &task.description
@@ -3592,8 +3609,7 @@ impl Render for TaskDetails {
                             .cursor_pointer()
                             .child(desc.clone())
                             .on_click(cx.listener(|this, event, window, cx| {
-                                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
-                                {
+                                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2) {
                                     this.begin_description_edit(window, cx);
                                 }
                             })),
@@ -3657,6 +3673,7 @@ impl Render for TaskDetails {
             .min_w_0()
             .v_flex()
             .p_4()
+            .pr(px(0.))
             .gap_4()
             .bg(rgb(APP_BG))
             // Soft dark edge fully outside the left side so the pane reads
@@ -3665,13 +3682,22 @@ impl Render for TaskDetails {
             // boxes. Fully outside (offset beyond blur) means nothing
             // bleeds back inside the pane.
             .shadow(vec![
-                BoxShadow::new(px(-12.), px(0.), hsla(0., 0., 0., 0.12))
-                    .blur_radius(px(10.)),
+                BoxShadow::new(px(-12.), px(0.), hsla(0., 0., 0., 0.12)).blur_radius(px(10.)),
             ])
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.stop_propagation();
             }))
-            .child(body)
+            .child(
+                // Long details scroll inside a fixed-height body. The overlay
+                // scrollbar paints in this wrapper's reserved right gutter, so
+                // async-loaded sections change height without changing width.
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .pr(px(16.))
+                    .overflow_y_scrollbar()
+                    .child(body),
+            )
             .when(self.confirming, |this| {
                 this.child(
                     div()
@@ -3823,7 +3849,10 @@ mod coding_tests {
             prompt.starts_with("You are running an interview"),
             "the interview prompt is expanded in the app: {prompt}"
         );
-        assert!(prompt.contains("Request to interview: Add OAuth"), "{prompt}");
+        assert!(
+            prompt.contains("Request to interview: Add OAuth"),
+            "{prompt}"
+        );
         assert!(prompt.contains("Sign in with Google."), "{prompt}");
     }
 

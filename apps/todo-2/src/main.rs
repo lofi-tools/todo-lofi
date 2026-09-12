@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
-    div, prelude::FluentBuilder, px, rgb,
+    IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::StyledExt;
@@ -60,6 +60,12 @@ enum RightPane {
     Agent,
 }
 
+/// Details pane geometry: 1.2x the original 560px default and 1.5x the
+/// original 1000px maximum.
+const DETAILS_PANE_WIDTH: f32 = 672.;
+const DETAILS_PANE_MIN_WIDTH: f32 = 320.;
+const DETAILS_PANE_MAX_WIDTH: f32 = 1500.;
+
 /// The selected tag that is owned by an automation: the Layout swaps the
 /// task list for the automation's special panel while it is selected.
 #[derive(Clone)]
@@ -84,6 +90,9 @@ struct Layout {
     /// also work; holding it makes the type nameable and keeps the width for
     /// the app run without writing anything to disk.
     split_state: Entity<ResizableState>,
+    /// Current details overlay width and an in-progress left-edge drag, if any.
+    right_pane_width: Pixels,
+    details_resize_grab: Option<(Pixels, Pixels)>,
     _agent_events: Subscription,
     workflows: Entity<WorkflowPanel>,
     /// Special panel for the managed tag in `managed_tag`, if any.
@@ -351,9 +360,8 @@ impl Layout {
         let travel_for_empty_action = travel_panel.clone();
         cx.subscribe(&task_list, move |this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
-                let deferred = details_for_list.update(cx, |details, cx| {
-                    details.request_select(task.clone(), cx)
-                });
+                let deferred = details_for_list
+                    .update(cx, |details, cx| details.request_select(task.clone(), cx));
                 if !deferred {
                     cx.notify();
                 }
@@ -534,6 +542,8 @@ impl Layout {
             right_pane: RightPane::Details,
             agent_available: false,
             split_state,
+            right_pane_width: px(DETAILS_PANE_WIDTH),
+            details_resize_grab: None,
             _agent_events,
             workflows,
             travel_panel,
@@ -637,6 +647,80 @@ async fn lookup_managed_tag(
             .ok();
         })
         .detach();
+    }
+
+    /// Begin a left-edge details resize drag.
+    fn begin_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        self.details_resize_grab = Some((x, self.right_pane_width));
+        cx.notify();
+    }
+
+    /// Continue a left-edge details resize drag, clamped to the pane limits.
+    fn update_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        if let Some((grab_x, grab_width)) = self.details_resize_grab {
+            let width = (grab_width + (grab_x - x))
+                .as_f32()
+                .clamp(DETAILS_PANE_MIN_WIDTH, DETAILS_PANE_MAX_WIDTH);
+            self.right_pane_width = px(width);
+            cx.notify();
+        }
+    }
+
+    /// End a left-edge details resize drag.
+    fn end_details_resize(&mut self, cx: &mut Context<Self>) {
+        if self.details_resize_grab.is_some() {
+            self.details_resize_grab = None;
+            cx.notify();
+        }
+    }
+
+    /// Task list at full row width, used when the details pane overlays it.
+    fn render_full_task_list(&self) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(self.task_list.clone())
+            .into_any_element()
+    }
+
+    /// Details pane as a right-anchored overlay. It can be resized over the
+    /// task list instead of shrinking it.
+    fn render_details_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("details-overlay")
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(self.right_pane_width)
+            .min_w(px(DETAILS_PANE_MIN_WIDTH))
+            .max_w(px(DETAILS_PANE_MAX_WIDTH))
+            .child(self.details.clone())
+            .child(
+                div()
+                    .id("details-resize-handle")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-4.))
+                    .w(px(8.))
+                    .cursor_col_resize()
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.begin_details_resize(event.position.x, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Show one of the two right-hand panes and focus the agent when it is
@@ -902,6 +986,8 @@ impl Render for Layout {
         // dialogs must be layered on top by the app (same composition as
         // gpui-component's story app).
         let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
+        let details_open =
+            self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
 
         div()
             .relative()
@@ -961,7 +1047,7 @@ impl Render for Layout {
                             // "+ New trip" button at its end. The split
                             // docks the details pane on the right so a
                             // clicked checklist row opens it like any other.
-                            .child(
+                            .child(if self.right_pane == RightPane::Agent {
                                 h_resizable(ElementId::Name("tasks-split".into()))
                                     .with_state(&self.split_state)
                                     .child(
@@ -981,11 +1067,18 @@ impl Render for Layout {
                                     .child(
                                         resizable_panel()
                                             .visible(self.right_pane_open(cx))
-                                            .size(px(560.))
-                                            .size_range(px(320.)..px(1000.))
+                                            .size(px(DETAILS_PANE_WIDTH))
+                                            .size_range(px(320.)..px(DETAILS_PANE_MAX_WIDTH))
+                                            .flex_none()
                                             .child(self.render_right_pane(cx)),
-                                    ),
-                            )
+                                    )
+                                    .into_any_element()
+                            } else {
+                                self.render_full_task_list()
+                            })
+                            .when(details_open, |this| {
+                                this.child(self.render_details_overlay(cx))
+                            })
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
                             // order).
@@ -996,6 +1089,7 @@ impl Render for Layout {
                             .into_any_element(),
                         NavPanel::Tasks => div()
                             .id("right-column")
+                            .relative()
                             .flex_1()
                             .flex()
                             .flex_row()
@@ -1017,7 +1111,7 @@ impl Render for Layout {
                             // Always two panels: the right one collapses with
                             // `.visible(false)` so the group's keyed state stays
                             // coherent (and the width survives pane switching).
-                            .child(
+                            .child(if self.right_pane == RightPane::Agent {
                                 h_resizable(ElementId::Name("tasks-split".into()))
                                     .with_state(&self.split_state)
                                     .child(
@@ -1037,11 +1131,18 @@ impl Render for Layout {
                                     .child(
                                         resizable_panel()
                                             .visible(self.right_pane_open(cx))
-                                            .size(px(560.))
-                                            .size_range(px(320.)..px(1000.))
+                                            .size(px(DETAILS_PANE_WIDTH))
+                                            .size_range(px(320.)..px(DETAILS_PANE_MAX_WIDTH))
+                                            .flex_none()
                                             .child(self.render_right_pane(cx)),
-                                    ),
-                            )
+                                    )
+                                    .into_any_element()
+                            } else {
+                                self.render_full_task_list()
+                            })
+                            .when(details_open, |this| {
+                                this.child(self.render_details_overlay(cx))
+                            })
                             .into_any_element(),
                         NavPanel::Integrations => div()
                             .flex_1()
@@ -1078,6 +1179,30 @@ impl Render for Layout {
             })
             // Keep the dialog layer last so dialogs paint above everything.
             .children(dialog_layer)
+            .when(self.details_resize_grab.is_some(), |this| {
+                this.child(
+                    div()
+                        .id("details-resize-capture")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .cursor_col_resize()
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            this.update_details_resize(event.position.x, cx);
+                        }))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.end_details_resize(cx);
+                            }),
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.stop_propagation();
+                        })),
+                )
+            })
     }
 }
 
