@@ -3,6 +3,8 @@ use std::sync::Arc;
 use storage::prelude::*;
 use storage::task::TaskCreate;
 
+use crate::coding_git;
+
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
 
@@ -765,8 +767,341 @@ impl Store {
         })
     }
 
+    /// ─── Coding workflow ──────────────────────────────────────────────────
+    /// Start the `coding-task` run whose root is `task_id` (the feature task).
+    /// Returns the new run id. Fails when the task or its project already has
+    /// an active run.
+    pub fn start_coding_run(&self, task_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<u64>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let recipe_id = s
+                .recipe_id_by_slug("coding-task")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the coding-task recipe is missing"))?;
+            let run = s
+                .create_task_run(task_id, recipe_id, serde_json::json!({}))
+                .await?;
+            Ok(run.id)
+        })
+    }
+
+    /// The newest coding run rooted at `task_id` with its steps, for the
+    /// details panel stepper.
+    pub fn coding_run_for_task(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::RunView>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.coding_run_for_task(task_id).await?)
+        })
+    }
+
+    /// Store the spec the interview produced (or one the user pasted) and
+    /// complete that run's open interview step, which advances the run to the
+    /// spec gate.
+    pub fn save_coding_spec(
+        &self,
+        task_id: u64,
+        spec: String,
+        spec_path: Option<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.save_task_spec(task_id, Some(spec), spec_path).await?;
+            let Some(view) = s.coding_run_for_task(task_id).await? else {
+                return Ok(());
+            };
+            if view.run.status != "active" {
+                return Ok(());
+            }
+            s.append_run_note(view.run.id, "spec", "interview", "interview", "Spec saved")
+                .await?;
+            if let Some(step) = view.steps.iter().find(|step| {
+                step.node.id == "interview" && !step.task.done
+            }) {
+                let step_id = step.task.id;
+                s.complete_workflow_step(step_id, serde_json::json!({})).await?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Approve the spec gate: cut the feature branch (once — a later cycle
+    /// reuses it) and let the run spawn the implement phase. Returns the branch
+    /// the run is on.
+    pub fn approve_coding_spec(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<String>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let view = s
+                .coding_run_for_task(task_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no coding run for this task"))?;
+            let Some(step) = view
+                .steps
+                .iter()
+                .find(|step| step.node.id == "spec" && !step.task.done)
+            else {
+                anyhow::bail!("the spec is not waiting for approval");
+            };
+            let fallback = Self::default_branch_name(&view, task_id, &mut s).await?;
+            let desired = Self::proposed_branch(&view).unwrap_or_else(|| fallback.clone());
+            // A rejection sends the run back to the interview, but the branch
+            // survives it: only the first approval creates the branch, later
+            // cycles keep working on it.
+            let branch = if view.run.branch_status.as_deref() == Some("active") {
+                s.set_run_branch(view.run.id, &desired, view.run.base_branch.as_deref())
+                    .await?;
+                s.append_run_note(
+                    view.run.id,
+                    "annotation",
+                    "spec",
+                    "spec",
+                    &format!("Continuing on {desired}"),
+                )
+                .await?;
+                desired
+            } else {
+                let dir = Self::project_dir(&mut s, task_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("set this project's directory first"))?;
+                let (base, branch) = tokio::task::spawn_blocking(move || {
+                    Self::create_feature_branch(&dir, &desired, &fallback)
+                })
+                .await??;
+                s.set_run_branch(view.run.id, &branch, Some(&base)).await?;
+                s.append_run_note(
+                    view.run.id,
+                    "branch",
+                    "spec",
+                    "spec",
+                    &format!("Created {branch} from {base}"),
+                )
+                .await?;
+                branch
+            };
+            s.complete_workflow_step(step.task.id, serde_json::json!({ "approved": true }))
+                .await?;
+            Ok(branch)
+        })
+    }
+
+    /// Merge the run's feature branch into its base branch and complete the
+    /// run. On conflict the merge is aborted so the tree stays usable.
+    pub fn merge_coding_branch(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let run = s.get_run(run_id).await?;
+            let branch = run
+                .branch
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("this run has no branch to merge"))?;
+            let base = run
+                .base_branch
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("this run has no base branch"))?;
+            let root = run
+                .root_task_id
+                .ok_or_else(|| anyhow::anyhow!("this run has no feature task"))?;
+            let dir = Self::project_dir(&mut s, root)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("set this project's directory first"))?;
+            tokio::task::spawn_blocking(move || Self::merge_into_base(&dir, &base, &branch))
+                .await??;
+            s.complete_coding_merge(run_id).await?;
+            Ok(())
+        })
+    }
+
+    /// Start a `coding-sub-interview` run rooted at a sub-task, so the model
+    /// can be asked to clarify it without touching the parent run.
+    pub fn request_sub_task_interview(
+        &self,
+        sub_task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let recipe_id = s
+                .recipe_id_by_slug("coding-sub-interview")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the coding-sub-interview recipe is missing"))?;
+            s.create_task_run(sub_task_id, recipe_id, serde_json::json!({}))
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Cancelled or completed coding runs that still hold a branch.
+    pub fn list_branch_cleanup_runs(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RunView>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_branch_cleanup_runs().await?)
+        })
+    }
+
+    /// Delete a run's branch with `git branch -D` and detach it from the run.
+    pub fn delete_coding_branch(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let run = s.get_run(run_id).await?;
+            let Some(branch) = run.branch.clone() else {
+                return Ok(());
+            };
+            // The run's base branch is where a merge left us; a root task is
+            // enough to resolve the directory either way.
+            if let Some(root) = run.root_task_id
+                && let Some(dir) = Self::project_dir(&mut s, root).await?
+            {
+                let dir_for_git = dir.clone();
+                let branch_for_git = branch.clone();
+                tokio::task::spawn_blocking(move || {
+                    coding_git::delete_branch(&dir_for_git, &branch_for_git)
+                })
+                .await??;
+            }
+            s.clear_run_branch(run_id).await?;
+            Ok(())
+        })
+    }
+
+    /// Cut the feature branch: refuse a dirty tree, prefer `desired`, and fall
+    /// back to `fallback` when that name is already taken (`git switch -c` per
+    /// the spec, never an existing branch). Returns the base branch and the
+    /// branch that was actually created.
+    fn create_feature_branch(
+        dir: &std::path::Path,
+        desired: &str,
+        fallback: &str,
+    ) -> anyhow::Result<(String, String)> {
+        if !coding_git::is_repo(dir) {
+            anyhow::bail!("{} is not a git repository", dir.display());
+        }
+        let changed = coding_git::changed_paths(dir)?;
+        if !changed.is_empty() {
+            let listed: Vec<&str> = changed.iter().take(5).map(String::as_str).collect();
+            anyhow::bail!("commit or stash these changes first: {}", listed.join(", "));
+        }
+        let base = coding_git::current_branch(dir)?;
+        let branch = if !coding_git::branch_exists(dir, desired) {
+            desired.to_string()
+        } else if desired != fallback && !coding_git::branch_exists(dir, fallback) {
+            fallback.to_string()
+        } else {
+            anyhow::bail!("both {desired} and {fallback} already exist; delete one first");
+        };
+        coding_git::create_branch(dir, &branch)?;
+        Ok((base, branch))
+    }
+
+    /// Switch to the base branch and merge the feature branch into it.
+    fn merge_into_base(dir: &std::path::Path, base: &str, branch: &str) -> anyhow::Result<()> {
+        if !coding_git::is_repo(dir) {
+            anyhow::bail!("{} is not a git repository", dir.display());
+        }
+        let changed = coding_git::changed_paths(dir)?;
+        if !changed.is_empty() {
+            let listed: Vec<&str> = changed.iter().take(5).map(String::as_str).collect();
+            anyhow::bail!(
+                "commit or stash these changes before merging: {}",
+                listed.join(", ")
+            );
+        }
+        coding_git::switch_branch(dir, base)?;
+        if let Err(error) = coding_git::merge_no_ff(dir, branch) {
+            // Leave the tree clean so the user can resolve the conflict in the
+            // agent pane and merge again.
+            if let Err(abort) = coding_git::abort_merge(dir) {
+                return Err(anyhow::anyhow!("{error} (and the merge could not be aborted: {abort})"));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// The agent's branch proposal, when it normalizes to something git can
+    /// use.
+    fn proposed_branch(view: &RunView) -> Option<String> {
+        let proposed = view.run.branch.as_deref()?;
+        let normalized = normalize_branch_name(proposed);
+        (!normalized.is_empty()).then_some(normalized)
+    }
+
+    /// The branch name used when the agent proposed nothing usable:
+    /// `feature/<run-id>-<title-slug>`.
+    async fn default_branch_name(
+        view: &RunView,
+        task_id: u64,
+        store: &mut TodoStore,
+    ) -> anyhow::Result<String> {
+        let title = store.get_task(task_id).await?.title;
+        let slug = normalize_branch_name(&title).to_lowercase();
+        let slug = slug.rsplit('/').next().unwrap_or_default().to_string();
+        let slug = if slug.is_empty() { "task".to_string() } else { slug };
+        Ok(format!("feature/{}-{slug}", view.run.id))
+    }
+
+    /// The directory the run's git commands run in: the first ancestor of
+    /// `task_id` (itself included) that carries a project tag with a usable
+    /// directory. `None` means the user has to configure one.
+    async fn project_dir(
+        store: &mut TodoStore,
+        task_id: u64,
+    ) -> anyhow::Result<Option<std::path::PathBuf>> {
+        let mut current = Some(task_id);
+        // Bounded so a corrupt parent chain cannot loop forever.
+        for _ in 0..32 {
+            let Some(id) = current else {
+                return Ok(None);
+            };
+            let task = store.get_task(id).await?;
+            for tag in store.get_direct_task_tags(id).await? {
+                if let Some(path) = tag.name.strip_prefix("project:") {
+                    let path = std::path::PathBuf::from(path);
+                    if path.is_dir() {
+                        return Ok(Some(path));
+                    }
+                }
+            }
+            for tag in store.get_direct_task_tags(id).await? {
+                for dir in store.tag_settings(tag.id).await?.dirs {
+                    let path = std::path::PathBuf::from(dir);
+                    if path.is_dir() {
+                        return Ok(Some(path));
+                    }
+                }
+            }
+            current = task.parent_id;
+        }
+        Ok(None)
+    }
+
     /// Section display order plus task-id → section map for a tag view.
-    /// Empty when the tag has no sectioned tasks.
     pub fn task_section_groups(
         &self,
         tag_name: String,

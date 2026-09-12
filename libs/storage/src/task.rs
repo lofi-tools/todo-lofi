@@ -61,6 +61,12 @@ pub struct Task {
     /// The recipe node this task materializes (engine bookkeeping for edge
     /// evaluation and event lookup). Only set on workflow steps.
     pub node_id: Option<String>,
+    /// The spec artifact of a coding run's feature task (markdown text saved by
+    /// the agent's interview phase, or pasted by the user in the details panel).
+    pub spec: Option<String>,
+    /// Where the spec was written on disk, when the agent reported a path. The
+    /// details panel offers an "open file" affordance for it.
+    pub spec_path: Option<String>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -227,6 +233,10 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let completed_at = record.get(15).and_then(|v| v.to_u64());
     let workflow_run_id = record.get(16).and_then(|v| v.to_i64()).map(|id| id as u64);
     let node_id = record.get(17).and_then(|v| v.as_str()).map(str::to_owned);
+    // The spec columns are only selected by queries that need them, so these
+    // reads are optional rather than positional requirements.
+    let spec = record.get(18).and_then(|v| v.as_str()).map(str::to_owned);
+    let spec_path = record.get(19).and_then(|v| v.as_str()).map(str::to_owned);
 
     let task = Task {
         id,
@@ -252,6 +262,8 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         is_seed: false,
         workflow_run_id,
         node_id,
+        spec,
+        spec_path,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };
@@ -322,6 +334,29 @@ impl TodoStore {
     ) -> crate::QueryResult<()> {
         Task::update_by_id(id)
             .description(description)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
+    }
+
+    /// Store a coding feature task's spec artifact (and the path the agent
+    /// wrote it to, when it reported one). `None` leaves the column alone.
+    #[fastrace::trace]
+    pub async fn save_task_spec(
+        &mut self,
+        id: u64,
+        spec: Option<String>,
+        spec_path: Option<String>,
+    ) -> crate::QueryResult<()> {
+        let mut update = Task::update_by_id(id);
+        if let Some(spec) = spec {
+            update = update.spec(Some(spec));
+        }
+        if let Some(path) = spec_path {
+            update = update.spec_path(Some(path));
+        }
+        update
             .exec(&mut self.db)
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;

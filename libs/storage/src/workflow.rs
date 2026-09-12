@@ -42,11 +42,21 @@ pub struct WorkflowRun {
     /// Runtime params merged with the recipe schema defaults.
     pub params: toasty::Json<Value>,
     /// `node_id -> result` recorded by completed steps; consumed by
-    /// `on_result` edges.
+    /// `on_result` edges. The reserved `@notes` key holds a coding run's
+    /// ordered log (see [`RunNote`]).
     pub step_results: toasty::Json<Value>,
     #[default(jiff::Timestamp::now())]
     pub created_at: jiff::Timestamp,
     pub completed_at: Option<jiff::Timestamp>,
+    /// The feature task a coding run is attached to. Phase steps materialize
+    /// as its subtasks and completing it completes the run.
+    pub root_task_id: Option<u64>,
+    /// Coding runs: the feature branch, the branch it was cut from, and
+    /// `proposed` | `active` | `merged` | `abandoned`. Kept after
+    /// cancellation so the branch stays visible for cleanup.
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub branch_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +68,17 @@ pub struct RecipeNode {
     pub ai: bool,
     pub approval: bool,
     pub retrigger_on_reject: bool,
+    /// Coding recipes only: which phase of the coding workflow this node
+    /// drives (`interview` | `spec` | `implement` | `review` | `merge`).
+    /// The app keys its stepper and phase prompts off this.
+    pub phase: Option<String>,
+    /// Materialize as a subtask of the run's root task instead of at the top
+    /// level (coding phases hang off the feature task).
+    pub subtask: bool,
+    /// Node to re-open when this approval rejects. Defaults to the approval's
+    /// feeder task, which is what generic recipes expect; coding recipes point
+    /// it back at the interview step so a rejection re-specs the feature.
+    pub retrigger_node: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +124,9 @@ pub struct RecipeMeta {
     pub managed_tag: Option<String>,
     pub managed_enabled: bool,
     pub active_runs: usize,
+    /// Whether the recipe's nodes declare coding phases. Phased recipes are
+    /// started from a feature task, not from the workflows panel's start row.
+    pub phased: bool,
 }
 
 /// One step of a run, as the UI renders it: the task plus the recipe node
@@ -123,6 +147,186 @@ pub struct RunView {
     pub run: WorkflowRun,
     pub recipe_name: String,
     pub steps: Vec<RunStepView>,
+}
+
+/// Phase names a coding recipe node may declare.
+pub const CODING_PHASES: [&str; 5] = ["interview", "spec", "implement", "review", "merge"];
+
+/// Reserved `workflow_runs.step_results` key holding the run's ordered log.
+/// Node ids are `[A-Za-z0-9_-]+`, so `@` cannot collide with a node result.
+/// The log must survive `retry_task` clearing `step_results[node_id]`, which is
+/// why it lives on the run rather than on the step result.
+pub const RUN_NOTES_KEY: &str = "@notes";
+
+/// One entry of a run's ordered log: an annotation, a rejection, an approval,
+/// a spec save, a branch change, or a merge.
+///
+/// `kind` is `annotation` | `reject` | `approve` | `spec` | `branch` | `merge`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunNote {
+    pub at: u64,
+    pub phase: String,
+    pub node_id: String,
+    pub kind: String,
+    pub body: String,
+}
+
+impl RunNote {
+    pub fn new(
+        kind: impl Into<String>,
+        phase: impl Into<String>,
+        node_id: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            at: now_secs(),
+            phase: phase.into(),
+            node_id: node_id.into(),
+            kind: kind.into(),
+            body: body.into(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "at": self.at,
+            "phase": self.phase,
+            "node_id": self.node_id,
+            "kind": self.kind,
+            "body": self.body,
+        })
+    }
+
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            at: object.get("at").and_then(Value::as_u64).unwrap_or(0),
+            phase: object
+                .get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            node_id: object
+                .get("node_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            kind: object
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            body: object
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+    }
+}
+
+/// The run's ordered log, oldest first. Missing or malformed entries are
+/// skipped rather than failing the whole read.
+pub fn run_notes(results: &Value) -> Vec<RunNote> {
+    results
+        .get(RUN_NOTES_KEY)
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().filter_map(RunNote::from_json).collect())
+        .unwrap_or_default()
+}
+
+/// The coding recipe declarations shipped with the app. `coding-task` is the
+/// full feature pipeline; `coding-sub-interview` is the single-node run used
+/// when a sub-task needs its own interview round.
+pub fn coding_recipes() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "coding-task",
+            serde_json::json!({
+                "name": "Coding task",
+                "description": "AI-assisted feature development: interview and spec, approve, implement on a branch, review and annotate, then merge.",
+                "params": {
+                    "branch": { "type": "string", "default": "" }
+                },
+                "nodes": [
+                    {
+                        "id": "interview",
+                        "kind": "action",
+                        "title": "Interview & spec the feature",
+                        "description": "Run /interview with the feature title and description, ask clarifying questions, then save the spec.",
+                        "ai": true,
+                        "phase": "interview",
+                        "subtask": true
+                    },
+                    {
+                        "id": "spec",
+                        "kind": "action",
+                        "title": "Approve the spec",
+                        "description": "Read the spec. Approve to start implementation, or reject with notes to re-interview.",
+                        "phase": "spec",
+                        "subtask": true,
+                        "approval": true,
+                        "retrigger_on_reject": true,
+                        "retrigger_node": "interview"
+                    },
+                    {
+                        "id": "implement",
+                        "kind": "action",
+                        "title": "Implement the feature",
+                        "description": "Implement the approved spec on the feature branch, then confirm.",
+                        "ai": true,
+                        "phase": "implement",
+                        "subtask": true
+                    },
+                    {
+                        "id": "review",
+                        "kind": "action",
+                        "title": "Review & annotate",
+                        "description": "Review the implementation, annotate findings, then approve to merge or reject to re-spec.",
+                        "ai": true,
+                        "phase": "review",
+                        "subtask": true,
+                        "approval": true,
+                        "retrigger_on_reject": true,
+                        "retrigger_node": "interview"
+                    },
+                    {
+                        "id": "merge",
+                        "kind": "action",
+                        "title": "Merge the branch",
+                        "description": "Merge the feature branch into its base branch and mark the feature complete.",
+                        "phase": "merge",
+                        "subtask": true
+                    }
+                ],
+                "edges": [
+                    { "from": "interview", "to": "spec", "condition_type": "on_result", "condition_value": {} },
+                    { "from": "spec", "to": "implement", "condition_type": "on_result", "condition_value": { "approved": true } },
+                    { "from": "implement", "to": "review", "condition_type": "on_result", "condition_value": {} },
+                    { "from": "review", "to": "merge", "condition_type": "on_result", "condition_value": { "approved": true } }
+                ]
+            }),
+        ),
+        (
+            "coding-sub-interview",
+            serde_json::json!({
+                "name": "Sub-task interview",
+                "description": "Interview a single under-specified sub-task and save its spec.",
+                "nodes": [
+                    {
+                        "id": "interview",
+                        "kind": "action",
+                        "title": "Interview the sub-task",
+                        "description": "Run /interview for this sub-task, then save the spec.",
+                        "ai": true,
+                        "phase": "interview",
+                        "subtask": true
+                    }
+                ],
+                "edges": []
+            }),
+        ),
+    ]
 }
 
 fn now_secs() -> u64 {
@@ -256,6 +460,36 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
                 "node `{id}`: `retrigger_on_reject` requires `approval: true`"
             ));
         }
+        let phase = obj
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if let Some(phase) = &phase
+            && !CODING_PHASES.contains(&phase.as_str())
+        {
+            return Err(format!(
+                "node `{id}`: invalid phase `{phase}` (expected one of {})",
+                CODING_PHASES.join(", ")
+            ));
+        }
+        let subtask = obj
+            .get("subtask")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if subtask && kind != "action" {
+            return Err(format!(
+                "node `{id}`: `subtask` is only valid on action nodes"
+            ));
+        }
+        let retrigger_node = obj
+            .get("retrigger_node")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if retrigger_node.is_some() && !retrigger_on_reject {
+            return Err(format!(
+                "node `{id}`: `retrigger_node` requires `retrigger_on_reject`"
+            ));
+        }
         nodes.push(RecipeNode {
             id,
             kind,
@@ -264,6 +498,9 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             ai,
             approval,
             retrigger_on_reject,
+            phase,
+            subtask,
+            retrigger_node,
         });
     }
 
@@ -402,6 +639,31 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
                     "approval node `{}` must be fed by an on_result edge from an ai: true node",
                     node.id
                 ));
+            }
+        }
+        // `retrigger_node` re-opens a node on rejection, so it must name an
+        // automated node of this recipe (a plain node has nothing to re-run).
+        if let Some(target_id) = &node.retrigger_node {
+            match nodes.iter().find(|n| &n.id == target_id) {
+                None => {
+                    return Err(format!(
+                        "node `{}`: `retrigger_node` references unknown node `{target_id}`",
+                        node.id
+                    ));
+                }
+                Some(target) if target.id == node.id => {
+                    return Err(format!(
+                        "node `{}`: `retrigger_node` must not be itself",
+                        node.id
+                    ));
+                }
+                Some(target) if !target.ai => {
+                    return Err(format!(
+                        "node `{}`: `retrigger_node` must reference an `ai: true` node",
+                        node.id
+                    ));
+                }
+                Some(_) => {}
             }
         }
     }
@@ -561,6 +823,60 @@ fn is_rejection(result: &Value) -> bool {
     key_match(result, &serde_json::json!({ "approved": false }))
 }
 
+/// The log entry implied by a completed approval step: `approve` or `reject`,
+/// carrying the reviewer's notes. Non-approval steps log nothing.
+fn phase_note_for(recipe: &Recipe, node_id: &str, result: &Value) -> Option<RunNote> {
+    let node = recipe.nodes.iter().find(|n| n.id == node_id)?;
+    if !node.approval {
+        return None;
+    }
+    let approved = result
+        .get("approved")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let notes = result
+        .get("notes")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let (kind, body) = if approved {
+        (
+            "approve",
+            if notes.is_empty() {
+                "Approved".to_string()
+            } else {
+                notes
+            },
+        )
+    } else {
+        ("reject", notes)
+    };
+    Some(RunNote::new(
+        kind,
+        node.phase.clone().unwrap_or_default(),
+        node.id.clone(),
+        body,
+    ))
+}
+
+/// Sanitize a proposed branch name into something git accepts: whitespace
+/// becomes `-`, other characters outside `[A-Za-z0-9._/-]` are dropped, and
+/// leading/trailing separators are trimmed. Empty means "not usable".
+pub fn normalize_branch_name(raw: &str) -> String {
+    let mut out: String = raw
+        .trim()
+        .chars()
+        .map(|c| if c.is_whitespace() { '-' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        .collect();
+    out = out.trim_matches(|c| c == '/' || c == '-').to_string();
+    if out.contains("..") || out == "." {
+        return String::new();
+    }
+    out
+}
+
 impl TodoStore {
     pub async fn get_recipe(&mut self, id: u64) -> QueryResult<WorkflowRecipe> {
         WorkflowRecipe::get_by_id(&mut self.db, id)
@@ -612,6 +928,7 @@ impl TodoStore {
                 managed_tag: parsed.managed_tag,
                 managed_enabled,
                 active_runs: active.get(&recipe.id).copied().unwrap_or(0),
+                phased: parsed.nodes.iter().any(|node| node.phase.is_some()),
             });
         }
         Ok(metas)
@@ -650,7 +967,8 @@ impl TodoStore {
 
     pub async fn find_run(&mut self, run_id: u64) -> QueryResult<Option<WorkflowRun>> {
         let rows = toasty::sql::query(
-            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at
+            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at,
+                      root_task_id, branch, base_branch, branch_status
                FROM workflow_runs WHERE id = ?1"#,
         )
         .column_types([
@@ -659,6 +977,10 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
@@ -681,7 +1003,8 @@ impl TodoStore {
     /// All runs, newest first (drives the run banner and history).
     pub async fn list_workflow_runs(&mut self) -> QueryResult<Vec<WorkflowRun>> {
         let rows = toasty::sql::query(
-            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at
+            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at,
+                      root_task_id, branch, base_branch, branch_status
                FROM workflow_runs ORDER BY id DESC"#,
         )
         .column_types([
@@ -690,6 +1013,10 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
@@ -709,7 +1036,8 @@ impl TodoStore {
         template_id: u64,
     ) -> QueryResult<Vec<WorkflowRun>> {
         let rows = toasty::sql::query(
-            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at
+            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at,
+                      root_task_id, branch, base_branch, branch_status
                FROM workflow_runs WHERE schedule_id = ?1 ORDER BY created_at"#,
         )
         .column_types([
@@ -718,6 +1046,10 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
@@ -738,6 +1070,7 @@ impl TodoStore {
         recipe_id: u64,
         params: Value,
         schedule_id: Option<u64>,
+        root_task_id: Option<u64>,
     ) -> QueryResult<(WorkflowRun, Recipe)> {
         let recipe_row = self.get_recipe(recipe_id).await?;
         let recipe = parse_recipe(&recipe_row.recipe_json.0)
@@ -749,6 +1082,7 @@ impl TodoStore {
             .status("active".to_string())
             .params(toasty::Json(effective))
             .step_results(toasty::Json(serde_json::json!({})))
+            .root_task_id(root_task_id)
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -765,7 +1099,9 @@ impl TodoStore {
         params: Value,
         schedule_id: Option<u64>,
     ) -> QueryResult<WorkflowRun> {
-        let (run, recipe) = self.insert_run_row(recipe_id, params, schedule_id).await?;
+        let (run, recipe) = self
+            .insert_run_row(recipe_id, params, schedule_id, None)
+            .await?;
 
         let start_ids: HashSet<&str> = recipe
             .nodes
@@ -786,7 +1122,7 @@ impl TodoStore {
     /// start nodes: the tag's own flow (e.g. the travel trip builder)
     /// generates the run's content instead.
     pub async fn create_managed_run(&mut self, recipe_id: u64, params: Value) -> QueryResult<WorkflowRun> {
-        let (run, _) = self.insert_run_row(recipe_id, params, None).await?;
+        let (run, _) = self.insert_run_row(recipe_id, params, None, None).await?;
         Ok(run)
     }
 
@@ -898,8 +1234,15 @@ impl TodoStore {
                 self.tombstone_task(id).await?;
             }
         }
-        WorkflowRun::update_by_id(run_id)
-            .status("cancelled".to_string())
+        // A coding run keeps its branch reference while being cancelled: the
+        // branch outlives the run and has to be cleaned up deliberately.
+        let mut update = WorkflowRun::update_by_id(run_id).status("cancelled".to_string());
+        if let Some(run) = self.find_run(run_id).await?
+            && run.branch.is_some()
+        {
+            update = update.branch_status(Some("abandoned".to_string()));
+        }
+        update
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -959,9 +1302,10 @@ impl TodoStore {
         let Some(run) = self.find_run(run_id).await? else {
             return Ok(None);
         };
-        // Cancelled runs have no view: every step is tombstoned, so there
-        // is nothing left to show.
-        if run.status == "cancelled" {
+        // Cancelled runs without a branch have nothing left to show (every
+        // step is tombstoned). One that still holds a branch stays visible so
+        // the branch can be cleaned up deliberately.
+        if run.status == "cancelled" && run.branch.is_none() {
             return Ok(None);
         }
         let recipe_row = self.get_recipe(run.recipe_id).await?;
@@ -1041,6 +1385,17 @@ impl TodoStore {
             invalid("workflow run step_results is corrupt (expected an object)")
         })?;
         results_obj.insert(node_id.clone(), result.clone());
+        // Coding approvals are also appended to the run's ordered log, so the
+        // review history survives the retrigger that clears this node's result.
+        if let Some(note) = phase_note_for(&recipe, &node_id, &result) {
+            match results_obj
+                .entry(RUN_NOTES_KEY.to_string())
+                .or_insert_with(|| Value::Array(Vec::new()))
+            {
+                Value::Array(entries) => entries.push(note.to_json()),
+                slot => *slot = Value::Array(vec![note.to_json()]),
+            }
+        }
         WorkflowRun::update_by_id(run.id)
             .step_results(toasty::Json(results.clone()))
             .exec(&mut self.db)
@@ -1053,15 +1408,23 @@ impl TodoStore {
             ..run.clone()
         };
 
-        // Approval rejection with `retrigger_on_reject`: re-open the
-        // automated parent so the AI/script can produce a revised result.
+        // Approval rejection with `retrigger_on_reject`: re-open the automated
+        // node so it can produce a revised result. `retrigger_node` names that
+        // node (coding recipes point both gates back at the interview step so a
+        // rejection re-specs the feature); without it the approval's feeder
+        // task is re-opened, which is what generic recipes expect.
         if let Some(node) = recipe.nodes.iter().find(|n| n.id == node_id)
             && node.approval
             && node.retrigger_on_reject
             && is_rejection(&result)
-            && let Some(parent_id) = task.parent_id
         {
-            self.retry_task(parent_id, &recipe, &run).await?;
+            let target = match node.retrigger_node.as_deref() {
+                Some(target_node) => self.node_latest_task_id(&run, target_node).await?,
+                None => task.parent_id,
+            };
+            if let Some(target) = target {
+                self.retry_task(target, &recipe, &run).await?;
+            }
         }
 
         let outgoing: Vec<&RecipeEdge> = recipe
@@ -1192,10 +1555,30 @@ impl TodoStore {
         run: &WorkflowRun,
         node_id: &str,
     ) -> QueryResult<Option<u64>> {
-        let rows = toasty::sql::query(
+        self.node_done_task_id_impl(run, node_id, false).await
+    }
+
+    /// The most recent done task of `node_id`, for re-opening the right step
+    /// when a node ran more than once (re-spec cycles).
+    async fn node_latest_task_id(
+        &mut self,
+        run: &WorkflowRun,
+        node_id: &str,
+    ) -> QueryResult<Option<u64>> {
+        self.node_done_task_id_impl(run, node_id, true).await
+    }
+
+    async fn node_done_task_id_impl(
+        &mut self,
+        run: &WorkflowRun,
+        node_id: &str,
+        latest: bool,
+    ) -> QueryResult<Option<u64>> {
+        let order = if latest { "DESC" } else { "ASC" };
+        let rows = toasty::sql::query(format!(
             r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = ?2
-               AND done = 1 AND deleted_at IS NULL ORDER BY id LIMIT 1"#,
-        )
+               AND done = 1 AND deleted_at IS NULL ORDER BY id {order} LIMIT 1"#
+        ))
         .column_types([toasty::stmt::Type::I64])
         .bind(run.id as i64)
         .bind(node_id)
@@ -1231,6 +1614,9 @@ impl TodoStore {
         let Some(node) = recipe.nodes.iter().find(|n| n.id == node_id) else {
             return Err(invalid(format!("recipe node `{node_id}` not found")));
         };
+        // Coding phases hang off the run's feature task. An explicit parent
+        // (approval subtasks) always wins.
+        let parent_id = parent_id.or_else(|| node.subtask.then_some(run.root_task_id).flatten());
         let task = self
             .create_task(
                 crate::Task::create()
@@ -1350,6 +1736,321 @@ impl TodoStore {
     }
 }
 
+// ─── Coding runs ───────────────────────────────────────────────────────────
+
+impl TodoStore {
+    /// Create the built-in coding recipes when they are missing. Recipes are
+    /// immutable, so an existing one is never overwritten; changing a
+    /// declaration means a new version through `create_recipe`.
+    pub async fn ensure_coding_recipes(&mut self) -> QueryResult<()> {
+        for (slug, recipe_json) in coding_recipes() {
+            if self.recipe_id_by_slug(slug).await?.is_none() {
+                self.create_recipe(slug, recipe_json).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The newest version of a recipe, by slug.
+    pub async fn recipe_id_by_slug(&mut self, slug: &str) -> QueryResult<Option<u64>> {
+        Ok(self
+            .list_recipes()
+            .await?
+            .iter()
+            .filter(|recipe| recipe.slug == slug)
+            .max_by_key(|recipe| recipe.version)
+            .map(|recipe| recipe.id))
+    }
+
+    /// Start a coding run for an existing feature task: the task becomes the
+    /// run root, phase steps materialize as its subtasks, and completing it
+    /// completes the run. Rejects a second active run on the same task, or on
+    /// the same project (nested runs are exempt from the project guard).
+    pub async fn create_task_run(
+        &mut self,
+        task_id: u64,
+        recipe_id: u64,
+        params: Value,
+    ) -> QueryResult<WorkflowRun> {
+        let task = self.get_task(task_id).await?;
+        if task.deleted_at.is_some() {
+            return Err(invalid(format!("task {task_id} is deleted")));
+        }
+        if let Some(existing) = self.find_run_by_root_task(task_id).await?
+            && existing.status == "active"
+        {
+            return Err(invalid(format!(
+                "task {task_id} already has an active coding run"
+            )));
+        }
+        if self.project_has_active_coding_run(&task).await? {
+            return Err(invalid(
+                "another coding run is already active for this project".to_string(),
+            ));
+        }
+        let (run, recipe) = self
+            .insert_run_row(recipe_id, params, None, Some(task_id))
+            .await?;
+        crate::Task::update_by_id(task_id)
+            .workflow_run_id(Some(run.id))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id: task_id })?;
+        let start_ids: HashSet<&str> = recipe
+            .nodes
+            .iter()
+            .filter(|node| recipe.edges.iter().all(|edge| edge.to != node.id))
+            .map(|node| node.id.as_str())
+            .collect();
+        for node in &recipe.nodes {
+            if start_ids.contains(node.id.as_str()) {
+                self.spawn_node_task(&recipe, &run, &node.id, None, &[], None)
+                    .await?;
+            }
+        }
+        Ok(run)
+    }
+
+    /// The newest run rooted at `task_id`, as the UI needs it (steps included).
+    /// Completed runs are returned too, so the details panel keeps showing the
+    /// workflow after it ends.
+    pub async fn coding_run_for_task(&mut self, task_id: u64) -> QueryResult<Option<RunView>> {
+        let Some(run) = self.find_run_by_root_task(task_id).await? else {
+            return Ok(None);
+        };
+        self.workflow_run_view(run.id).await
+    }
+
+    /// The newest run whose root task is `task_id`.
+    pub async fn find_run_by_root_task(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Option<WorkflowRun>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at,
+                      root_task_id, branch, base_branch, branch_status
+               FROM workflow_runs WHERE root_task_id = ?1 ORDER BY id DESC LIMIT 1"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
+        .bind(task_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "find run by root task",
+        })?;
+        Ok(rows.first().and_then(parse_run_row))
+    }
+
+    /// Whether another top-level coding run is active for the project `task`
+    /// belongs to. A task that is itself a subtask is a nested run and is
+    /// exempt, as are nested runs on the other side of the comparison.
+    async fn project_has_active_coding_run(&mut self, task: &crate::Task) -> QueryResult<bool> {
+        if task.parent_id.is_some() {
+            return Ok(false);
+        }
+        let ours: HashSet<u64> = self
+            .get_direct_task_tags(task.id)
+            .await?
+            .into_iter()
+            .map(|tag| tag.id)
+            .collect();
+        if ours.is_empty() {
+            return Ok(false);
+        }
+        for run in self.list_workflow_runs().await? {
+            if run.status != "active" || run.root_task_id == Some(task.id) {
+                continue;
+            }
+            let Some(root) = run.root_task_id else {
+                continue;
+            };
+            if self.get_task(root).await?.parent_id.is_some() {
+                continue;
+            }
+            let theirs: HashSet<u64> = self
+                .get_direct_task_tags(root)
+                .await?
+                .into_iter()
+                .map(|tag| tag.id)
+                .collect();
+            if !ours.is_disjoint(&theirs) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl TodoStore {
+    /// Runs that still hold a branch and are no longer active, for the
+    /// "Branches to clean up" section of the workflow panel.
+    pub async fn list_branch_cleanup_runs(&mut self) -> QueryResult<Vec<RunView>> {
+        let runs = self.list_workflow_runs().await?;
+        let mut views = Vec::new();
+        for run in runs {
+            if run.status == "active" || run.branch.is_none() {
+                continue;
+            }
+            if run.branch_status.as_deref() == Some("deleted") {
+                continue;
+            }
+            if let Some(view) = self.workflow_run_view(run.id).await? {
+                views.push(view);
+            }
+        }
+        Ok(views)
+    }
+
+    /// Append an entry to a run's ordered log (`step_results["@notes"]`).
+    pub async fn append_run_note(
+        &mut self,
+        run_id: u64,
+        kind: &str,
+        phase: &str,
+        node_id: &str,
+        body: &str,
+    ) -> QueryResult<()> {
+        let run = self.get_run(run_id).await?;
+        let note = RunNote::new(kind, phase, node_id, body);
+        let mut results = run.step_results.0.clone();
+        let Some(object) = results.as_object_mut() else {
+            return Err(invalid(
+                "workflow run step_results is corrupt (expected an object)",
+            ));
+        };
+        match object
+            .entry(RUN_NOTES_KEY.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+        {
+            Value::Array(entries) => entries.push(note.to_json()),
+            slot => *slot = Value::Array(vec![note.to_json()]),
+        }
+        WorkflowRun::update_by_id(run_id)
+            .step_results(toasty::Json(results))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "append run note",
+            })?;
+        Ok(())
+    }
+
+    /// Store the agent's branch proposal (the branch does not exist yet).
+    /// Returns the sanitized name that was kept.
+    pub async fn propose_run_branch(&mut self, run_id: u64, branch: &str) -> QueryResult<String> {
+        let branch = normalize_branch_name(branch);
+        if branch.is_empty() {
+            return Err(invalid("branch name is not usable"));
+        }
+        WorkflowRun::update_by_id(run_id)
+            .branch(Some(branch.clone()))
+            .branch_status(Some("proposed".to_string()))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "propose run branch",
+            })?;
+        Ok(branch)
+    }
+
+    /// Record the branch the app created, and the branch it was cut from.
+    pub async fn set_run_branch(
+        &mut self,
+        run_id: u64,
+        branch: &str,
+        base_branch: Option<&str>,
+    ) -> QueryResult<()> {
+        WorkflowRun::update_by_id(run_id)
+            .branch(Some(branch.to_string()))
+            .base_branch(base_branch.map(str::to_owned))
+            .branch_status(Some("active".to_string()))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "set run branch",
+            })?;
+        Ok(())
+    }
+
+    /// Detach the branch reference, e.g. after the branch was deleted.
+    pub async fn clear_run_branch(&mut self, run_id: u64) -> QueryResult<()> {
+        WorkflowRun::update_by_id(run_id)
+            .branch(None)
+            .base_branch(None)
+            .branch_status(Some("deleted".to_string()))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "clear run branch",
+            })?;
+        Ok(())
+    }
+
+    /// Mark a run's branch as merged.
+    pub async fn mark_branch_merged(&mut self, run_id: u64) -> QueryResult<()> {
+        WorkflowRun::update_by_id(run_id)
+            .branch_status(Some("merged".to_string()))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "mark branch merged",
+            })?;
+        Ok(())
+    }
+
+    /// Complete the merge step and the root feature task of a coding run (the
+    /// app has already performed the git merge), record the merge in the run
+    /// log, and let the run auto-complete.
+    pub async fn complete_coding_merge(&mut self, run_id: u64) -> QueryResult<()> {
+        let run = self.get_run(run_id).await?;
+        let rows = toasty::sql::query(
+            r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = 'merge'
+               AND done = 0 AND deleted_at IS NULL ORDER BY id"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(run_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "find merge step",
+        })?;
+        for row in rows {
+            if let Some(id) = row_id(&row) {
+                self.complete_workflow_step(id, serde_json::json!({ "merged": true }))
+                    .await?;
+            }
+        }
+        let merged = run.branch.clone();
+        if merged.is_some() {
+            self.mark_branch_merged(run_id).await?;
+        }
+        let body = match &merged {
+            Some(branch) => format!("Merged {branch}"),
+            None => "Merged".to_string(),
+        };
+        self.append_run_note(run_id, "merge", "merge", "merge", &body)
+            .await?;
+        if let Some(root) = run.root_task_id {
+            self.update_task_done(root, true).await?;
+        }
+        self.check_run_complete(run_id).await?;
+        Ok(())
+    }
+}
+
 fn parse_run_row(record: &toasty::stmt::Value) -> Option<WorkflowRun> {
     let toasty::stmt::Value::Record(record) = record else {
         return None;
@@ -1376,6 +2077,10 @@ fn parse_run_row(record: &toasty::stmt::Value) -> Option<WorkflowRun> {
         .get(7)
         .and_then(|v| v.as_str())
         .and_then(|raw| raw.parse::<jiff::Timestamp>().ok());
+    let root_task_id = record.get(8).and_then(|v| v.to_i64()).map(|id| id as u64);
+    let branch = record.get(9).and_then(|v| v.as_str()).map(str::to_owned);
+    let base_branch = record.get(10).and_then(|v| v.as_str()).map(str::to_owned);
+    let branch_status = record.get(11).and_then(|v| v.as_str()).map(str::to_owned);
     Some(WorkflowRun {
         id,
         recipe_id,
@@ -1385,6 +2090,10 @@ fn parse_run_row(record: &toasty::stmt::Value) -> Option<WorkflowRun> {
         step_results,
         created_at,
         completed_at,
+        root_task_id,
+        branch,
+        base_branch,
+        branch_status,
     })
 }
 
@@ -1816,6 +2525,361 @@ mod tests {
         assert_eq!(store.find_run(run.id).await?.unwrap().status, "cancelled");
         let view = store.workflow_run_view(run.id).await?;
         assert!(view.is_none(), "cancelled run steps are tombstoned");
+        Ok(())
+    }
+
+    async fn coding_recipe_id(store: &mut TodoStore) -> u64 {
+        store.ensure_coding_recipes().await.expect("recipes seed");
+        store
+            .recipe_id_by_slug("coding-task")
+            .await
+            .expect("recipe lookup")
+            .expect("coding recipe exists")
+    }
+
+    /// Create a feature task and start a coding run on it.
+    async fn start_coding_run(
+        store: &mut TodoStore,
+        title: &str,
+    ) -> anyhow::Result<(u64, WorkflowRun)> {
+        let recipe_id = coding_recipe_id(store).await;
+        let feature = store
+            .create_task(crate::Task::create().title(title.to_string()))
+            .await?;
+        let run = store
+            .create_task_run(feature.id, recipe_id, serde_json::json!({}))
+            .await?;
+        Ok((feature.id, run))
+    }
+
+    /// The pending step of `node_id` in the run's current view.
+    fn pending_step<'a>(view: &'a RunView, node_id: &str) -> &'a RunStepView {
+        view.steps
+            .iter()
+            .filter(|step| step.node.id == node_id)
+            .next_back()
+            .unwrap_or_else(|| panic!("step `{node_id}` should exist"))
+    }
+
+    #[tokio::test]
+    async fn test_coding_recipes_seed_idempotently() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        store.ensure_coding_recipes().await?;
+        // A second call must not create another version.
+        store.ensure_coding_recipes().await?;
+        let recipes = store.list_recipes().await?;
+        assert_eq!(
+            recipes
+                .iter()
+                .filter(|recipe| recipe.slug == "coding-task")
+                .count(),
+            1
+        );
+        assert_eq!(
+            recipes
+                .iter()
+                .filter(|recipe| recipe.slug == "coding-sub-interview")
+                .count(),
+            1
+        );
+
+        let id = store
+            .recipe_id_by_slug("coding-task")
+            .await?
+            .expect("coding recipe");
+        let row = store.get_recipe(id).await?;
+        let recipe = parse_recipe(&row.recipe_json.0).expect("recipe validates");
+        assert_eq!(recipe.nodes.len(), 5);
+        let review = recipe
+            .nodes
+            .iter()
+            .find(|node| node.id == "review")
+            .expect("review node");
+        assert_eq!(review.phase.as_deref(), Some("review"));
+        assert!(review.subtask);
+        assert_eq!(review.retrigger_node.as_deref(), Some("interview"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_coding_run_walks_every_phase() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        assert_eq!(run.root_task_id, Some(feature_id));
+        assert_eq!(
+            store.get_task(feature_id).await?.workflow_run_id,
+            Some(run.id)
+        );
+
+        // The start node materializes as a subtask of the feature task.
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        assert_eq!(view.steps.len(), 1);
+        let interview = pending_step(&view, "interview");
+        assert_eq!(interview.task.parent_id, Some(feature_id));
+
+        // The agent's spec signal completes the interview step; the spec gate
+        // spawns under the feature task.
+        store
+            .complete_workflow_step(interview.task.id, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let spec = pending_step(&view, "spec");
+        assert!(spec.node.approval);
+        // Approval gates nest under the step they review (the engine's existing
+        // rule), which is itself a subtask of the feature task.
+        assert_eq!(spec.task.parent_id, Some(interview.task.id));
+
+        // Approving the spec spawns the implementation.
+        store
+            .complete_workflow_step(spec.task.id, serde_json::json!({ "approved": true }))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let implement = pending_step(&view, "implement");
+
+        // Confirming the implementation spawns the review as its subtask.
+        store
+            .complete_workflow_step(implement.task.id, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let review = pending_step(&view, "review");
+        assert_eq!(review.task.parent_id, Some(implement.task.id));
+
+        // Approval spawns the merge step; the app merges and the run finishes.
+        store
+            .complete_workflow_step(review.task.id, serde_json::json!({ "approved": true }))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        assert!(view.steps.iter().any(|step| step.node.id == "merge"));
+        store.complete_coding_merge(run.id).await?;
+
+        assert_eq!(store.find_run(run.id).await?.expect("run").status, "completed");
+        assert!(store.get_task(feature_id).await?.done);
+        let notes = run_notes(&view.run.step_results.0);
+        assert!(notes.iter().any(|note| note.kind == "approve"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_coding_rejection_respecs_and_keeps_the_log() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (_feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let interview = pending_step(&view, "interview").task.id;
+        store
+            .complete_workflow_step(interview, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let spec = pending_step(&view, "spec").task.id;
+        store
+            .complete_workflow_step(spec, serde_json::json!({ "approved": true }))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let implement = pending_step(&view, "implement").task.id;
+        store
+            .complete_workflow_step(implement, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let review = pending_step(&view, "review").task.id;
+
+        // Rejecting the review re-opens the interview (re-spec) rather than
+        // re-running the implementation.
+        store
+            .complete_workflow_step(
+                review,
+                serde_json::json!({ "approved": false, "notes": "Needs a migration test." }),
+            )
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let reopened = view
+            .steps
+            .iter()
+            .find(|step| step.node.id == "interview" && !step.task.done)
+            .expect("the interview step re-opens");
+        let notes = run_notes(&view.run.step_results.0);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.kind == "reject" && note.body == "Needs a migration test."),
+            "the rejection is logged: {notes:?}"
+        );
+
+        // Saving the spec again spawns a second spec gate: cycle two.
+        store
+            .complete_workflow_step(reopened.task.id, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        assert_eq!(
+            view.steps
+                .iter()
+                .filter(|step| step.node.id == "spec")
+                .count(),
+            2
+        );
+        // The rejection cleared the interview result, so the re-opened step's
+        // result is the fresh one.
+        assert!(run_notes(&view.run.step_results.0).len() >= 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_one_coding_run_per_project() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let recipe_id = coding_recipe_id(&mut store).await;
+        let tag = store.create_tag("managed:oauth").await?;
+        let first = store
+            .create_task(crate::Task::create().title("First"))
+            .await?;
+        let second = store
+            .create_task(crate::Task::create().title("Second"))
+            .await?;
+        store.assign_tag_to_task(first.id, &tag.name).await?;
+        store.assign_tag_to_task(second.id, &tag.name).await?;
+
+        store
+            .create_task_run(first.id, recipe_id, serde_json::json!({}))
+            .await?;
+        let blocked = store
+            .create_task_run(second.id, recipe_id, serde_json::json!({}))
+            .await;
+        assert!(blocked.is_err(), "a second run on the project is blocked");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_run_keeps_its_branch_visible() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (_feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        store
+            .set_run_branch(run.id, "feature/1-add-oauth", Some("main"))
+            .await?;
+        store.cancel_run(run.id).await?;
+
+        let cancelled = store.find_run(run.id).await?.expect("run");
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.branch_status.as_deref(), Some("abandoned"));
+        assert_eq!(cancelled.base_branch.as_deref(), Some("main"));
+        // The branch stays listed for cleanup...
+        assert!(store.workflow_run_view(run.id).await?.is_some());
+        assert_eq!(store.list_branch_cleanup_runs().await?.len(), 1);
+        // ...until the branch reference is dropped.
+        store.clear_run_branch(run.id).await?;
+        assert!(store.workflow_run_view(run.id).await?.is_none());
+        assert!(store.list_branch_cleanup_runs().await?.is_empty());
+
+        // A cancelled run that never had a branch stays hidden. (No tags, so
+        // the per-project guard does not block this second run.)
+        let (_other_feature, other) = start_coding_run(&mut store, "Add SSO").await?;
+        store.cancel_run(other.id).await?;
+        assert!(store.workflow_run_view(other.id).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_branch_proposal_is_normalized() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (_feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let kept = store.propose_run_branch(run.id, "Feature/Add OAuth!!").await?;
+        assert_eq!(kept, "Feature/Add-OAuth");
+        let stored = store.find_run(run.id).await?.expect("run");
+        assert_eq!(stored.branch.as_deref(), Some("Feature/Add-OAuth"));
+        assert_eq!(stored.branch_status.as_deref(), Some("proposed"));
+        assert!(
+            store.propose_run_branch(run.id, "//").await.is_err(),
+            "an unusable name is rejected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_coding_node_field_validation() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        // Unknown phase.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-phase",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [{ "id": "a", "kind": "action", "title": "A", "phase": "deploy" }],
+                        "edges": []
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // `subtask` only makes sense on action nodes.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-subtask",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [{ "id": "a", "kind": "event", "title": "A", "subtask": true }],
+                        "edges": []
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // `retrigger_node` needs `retrigger_on_reject`.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-retrigger",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [
+                            { "id": "draft", "kind": "action", "title": "D", "ai": true },
+                            { "id": "gate", "kind": "action", "title": "G", "approval": true, "retrigger_node": "draft" }
+                        ],
+                        "edges": [
+                            { "from": "draft", "to": "gate", "condition_type": "on_result", "condition_value": {} }
+                        ]
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // `retrigger_node` must name an automated node.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-retrigger-target",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [
+                            { "id": "draft", "kind": "action", "title": "D", "ai": true },
+                            { "id": "plain", "kind": "action", "title": "P" },
+                            { "id": "gate", "kind": "action", "title": "G", "approval": true, "retrigger_on_reject": true, "retrigger_node": "plain" }
+                        ],
+                        "edges": [
+                            { "from": "draft", "to": "gate", "condition_type": "on_result", "condition_value": {} },
+                            { "from": "plain", "to": "gate", "condition_type": "on_complete" }
+                        ]
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // `retrigger_node` must exist.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-retrigger-unknown",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [
+                            { "id": "draft", "kind": "action", "title": "D", "ai": true },
+                            { "id": "gate", "kind": "action", "title": "G", "approval": true, "retrigger_on_reject": true, "retrigger_node": "nope" }
+                        ],
+                        "edges": [
+                            { "from": "draft", "to": "gate", "condition_type": "on_result", "condition_value": {} }
+                        ]
+                    }),
+                )
+                .await
+                .is_err()
+        );
         Ok(())
     }
 }

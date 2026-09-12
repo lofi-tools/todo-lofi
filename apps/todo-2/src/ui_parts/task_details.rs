@@ -1,7 +1,7 @@
 use gpui::{
-    App, AppContext, BoxShadow, ClickEvent, Context, Entity, EventEmitter, InteractiveElement,
-    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
-    div, hsla, prelude::FluentBuilder, px, rgb, svg,
+    AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Entity, EventEmitter,
+    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled,
+    Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Disableable;
 use gpui_component::IconName;
@@ -9,15 +9,149 @@ use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
+use storage::prelude::{RunNote, RunStepView, RunView, run_notes};
 
 use crate::components::Checkbox;
 use crate::components::{DateTimePicker, DateTimePickerEvent};
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
 
+use super::agent_pane::build_task_context;
 use super::repeat_picker::{RepeatPicker, RepeatPickerEvent, repeat_label};
 use super::task_picker::{TaskPicker, TaskPickerEvent};
+
+/// The coding phases in run order, with their display labels. Mirrors
+/// `storage::CODING_PHASES`; the nodes of the `coding-task` recipe carry the
+/// same `phase` values.
+const CODING_PHASES: [(&str, &str); 5] = [
+    ("interview", "Interview"),
+    ("spec", "Spec"),
+    ("implement", "Implement"),
+    ("review", "Review"),
+    ("merge", "Merge"),
+];
+
+/// Where a phase sits in the run, derived from its step rows. A re-spec cycle
+/// leaves earlier steps done while a fresh one is open, so an open step wins
+/// over a done one of the same node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseState {
+    Pending,
+    Active,
+    Done,
+}
+
+fn phase_state(steps: &[RunStepView], node_id: &str) -> PhaseState {
+    let mut seen = false;
+    for step in steps.iter().filter(|step| step.node.id == node_id) {
+        if !step.task.done {
+            return PhaseState::Active;
+        }
+        seen = true;
+    }
+    if seen {
+        PhaseState::Done
+    } else {
+        PhaseState::Pending
+    }
+}
+
+/// The one step the run is waiting on, if any. Coding runs keep a single
+/// open step per cycle.
+fn current_step(steps: &[RunStepView]) -> Option<&RunStepView> {
+    steps.iter().find(|step| !step.task.done)
+}
+
+/// The UI's cycle counter: the run starts at round 1 and every rejection
+/// opens a new one. Derived from the log rather than from the step rows,
+/// because a rejection tombstones the previous cycle's steps.
+fn round_number(notes: &[RunNote]) -> usize {
+    1 + notes.iter().filter(|note| note.kind == "reject").count()
+}
+
+/// Assign each log entry its cycle (1-based) by counting rejections, then
+/// return the log newest-first for display.
+fn notes_by_round(notes: &[RunNote]) -> Vec<(usize, RunNote)> {
+    let mut round = 1;
+    let mut tagged = Vec::with_capacity(notes.len());
+    for note in notes {
+        tagged.push((round, note.clone()));
+        if note.kind == "reject" {
+            round += 1;
+        }
+    }
+    tagged.reverse();
+    tagged
+}
+
+/// The prompt the app drops into the agent pane for a phase (§8.1 of the
+/// coding workflow spec). The user edits and sends it; nothing is auto-sent.
+fn phase_prompt(
+    task: &TaskWithMeta,
+    notes: &[RunNote],
+    branch: Option<&str>,
+    phase: &str,
+) -> String {
+    let context = build_task_context(task);
+    match phase {
+        "interview" => {
+            let mut prompt = format!("/interview {}", task.title);
+            if let Some(description) = task.description.as_deref()
+                && !description.is_empty()
+            {
+                prompt.push_str(&format!("\n\n{description}"));
+            }
+            let round = round_number(notes);
+            if round > 1 {
+                let last_rejection = notes
+                    .iter()
+                    .filter(|note| note.kind == "reject")
+                    .next_back();
+                prompt.push_str(&format!("\n\nThis is round {round}."));
+                if let Some(note) = last_rejection
+                    && !note.body.trim().is_empty()
+                {
+                    prompt.push_str(&format!(" The last review rejected the result: {}", note.body));
+                }
+            }
+            prompt
+        }
+        "implement" => {
+            let mut prompt = String::from("Implement the approved spec.\n\n");
+            prompt.push_str(&context);
+            if let Some(spec) = task.spec.as_deref().filter(|spec| !spec.is_empty()) {
+                prompt.push_str(&format!("\n\nSpec:\n{spec}"));
+            }
+            let annotations: Vec<String> = notes
+                .iter()
+                .filter(|note| matches!(note.kind.as_str(), "annotation" | "reject"))
+                .map(|note| format!("- {} ({}): {}", note.kind, note.phase, note.body))
+                .collect();
+            if !annotations.is_empty() {
+                prompt.push_str(&format!("\n\nFeedback so far:\n{}", annotations.join("\n")));
+            }
+            let branch = branch.unwrap_or("the feature branch");
+            prompt.push_str(&format!("\n\nWork on branch `{branch}`. Do not merge it."));
+            prompt
+        }
+        "review" => format!(
+            "{context}\n\nSummarise what you changed on `{}` and call `complete_phase`, then wait for my review notes.",
+            branch.unwrap_or("the feature branch")
+        ),
+        "sub-interview" => {
+            let mut prompt = format!("/interview {}", task.title);
+            if let Some(description) = task.description.as_deref()
+                && !description.is_empty()
+            {
+                prompt.push_str(&format!("\n\n{description}"));
+            }
+            prompt
+        }
+        other => format!("{context}\n\nContinue the {other} phase."),
+    }
+}
 
 /// How long after an outside mousedown closed a picker card before the
 /// toggle button treats a click as a fresh open rather than the same click
@@ -47,6 +181,15 @@ pub enum TaskDetailsEvent {
     SubtaskCreated,
     /// A follow-up task was created; the task list reloads its current view.
     FollowUpCreated,
+    /// A coding phase action changed run state; the task list and workflow
+    /// panel reload (steps may have spawned or completed).
+    CodingChanged,
+    /// Put a composed phase prompt into the agent pane and switch to it. The
+    /// user still edits and sends it.
+    CodingLaunch {
+        phase: String,
+        prompt: String,
+    },
 }
 
 /// A selection change that arrived while edits were unsaved. `Some` selects
@@ -111,6 +254,25 @@ pub struct TaskDetails {
     /// The selected task's repeat template, shown as a "Repeats" field.
     repeat_template: Option<storage::RepeatTaskTemplate>,
     _repeat_template_fetch: Option<gpui::Task<()>>,
+    /// The selected task's coding run (root or nested root), for the phase
+    /// stepper at the top of the panel.
+    coding: Option<RunView>,
+    _coding_fetch: Option<gpui::Task<()>>,
+    /// Inline reason a coding action could not run (missing directory, dirty
+    /// tree, merge conflict, …).
+    coding_error: Option<String>,
+    /// The reject-notes box is open (spec gate or review gate).
+    coding_notes_open: bool,
+    coding_notes_step: Option<u64>,
+    coding_notes_input: Option<Entity<InputState>>,
+    _coding_notes_subscription: Option<Subscription>,
+    /// The manual-spec box is open (the fallback when no interview agent is
+    /// wired up).
+    coding_spec_open: bool,
+    coding_spec_input: Option<Entity<InputState>>,
+    _coding_spec_subscription: Option<Subscription>,
+    /// The spec artifact is expanded.
+    coding_spec_expanded: bool,
 }
 
 struct TimeEditInputs {
@@ -177,6 +339,17 @@ impl TaskDetails {
             repeat_outside_closed_at: None,
             repeat_template: None,
             _repeat_template_fetch: None,
+            coding: None,
+            _coding_fetch: None,
+            coding_error: None,
+            coding_notes_open: false,
+            coding_notes_step: None,
+            coding_notes_input: None,
+            _coding_notes_subscription: None,
+            coding_spec_open: false,
+            coding_spec_input: None,
+            _coding_spec_subscription: None,
+            coding_spec_expanded: false,
         }
     }
 
@@ -199,6 +372,11 @@ impl TaskDetails {
         self.parent = None;
         self.repeat_template = None;
         self.link_error = None;
+        self.coding = None;
+        self.coding_error = None;
+        self.coding_spec_expanded = false;
+        self.close_coding_notes();
+        self.close_coding_spec();
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
@@ -288,7 +466,43 @@ impl TaskDetails {
                     tracing::error!("Failed to fetch repeat template: {e}");
                 }
             }));
+        let coding_fetch = self.store.coding_run_for_task(task_id, cx);
+        self._coding_fetch = Some(cx.spawn(async move |this, cx| match coding_fetch.await {
+            Ok(view) => {
+                this.update(cx, |this, cx| {
+                    this.coding = view;
+                    this._coding_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch coding run: {e}");
+            }
+        }));
         cx.notify();
+    }
+
+    /// Re-fetch the selected task's coding run (after a phase action, or when
+    /// the workflow panel reports a change).
+    pub fn refresh_coding(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let fetch = self.store.coding_run_for_task(task_id, cx);
+        self._coding_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(view) => {
+                this.update(cx, |this, cx| {
+                    this.coding = view;
+                    this._coding_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch coding run: {e}");
+            }
+        }));
     }
 
     /// Reload the selected task's subtasks from the DB, e.g. right after a
@@ -1983,6 +2197,802 @@ fn format_deadline(deadline: u64) -> String {
 
 impl EventEmitter<TaskDetailsEvent> for TaskDetails {}
 
+/// A small muted chip, used for run metadata (recipe name, round, phase).
+fn chip(label: &str) -> impl IntoElement {
+    div()
+        .text_size(px(10.))
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(3.))
+        .bg(rgb(0x2a2a2a))
+        .text_color(rgb(0xa3a3a3))
+        .child(label.to_string())
+}
+
+impl TaskDetails {
+    // ─── Coding workflow actions ────────────────────────────────────────────
+
+    fn close_coding_notes(&mut self) {
+        self.coding_notes_open = false;
+        self.coding_notes_step = None;
+        self.coding_notes_input = None;
+        self._coding_notes_subscription = None;
+    }
+
+    fn close_coding_spec(&mut self) {
+        self.coding_spec_open = false;
+        self.coding_spec_input = None;
+        self._coding_spec_subscription = None;
+    }
+
+    /// Run a coding action, then reload the run and surface any failure inline.
+    /// Every phase action funnels through here so the stepper always reflects
+    /// what the engine actually did (or why it refused).
+    fn run_coding_action(
+        &mut self,
+        action: gpui::Task<anyhow::Result<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let target = self.selected.as_ref().map(|task| task.id);
+        self._coding_fetch = Some(cx.spawn(async move |this, cx| {
+            let error = action.await.err().map(|error| error.to_string());
+            let view = match target {
+                Some(task_id) => match store.coding_run_for_task(task_id, cx).await {
+                    Ok(view) => view,
+                    Err(fetch_error) => {
+                        tracing::error!("Failed to reload coding run: {fetch_error}");
+                        None
+                    }
+                },
+                None => None,
+            };
+            this.update(cx, |this, cx| {
+                this.coding = view;
+                this.coding_error = error;
+                this._coding_fetch = None;
+                this.close_coding_notes();
+                this.close_coding_spec();
+                cx.emit(TaskDetailsEvent::CodingChanged);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn start_coding_run(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let action =
+            cx.spawn(async move |_, cx| store.start_coding_run(task_id, cx).await.map(|_| ()));
+        self.run_coding_action(action, cx);
+    }
+
+    fn complete_coding_step(
+        &mut self,
+        step_id: u64,
+        result: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let action = self.store.complete_workflow_step(step_id, result, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    fn approve_coding_spec(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let action =
+            cx.spawn(async move |_, cx| store.approve_coding_spec(task_id, cx).await.map(|_| ()));
+        self.run_coding_action(action, cx);
+    }
+
+    fn merge_coding_run(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.merge_coding_branch(run_id, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    fn cancel_coding_run(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.cancel_workflow_run(run_id, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    fn request_sub_task_interview(&mut self, sub_task_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.request_sub_task_interview(sub_task_id, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    /// Open the reject-notes box for the approval step `step_id`.
+    fn open_coding_notes(&mut self, step_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.coding_notes_open && self.coding_notes_step == Some(step_id) {
+            self.close_coding_notes();
+            cx.notify();
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("What needs to change?", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_coding_reject(cx);
+            }
+        });
+        self.coding_notes_open = true;
+        self.coding_notes_step = Some(step_id);
+        self.coding_notes_input = Some(input);
+        self._coding_notes_subscription = Some(subscription);
+        cx.notify();
+    }
+
+    /// Reject the gate the notes box belongs to, carrying the notes as the
+    /// step result and into the run log.
+    fn commit_coding_reject(&mut self, cx: &mut Context<Self>) {
+        let Some(step_id) = self.coding_notes_step else {
+            return;
+        };
+        let notes = self
+            .coding_notes_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default();
+        let notes = notes.trim().to_string();
+        let result = serde_json::json!({ "approved": false, "notes": notes });
+        self.complete_coding_step(step_id, result, cx);
+    }
+
+    /// Open the manual-spec box (the fallback when no interview agent is
+    /// wired into the pane).
+    fn open_coding_spec(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.coding_spec_open {
+            self.close_coding_spec();
+            cx.notify();
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Paste or write the spec, then Enter", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_coding_spec(cx);
+            }
+        });
+        self.coding_spec_open = true;
+        self.coding_spec_input = Some(input);
+        self._coding_spec_subscription = Some(subscription);
+        cx.notify();
+    }
+
+    /// Save the manual spec and let the engine advance the run to the spec
+    /// gate.
+    fn commit_coding_spec(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let spec = self
+            .coding_spec_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if spec.is_empty() {
+            return;
+        }
+        let action = self.store.save_coding_spec(task_id, spec, None, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    /// Compose a phase prompt and hand it to the layout, which inserts it into
+    /// the agent pane and switches to it.
+    fn launch_phase(
+        &mut self,
+        task: &TaskWithMeta,
+        view: &RunView,
+        phase: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let notes = run_notes(&view.run.step_results.0);
+        let prompt = phase_prompt(task, &notes, view.run.branch.as_deref(), phase);
+        cx.emit(TaskDetailsEvent::CodingLaunch {
+            phase: phase.to_string(),
+            prompt,
+        });
+    }
+
+    // ─── Coding workflow rendering ─────────────────────────────────────────
+
+    fn coding_section(
+        &mut self,
+        task: &TaskWithMeta,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(view) = self.coding.clone() else {
+            // Only the feature task (a top-level task) can start a run; phase
+            // steps and plain sub-tasks have nothing to start here.
+            if task.node_id.is_some() || task.parent_id.is_some() || task.done {
+                return div().into_any_element();
+            }
+            return self.coding_start_card(task, cx);
+        };
+        let run_id = view.run.id;
+        let task_id = task.id;
+        let notes = run_notes(&view.run.step_results.0);
+        let round = round_number(&notes);
+        let current = current_step(&view.steps).cloned();
+        let mut section = div()
+            .id(("coding-section", task_id))
+            .v_flex()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(HAIRLINE))
+            .bg(rgb(CARD_BG));
+
+        let mut header = div()
+            .h_flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xe5e5e5))
+                            .child("Coding workflow"),
+                    )
+                    .child(chip(&view.recipe_name))
+                    .child(chip(&format!("Round {round}"))),
+            );
+        if view.run.status == "active" {
+            header = header.child(
+                Button::new(format!("coding-cancel-{run_id}"))
+                    .ghost()
+                    .compact()
+                    .label("Cancel run")
+                    .tooltip("Cancel the run; its branch stays for cleanup")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cancel_coding_run(run_id, cx);
+                    })),
+            );
+        } else {
+            header = header.child(chip(&view.run.status));
+        }
+        section = section.child(header);
+        section = section.child(self.coding_stepper(&view, cx));
+
+        if let Some(branch) = view.run.branch.clone() {
+            let status = view.run.branch_status.clone().unwrap_or_default();
+            let base = view.run.base_branch.clone().unwrap_or_default();
+            let mut detail = status;
+            if !base.is_empty() {
+                detail = format!("{detail} · from {base}");
+            }
+            section = section.child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(format!("branch {branch}")),
+                    )
+                    .child(chip(&detail)),
+            );
+        }
+
+        if let Some(error) = self.coding_error.clone() {
+            section = section.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xf87171))
+                    .child(error),
+            );
+        }
+
+        section = section.child(self.coding_actions(task, &view, current.as_ref(), window, cx));
+        section = section.child(self.coding_sub_tasks(cx));
+        section = section.child(self.coding_round_log(&notes));
+        section = section.child(self.coding_spec_artifact(task, &view, cx));
+        section.into_any_element()
+    }
+
+    /// The affordance shown on a feature task that has no run yet.
+    fn coding_start_card(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) -> AnyElement {
+        let task_id = task.id;
+        div()
+            .v_flex()
+            .gap_2()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(HAIRLINE))
+            .bg(rgb(CARD_BG))
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(rgb(0xe5e5e5))
+                            .child("Coding workflow"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8a8a8a))
+                            .child("interview → spec → implement → review → merge"),
+                    ),
+            )
+            .child(
+                Button::new(format!("coding-start-{task_id}"))
+                    .compact()
+                    .label("Start coding workflow")
+                    .tooltip("Turn this task into a coding run")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_coding_run(task_id, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn coding_stepper(&self, view: &RunView, cx: &mut Context<Self>) -> AnyElement {
+        let phases: Vec<AnyElement> = CODING_PHASES
+            .iter()
+            .map(|(node_id, label)| {
+                let state = phase_state(&view.steps, node_id);
+                let (glyph, color) = match state {
+                    PhaseState::Done => ("✓", rgb(0x6b6b6b)),
+                    PhaseState::Active => ("◉", rgb(0xd4d4d4)),
+                    PhaseState::Pending => ("○", rgb(0x6b6b6b)),
+                };
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(div().text_xs().text_color(color).child(glyph))
+                    .child(
+                        div()
+                            .text_xs()
+                            .when(state == PhaseState::Active, |this| this.font_semibold())
+                            .text_color(color)
+                            .child(*label),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let _ = cx;
+        div()
+            .h_flex()
+            .items_center()
+            .gap_3()
+            .flex_wrap()
+            .children(phases)
+            .into_any_element()
+    }
+
+    /// The action row for the step the run is waiting on, plus the reject and
+    /// manual-spec boxes when they are open.
+    fn coding_actions(
+        &mut self,
+        task: &TaskWithMeta,
+        view: &RunView,
+        current: Option<&RunStepView>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let task_id = task.id;
+        let run_id = view.run.id;
+        let mut actions = div().h_flex().items_center().gap_2().flex_wrap();
+        match current.map(|step| step.node.id.as_str()) {
+            Some("interview") => {
+                let task_for_prompt = task.clone();
+                let view_for_prompt = view.clone();
+                actions = actions
+                    .child(
+                        Button::new(format!("coding-interview-{task_id}"))
+                            .compact()
+                            .label("Start interview")
+                            .tooltip("Compose the /interview prompt in the agent pane")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.launch_phase(
+                                    &task_for_prompt,
+                                    &view_for_prompt,
+                                    "interview",
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("coding-manual-spec-{task_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Write spec manually")
+                            .tooltip("Skip the agent and write the spec yourself")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_coding_spec(window, cx);
+                            })),
+                    );
+            }
+            Some("spec") => {
+                let step_id = current.map(|step| step.task.id).unwrap_or_default();
+                actions = actions
+                    .child(
+                        Button::new(format!("coding-approve-spec-{task_id}"))
+                            .compact()
+                            .label("Approve spec & create branch")
+                            .tooltip("Cut the feature branch and start implementation")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.approve_coding_spec(task_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("coding-reject-spec-{task_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Reject…")
+                            .tooltip("Send the run back to the interview with notes")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_coding_notes(step_id, window, cx);
+                            })),
+                    );
+            }
+            Some("implement") => {
+                let step_id = current.map(|step| step.task.id).unwrap_or_default();
+                let task_for_prompt = task.clone();
+                let view_for_prompt = view.clone();
+                actions = actions
+                    .child(
+                        Button::new(format!("coding-implement-{task_id}"))
+                            .compact()
+                            .label("Start implementation")
+                            .tooltip("Compose the implementation prompt in the agent pane")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.launch_phase(
+                                    &task_for_prompt,
+                                    &view_for_prompt,
+                                    "implement",
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("coding-implement-done-{task_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Mark implemented")
+                            .tooltip("Confirm the work is done and move to review")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.complete_coding_step(step_id, serde_json::json!({}), cx);
+                            })),
+                    );
+            }
+            Some("review") => {
+                let step_id = current.map(|step| step.task.id).unwrap_or_default();
+                let task_for_prompt = task.clone();
+                let view_for_prompt = view.clone();
+                actions = actions
+                    .child(
+                        Button::new(format!("coding-review-brief-{task_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Ask for a summary")
+                            .tooltip("Compose a summary request in the agent pane")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.launch_phase(
+                                    &task_for_prompt,
+                                    &view_for_prompt,
+                                    "review",
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("coding-review-approve-{task_id}"))
+                            .compact()
+                            .label("Approve review")
+                            .tooltip("Accept the implementation and queue the merge")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.complete_coding_step(
+                                    step_id,
+                                    serde_json::json!({ "approved": true }),
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("coding-review-reject-{task_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Reject…")
+                            .tooltip("Send the run back to the interview with notes")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_coding_notes(step_id, window, cx);
+                            })),
+                    );
+            }
+            Some("merge") => {
+                actions = actions.child(
+                    Button::new(format!("coding-merge-{task_id}"))
+                        .compact()
+                        .label("Merge branch")
+                        .tooltip("Merge the feature branch into its base branch")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.merge_coding_run(run_id, cx);
+                        })),
+                );
+            }
+            _ => {}
+        }
+
+        if self.coding_notes_open
+            && let Some(input) = self.coding_notes_input.clone()
+        {
+            actions = actions.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(field_label("Why is this being sent back?"))
+                    .child(
+                        Input::new(&input)
+                            .small()
+                            .appearance(false)
+                            .bg(rgb(APP_BG))
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .rounded_md(),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("coding-notes-cancel-{task_id}"))
+                                    .ghost()
+                                    .compact()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_coding_notes();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("coding-notes-send-{task_id}"))
+                                    .compact()
+                                    .label("Reject with notes")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit_coding_reject(cx);
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        if self.coding_spec_open
+            && let Some(input) = self.coding_spec_input.clone()
+        {
+            actions = actions.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(field_label("Spec"))
+                    .child(
+                        Input::new(&input)
+                            .small()
+                            .appearance(false)
+                            .bg(rgb(APP_BG))
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .rounded_md(),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("coding-spec-cancel-{task_id}"))
+                                    .ghost()
+                                    .compact()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_coding_spec();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("coding-spec-save-{task_id}"))
+                                    .compact()
+                                    .label("Save spec")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit_coding_spec(cx);
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        actions.into_any_element()
+    }
+
+    /// The model-created sub-tasks of the feature task. Phase steps are
+    /// subtasks too, so they are filtered out (`node_id` is set on those).
+    fn coding_sub_tasks(&self, cx: &mut Context<Self>) -> AnyElement {
+        let work_items: Vec<&storage::Task> = self
+            .subtasks
+            .iter()
+            .filter(|sub| sub.node_id.is_none())
+            .collect();
+        if work_items.is_empty() {
+            return div().into_any_element();
+        }
+        let rows: Vec<AnyElement> = work_items
+            .into_iter()
+            .map(|sub| {
+                let sub_id = sub.id;
+                let nested = sub.workflow_run_id.is_some();
+                let mut row = div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8a8a8a))
+                            .child(if sub.done { "☑" } else { "☐" }),
+                    )
+                    .child(
+                        div()
+                            .id(("coding-sub-task", sub_id))
+                            .text_sm()
+                            .text_color(if sub.done { rgb(0x6b6b6b) } else { rgb(0xd4d4d4) })
+                            .hover(|this| this.underline())
+                            .child(sub.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: sub_id });
+                            })),
+                    );
+                if nested {
+                    row = row.child(chip("nested run"));
+                } else if !sub.done {
+                    row = row.child(
+                        Button::new(format!("coding-sub-interview-{sub_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Interview")
+                            .tooltip("Start a sub-task interview run")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_sub_task_interview(sub_id, cx);
+                            })),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect();
+        div()
+            .v_flex()
+            .gap_1()
+            .child(field_label(&format!("Sub-tasks ({})", rows.len())))
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn coding_round_log(&self, log: &[RunNote]) -> AnyElement {
+        let notes = notes_by_round(log);
+        if notes.is_empty() {
+            return div().into_any_element();
+        }
+        let rounds = notes.iter().map(|(round, _)| *round).max().unwrap_or(1);
+        let rows: Vec<AnyElement> = notes
+            .iter()
+            .map(|(round, note)| {
+                let when = jiff::Timestamp::from_second(note.at as i64)
+                    .map(|at| at.to_zoned(jiff::tz::TimeZone::system()))
+                    .map(|at| at.strftime("%b %-d %-I:%M%p").to_string())
+                    .unwrap_or_default();
+                div()
+                    .h_flex()
+                    .items_start()
+                    .gap_2()
+                    .child(chip(&format!("Round {round}")))
+                    .child(chip(&note.kind))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(format!("{} · {when}", note.body)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .v_flex()
+            .gap_1()
+            .child(field_label(&format!("Round log ({rounds} cycles)")))
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn coding_spec_artifact(
+        &self,
+        task: &TaskWithMeta,
+        view: &RunView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(spec) = task.spec.clone().filter(|spec| !spec.is_empty()) else {
+            return div().into_any_element();
+        };
+        let lines = spec.lines().count();
+        let mut block = div()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("coding-spec-toggle")
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .cursor_pointer()
+                            .child(format!(
+                                "{} Spec ({lines} lines)",
+                                if self.coding_spec_expanded { "▾" } else { "▸" }
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.coding_spec_expanded = !this.coding_spec_expanded;
+                                cx.notify();
+                            })),
+                    )
+                    .when_some(self.spec_path_hint(task), |this, path| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(0x8a8a8a))
+                                .child(path),
+                        )
+                    }),
+            )
+            .when(self.coding_spec_expanded, |this| {
+                this.child(
+                    div()
+                        .max_h(px(240.))
+                        .overflow_y_scrollbar()
+                        .p_2()
+                        .rounded_md()
+                        .bg(rgb(APP_BG))
+                        .text_xs()
+                        .text_color(rgb(0xd4d4d4))
+                        .child(spec.clone()),
+                )
+            });
+        // Keep the run in the signature: the artifact is part of the run, and
+        // callers pass it so the render order matches the other sections.
+        let _ = view;
+        block = block.w_full();
+        block.into_any_element()
+    }
+
+    /// The spec file path the agent reported, shown next to the spec header.
+    fn spec_path_hint(&self, task: &TaskWithMeta) -> Option<String> {
+        task.spec_path.clone().filter(|path| !path.is_empty())
+    }
+}
+
 impl Render for TaskDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
@@ -1993,6 +3003,9 @@ impl Render for TaskDetails {
                     .child("Select a task to see details"),
             ),
             Some(task) => {
+                // Owned so the coding section (which needs `&mut self`) does not
+                // conflict with the borrow of `self.selected`.
+                let task = task.clone();
                 let task_id = task.id;
                 let done = task.done;
                 let store = self.store.clone();
@@ -2000,6 +3013,7 @@ impl Render for TaskDetails {
                 let blocked = self.computed_blocked();
 
                 let mut details = div().v_flex().gap_3();
+                details = details.child(self.coding_section(&task, window, cx));
                 let mut header = div().v_flex().gap_1();
                 if !task.leaf_tags.is_empty() {
                     header = header.child(div().h_flex().gap_1().flex_wrap().children(
@@ -2278,5 +3292,158 @@ impl Render for TaskDetails {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod coding_tests {
+    use super::*;
+    use storage::prelude::RecipeNode;
+
+    fn feature(title: &str, description: Option<&str>) -> TaskWithMeta {
+        let mut meta = phase_step_task(1, "interview", false);
+        meta.task.title = title.to_string();
+        meta.task.description = description.map(str::to_owned);
+        meta
+    }
+
+    fn phase_step_view(node_id: &str, phase: &str, done: bool) -> RunStepView {
+        RunStepView {
+            task: phase_step_task(2, node_id, done),
+            node: RecipeNode {
+                id: node_id.to_string(),
+                kind: "action".to_string(),
+                title: node_id.to_string(),
+                description: None,
+                ai: true,
+                approval: false,
+                retrigger_on_reject: false,
+                phase: Some(phase.to_string()),
+                subtask: true,
+                retrigger_node: None,
+            },
+            outgoing: Vec::new(),
+            incoming_event: None,
+        }
+    }
+
+    fn phase_step_task(id: u64, node_id: &str, done: bool) -> TaskWithMeta {
+        TaskWithMeta {
+            task: storage::task::Task {
+                id,
+                title: node_id.to_string(),
+                description: None,
+                branch_name: None,
+                labels: None,
+                deadline: None,
+                blocked_until: None,
+                importance_factor: 1.0,
+                urgency_factor: 1.0,
+                done,
+                completed_at: None,
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
+                parent_id: None,
+                source_task_id: None,
+                deleted_at: None,
+                timezone: None,
+                comments: None,
+                is_seed: false,
+                workflow_run_id: None,
+                node_id: Some(node_id.to_string()),
+                spec: None,
+                spec_path: None,
+                subtasks: storage::prelude::Deferred::default(),
+                parent: storage::prelude::Deferred::default(),
+            },
+            direct_tags: Vec::new(),
+            inherited_tags: Vec::new(),
+            inferred_tags: Vec::new(),
+            leaf_tags: Vec::new(),
+            blocked: false,
+        }
+    }
+
+    fn note(kind: &str, body: &str) -> RunNote {
+        RunNote::new(kind, "review", "review", body)
+    }
+
+    #[test]
+    fn interview_prompt_uses_the_slash_form() {
+        let task = feature("Add OAuth", Some("Sign in with Google."));
+        let prompt = phase_prompt(&task, &[], None, "interview");
+        assert!(
+            prompt.starts_with("/interview Add OAuth"),
+            "agent-cli detects the phase by the `/interview ` prefix: {prompt}"
+        );
+        assert!(prompt.contains("Sign in with Google."));
+    }
+
+    #[test]
+    fn reopened_interview_carries_the_rejection_notes() {
+        let task = feature("Add OAuth", None);
+        let notes = vec![note("reject", "Needs a migration test.")];
+        let prompt = phase_prompt(&task, &notes, None, "interview");
+        assert!(prompt.contains("round 2"), "{prompt}");
+        assert!(prompt.contains("Needs a migration test."), "{prompt}");
+    }
+
+    #[test]
+    fn implement_prompt_names_the_branch_and_the_feedback() {
+        let mut task = feature("Add OAuth", None);
+        task.task.spec = Some("Spec body".to_string());
+        let notes = vec![note("annotation", "Guard the empty-input case.")];
+        let prompt = phase_prompt(&task, &notes, Some("feature/7-add-oauth"), "implement");
+        assert!(prompt.contains("feature/7-add-oauth"), "{prompt}");
+        assert!(prompt.contains("Spec body"), "{prompt}");
+        assert!(prompt.contains("Guard the empty-input case."), "{prompt}");
+    }
+
+    #[test]
+    fn phase_state_prefers_the_open_step() {
+        let steps = vec![
+            phase_step_view("interview", "interview", true),
+            phase_step_view("interview", "interview", false),
+        ];
+        assert_eq!(phase_state(&steps, "interview"), PhaseState::Active);
+        assert_eq!(phase_state(&steps, "merge"), PhaseState::Pending);
+        assert_eq!(phase_state(&steps[..1], "interview"), PhaseState::Done);
+    }
+
+    #[test]
+    fn notes_group_by_cycle_newest_first() {
+        let notes = vec![
+            note("spec", "first spec"),
+            note("reject", "needs work"),
+            note("spec", "second spec"),
+        ];
+        let grouped = notes_by_round(&notes);
+        assert_eq!(grouped.len(), 3);
+        // Newest first, and the second cycle starts after the rejection.
+        assert_eq!(grouped[0].0, 2);
+        assert_eq!(grouped[0].1.body, "second spec");
+        assert_eq!(grouped[1].0, 1);
+        assert_eq!(grouped[1].1.kind, "reject");
+        assert_eq!(grouped[2].0, 1);
+    }
+
+    #[test]
+    fn round_number_counts_rejections() {
+        assert_eq!(round_number(&[]), 1);
+        let notes = vec![note("reject", "a"), note("spec", "b"), note("reject", "c")];
+        assert_eq!(round_number(&notes), 3);
+    }
+
+    #[test]
+    fn current_step_is_the_open_one() {
+        let steps = vec![
+            phase_step_view("interview", "interview", true),
+            phase_step_view("spec", "spec", true),
+            phase_step_view("review", "review", false),
+        ];
+        assert_eq!(
+            current_step(&steps).map(|step| step.node.id.as_str()),
+            Some("review")
+        );
     }
 }

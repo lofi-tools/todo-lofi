@@ -26,8 +26,9 @@ pub mod prelude {
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta, factors_between};
     pub use crate::workflow::{
-        Recipe, RecipeEdge, RecipeMeta, RecipeNode, RunStepView, RunView, WorkflowRecipe,
-        WorkflowRun,
+        CODING_PHASES, Recipe, RecipeEdge, RecipeMeta, RecipeNode, RUN_NOTES_KEY, RunNote,
+        RunStepView, RunView, WorkflowRecipe, WorkflowRun, coding_recipes, normalize_branch_name,
+        run_notes,
     };
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;

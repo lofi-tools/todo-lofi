@@ -1008,6 +1008,8 @@ mod tests {
                 is_seed: false,
                 workflow_run_id: None,
                 node_id: None,
+                spec: None,
+                spec_path: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },

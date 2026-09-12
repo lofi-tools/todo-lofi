@@ -29,6 +29,8 @@ use ui_parts::task_list::{TaskListEvent, TaskListView};
 use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 use ui_parts::workflows::{WorkflowPanel, WorkflowPanelEvent};
 
+mod coding_git;
+mod coding_mcp;
 mod components;
 mod projects;
 mod store;
@@ -103,6 +105,9 @@ struct Layout {
     _picker_subscription: Option<Subscription>,
     /// Window-wide Escape observer (focus-independent deselect).
     _escape_observer: Subscription,
+    /// The loopback MCP endpoint the coding agent attaches to, held for the
+    /// app run (the listener thread lives until the process exits).
+    _coding_mcp: Option<coding_mcp::CodingMcpServer>,
 }
 
 impl Layout {
@@ -112,6 +117,41 @@ impl Layout {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The agent's tool surface: a loopback MCP endpoint over the same
+        // store the UI uses. Every mutating tool call signals this channel so
+        // the panels reload when the agent attaches a spec or spawns a
+        // sub-task.
+        let (coding_notify, mut coding_changes) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let coding_endpoint = match coding_mcp::start(
+            store.clone(),
+            gpui_tokio::Tokio::handle(cx),
+            Some(coding_notify),
+        ) {
+            Ok(server) => {
+                tracing::info!(
+                    url = server.url(),
+                    token = server.token(),
+                    "coding MCP endpoint ready"
+                );
+                Some(server)
+            }
+            Err(error) => {
+                tracing::error!("Failed to start the coding MCP endpoint: {error}");
+                None
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            while coding_changes.recv().await.is_some() {
+                this.update(cx, |this, cx| {
+                    this.details
+                        .update(cx, |details, cx| details.refresh_coding(cx));
+                    this.task_list.update(cx, |list, cx| list.refresh(cx));
+                    this.workflows.update(cx, |panel, cx| panel.refresh(cx));
+                })
+                .ok();
+            }
+        })
+        .detach();
         let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
         // The agent pane keeps one session per project, so it is created once
         // with the layout and merely stops being rendered when the details
@@ -272,11 +312,14 @@ impl Layout {
         })
         .detach();
         // A workflow action (start run, approve/reject, fire event) can
-        // spawn or complete tasks: reload the task list.
+        // spawn or complete tasks: reload the task list, and pick the change
+        // up in the details stepper when the run belongs to the selected task.
         let list_for_workflow = task_list.clone();
+        let details_for_workflow = details.clone();
         cx.subscribe(&workflows, move |_this, _panel, event, cx| match event {
             WorkflowPanelEvent::Changed => {
                 list_for_workflow.update(cx, |list, cx| list.refresh(cx));
+                details_for_workflow.update(cx, |details, cx| details.refresh_coding(cx));
             }
         })
         .detach();
@@ -345,7 +388,7 @@ impl Layout {
         cx.subscribe_in(
             &details,
             window,
-            move |_this, _details, event, _window, cx| match event {
+            move |this, _details, event, window, cx| match event {
                 TaskDetailsEvent::Toggled { task_id, done } => {
                     list_for_toggle.update(cx, |list, cx| {
                         list.on_task_done_toggled(*task_id, *done, cx)
@@ -377,6 +420,21 @@ impl Layout {
                 }
                 TaskDetailsEvent::SubtaskCreated | TaskDetailsEvent::FollowUpCreated => {
                     list_for_pending.update(cx, |list, cx| list.refresh(cx));
+                }
+                // A phase action spawned or completed steps: reload the task
+                // list and the run cards.
+                TaskDetailsEvent::CodingChanged => {
+                    list_for_pending.update(cx, |list, cx| list.refresh(cx));
+                    workflows_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
+                }
+                // A phase prompt is ready: drop it into the agent pane and
+                // show the pane. Sending stays manual so it can be edited.
+                TaskDetailsEvent::CodingLaunch { phase, prompt } => {
+                    tracing::info!(phase, "coding phase prompt ready in the agent pane");
+                    let prompt = prompt.clone();
+                    this.agent_pane
+                        .update(cx, |pane, cx| pane.insert_prompt_text(prompt, window, cx));
+                    this.show_right_pane(RightPane::Agent, window, cx);
                 }
             },
         )
@@ -489,6 +547,7 @@ impl Layout {
             _project_subscription: project_subscription,
             _picker_subscription: None,
             _escape_observer: escape_observer,
+            _coding_mcp: coding_endpoint,
         }
     }
 
@@ -1020,6 +1079,9 @@ fn main() {
             };
             let mut store = TodoStore::new(&config).await?;
             store.seed().await?;
+            // The coding recipes ship with the app rather than with the demo
+            // seed data, so they exist for every project.
+            store.ensure_coding_recipes().await?;
             // The database is in-memory, so re-register the Todoist
             // connection row when tokens survived in ~/.config/my-todo.
             if todoist_auth::has_stored_credentials()

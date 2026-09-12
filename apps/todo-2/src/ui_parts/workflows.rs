@@ -4,7 +4,7 @@
 //! or firing an event wait. Starting a run is one click per recipe.
 
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div, rgb,
+    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div, px, rgb,
     prelude::FluentBuilder,
 };
 use gpui_component::StyledExt;
@@ -25,7 +25,32 @@ pub struct WorkflowPanel {
     store: Store,
     recipes: Vec<RecipeMeta>,
     runs: Vec<RunView>,
+    /// Non-active coding runs that still hold a feature branch.
+    branch_runs: Vec<RunView>,
+    /// Runs whose branch the user chose to keep, dismissed for this session.
+    kept_branches: std::collections::HashSet<u64>,
     _fetch: Option<Task<()>>,
+}
+
+/// "Round 2 · Implement" for a coding run; `None` for ordinary recipes.
+fn phase_label(view: &RunView) -> Option<String> {
+    view.run.root_task_id?;
+    if view.run.status != "active" {
+        return Some(view.run.status.clone());
+    }
+    let round = view
+        .steps
+        .iter()
+        .filter(|step| step.node.id == "spec")
+        .count()
+        .max(1);
+    let phase = view
+        .steps
+        .iter()
+        .find(|step| !step.task.done)
+        .and_then(|step| step.node.phase.clone())
+        .unwrap_or_else(|| "done".to_string());
+    Some(format!("Round {round} · {phase}"))
 }
 
 fn now_secs() -> u64 {
@@ -76,6 +101,8 @@ impl WorkflowPanel {
             store,
             recipes: Vec::new(),
             runs: Vec::new(),
+            branch_runs: Vec::new(),
+            kept_branches: std::collections::HashSet::new(),
             _fetch: None,
         };
         panel.refresh(cx);
@@ -88,9 +115,11 @@ impl WorkflowPanel {
         self._fetch = Some(cx.spawn(async move |this, cx| {
             let recipes = store.list_recipe_metas(cx).await.unwrap_or_default();
             let runs = store.list_active_run_views(cx).await.unwrap_or_default();
+            let branch_runs = store.list_branch_cleanup_runs(cx).await.unwrap_or_default();
             this.update(cx, |this, cx| {
                 this.recipes = recipes;
                 this.runs = runs;
+                this.branch_runs = branch_runs;
                 this._fetch = None;
                 cx.notify();
             })
@@ -108,15 +137,29 @@ impl WorkflowPanel {
             }
             let recipes = store.list_recipe_metas(cx).await.unwrap_or_default();
             let runs = store.list_active_run_views(cx).await.unwrap_or_default();
+            let branch_runs = store.list_branch_cleanup_runs(cx).await.unwrap_or_default();
             this.update(cx, |this, cx| {
                 this.recipes = recipes;
                 this.runs = runs;
+                this.branch_runs = branch_runs;
                 this._fetch = None;
                 cx.emit(WorkflowPanelEvent::Changed);
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Delete a run's feature branch and drop it from the cleanup list.
+    fn delete_branch(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let delete = self.store.delete_coding_branch(run_id, cx);
+        self.run_action(delete, cx);
+    }
+
+    /// Keep a branch: dismiss the row for this session without touching git.
+    fn keep_branch(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        self.kept_branches.insert(run_id);
+        cx.notify();
     }
 
     fn start_run(&mut self, recipe_id: u64, cx: &mut Context<Self>) {
@@ -150,6 +193,7 @@ impl Render for WorkflowPanel {
             .v_flex()
             .gap_2()
             .child(self.header(cx))
+            .child(self.branch_cleanup(cx))
             .children(self.runs.iter().map(|view| self.run_card(view, window, cx)))
     }
 }
@@ -160,8 +204,9 @@ impl WorkflowPanel {
             .recipes
             .iter()
             // Managed-tag automations (travel checklists) are enabled from
-            // the Automations panel: they own a tag+panel, not a run.
-            .filter(|recipe| recipe.managed_tag.is_none())
+            // the Automations panel: they own a tag+panel, not a run. Phased
+            // recipes (coding) are started from a feature task instead.
+            .filter(|recipe| recipe.managed_tag.is_none() && !recipe.phased)
             .map(|recipe| {
                 let recipe_id = recipe.id;
                 let name = recipe.name.clone();
@@ -234,6 +279,18 @@ impl WorkflowPanel {
                             .h_flex()
                             .items_center()
                             .gap_2()
+                            .when_some(phase_label(view), |this, label| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .px(px(5.))
+                                        .py(px(1.))
+                                        .rounded(px(3.))
+                                        .bg(rgb(0x2a2a2a))
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child(label),
+                                )
+                            })
                             .child(
                                 div()
                                     .text_xs()
@@ -244,6 +301,70 @@ impl WorkflowPanel {
                     ),
             )
             .children(steps)
+            .into_any_element()
+    }
+
+    /// "Branches to clean up": cancelled or completed coding runs that still
+    /// hold a feature branch, so cleanup is deliberate rather than implicit.
+    fn branch_cleanup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows: Vec<gpui::AnyElement> = self
+            .branch_runs
+            .iter()
+            .filter(|view| !self.kept_branches.contains(&view.run.id))
+            .filter_map(|view| view.run.branch.clone().map(|branch| (view.run.id, branch)))
+            .map(|(run_id, branch)| {
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(rgb(0xd4d4d4))
+                            .child(branch),
+                    )
+                    .child(
+                        Button::new(format!("delete-branch-{run_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Delete branch")
+                            .tooltip("Delete this feature branch")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_branch(run_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("keep-branch-{run_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Keep")
+                            .tooltip("Keep the branch and hide this row")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.keep_branch(run_id, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        if rows.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .v_flex()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x2f2f2f))
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Branches to clean up"),
+            )
+            .children(rows)
             .into_any_element()
     }
 

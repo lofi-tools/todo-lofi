@@ -1,6 +1,6 @@
 # Coding Workflow Runs (AI-assisted feature development) — Spec
 
-Status: Draft v1 (interview-derived; no code written yet)
+Status: Implemented (see §19 for the parts that are still open)
 Supersedes/relates to: `docs/spec/workflow-engine-spec.md` (v1 recipe format),
 `docs/spec/workflow-simplification-spec.md` (v2 data model, implemented),
 `docs/spec/agent-cli-interview-feature-spec.md` (`/interview`, `ask_user`),
@@ -833,3 +833,82 @@ Decline).
 8. Agent pane phase prompts + run strip (the question card lands in step 1).
 9. Sub-task creation, nested runs, sub-task interviews.
 10. Git merge on the Completed step; polish + next-action suggestions.
+
+## 19. Implementation status
+
+Implemented and verified (`cargo check --workspace` clean; `cargo test -p
+storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
+
+**Storage (`libs/storage`)**
+
+- Migration `0017_coding_workflow.sql`: `workflow_runs.root_task_id|branch|
+  base_branch|branch_status`, `tasks.spec|spec_path`, root-task index.
+- `RecipeNode.phase|subtask|retrigger_node` + validation (unknown phase,
+  `subtask` on a non-action node, non-`ai` or self `retrigger_node` rejected).
+- `@notes`: `RunNote` / `run_notes` / `append_run_note`; approvals and
+  rejections are logged by `evaluate_step_completion`, and `retry_task` clears
+  only the node's own result so the log survives a re-spec.
+- `create_task_run` (root task tagged with the run, phases materialize as its
+  subtasks, one-run-per-project guard with nested runs exempt),
+  `coding_run_for_task`, `list_branch_cleanup_runs`, `set_run_branch`,
+  `propose_run_branch`, `clear_run_branch`, `mark_branch_merged`,
+  `complete_coding_merge`, `cancel_run` marking the branch abandoned.
+- `seeded coding-task` v1 + `coding-sub-interview` via `ensure_coding_recipes`
+  (called at app startup), `save_task_spec`, `RecipeMeta.phased`.
+- Tests: recipe validation, phase walkthrough, review rejection → re-spec →
+  second `spec` step with the log preserved, one run per project, cancelled run
+  keeping its branch, branch normalization, idempotent seeding.
+
+**todo-2**
+
+- `src/store.rs`: `start_coding_run`, `coding_run_for_task`, `save_coding_spec`
+  (stores the spec and completes the open interview step), `approve_coding_spec`
+  (creates the branch once, reuses it on later cycles, dirty-tree and
+  name-collision handling), `merge_coding_branch` (merge, `--abort` on
+  conflict), `cancel_coding_run`, `request_sub_task_interview`,
+  `list_branch_cleanup_runs`, `delete_coding_branch`, plus project-directory
+  resolution through the task's ancestor tags.
+- `src/coding_git.rs`: `is_repo`, `current_branch`, `changed_paths`,
+  `branch_exists`, `create_branch`, `switch_branch`, `merge_no_ff`,
+  `abort_merge`, `delete_branch`, with stderr captured in every error. Tested
+  against throwaway repos (create/delete, dirty tree, merge, conflict→abort).
+- `src/ui_parts/task_details.rs`: the top-of-panel **Coding workflow** section —
+  phase stepper, per-phase actions (Start interview / Write spec manually /
+  Approve spec & create branch / Reject… / Start implementation / Mark
+  implemented / Approve review / Merge branch / Cancel run), inline blocked
+  reason, branch chip, sub-task list with `nested run` badge and `Interview`
+  affordance, round log grouped by cycle, expandable spec artifact, and the
+  `Start coding workflow` card for a feature task with no run. Phase prompt
+  templates (`interview` in raw slash form, `implement`, `review`) are pure
+  functions with unit tests.
+- `src/ui_parts/workflows.rs`: phased recipes hidden from the start row, phase
+  chip (`Round 2 · Implement`) on coding run cards, **Branches to clean up**
+  section with delete/keep.
+- `src/main.rs`: `ensure_coding_recipes` at startup, `CodingChanged` /
+  `CodingLaunch` wiring (compose → insert into the agent pane → switch to it),
+  coding-change notifications refreshing the panels.
+- `src/coding_mcp.rs`: the tool surface — 8 tools with JSON schemas and a
+  `dispatch` into the store, served over a minimal loopback HTTP/1.1 JSON-RPC
+  endpoint (`initialize`, `tools/list`, `tools/call`) bound to `127.0.0.1:0`
+  with a per-process bearer token, started with the app and logged at startup.
+  Tested in-process and over a real socket (initialize / tools-list / tool call
+  / rejected token).
+
+**Still open (in addition to §17.2)**
+
+1. **The `ask_user` bridge (§17.1) is not in.** No elicitation capability or
+   handler in `libs/acp-client`, no question card, no agent-cli schema fix, no
+   `AgentCliAgent` selection. The `interview` phase prompt is composed and
+   inserted as `/interview <title + description>` (which agent-cli already
+   understands), so an interview runs, but questions do not reach the user until
+   the bridge lands — **Write spec manually** / **Save spec** is the working
+   path meanwhile.
+2. **The MCP endpoint is not handed to the agent yet.** `acp-client` still
+   builds `NewSessionRequest::new(cwd).additional_directories(…)` with no
+   `mcp_servers`, and agent-cli's MCP client (`cersei::mcp`) only speaks stdio,
+   so the loopback endpoint needs an HTTP client transport (or a stdio shim)
+   before it can be attached. The URL and token are logged at startup so an
+   external MCP client can use it today.
+3. Git merge conflicts report the git error inline but do not yet compose a
+   "resolve in agent" prompt; the optional agent-pane run strip is not built;
+   the stepper has no GPUI/widget tests (only the pure helpers are covered).
