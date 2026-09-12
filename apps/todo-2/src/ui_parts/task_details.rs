@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Entity, EventEmitter,
+    AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled,
     Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
@@ -255,6 +255,12 @@ pub struct TaskDetails {
     editing_tags: bool,
     tags_input: Option<Entity<InputState>>,
     _tags_subscription: Option<Subscription>,
+    /// The tags currently shown as chips inside the tags editor.
+    tag_draft: Vec<String>,
+    /// True when the tags input should be replaced with a fresh empty one on
+    /// the next render — defers the recreation so the subscriber callback does
+    /// not need to touch `Window`.
+    needs_tag_input_clear: bool,
     confirming: bool,
     pending: Option<PendingSelection>,
     blockers: Vec<storage::Task>,
@@ -366,6 +372,8 @@ impl TaskDetails {
             editing_tags: false,
             tags_input: None,
             _tags_subscription: None,
+            tag_draft: Vec::new(),
+            needs_tag_input_clear: false,
             confirming: false,
             pending: None,
             blockers: Vec::new(),
@@ -1033,10 +1041,13 @@ impl TaskDetails {
         self.editing_tags = false;
         self.tags_input = None;
         self._tags_subscription = None;
+        self.tag_draft = Vec::new();
+        self.needs_tag_input_clear = false;
     }
 
-    /// Open the tags editor: a text field pre-filled with the task's direct
-    /// tags, comma-separated. Commit splits the text back into an array.
+    /// Open the tags editor: the current tags as chips inline in the field,
+    /// with a blank text slot after the last one. Enter turns the pending
+    /// text into a chip; Enter with no pending text saves the lot.
     fn begin_tags_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editing_tags {
             return;
@@ -1044,51 +1055,100 @@ impl TaskDetails {
         let Some(task) = &self.selected else {
             return;
         };
-        let text = task.direct_tags.join(", ");
+        self.tag_draft = task.direct_tags.clone();
+        self.reset_tag_input(window, cx);
+        self.editing_tags = true;
+        cx.notify();
+    }
+
+    /// Swap in a fresh, empty tag input. Used both to open the editor and,
+    /// after Enter turns the pending text into a chip, to restart typing.
+    fn reset_tag_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.needs_tag_input_clear = false;
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
-            state.set_value(&text, window, cx);
+            state.set_placeholder("Add tags…", window, cx);
             state
         });
         let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
-            InputEvent::PressEnter { .. } => this.commit_tags_edit(cx),
+            InputEvent::PressEnter { .. } => this.on_tag_input_enter(cx),
+            InputEvent::Change => this.on_tag_input_change(cx),
             InputEvent::Blur => this.commit_tags_edit(cx),
             _ => {}
         });
-        self.editing_tags = true;
         self.tags_input = Some(input.clone());
         self._tags_subscription = Some(subscription);
-        cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
         });
+    }
+
+    /// Enter in the tag input: non-empty text becomes a chip (and typing
+    /// restarts empty); empty text saves all current chips.
+    fn on_tag_input_enter(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.tags_input.clone() else {
+            return;
+        };
+        let text = input.read(cx).text().to_string();
+        if text.trim().is_empty() {
+            self.commit_tags_edit(cx);
+            return;
+        }
+        self.add_pending_tag(&text);
+        self.needs_tag_input_clear = true;
+        cx.notify();
+    }
+
+    /// Comma in the tag input: flush whatever was typed as a chip and restart
+    /// with an empty field.
+    fn on_tag_input_change(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.tags_input.clone() else {
+            return;
+        };
+        let text = input.read(cx).text().to_string();
+        if !text.trim_end().ends_with(',') {
+            return;
+        }
+        self.add_pending_tag(text.trim_end_matches(',').trim());
+        self.needs_tag_input_clear = true;
+        cx.notify();
+    }
+
+    /// Turn raw pending text into a chip, unless it is empty or already present.
+    fn add_pending_tag(&mut self, tag_raw: &str) {
+        let tag = tag_raw.trim().trim_start_matches('#').to_lowercase();
+        if tag.is_empty() {
+            return;
+        }
+        if !self.tag_draft.iter().any(|draft| draft.to_lowercase() == tag) {
+            self.tag_draft.push(tag);
+        }
+    }
+
+    /// Remove a chip from the draft and keep editing.
+    fn remove_tag_draft(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.tag_draft.len() {
+            self.tag_draft.remove(index);
+            cx.notify();
+        }
     }
 
     fn commit_tags_edit(&mut self, cx: &mut Context<Self>) {
         if !self.editing_tags {
             return;
         }
-        let Some(input) = self.tags_input.clone() else {
-            return;
-        };
         let Some(task) = &self.selected else {
             return;
         };
-        let raw = input.read(cx).text().to_string();
-        let tags: Vec<String> = raw
-            .split(',')
-            .map(|tag| tag.trim().trim_start_matches('#').to_string())
-            .filter(|tag| !tag.is_empty())
-            .collect();
+        let tags = self.tag_draft.clone();
         let task_id = task.id;
         let store = self.store.clone();
-        let tags_for_write = tags.clone();
         if let Some(selected) = &mut self.selected {
-            selected.direct_tags = tags;
+            selected.direct_tags = tags.clone();
         }
         self.abandon_tags();
         cx.spawn(async move |this, cx| {
-            if let Err(e) = store.set_task_tags(task_id, tags_for_write, cx).await {
+            if let Err(e) = store.set_task_tags(task_id, tags, cx).await {
                 tracing::error!("Failed to set tags: {e}");
                 return;
             }
@@ -3289,6 +3349,18 @@ impl TaskDetails {
     }
 }
 
+/// A tag chip, used both in the read-only tag list and inside the tag editor.
+fn tag_chip(label: &str) -> Div {
+    div()
+        .text_size(px(10.))
+        .px(px(4.))
+        .py(px(1.))
+        .rounded(px(2.))
+        .bg(rgb(0x2a2a2a))
+        .text_color(rgb(0xa3a3a3))
+        .child(format!("#{label}"))
+}
+
 impl Render for TaskDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
@@ -3311,23 +3383,52 @@ impl Render for TaskDetails {
                 let mut details = div().v_flex().gap_3();
                 let mut header = div().v_flex().gap_1();
                 if self.editing_tags {
-                    if let Some(input) = self.tags_input.clone() {
-                        header = header.child(
-                            div()
-                                .id(("details-tags-edit", task_id))
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    Input::new(&input)
-                                        .small()
-                                        .appearance(false)
-                                        .bg(rgb(APP_BG))
-                                        .border_1()
-                                        .border_color(rgb(HAIRLINE))
-                                        .rounded_md(),
-                                ),
-                        );
+                    if self.needs_tag_input_clear {
+                        self.reset_tag_input(window, cx);
                     }
+                    let input = self.tags_input.clone();
+                    header = header.child(
+                        div()
+                            .id(("details-tags-edit", task_id))
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(4.))
+                            .py(px(0.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .bg(rgb(APP_BG))
+                            .when_some(input, |this, input| {
+                                this.h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .children(self.tag_draft.iter().enumerate().map(|(idx, tag)| {
+                                        tag_chip(tag)
+                                            .id(("tag-chip", idx))
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .id(("tag-chip-remove", idx))
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(0x737373))
+                                                    .cursor_pointer()
+                                                    .hover(|this| this.text_color(rgb(0xe5e5e5)))
+                                                    .child("×")
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.remove_tag_draft(idx, cx);
+                                                    })),
+                                            )
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(Input::new(&input).appearance(false)),
+                                    )
+                            }),
+                    );
                 } else {
                     header = header.child(
                         div()
@@ -3336,18 +3437,10 @@ impl Render for TaskDetails {
                             .flex_wrap()
                             .items_center()
                             .children(task.leaf_tags.iter().enumerate().map(|(index, tag)| {
-                                let tag_name = tag.clone();
-                                div()
+                                tag_chip(tag)
                                     .id(("details-tag", index))
-                                    .text_size(px(10.))
-                                    .px(px(4.))
-                                    .py(px(2.))
-                                    .rounded(px(2.))
-                                    .bg(rgb(0x2a2a2a))
-                                    .text_color(rgb(0xa3a3a3))
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))
-                                    .child(format!("#{tag_name}"))
                                     .on_click(cx.listener(|this, event, window, cx| {
                                         if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
                                         {
