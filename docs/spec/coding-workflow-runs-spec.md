@@ -459,18 +459,20 @@ Behaviour:
 Built from `build_task_context(root_task)` plus phase-specific material, then
 inserted with `AgentPane::insert_prompt_text`:
 
-- **interview**: `/interview <feature title + description>` in the **raw slash
-  form**, plus the re-spec notes on a repeat round ("round N; the previous
-  review rejected the spec because: …"). Do **not** pre-wrap it with
-  `INTERVIEW_BASE_PROMPT`: agent-cli detects the `/interview ` prefix and wraps
-  the target itself (acp.rs:1585) — that path is also what emits the
-  `interview/*` notifications and captures the spec file path.
+- **interview**: the full interview prompt is **expanded in the app**
+  (`INTERVIEW_BASE_PROMPT` + title + description + re-spec notes) and sent as an
+  ordinary prompt. **Not** the raw `/interview <target>` slash form: the pane's
+  ACP agent is `opencode`, which registers no `interview` command and silently
+  drops unknown `/`-prefixed prompts (opencode issue #27528), so a leading slash
+  turns the phase into a no-op. Expanding client-side also makes the phase work
+  identically against any ACP agent. The re-spec notes follow the target on a
+  repeat round ("round N; the previous review rejected the spec because: …").
 - **implement**: spec + annotation log + "work on branch `<branch>`; do not
   merge".
 - **review**: "summarise what you changed, then call `complete_phase`; wait for
   the user's annotation".
-- **sub-interview**: the same `/interview <sub-task title + description>` form,
-  sent against the sub-task's project session.
+- **sub-interview**: the same expanded interview prompt
+  (`title + description`), sent against the sub-task's project session.
 
 The templates live next to the `TaskDetails` stepper (one function per phase,
 `&str` built from the run view) so they are unit-testable.

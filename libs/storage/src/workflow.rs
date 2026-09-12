@@ -253,7 +253,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "id": "interview",
                         "kind": "action",
                         "title": "Interview & spec the feature",
-                        "description": "Run /interview with the feature title and description, ask clarifying questions, then save the spec.",
+                        "description": "Interview & spec the feature out (the app composes the full interview prompt), ask clarifying questions, then save the spec.",
                         "ai": true,
                         "phase": "interview",
                         "subtask": true
@@ -317,7 +317,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "id": "interview",
                         "kind": "action",
                         "title": "Interview the sub-task",
-                        "description": "Run /interview for this sub-task, then save the spec.",
+                        "description": "Interview the sub-task out (the app composes the full interview prompt), then save the spec.",
                         "ai": true,
                         "phase": "interview",
                         "subtask": true

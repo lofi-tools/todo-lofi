@@ -75,6 +75,50 @@ fn notes_by_round(notes: &[RunNote]) -> Vec<(usize, RunNote)> {
     tagged
 }
 
+/// The self-contained interview prompt the app drops into the agent pane for
+/// the coding-run `interview` phases. It is fully expanded here (never the raw
+/// `/interview` slash form): the pane's ACP agent is `opencode`, which does not
+/// register an `interview` command and silently drops unknown `/`-prefixed
+/// prompts, so the app sends the complete instruction as an ordinary prompt.
+/// The final line is the request to interview (`Request to interview: …`).
+const INTERVIEW_BASE_PROMPT: &str = "\
+You are running an interview for a feature request. Your job is to gather context \
+and ask clarifying questions before producing a detailed spec.
+
+## Process
+
+1. First, gather relevant context about the request — read files, search the \
+   codebase, check existing docs — whatever helps you understand the current \
+   state.
+2. Then ask clarifying questions in several rounds. Ask about edge cases, \
+   preferences, constraints, and design decisions — the things you cannot infer \
+   on your own. Write the questions out in the conversation; there is no \
+   question tool, so never wait for one.
+3. When you have enough context, write a detailed spec file.
+
+## Spec file output
+
+- Write the spec to `./docs/spec/<slug>-spec.md` where `<slug>` is derived from \
+   the request (a short kebab-case name).
+- If the request doesn't suggest an obvious slug, use a sensible name in the \
+   same `docs/spec/` location.
+- The spec should be detailed: capture everything you learned during the \
+   interview — requirements, constraints, decisions, open questions, and the \
+   planned approach.
+- Create the `docs/spec/` directory if it doesn't exist.
+- If a `save_spec` tool is available, call it with the final spec so the app \
+   stores it on the task.
+
+## Final reply
+
+- After writing the spec file, reply with a short summary plus the spec file \
+   path (e.g. `Wrote spec to ./docs/spec/add-oauth-spec.md`).
+- The summary is included even if the interview only produced a spec file.
+
+## Request
+
+Request to interview: ";
+
 /// The prompt the app drops into the agent pane for a phase (§8.1 of the
 /// coding workflow spec). The user edits and sends it; nothing is auto-sent.
 fn phase_prompt(
@@ -86,11 +130,11 @@ fn phase_prompt(
     let context = build_task_context(task);
     match phase {
         "interview" => {
-            let mut prompt = format!("/interview {}", task.title);
+            let mut target = task.title.clone();
             if let Some(description) = task.description.as_deref()
                 && !description.is_empty()
             {
-                prompt.push_str(&format!("\n\n{description}"));
+                target.push_str(&format!("\n\n{description}"));
             }
             let round = round_number(notes);
             if round > 1 {
@@ -98,14 +142,14 @@ fn phase_prompt(
                     .iter()
                     .filter(|note| note.kind == "reject")
                     .next_back();
-                prompt.push_str(&format!("\n\nThis is round {round}."));
+                target.push_str(&format!("\n\nThis is round {round}."));
                 if let Some(note) = last_rejection
                     && !note.body.trim().is_empty()
                 {
-                    prompt.push_str(&format!(" The last review rejected the result: {}", note.body));
+                    target.push_str(&format!(" The last review rejected the result: {}", note.body));
                 }
             }
-            prompt
+            format!("{INTERVIEW_BASE_PROMPT}{target}")
         }
         "implement" => {
             let mut prompt = String::from("Implement the approved spec.\n\n");
@@ -130,13 +174,13 @@ fn phase_prompt(
             branch.unwrap_or("the feature branch")
         ),
         "sub-interview" => {
-            let mut prompt = format!("/interview {}", task.title);
+            let mut target = task.title.clone();
             if let Some(description) = task.description.as_deref()
                 && !description.is_empty()
             {
-                prompt.push_str(&format!("\n\n{description}"));
+                target.push_str(&format!("\n\n{description}"));
             }
-            prompt
+            format!("{INTERVIEW_BASE_PROMPT}{target}")
         }
         other => format!("{context}\n\nContinue the {other} phase."),
     }
@@ -3372,14 +3416,20 @@ mod coding_tests {
     }
 
     #[test]
-    fn interview_prompt_uses_the_slash_form() {
+    fn interview_prompt_is_a_full_prompt() {
         let task = feature("Add OAuth", Some("Sign in with Google."));
         let prompt = phase_prompt(&task, &[], None, "interview");
         assert!(
-            prompt.starts_with("/interview Add OAuth"),
-            "agent-cli detects the phase by the `/interview ` prefix: {prompt}"
+            !prompt.starts_with('/'),
+            "a pre-filled prompt must not be an unknown slash command (opencode drops \
+             unrecognised `/`-prefixed prompts silently): {prompt}"
         );
-        assert!(prompt.contains("Sign in with Google."));
+        assert!(
+            prompt.starts_with("You are running an interview"),
+            "the interview prompt is expanded in the app: {prompt}"
+        );
+        assert!(prompt.contains("Request to interview: Add OAuth"), "{prompt}");
+        assert!(prompt.contains("Sign in with Google."), "{prompt}");
     }
 
     #[test]
