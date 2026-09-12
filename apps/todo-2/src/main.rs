@@ -954,21 +954,41 @@ impl Render for Layout {
                             .relative()
                             .flex_1()
                             .flex()
-                            .flex_col()
+                            .flex_row()
                             .min_h_0()
                             // The checklist items use the normal task list
                             // with its sections; its title row carries the
-                            // "+ New trip" button at its end. The popover
-                            // is the LAST child so GPUI paints it above the
-                            // task list (paint order follows tree order).
+                            // "+ New trip" button at its end. The split
+                            // docks the details pane on the right so a
+                            // clicked checklist row opens it like any other.
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(self.task_list.clone()),
+                                h_resizable(ElementId::Name("tasks-split".into()))
+                                    .with_state(&self.split_state)
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(640.))
+                                            .size_range(px(320.)..px(1200.))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .min_w_0()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(self.task_list.clone()),
+                                            ),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .visible(self.right_pane_open(cx))
+                                            .size(px(560.))
+                                            .size_range(px(320.)..px(1000.))
+                                            .child(self.render_right_pane(cx)),
+                                    ),
                             )
+                            // The popover is the LAST child so GPUI paints it
+                            // above the task list (paint order follows tree
+                            // order).
                             .child(
                                 self.travel_panel
                                     .update(cx, |panel, cx| panel.popover(window, cx)),
@@ -1017,8 +1037,8 @@ impl Render for Layout {
                                     .child(
                                         resizable_panel()
                                             .visible(self.right_pane_open(cx))
-                                            .size(px(420.))
-                                            .size_range(px(320.)..px(760.))
+                                            .size(px(560.))
+                                            .size_range(px(320.)..px(1000.))
                                             .child(self.render_right_pane(cx)),
                                     ),
                             )

@@ -11,7 +11,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
-use storage::prelude::{RunNote, RunStepView, RunView, run_notes};
+use storage::prelude::{CODING_PHASES, RunNote, RunStepView, RunView, run_notes};
 
 use crate::components::Checkbox;
 use crate::components::{DateTimePicker, DateTimePickerEvent};
@@ -51,6 +51,20 @@ fn phase_state(steps: &[RunStepView], node_id: &str) -> PhaseState {
 /// open step per cycle.
 fn current_step(steps: &[RunStepView]) -> Option<&RunStepView> {
     steps.iter().find(|step| !step.task.done)
+}
+
+/// Placeholder title for a coding phase that has not materialized yet, kept
+/// in step with the seeded `coding-task` recipe's node titles so the roadmap
+/// rows read like the real steps they preview.
+fn phase_roadmap_title(phase: &str) -> &'static str {
+    match phase {
+        "interview" => "Interview & spec the feature",
+        "spec" => "Approve the spec",
+        "implement" => "Implement the feature",
+        "review" => "Review & annotate",
+        "merge" => "Merge the branch",
+        _ => "Complete the next coding step",
+    }
 }
 
 /// The UI's cycle counter: the run starts at round 1 and every rejection
@@ -296,6 +310,13 @@ pub struct TaskDetails {
     /// Inline reason a coding action could not run (missing directory, dirty
     /// tree, merge conflict, …).
     coding_error: Option<String>,
+    /// Whether the run was already auto-started for the current selection, so
+    /// selecting a feature task starts its coding run exactly once.
+    coding_auto_started: bool,
+    /// Whether the selected task sits in a directory-backed project (a
+    /// `project:` tag or a tag with a configured directory). Only those
+    /// tasks get a coding workflow at all.
+    coding_directory_backed: bool,
     /// The reject-notes box is open (spec gate or review gate).
     coding_notes_open: bool,
     coding_notes_step: Option<u64>,
@@ -378,6 +399,8 @@ impl TaskDetails {
             step_subtasks: std::collections::HashMap::new(),
             _coding_fetch: None,
             coding_error: None,
+            coding_auto_started: false,
+            coding_directory_backed: false,
             coding_notes_open: false,
             coding_notes_step: None,
             coding_notes_input: None,
@@ -396,6 +419,7 @@ impl TaskDetails {
     fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         let parent_id = task.parent_id;
         let task_id = task.id;
+        let auto_start = task.node_id.is_none() && task.parent_id.is_none() && !task.done;
         let fetch = self.store.list_blockers(task.id, cx);
         let after_fetch = self.store.list_after(task.id, cx);
         let subtasks_fetch = self.store.list_subtasks(task.id, cx);
@@ -411,6 +435,8 @@ impl TaskDetails {
         self.coding = None;
         self.step_subtasks = std::collections::HashMap::new();
         self.coding_error = None;
+        self.coding_auto_started = false;
+        self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
         self.close_coding_notes();
         self.close_coding_spec();
@@ -503,7 +529,7 @@ impl TaskDetails {
                     tracing::error!("Failed to fetch repeat template: {e}");
                 }
             }));
-        self.load_coding(task_id, cx);
+        self.load_coding(task_id, auto_start, cx);
         cx.notify();
     }
 
@@ -513,43 +539,115 @@ impl TaskDetails {
         let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
             return;
         };
-        self.load_coding(task_id, cx);
+        self.load_coding(task_id, false, cx);
     }
 
     /// Fetch the coding run for `task_id` together with the sub-tasks hanging
-    /// off each of its phase steps, so the step rows can nest them.
-    fn load_coding(&mut self, task_id: u64, cx: &mut Context<Self>) {
+    /// off each of its phase steps, so the step rows can nest them. When
+    /// `auto_start` is set and the task has no run at all, start it first so
+    /// the select of a feature task lands on its already-active interview.
+    fn load_coding(&mut self, task_id: u64, auto_start: bool, cx: &mut Context<Self>) {
         let store = self.store.clone();
         self._coding_fetch = Some(cx.spawn(async move |this, cx| {
-            match store.coding_run_for_task(task_id, cx).await {
-                Ok(view) => {
-                    let step_ids: Vec<u64> = view
-                        .as_ref()
-                        .map(|view| view.steps.iter().map(|step| step.task.id).collect())
-                        .unwrap_or_default();
-                    let step_subtasks = if step_ids.is_empty() {
-                        std::collections::HashMap::new()
-                    } else {
-                        match store.subtasks_map(step_ids, cx).await {
-                            Ok(map) => map,
-                            Err(error) => {
-                                tracing::error!("Failed to fetch step sub-tasks: {error}");
-                                std::collections::HashMap::new()
-                            }
-                        }
-                    };
+            let view = match store.coding_run_for_task(task_id, cx).await {
+                Ok(view) => view,
+                Err(error) => {
+                    tracing::error!("Failed to fetch coding run: {error}");
                     this.update(cx, |this, cx| {
-                        this.coding = view;
-                        this.step_subtasks = step_subtasks;
+                        if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                            return;
+                        }
+                        this.coding_error = Some(error.to_string());
                         this._coding_fetch = None;
                         cx.notify();
                     })
                     .ok();
+                    return;
                 }
-                Err(e) => {
-                    tracing::error!("Failed to fetch coding run: {e}");
+            };
+            let mut view = view;
+            if view.is_none() && auto_start {
+                // Auto-start is for directory-backed projects only: a travel
+                // checklist or any other non-project tag's task has no repo
+                // to run in, so it never gets an interview or other steps.
+                let directory_backed = store.coding_directory(task_id, cx).await.unwrap_or(false);
+                this.update(cx, |this, cx| {
+                    if this.selected.as_ref().map(|task| task.id) == Some(task_id) {
+                        this.coding_directory_backed = directory_backed;
+                        if !directory_backed {
+                            this._coding_fetch = None;
+                        }
+                        cx.notify();
+                    }
+                })
+                .ok();
+                if !directory_backed {
+                    return;
+                }
+                let claimed = this
+                    .update(cx, |this, _| {
+                        if this.coding_auto_started || this.coding_error.is_some() {
+                            return false;
+                        }
+                        this.coding_auto_started = true;
+                        true
+                    })
+                    .unwrap_or(false);
+                if claimed {
+                    match store.start_coding_run(task_id, cx).await {
+                        Ok(_run_id) => {
+                            view = store.coding_run_for_task(task_id, cx).await.ok().flatten();
+                        }
+                        Err(error) => {
+                            tracing::error!("Auto-start of the coding run failed: {error}");
+                            this.update(cx, |this, cx| {
+                                if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                                    return;
+                                }
+                                this.coding_error = Some(error.to_string());
+                                this._coding_fetch = None;
+                                cx.notify();
+                            })
+                            .ok();
+                            return;
+                        }
+                    }
                 }
             }
+            let step_ids: Vec<u64> = view
+                .as_ref()
+                .map(|view| view.steps.iter().map(|step| step.task.id).collect())
+                .unwrap_or_default();
+            let step_subtasks = if step_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                match store.subtasks_map(step_ids, cx).await {
+                    Ok(map) => map,
+                    Err(error) => {
+                        tracing::error!("Failed to fetch step sub-tasks: {error}");
+                        std::collections::HashMap::new()
+                    }
+                }
+            };
+            let auto_started = view.is_some() && auto_start;
+            let has_run = view.is_some();
+            this.update(cx, |this, cx| {
+                if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                    return;
+                }
+                this.coding = view;
+                this.step_subtasks = step_subtasks;
+                this._coding_fetch = None;
+                if has_run {
+                    this.coding_directory_backed = true;
+                }
+                if auto_started {
+                    this.coding_error = None;
+                    cx.emit(TaskDetailsEvent::CodingChanged);
+                }
+                cx.notify();
+            })
+            .ok();
         }));
     }
 
@@ -2479,12 +2577,42 @@ impl TaskDetails {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(view) = self.coding.clone() else {
-            // Only the feature task (a top-level task) can start a run; phase
+            // Only the feature task (a top-level task) gets a coding run; phase
             // steps and plain sub-tasks have nothing to start here.
             if task.node_id.is_some() || task.parent_id.is_some() || task.done {
                 return div().into_any_element();
             }
-            return self.coding_start_card(task, cx);
+            // Tasks outside a directory-backed project get no coding workflow
+            // at all: there is nowhere to run the spec-implement cycle, so the
+            // pane shows nothing rather than a start button. The directory
+            // check is async, so while it is pending show nothing too.
+            if !self.coding_directory_backed {
+                return div().into_any_element();
+            }
+            // The run auto-starts on selection, so while the fetch is in
+            // flight there is nothing to act on yet; a quiet row beats the
+            // start button flashing in and out.
+            if self._coding_fetch.is_some() {
+                return div()
+                    .mt_2()
+                    .ml_2()
+                    .px_2()
+                    .py(px(3.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child("Preparing the interview…"),
+                    )
+                    .into_any_element();
+            }
+            // The auto-start failed: surface the reason and offer the start
+            // button as the retry affordance.
+            let mut fallback = div().v_flex().gap_2();
+            if let Some(error) = self.coding_error.clone() {
+                fallback = fallback.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
+            }
+            return fallback.child(self.coding_start_card(task, cx)).into_any_element();
         };
         let run_id = view.run.id;
         let task_id = task.id;
@@ -2554,8 +2682,9 @@ impl TaskDetails {
         section.into_any_element()
     }
 
-    /// The affordance shown on a feature task that has no run yet, at the
-    /// bottom of the panel where the step list will go.
+    /// The fallback affordance on a feature task whose run could not be
+    /// auto-started: the start button, at the bottom of the panel where the
+    /// step list will go once the run exists.
     fn coding_start_card(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) -> AnyElement {
         let task_id = task.id;
         div()
@@ -2632,6 +2761,38 @@ impl TaskDetails {
             if let Some(children) = self.step_subtasks.get(&step_id).cloned() {
                 rows.push(self.coding_step_children(&children, cx));
             }
+        }
+        // The run's later phases do not exist as steps yet (they materialize
+        // only when the previous one completes), so preview them as disabled
+        // rows to show where the run is going.
+        let present: std::collections::HashSet<&str> = view
+            .steps
+            .iter()
+            .filter_map(|step| step.node.phase.as_deref())
+            .collect();
+        for phase in CODING_PHASES {
+            if present.contains(phase) {
+                continue;
+            }
+            rows.push(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded_md()
+                    .child(div().text_xs().text_color(rgb(0x4f4f4f)).child("☐"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(rgb(0x7a7a7a))
+                            .child(phase_roadmap_title(phase)),
+                    )
+                    .into_any_element(),
+            );
         }
         div()
             .v_flex()

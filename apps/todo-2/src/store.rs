@@ -800,6 +800,22 @@ impl Store {
         })
     }
 
+    /// Whether `task_id` sits in a directory-backed project: some ancestor
+    /// task (itself included) carries a `project:` tag, or a tag with a
+    /// configured directory, that exists on disk. Only such tasks get a
+    /// coding run; travel and other non-directory tags never do.
+    pub fn coding_directory(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<bool>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(Self::project_dir(&mut s, task_id).await?.is_some())
+        })
+    }
+
     /// Store the spec the interview produced (or one the user pasted) and
     /// complete that run's open interview step, which advances the run to the
     /// spec gate.
