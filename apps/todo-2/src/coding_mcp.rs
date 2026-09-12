@@ -227,7 +227,7 @@ pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_coding_context",
-            "description": "Read the current coding run: phase, spec, cycle, branch, annotation log and sub-tasks. Call this before acting on a phase.",
+            "description": "Read the current coding run: phase, spec, cycle, branch, annotation log and steps. `phases[].task_id` is the task id of each step (and `open_task_id` the one being worked on); pass it as `parent_task_id` to nest work under that step. Call this before acting on a phase.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -251,11 +251,11 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "create_sub_task",
-            "description": "Split the feature into a sub-task. Set nested=true when the sub-task is complex enough to deserve its own coding run.",
+            "description": "Split the current step into a sub-task: pass the step's task id (from `get_coding_context`) as parent_task_id, so the work hangs off that step and the step's progress reflects it. Set nested=true when the sub-task is complex enough to deserve its own coding run.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "parent_task_id": { "type": "integer" },
+                    "parent_task_id": { "type": "integer", "description": "A step's task id, or the feature task for run-level work." },
                     "title": { "type": "string" },
                     "description": { "type": "string" },
                     "nested": { "type": "boolean", "default": false }

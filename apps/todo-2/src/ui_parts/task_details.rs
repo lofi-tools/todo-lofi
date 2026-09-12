@@ -16,22 +16,11 @@ use storage::prelude::{RunNote, RunStepView, RunView, run_notes};
 use crate::components::Checkbox;
 use crate::components::{DateTimePicker, DateTimePickerEvent};
 use crate::store::Store;
-use crate::theme::{APP_BG, CARD_BG, HAIRLINE};
+use crate::theme::{APP_BG, CARD_BG, HAIRLINE, PANEL_HOVER};
 
 use super::agent_pane::build_task_context;
 use super::repeat_picker::{RepeatPicker, RepeatPickerEvent, repeat_label};
 use super::task_picker::{TaskPicker, TaskPickerEvent};
-
-/// The coding phases in run order, with their display labels. Mirrors
-/// `storage::CODING_PHASES`; the nodes of the `coding-task` recipe carry the
-/// same `phase` values.
-const CODING_PHASES: [(&str, &str); 5] = [
-    ("interview", "Interview"),
-    ("spec", "Spec"),
-    ("implement", "Implement"),
-    ("review", "Review"),
-    ("merge", "Merge"),
-];
 
 /// Where a phase sits in the run, derived from its step rows. A re-spec cycle
 /// leaves earlier steps done while a fresh one is open, so an open step wins
@@ -254,9 +243,11 @@ pub struct TaskDetails {
     /// The selected task's repeat template, shown as a "Repeats" field.
     repeat_template: Option<storage::RepeatTaskTemplate>,
     _repeat_template_fetch: Option<gpui::Task<()>>,
-    /// The selected task's coding run (root or nested root), for the phase
-    /// stepper at the top of the panel.
+    /// The selected task's coding run (root or nested root), for the step list
+    /// at the bottom of the panel.
     coding: Option<RunView>,
+    /// Sub-tasks the model created *under* a phase step, keyed by step task id.
+    step_subtasks: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     _coding_fetch: Option<gpui::Task<()>>,
     /// Inline reason a coding action could not run (missing directory, dirty
     /// tree, merge conflict, …).
@@ -340,6 +331,7 @@ impl TaskDetails {
             repeat_template: None,
             _repeat_template_fetch: None,
             coding: None,
+            step_subtasks: std::collections::HashMap::new(),
             _coding_fetch: None,
             coding_error: None,
             coding_notes_open: false,
@@ -373,6 +365,7 @@ impl TaskDetails {
         self.repeat_template = None;
         self.link_error = None;
         self.coding = None;
+        self.step_subtasks = std::collections::HashMap::new();
         self.coding_error = None;
         self.coding_spec_expanded = false;
         self.close_coding_notes();
@@ -466,20 +459,7 @@ impl TaskDetails {
                     tracing::error!("Failed to fetch repeat template: {e}");
                 }
             }));
-        let coding_fetch = self.store.coding_run_for_task(task_id, cx);
-        self._coding_fetch = Some(cx.spawn(async move |this, cx| match coding_fetch.await {
-            Ok(view) => {
-                this.update(cx, |this, cx| {
-                    this.coding = view;
-                    this._coding_fetch = None;
-                    cx.notify();
-                })
-                .ok();
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch coding run: {e}");
-            }
-        }));
+        self.load_coding(task_id, cx);
         cx.notify();
     }
 
@@ -489,18 +469,42 @@ impl TaskDetails {
         let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
             return;
         };
-        let fetch = self.store.coding_run_for_task(task_id, cx);
-        self._coding_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
-            Ok(view) => {
-                this.update(cx, |this, cx| {
-                    this.coding = view;
-                    this._coding_fetch = None;
-                    cx.notify();
-                })
-                .ok();
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch coding run: {e}");
+        self.load_coding(task_id, cx);
+    }
+
+    /// Fetch the coding run for `task_id` together with the sub-tasks hanging
+    /// off each of its phase steps, so the step rows can nest them.
+    fn load_coding(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        self._coding_fetch = Some(cx.spawn(async move |this, cx| {
+            match store.coding_run_for_task(task_id, cx).await {
+                Ok(view) => {
+                    let step_ids: Vec<u64> = view
+                        .as_ref()
+                        .map(|view| view.steps.iter().map(|step| step.task.id).collect())
+                        .unwrap_or_default();
+                    let step_subtasks = if step_ids.is_empty() {
+                        std::collections::HashMap::new()
+                    } else {
+                        match store.subtasks_map(step_ids, cx).await {
+                            Ok(map) => map,
+                            Err(error) => {
+                                tracing::error!("Failed to fetch step sub-tasks: {error}");
+                                std::collections::HashMap::new()
+                            }
+                        }
+                    };
+                    this.update(cx, |this, cx| {
+                        this.coding = view;
+                        this.step_subtasks = step_subtasks;
+                        this._coding_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch coding run: {e}");
+                }
             }
         }));
     }
@@ -1890,17 +1894,23 @@ impl TaskDetails {
 
         // Subtasks live inside the lists so they paint before (under) the
         // floating picker cards, which are siblings added after `lists`.
-        if !self.subtasks.is_empty() {
+        // Coding phase steps are subtasks too, but they read as the run's step
+        // list at the bottom of the panel, so they are left out here.
+        let plain_subtasks: Vec<storage::Task> = self
+            .subtasks
+            .iter()
+            .filter(|subtask| subtask.node_id.is_none())
+            .cloned()
+            .collect();
+        if !plain_subtasks.is_empty() {
             lists = lists.child(
                 div()
                     .text_xs()
                     .text_color(rgb(0xa3a3a3))
-                    .child(format!("Subtasks ({})", self.subtasks.len())),
+                    .child(format!("Subtasks ({})", plain_subtasks.len())),
             );
         }
-        let subtask_rows = self
-            .subtasks
-            .clone()
+        let subtask_rows = plain_subtasks
             .into_iter()
             .map(|subtask| {
                 let subtask_id = subtask.id;
@@ -2247,8 +2257,24 @@ impl TaskDetails {
                 },
                 None => None,
             };
+            let step_ids: Vec<u64> = view
+                .as_ref()
+                .map(|view| view.steps.iter().map(|step| step.task.id).collect())
+                .unwrap_or_default();
+            let step_subtasks = if step_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                match store.subtasks_map(step_ids, cx).await {
+                    Ok(map) => map,
+                    Err(fetch_error) => {
+                        tracing::error!("Failed to fetch step sub-tasks: {fetch_error}");
+                        std::collections::HashMap::new()
+                    }
+                }
+            };
             this.update(cx, |this, cx| {
                 this.coding = view;
+                this.step_subtasks = step_subtasks;
                 this.coding_error = error;
                 this._coding_fetch = None;
                 this.close_coding_notes();
@@ -2425,33 +2451,38 @@ impl TaskDetails {
             .id(("coding-section", task_id))
             .v_flex()
             .gap_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(HAIRLINE))
-            .bg(rgb(CARD_BG));
+            .mt_2();
 
-        let mut header = div()
-            .h_flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
+        // The steps first: they are the run, and the next one carries its
+        // action on its own row.
+        section = section.child(self.coding_steps(task, &view, window, cx));
+
+        let mut meta = div().h_flex().items_center().gap_2().flex_wrap();
+        meta = meta.child(chip(&format!("Round {round}")));
+        match view.run.branch.clone() {
+            Some(branch) => {
+                let status = view.run.branch_status.clone().unwrap_or_default();
+                let detail = match view.run.base_branch.clone() {
+                    Some(base) if !base.is_empty() => format!("{status} · from {base}"),
+                    _ => status,
+                };
+                meta = meta
                     .child(
                         div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xe5e5e5))
-                            .child("Coding workflow"),
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(format!("branch {branch}")),
                     )
-                    .child(chip(&view.recipe_name))
-                    .child(chip(&format!("Round {round}"))),
-            );
+                    .child(chip(&detail));
+            }
+            None => {
+                if view.run.status != "active" {
+                    meta = meta.child(chip(&view.run.status));
+                }
+            }
+        }
         if view.run.status == "active" {
-            header = header.child(
+            meta = meta.child(
                 Button::new(format!("coding-cancel-{run_id}"))
                     .ghost()
                     .compact()
@@ -2461,85 +2492,39 @@ impl TaskDetails {
                         this.cancel_coding_run(run_id, cx);
                     })),
             );
-        } else {
-            header = header.child(chip(&view.run.status));
         }
-        section = section.child(header);
-        section = section.child(self.coding_stepper(&view, cx));
-
-        if let Some(branch) = view.run.branch.clone() {
-            let status = view.run.branch_status.clone().unwrap_or_default();
-            let base = view.run.base_branch.clone().unwrap_or_default();
-            let mut detail = status;
-            if !base.is_empty() {
-                detail = format!("{detail} · from {base}");
-            }
-            section = section.child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xa3a3a3))
-                            .child(format!("branch {branch}")),
-                    )
-                    .child(chip(&detail)),
-            );
-        }
+        section = section.child(meta);
+        section = section.child(self.coding_secondary_actions(
+            task,
+            &view,
+            current.as_ref(),
+            window,
+            cx,
+        ));
 
         if let Some(error) = self.coding_error.clone() {
-            section = section.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0xf87171))
-                    .child(error),
-            );
+            section = section.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
         }
-
-        section = section.child(self.coding_actions(task, &view, current.as_ref(), window, cx));
-        section = section.child(self.coding_sub_tasks(cx));
         section = section.child(self.coding_round_log(&notes));
         section = section.child(self.coding_spec_artifact(task, &view, cx));
         section.into_any_element()
     }
 
-    /// The affordance shown on a feature task that has no run yet.
+    /// The affordance shown on a feature task that has no run yet, at the
+    /// bottom of the panel where the step list will go.
     fn coding_start_card(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) -> AnyElement {
         let task_id = task.id;
         div()
-            .v_flex()
+            .h_flex()
+            .items_center()
             .gap_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(HAIRLINE))
-            .bg(rgb(CARD_BG))
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xe5e5e5))
-                            .child("Coding workflow"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x8a8a8a))
-                            .child("interview → spec → implement → review → merge"),
-                    ),
-            )
+            .mt_2()
+            .ml_2()
             .child(
                 Button::new(format!("coding-start-{task_id}"))
                     .compact()
                     .label("Start coding workflow")
-                    .tooltip("Turn this task into a coding run")
+                    .tooltip("Turn this task into an interview → spec → implement → review → merge run")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_coding_run(task_id, cx);
                     })),
@@ -2547,44 +2532,188 @@ impl TaskDetails {
             .into_any_element()
     }
 
-    fn coding_stepper(&self, view: &RunView, cx: &mut Context<Self>) -> AnyElement {
-        let phases: Vec<AnyElement> = CODING_PHASES
-            .iter()
-            .map(|(node_id, label)| {
-                let state = phase_state(&view.steps, node_id);
-                let (glyph, color) = match state {
-                    PhaseState::Done => ("✓", rgb(0x6b6b6b)),
-                    PhaseState::Active => ("◉", rgb(0xd4d4d4)),
-                    PhaseState::Pending => ("○", rgb(0x6b6b6b)),
-                };
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(div().text_xs().text_color(color).child(glyph))
-                    .child(
-                        div()
-                            .text_xs()
-                            .when(state == PhaseState::Active, |this| this.font_semibold())
-                            .text_color(color)
-                            .child(*label),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        let _ = cx;
+    /// The run's phase steps, rendered as the sub-tasks they are: one row per
+    /// phase in run order, the next pending one highlighted with the action
+    /// that moves it, and the model's sub-tasks of that step nested below it.
+    fn coding_steps(
+        &mut self,
+        task: &TaskWithMeta,
+        view: &RunView,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let current_id = current_step(&view.steps).map(|step| step.task.id);
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for step in view.steps.iter() {
+            let step_id = step.task.id;
+            let done = step.task.done;
+            let is_current = Some(step_id) == current_id;
+            let (glyph, color) = match phase_state(&view.steps, &step.node.id) {
+                PhaseState::Done => ("☑", rgb(0x6b6b6b)),
+                PhaseState::Active => ("◐", rgb(0xd4d4d4)),
+                PhaseState::Pending => ("☐", rgb(0x737373)),
+            };
+            let mut row = div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py(px(3.))
+                .rounded_md()
+                .when(is_current, |this| this.bg(rgb(PANEL_HOVER)))
+                .child(div().text_xs().text_color(color).child(glyph))
+                .child(
+                    div()
+                        .id(("coding-step", step_id))
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                        .child(step.task.title.clone())
+                        .on_click(cx.listener(move |_this, _, _, cx| {
+                            cx.emit(TaskDetailsEvent::SelectTask { task_id: step_id });
+                        })),
+                );
+            if done {
+                row = row.child(div().text_xs().text_color(rgb(0x737373)).child("done"));
+            } else if is_current
+                && let Some(action) = self.coding_primary_action(task, view, step, cx)
+            {
+                row = row.child(action);
+            }
+            rows.push(row.into_any_element());
+
+            // The model can split a step further: those sub-tasks hang off the
+            // step, so they nest under its row.
+            if let Some(children) = self.step_subtasks.get(&step_id).cloned() {
+                rows.push(self.coding_step_children(&children, cx));
+            }
+        }
         div()
-            .h_flex()
-            .items_center()
-            .gap_3()
-            .flex_wrap()
-            .children(phases)
+            .v_flex()
+            .gap_1()
+            .ml_2()
+            .children(rows)
             .into_any_element()
     }
 
-    /// The action row for the step the run is waiting on, plus the reject and
-    /// manual-spec boxes when they are open.
-    fn coding_actions(
+    /// The model's sub-tasks of one phase step, indented under its row.
+    fn coding_step_children(&mut self, children: &[TaskWithMeta], cx: &mut Context<Self>) -> AnyElement {
+        let rows: Vec<AnyElement> = children
+            .iter()
+            .map(|child| {
+                let child_id = child.id;
+                let nested = child.workflow_run_id.is_some();
+                let mut row = div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8a8a8a))
+                            .child(if child.done { "☑" } else { "☐" }),
+                    )
+                    .child(
+                        div()
+                            .id(("coding-step-child", child_id))
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(if child.done {
+                                rgb(0x666666)
+                            } else {
+                                rgb(0xd4d4d4)
+                            })
+                            .child(child.title.clone())
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::SelectTask { task_id: child_id });
+                            })),
+                    );
+                if nested {
+                    row = row.child(chip("nested run"));
+                } else if !child.done {
+                    row = row.child(
+                        Button::new(format!("coding-child-interview-{child_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Interview")
+                            .tooltip("Start a sub-task interview run")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_sub_task_interview(child_id, cx);
+                            })),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect();
+        div()
+            .v_flex()
+            .gap_1()
+            .pl_4()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// The forward action for the current step, sitting on its row: the
+    /// phase's start (compose its prompt) or the gate's approve/merge.
+    fn coding_primary_action(
+        &mut self,
+        task: &TaskWithMeta,
+        view: &RunView,
+        step: &RunStepView,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let task_id = task.id;
+        let step_id = step.task.id;
+        let run_id = view.run.id;
+        let node_id = step.node.id.clone();
+        let label = match node_id.as_str() {
+            "interview" => "Start interview",
+            "spec" => "Approve spec",
+            "implement" => "Start implementation",
+            "review" => "Approve review",
+            "merge" => "Merge branch",
+            _ => return None,
+        };
+        let tooltip = match node_id.as_str() {
+            "interview" | "implement" => "Compose this phase's prompt in the agent pane",
+            "spec" => "Cut the feature branch and start implementation",
+            "review" => "Accept the implementation and queue the merge",
+            _ => "Merge the feature branch into its base branch",
+        };
+        let task_for_prompt = task.clone();
+        let view_for_prompt = view.clone();
+        Some(
+            Button::new(format!("coding-primary-{step_id}"))
+                .compact()
+                .label(label)
+                .tooltip(tooltip)
+                .on_click(cx.listener(move |this, _, _, cx| match node_id.as_str() {
+                    "interview" => {
+                        this.launch_phase(&task_for_prompt, &view_for_prompt, "interview", cx)
+                    }
+                    "implement" => {
+                        this.launch_phase(&task_for_prompt, &view_for_prompt, "implement", cx)
+                    }
+                    "spec" => this.approve_coding_spec(task_id, cx),
+                    "review" => this.complete_coding_step(
+                        step_id,
+                        serde_json::json!({ "approved": true }),
+                        cx,
+                    ),
+                    "merge" => this.merge_coding_run(run_id, cx),
+                    _ => {}
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The current step's secondary actions, below the step list, plus the
+    /// reject and manual-spec boxes when they are open. The forward action
+    /// sits on the step's own row instead.
+    fn coding_secondary_actions(
         &mut self,
         task: &TaskWithMeta,
         view: &RunView,
@@ -2593,27 +2722,10 @@ impl TaskDetails {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let task_id = task.id;
-        let run_id = view.run.id;
         let mut actions = div().h_flex().items_center().gap_2().flex_wrap();
         match current.map(|step| step.node.id.as_str()) {
             Some("interview") => {
-                let task_for_prompt = task.clone();
-                let view_for_prompt = view.clone();
                 actions = actions
-                    .child(
-                        Button::new(format!("coding-interview-{task_id}"))
-                            .compact()
-                            .label("Start interview")
-                            .tooltip("Compose the /interview prompt in the agent pane")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.launch_phase(
-                                    &task_for_prompt,
-                                    &view_for_prompt,
-                                    "interview",
-                                    cx,
-                                );
-                            })),
-                    )
                     .child(
                         Button::new(format!("coding-manual-spec-{task_id}"))
                             .ghost()
@@ -2629,15 +2741,6 @@ impl TaskDetails {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
                 actions = actions
                     .child(
-                        Button::new(format!("coding-approve-spec-{task_id}"))
-                            .compact()
-                            .label("Approve spec & create branch")
-                            .tooltip("Cut the feature branch and start implementation")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.approve_coding_spec(task_id, cx);
-                            })),
-                    )
-                    .child(
                         Button::new(format!("coding-reject-spec-{task_id}"))
                             .ghost()
                             .compact()
@@ -2650,23 +2753,7 @@ impl TaskDetails {
             }
             Some("implement") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
-                let task_for_prompt = task.clone();
-                let view_for_prompt = view.clone();
                 actions = actions
-                    .child(
-                        Button::new(format!("coding-implement-{task_id}"))
-                            .compact()
-                            .label("Start implementation")
-                            .tooltip("Compose the implementation prompt in the agent pane")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.launch_phase(
-                                    &task_for_prompt,
-                                    &view_for_prompt,
-                                    "implement",
-                                    cx,
-                                );
-                            })),
-                    )
                     .child(
                         Button::new(format!("coding-implement-done-{task_id}"))
                             .ghost()
@@ -2699,19 +2786,6 @@ impl TaskDetails {
                             })),
                     )
                     .child(
-                        Button::new(format!("coding-review-approve-{task_id}"))
-                            .compact()
-                            .label("Approve review")
-                            .tooltip("Accept the implementation and queue the merge")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.complete_coding_step(
-                                    step_id,
-                                    serde_json::json!({ "approved": true }),
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
                         Button::new(format!("coding-review-reject-{task_id}"))
                             .ghost()
                             .compact()
@@ -2721,17 +2795,6 @@ impl TaskDetails {
                                 this.open_coding_notes(step_id, window, cx);
                             })),
                     );
-            }
-            Some("merge") => {
-                actions = actions.child(
-                    Button::new(format!("coding-merge-{task_id}"))
-                        .compact()
-                        .label("Merge branch")
-                        .tooltip("Merge the feature branch into its base branch")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.merge_coding_run(run_id, cx);
-                        })),
-                );
             }
             _ => {}
         }
@@ -2823,68 +2886,6 @@ impl TaskDetails {
             );
         }
         actions.into_any_element()
-    }
-
-    /// The model-created sub-tasks of the feature task. Phase steps are
-    /// subtasks too, so they are filtered out (`node_id` is set on those).
-    fn coding_sub_tasks(&self, cx: &mut Context<Self>) -> AnyElement {
-        let work_items: Vec<&storage::Task> = self
-            .subtasks
-            .iter()
-            .filter(|sub| sub.node_id.is_none())
-            .collect();
-        if work_items.is_empty() {
-            return div().into_any_element();
-        }
-        let rows: Vec<AnyElement> = work_items
-            .into_iter()
-            .map(|sub| {
-                let sub_id = sub.id;
-                let nested = sub.workflow_run_id.is_some();
-                let mut row = div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x8a8a8a))
-                            .child(if sub.done { "☑" } else { "☐" }),
-                    )
-                    .child(
-                        div()
-                            .id(("coding-sub-task", sub_id))
-                            .text_sm()
-                            .text_color(if sub.done { rgb(0x6b6b6b) } else { rgb(0xd4d4d4) })
-                            .hover(|this| this.underline())
-                            .child(sub.title.clone())
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                cx.emit(TaskDetailsEvent::SelectTask { task_id: sub_id });
-                            })),
-                    );
-                if nested {
-                    row = row.child(chip("nested run"));
-                } else if !sub.done {
-                    row = row.child(
-                        Button::new(format!("coding-sub-interview-{sub_id}"))
-                            .ghost()
-                            .compact()
-                            .label("Interview")
-                            .tooltip("Start a sub-task interview run")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_sub_task_interview(sub_id, cx);
-                            })),
-                    );
-                }
-                row.into_any_element()
-            })
-            .collect();
-        div()
-            .v_flex()
-            .gap_1()
-            .child(field_label(&format!("Sub-tasks ({})", rows.len())))
-            .children(rows)
-            .into_any_element()
     }
 
     fn coding_round_log(&self, log: &[RunNote]) -> AnyElement {
@@ -3013,7 +3014,6 @@ impl Render for TaskDetails {
                 let blocked = self.computed_blocked();
 
                 let mut details = div().v_flex().gap_3();
-                details = details.child(self.coding_section(&task, window, cx));
                 let mut header = div().v_flex().gap_1();
                 if !task.leaf_tags.is_empty() {
                     header = header.child(div().h_flex().gap_1().flex_wrap().children(
@@ -3204,6 +3204,9 @@ impl Render for TaskDetails {
                     details = details.child(field("Branch", branch.clone()));
                 }
                 details = details.child(self.relationships_section(window, cx));
+                // The coding steps are subtasks of the feature task, so they
+                // close the panel, after the ordinary fields and links.
+                details = details.child(self.coding_section(&task, window, cx));
                 details
             }
         };

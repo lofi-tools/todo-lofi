@@ -382,7 +382,7 @@ today, which is already a subtask of the root).
 | --- | --- | --- | --- |
 | `get_coding_context` | read | `task_id?`, `run_id?` | Returns phase, spec, cycle, branch, annotation log, sub-tasks, and the phase prompt hints. |
 | `save_spec` | write | `task_id`, `path`, `content` | Stores `tasks.spec` / `tasks.spec_path`, appends a `spec` note, **completes the `interview` step** (agent signal → mixed auto-advance). |
-| `create_sub_task` | write | `parent_task_id`, `title`, `description`, `nested: bool` | Creates a subtask (`parent_id`); when `nested` is true also starts a child `coding-task` run rooted at the subtask (exempt from the per-project guard). |
+| `create_sub_task` | write | `parent_task_id`, `title`, `description`, `nested: bool` | Creates a subtask under the given step (or the feature task); when `nested` is true also starts a child `coding-task` run rooted at the subtask (exempt from the per-project guard). |
 | `request_sub_task_interview` | write | `sub_task_id`, `reason?` | Creates an interview step for the sub-task (a `coding-sub-interview` run rooted at the sub-task) and flags it "needs input" in the UI. |
 | `append_note` | write | `task_id`, `kind`, `body` | Appends an `@notes` entry (annotation, finding, decision). |
 | `propose_branch` | write | `task_id`, `name`, `summary?` | Records the proposed branch name on the run; the app creates the branch after spec approval. |
@@ -396,43 +396,47 @@ mismatch (e.g. `save_spec` while the run is in `implement` after a merge),
 branch already taken, project has no directory, git command failure (with
 stderr text).
 
-## 8. UX — details panel (the phase stepper)
+## 8. UX — details panel (the steps, as subtasks)
 
-For the selected task, when `coding_run_for_task(task_id)` is `Some`, the top of
-the details panel renders a **Coding workflow** section before the ordinary
-fields:
+There is **no "Coding workflow" header and no separate phase stepper**. For the
+selected task, when `coding_run_for_task(task_id)` is `Some`, the bottom of the
+details panel — after the ordinary fields and the "Linked to" lists — renders
+The run's steps as the subtasks they are: one row per phase in run order, and
+the model's sub-tasks of a step nested under that step's row.
 
 ```
-┌ Coding workflow · Coding task ────────────────────────────── Round 2 ┐
-│ ● Interview ✓   ● Spec ✓   ◉ Implement   ○ Review   ○ Merge          │
-│ branch  feature/42-add-oauth        [copy] [open]                    │
-│                                                                      │
-│ [ Start implementation ]     Agent reports done                      │
-│                                                                      │
-│ ▸ Spec (expand)                                     [open file]      │
-│ ▾ Sub-tasks (3)   · 2 plain · 1 nested run                           │
-│    ☐ Add token refresh        [Start interview]                      │
-│    ☑ Wire the callback URL                                           │
-│    ▸ Session storage (nested run · review)                           │
-│ ▾ Round log (2 cycles)                                               │
-│    Round 2 · review · reject · "Needs a migration test."             │
-│    Round 1 · review · approve-suppressed…                            │
-└──────────────────────────────────────────────────────────────────────┘
+… ordinary fields, Linked to, Subtasks (2) …
+
+  ☑ Interview & spec the feature                        done
+  ☑ Approve the spec                                    done
+  ◐ Implement the feature       [ Start implementation ]      ← highlighted
+      ☐ Add token refresh            [ Interview ]
+      ☑ Wire the callback URL
+  ☐ Review & annotate
+  ☐ Merge the branch
+  Round 2 · branch feature/42-add-oauth · active · from main   [ Cancel run ]
+  [ Mark implemented ]                                          ← secondaries
+  ▾ Round log (2 cycles)
+     Round 2 · reject · "Needs a migration test."
+     Round 1 · approve · "Approved"
+  ▸ Spec (42 lines)                     docs/spec/oauth-spec.md
 ```
 
-Contents (decision #24 — all four are required):
+Contents (decision #24 — all four are covered):
 
-1. **Phase status + actions** — per-phase state
-   (`pending / active / done / rejected`), the current phase's action button,
-   and the overall run status. Approve/Reject come from the recipe's
-   `on_result` conditions exactly like `WorkflowsPanel::step_row` does today.
+1. **Steps** — one subtask-styled row per step (`☐ pending / ◐ active / ☑ done`),
+   selected by clicking the title like any other subtask. The **next pending
+   step is highlighted** and carries its forward action on the row: the phase's
+   start/resume (compose its prompt) for `interview` and `implement`, the
+   approve for `spec` and `review`, the git merge for `merge`. The model's
+   sub-tasks nest under the step they belong to, with a `nested run` badge or an
+   `Interview` affordance.
 2. **Round log** — the `@notes` history, newest first, grouped by cycle, with
    phase + kind chips.
-3. **Sub-task list** — title, checkbox state, a `nested run` badge that links to
-   that sub-task's own stepper, and a `Start interview` affordance when the
-   sub-task is awaiting one.
-4. **Branch + spec artifacts** — branch name with copy/open affordances (hidden
-   until created) and the spec with expand / open-file.
+3. **Branch + spec artifacts** — the branch with its status and base, and the
+   spec with expand.
+4. **Run meta** — `Round N`, branch/status, `Cancel run`, and the run's inline
+   blocked reason (missing directory, dirty tree, merge conflict, …).
 
 Behaviour:
 
@@ -440,12 +444,15 @@ Behaviour:
   implementation" compose the phase prompt (§8.1) and insert it into the agent
   pane, then switch `RightPane` to `Agent` and focus the prompt box. The user
   edits/sends; nothing is auto-sent.
-- Reject opens a notes box (free text, multi-line) which becomes the `review`
-  rejection result `{"approved": false, "notes": "…"}`; the notes are also
-  appended to `@notes`.
-- Phase tasks are also ordinary tasks in the task list (subtasks of the feature
-  task), so they can be ticked there too; the details panel refreshes on
-  `WorkflowsPanelEvent::Changed` / task-list selection as today.
+- The step's secondary actions sit in a row **below the step list**
+  (`Write spec manually`, `Reject…`, `Mark implemented`, `Ask for a summary`).
+  Reject opens the notes box, whose text becomes the rejection result
+  `{"approved": false, "notes": "…"}` and is also appended to `@notes`.
+- Phase steps are still ordinary tasks in the task list (subtasks of the feature
+  task), so they can be ticked there too; they are excluded from the panel's own
+  `Subtasks (N)` list, which keeps run-level sub-tasks. The panel refreshes on
+  `WorkflowsPanelEvent::Changed`, on selection, and on coding-run notifications
+  from the app's MCP endpoint.
 
 ### 8.1 Phase prompt templates (app-composed)
 
@@ -529,13 +536,20 @@ The templates live next to the `TaskDetails` stepper (one function per phase,
 
 ## 12. Sub-tasks
 
-- **Plain sub-task**: a task with `parent_id = <feature task>`, created by the
-  model through `create_sub_task`. No phase machine; listed in the stepper's
-  sub-task list.
+Phase steps are themselves subtasks of the run root. The model splits *a step*
+when a step is big enough to break down, so the parent of a sub-task is normally
+that step's task (`phases[].task_id` / `open_task_id` from
+`get_coding_context`); a run-level sub-task uses the feature task instead. The
+details panel renders the steps as the subtask rows they are, with the model's
+sub-tasks nested under the step they belong to.
+
+- **Plain sub-task**: a task with `parent_id = <step task>` (or `<feature
+  task>`), created by the model through `create_sub_task`. No phase machine; it
+  appears nested under its step row (or in the panel's Subtasks list when it
+  hangs off the feature task).
 - **Nested run**: the same call with `nested: true` starts a `coding-task` run
-  rooted at the sub-task, so the sub-task gets its own stepper
-  (root + nested roots render the stepper; plain sub-tasks get a badge —
-  decision #23).
+  rooted at the sub-task, so the sub-task gets its own step list; the row shows
+  a `nested run` badge and links to it by selection.
 - **Sub-task interview**: `request_sub_task_interview` starts a
   `coding-sub-interview` run (single `interview` node, phase `interview`, no
   outgoing edges) rooted at the sub-task. The UI shows `Start interview`; the
@@ -872,15 +886,18 @@ storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
   `branch_exists`, `create_branch`, `switch_branch`, `merge_no_ff`,
   `abort_merge`, `delete_branch`, with stderr captured in every error. Tested
   against throwaway repos (create/delete, dirty tree, merge, conflict→abort).
-- `src/ui_parts/task_details.rs`: the top-of-panel **Coding workflow** section —
-  phase stepper, per-phase actions (Start interview / Write spec manually /
-  Approve spec & create branch / Reject… / Start implementation / Mark
-  implemented / Approve review / Merge branch / Cancel run), inline blocked
-  reason, branch chip, sub-task list with `nested run` badge and `Interview`
-  affordance, round log grouped by cycle, expandable spec artifact, and the
-  `Start coding workflow` card for a feature task with no run. Phase prompt
-  templates (`interview` in raw slash form, `implement`, `review`) are pure
-  functions with unit tests.
+- `src/ui_parts/task_details.rs`: the run renders as a **step list at the bottom
+  of the panel** (§8) — one subtask-styled row per phase (☐/◐/☑), the next
+  pending step highlighted with its forward action on the row (start interview /
+  start implementation / approve spec / approve review / merge branch), the
+  model's sub-tasks of a step nested under it with a `nested run` badge or an
+  `Interview` affordance, secondaries below the list (Write spec manually /
+  Reject… / Mark implemented / Ask for a summary), plus the `Round N` + branch
+  chips, `Cancel run`, inline blocked reason, round log grouped by cycle, and the
+  expandable spec. Phase steps are excluded from the panel's own `Subtasks (N)`
+  list, and the `Start coding workflow` affordance shows on a top-level feature
+  task with no run. Phase prompt templates (`interview` in raw slash form,
+  `implement`, `review`) are pure functions with unit tests.
 - `src/ui_parts/workflows.rs`: phased recipes hidden from the start row, phase
   chip (`Round 2 · Implement`) on coding run cards, **Branches to clean up**
   section with delete/keep.
