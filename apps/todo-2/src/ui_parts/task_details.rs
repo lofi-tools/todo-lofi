@@ -1958,6 +1958,7 @@ impl TaskDetails {
         let clear_button = Button::new("clear-blocked-until")
             .ghost()
             .compact()
+            .cursor_pointer()
             .label("×")
             .tooltip("Clear time block")
             .on_click(cx.listener(|this, _, _, cx| {
@@ -2095,6 +2096,7 @@ impl TaskDetails {
                             .id(("blocker-title", blocker_id))
                             .flex_1()
                             .text_sm()
+                            .cursor_pointer()
                             .text_color(if blocker.done {
                                 rgb(0x666666)
                             } else {
@@ -2117,6 +2119,7 @@ impl TaskDetails {
                         Button::new(("remove-blocker", blocker_id))
                             .ghost()
                             .compact()
+                            .cursor_pointer()
                             .label("×")
                             .tooltip("Remove blocker")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2157,6 +2160,7 @@ impl TaskDetails {
                             .id(("after-title", after_id))
                             .flex_1()
                             .text_sm()
+                            .cursor_pointer()
                             .text_color(if after.done {
                                 rgb(0x666666)
                             } else {
@@ -2177,6 +2181,7 @@ impl TaskDetails {
                         Button::new(("remove-after", after_id))
                             .ghost()
                             .compact()
+                            .cursor_pointer()
                             .label("×")
                             .tooltip("Remove after task")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2220,6 +2225,7 @@ impl TaskDetails {
                             .id(("subtask-title", subtask_id))
                             .flex_1()
                             .text_sm()
+                            .cursor_pointer()
                             .text_color(if subtask.done {
                                 rgb(0x666666)
                             } else {
@@ -2267,6 +2273,7 @@ impl TaskDetails {
                             .id(("linked-title", linked_id))
                             .flex_1()
                             .text_sm()
+                            .cursor_pointer()
                             .text_color(if linked.done {
                                 rgb(0x666666)
                             } else {
@@ -2287,6 +2294,7 @@ impl TaskDetails {
                         Button::new(("remove-linked", linked_id))
                             .ghost()
                             .compact()
+                            .cursor_pointer()
                             .label("×")
                             .tooltip("Unlink task")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2398,6 +2406,7 @@ impl TaskDetails {
                                         .border_color(rgb(HAIRLINE))
                                         .text_sm()
                                         .text_color(rgb(0xa3a3a3))
+                                        .cursor_pointer()
                                         .hover(|this| this.bg(rgb(0x2a2a2a)))
                                         .child(
                                             svg()
@@ -2448,6 +2457,7 @@ fn relation_button(id: &'static str, label: &str) -> Button {
         .border_1()
         .border_color(rgb(HAIRLINE))
         .text_color(rgb(0xa3a3a3))
+        .cursor_pointer()
         .label(label)
 }
 
@@ -3519,6 +3529,7 @@ impl Render for TaskDetails {
                                     .flex_1()
                                     .text_xl()
                                     .font_bold()
+                                    .cursor_pointer()
                                     .text_color(if done {
                                         rgb(0x666666)
                                     } else {
@@ -3556,19 +3567,15 @@ impl Render for TaskDetails {
                     if let Some(input) = self.description_input.clone() {
                         details = details.child(
                             div()
-                                .v_flex()
-                                .gap_1()
-                                .child(field_label("Description"))
+                                .id(("details-description-edit", task_id))
                                 .child(
-                                    div().id(("details-description-edit", task_id)).child(
-                                        Input::new(&input)
-                                            .small()
-                                            .appearance(false)
-                                            .bg(rgb(APP_BG))
-                                            .border_1()
-                                            .border_color(rgb(HAIRLINE))
-                                            .rounded_md(),
-                                    ),
+                                    Input::new(&input)
+                                        .small()
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
                                 ),
                         );
                     }
@@ -3577,24 +3584,19 @@ impl Render for TaskDetails {
                 {
                     details = details.child(
                         div()
-                            .v_flex()
-                            .gap_1()
-                            .child(field_label("Description"))
-                            .child(
-                                div()
-                                    .id(("details-description", task_id))
-                                    .w_full()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .text_color(rgb(0xe5e5e5))
-                                    .child(desc.clone())
-                                    .on_click(cx.listener(|this, event, window, cx| {
-                                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
-                                        {
-                                            this.begin_description_edit(window, cx);
-                                        }
-                                    })),
-                            ),
+                            .id(("details-description", task_id))
+                            .w_full()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .cursor_pointer()
+                            .child(desc.clone())
+                            .on_click(cx.listener(|this, event, window, cx| {
+                                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                                {
+                                    this.begin_description_edit(window, cx);
+                                }
+                            })),
                     );
                 } else {
                     // No description yet: a grayed-out affordance row that
