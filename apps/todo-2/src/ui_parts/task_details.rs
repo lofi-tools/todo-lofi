@@ -1899,11 +1899,10 @@ impl TaskDetails {
                 .child("Linked to"),
         );
 
-        // Overlay zone: the lists paint first, then the buttons row and the
-        // picker cards on top, so open cards always cover (and receive hits
-        // before) the content underneath. The two-line button row is 56px
-        // tall, so the lists start below it and cards float just under it.
-        let mut lists = div().v_flex().gap_2().pt(px(64.));
+        // The lists stack in normal flow below the buttons row, so they sit
+        // under it whatever the pane width. The floating picker cards paint
+        // after both and cover (and take hits before) the content underneath.
+        let mut lists = div().v_flex().gap_2();
 
         if self.adding_subtask
             && let Some(input) = self.subtask_input.clone()
@@ -2159,124 +2158,119 @@ impl TaskDetails {
             );
         }
 
-        section =
-            section.child(
-                div()
-                    .relative()
-                    .child(lists)
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(0.))
-                            .left(px(0.))
-                            .right(px(0.))
-                            .v_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        relation_button("add-blocker", "+ blocked by task")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.blocker_picker_open() {
-                                                    this.close_blocker_picker_and_notify(cx);
-                                                } else if this.take_recent_blocker_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the picker; don't reopen it.
-                                                } else {
-                                                    this.open_blocker_picker(window, cx);
-                                                }
-                                            })),
-                                    )
-                                    .child(
-                                        relation_button("add-blocked-until", "+ blocked until")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.until_panel_open() {
-                                                    this.close_until_panel_and_notify(cx);
-                                                } else if this.take_recent_until_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the card; don't reopen it.
-                                                } else {
-                                                    this.open_until_panel(window, cx);
-                                                }
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(relation_button("add-after", "+ after task").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            if this.after_picker_open() {
-                                                this.close_after_picker_and_notify(cx);
-                                            } else if this.take_recent_after_outside_close() {
+        section = section.child(
+            div()
+                .relative()
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    relation_button("add-blocker", "+ blocked by task")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.blocker_picker_open() {
+                                                this.close_blocker_picker_and_notify(cx);
+                                            } else if this.take_recent_blocker_outside_close() {
                                                 // The mousedown before this click already
                                                 // closed the picker; don't reopen it.
                                             } else {
-                                                this.open_after_picker(window, cx);
+                                                this.open_blocker_picker(window, cx);
                                             }
-                                        }),
-                                    ))
-                                    .child(relation_button("add-subtask", "+ subtask").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.begin_subtask(window, cx);
-                                        }),
-                                    ))
-                                    .child(
-                                        relation_button("add-follow-up", "+ follow-up task")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.begin_follow_up(window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        // "repeat" button: an inline SVG icon left of the
-                                        // label, tinted the same color as the text.
-                                        div()
-                                            .id("repeat-task")
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .h_6()
-                                            .px_1p5()
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(rgb(HAIRLINE))
-                                            .text_sm()
-                                            .text_color(rgb(0xa3a3a3))
-                                            .hover(|this| this.bg(rgb(0x2a2a2a)))
-                                            .child(
-                                                svg()
-                                                    .data(REFRESH_ICON_SVG)
-                                                    .size(px(14.))
-                                                    .text_color(rgb(0xa3a3a3)),
-                                            )
-                                            .child("repeat")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.repeat_picker_open() {
-                                                    this.close_repeat_picker_and_notify(cx);
-                                                } else if this.take_recent_repeat_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the card; don't reopen it.
-                                                } else {
-                                                    this.open_repeat_picker(window, cx);
-                                                }
-                                            })),
-                                    ),
-                            ),
-                    )
-                    .when(self.until_panel_open(), |this| {
-                        this.child(self.until_card(cx))
-                    })
-                    .child(self.blocker_card(cx))
-                    .child(self.after_card(cx))
-                    .child(self.repeat_card(cx)),
-            );
+                                        })),
+                                )
+                                .child(
+                                    relation_button("add-blocked-until", "+ blocked until")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.until_panel_open() {
+                                                this.close_until_panel_and_notify(cx);
+                                            } else if this.take_recent_until_outside_close() {
+                                                // The mousedown before this click already
+                                                // closed the card; don't reopen it.
+                                            } else {
+                                                this.open_until_panel(window, cx);
+                                            }
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(relation_button("add-after", "+ after task").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        if this.after_picker_open() {
+                                            this.close_after_picker_and_notify(cx);
+                                        } else if this.take_recent_after_outside_close() {
+                                            // The mousedown before this click already
+                                            // closed the picker; don't reopen it.
+                                        } else {
+                                            this.open_after_picker(window, cx);
+                                        }
+                                    }),
+                                ))
+                                .child(relation_button("add-subtask", "+ subtask").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.begin_subtask(window, cx);
+                                    }),
+                                ))
+                                .child(
+                                    relation_button("add-follow-up", "+ follow-up task")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.begin_follow_up(window, cx);
+                                        })),
+                                )
+                                .child(
+                                    // "repeat" button: an inline SVG icon left of the
+                                    // label, tinted the same color as the text.
+                                    div()
+                                        .id("repeat-task")
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .h_6()
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .text_sm()
+                                        .text_color(rgb(0xa3a3a3))
+                                        .hover(|this| this.bg(rgb(0x2a2a2a)))
+                                        .child(
+                                            svg()
+                                                .data(REFRESH_ICON_SVG)
+                                                .size(px(14.))
+                                                .text_color(rgb(0xa3a3a3)),
+                                        )
+                                        .child("repeat")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.repeat_picker_open() {
+                                                this.close_repeat_picker_and_notify(cx);
+                                            } else if this.take_recent_repeat_outside_close() {
+                                                // The mousedown before this click already
+                                                // closed the card; don't reopen it.
+                                            } else {
+                                                this.open_repeat_picker(window, cx);
+                                            }
+                                        })),
+                                ),
+                        ),
+                )
+                .child(lists)
+                .when(self.until_panel_open(), |this| {
+                    this.child(self.until_card(cx))
+                })
+                .child(self.blocker_card(cx))
+                .child(self.after_card(cx))
+                .child(self.repeat_card(cx)),
+        );
 
         section
     }
@@ -3419,7 +3413,7 @@ impl Render for TaskDetails {
         div()
             .id("task-details")
             .relative()
-            .h_full()
+            .size_full()
             .min_w_0()
             .v_flex()
             .p_4()
