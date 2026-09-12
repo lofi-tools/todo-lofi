@@ -17,10 +17,10 @@ use acp_client::schema::{
     SessionModeId, SessionModeState, ToolCallUpdate,
 };
 use acp_client::{
-    AcpConnection, AcpEvent, AgentServer, AuthMethodRow, ConnectOptions, EntryKind, NoticeLevel,
-    OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord, PermissionReply,
-    PermissionRule, SessionRoots, SessionSpec, SessionStore, StoredSession, ToolPermissions,
-    ToolStatus, Transcript, connect,
+    AcpConnection, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions, EntryKind,
+    NoticeLevel, OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord,
+    PermissionReply, PermissionRule, SessionRoots, SessionSpec, SessionStore, StoredSession,
+    ToolPermissions, ToolStatus, Transcript, connect,
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -1919,6 +1919,10 @@ impl AgentPane {
                     .into_any_element()
             }
             EntryKind::Thought { text } => {
+                // A thought that is still streaming shows itself: the user
+                // watches the reasoning arrive instead of a collapsed header.
+                // Once it ends it collapses back to the one-line record.
+                let live = entry.transcript.live_entry() == Some(index);
                 let mut element = div()
                     .w_full()
                     .flex()
@@ -1927,42 +1931,59 @@ impl AgentPane {
                     .py_1()
                     .pl_3()
                     .border_l_1()
-                    .border_color(rgb(HAIRLINE))
-                    .child(
-                        div().flex().items_center().gap_1().child(
-                            div()
-                                .id(format!("thought-toggle-{entry_id}"))
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .cursor_pointer()
-                                .on_click({
-                                    let weak = weak.clone();
-                                    move |_, _, cx: &mut App| {
-                                        weak.update(cx, |pane, cx| {
-                                            pane.toggle_expanded(entry_id, cx)
-                                        })
+                    .border_color(rgb(if live { TEXT_FAINT } else { HAIRLINE }))
+                    .child(div().flex().items_center().gap_1().child(if live {
+                        // Nothing to collapse yet: the reasoning is still
+                        // arriving, so the header is a plain live label.
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                gpui_component::spinner::Spinner::new()
+                                    .with_size(px(10.))
+                                    .color(rgb(TEXT_FAINT).into()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child("Thinking…"),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id(format!("thought-toggle-{entry_id}"))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .on_click({
+                                let weak = weak.clone();
+                                move |_, _, cx: &mut App| {
+                                    weak.update(cx, |pane, cx| pane.toggle_expanded(entry_id, cx))
                                         .ok();
-                                    }
-                                })
-                                .child(icon(
-                                    if expanded {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    },
-                                    TEXT_FAINT,
-                                ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_semibold()
-                                        .text_color(rgb(TEXT_MUTED))
-                                        .child("Thinking"),
-                                ),
-                        ),
-                    );
-                if expanded {
+                                }
+                            })
+                            .child(icon(
+                                if expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                TEXT_FAINT,
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .child("Thinking"),
+                            )
+                            .into_any_element()
+                    }));
+                if expanded || live {
                     element = element.child(
                         div()
                             .text_xs()
@@ -2280,6 +2301,11 @@ impl AgentPane {
                     cx.stop_propagation();
                 }
             }))
+            // The live "something is happening" line, so a slow first token
+            // never looks like a dead pane.
+            .when_some(self.render_activity(), |this, activity| {
+                this.child(activity)
+            })
             .child(self.render_controls(busy, can_send, queue_len, cx))
             .when(slash_open, |this| this.child(self.render_slash(cx)))
             .child(
@@ -2321,6 +2347,43 @@ impl AgentPane {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The turn's live status: a spinner plus what the agent is doing right
+    /// now, so a slow first token never looks like a dead pane. `None` when the
+    /// pane is idle, so holding still costs nothing.
+    fn render_activity(&self) -> Option<AnyElement> {
+        if !self.is_busy() {
+            return None;
+        }
+        let entry = self.active_entry()?;
+        // The turn paused on the user rather than on the agent: no spinner,
+        // because nothing is running until the card is answered.
+        let (label, spinning) = if entry.transcript.has_pending_permission() {
+            ("Waiting for your approval".to_string(), false)
+        } else {
+            let label = match entry.transcript.activity() {
+                Some(Activity::Thinking) => "Thinking…".to_string(),
+                Some(Activity::Writing) => "Writing…".to_string(),
+                Some(Activity::Tool { title }) => format!("Running {title}…"),
+                // The turn has started but no content has arrived yet.
+                None => "Waiting for the agent…".to_string(),
+            };
+            (label, true)
+        };
+        let mut row = div().flex_none().h_flex().items_center().gap_2().px_1();
+        row = row.child(if spinning {
+            gpui_component::spinner::Spinner::new()
+                .with_size(px(12.))
+                .color(rgb(TEXT_MUTED).into())
+                .into_any_element()
+        } else {
+            div().text_xs().text_color(rgb(TEXT_FAINT)).child("●").into_any_element()
+        });
+        Some(
+            row.child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(label))
+                .into_any_element(),
+        )
     }
 
     fn render_controls(

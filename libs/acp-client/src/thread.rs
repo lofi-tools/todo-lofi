@@ -140,6 +140,19 @@ impl AuthMethodRow {
     }
 }
 
+/// What the agent is doing, as far as the transcript can tell: the row it is
+/// writing into, or the tool call it is waiting on. The pane turns this into
+/// the "something is happening" line above the prompt box.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activity {
+    /// A thought is streaming: the agent is reasoning before answering.
+    Thinking,
+    /// The answer itself is streaming.
+    Writing,
+    /// A tool call is running.
+    Tool { title: String },
+}
+
 #[derive(Clone, Debug)]
 pub enum EntryKind {
     UserMessage {
@@ -267,6 +280,10 @@ pub struct Transcript {
     /// `thought:<message id>`, falling back to a per-kind key when the agent
     /// sends chunks without a message id.
     streaming: HashMap<String, usize>,
+    /// The row currently being streamed into. Set by `push_streamed` and
+    /// cleared by any other append, so a live indicator only ever marks the
+    /// row the agent is writing right now.
+    live: Option<usize>,
     next_entry_id: u64,
     controls: SessionControls,
     usage_row: Option<usize>,
@@ -328,8 +345,58 @@ impl Transcript {
         self.entries.clear();
         self.tool_calls.clear();
         self.streaming.clear();
+        self.live = None;
         self.usage_row = None;
         self.controls = SessionControls::default();
+    }
+
+    /// The row the agent is streaming into right now, if any.
+    pub fn live_entry(&self) -> Option<usize> {
+        self.live
+    }
+
+    /// Whether a permission card is unanswered in the current turn: the turn is
+    /// paused on the user, not on the agent. Only the rows after the last user
+    /// message count, so a card abandoned in an earlier turn (a cancelled turn
+    /// leaves it unanswered) cannot keep claiming the agent is waiting.
+    pub fn has_pending_permission(&self) -> bool {
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
+            .map_or(0, |index| index + 1);
+        self.entries[turn_start..].iter().any(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Permission {
+                    decision: None,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// What the agent is doing, from the transcript's point of view. `None`
+    /// means nothing is visibly in flight — the pane falls back to its own
+    /// busy flag (the turn has started but no content has arrived yet).
+    pub fn activity(&self) -> Option<Activity> {
+        if let Some(index) = self.live
+            && let Some(entry) = self.entries.get(index)
+        {
+            return Some(match entry.kind {
+                EntryKind::Thought { .. } => Activity::Thinking,
+                _ => Activity::Writing,
+            });
+        }
+        match self.entries.last().map(|entry| &entry.kind) {
+            Some(EntryKind::ToolCall { title, status, .. }) => match status {
+                ToolStatus::Pending | ToolStatus::Running => Some(Activity::Tool {
+                    title: title.clone(),
+                }),
+                ToolStatus::Completed | ToolStatus::Failed => None,
+            },
+            _ => None,
+        }
     }
 
     /// Record the user's own message. Agents usually echo it back as a
@@ -417,6 +484,9 @@ impl Transcript {
         let id = self.next_entry_id;
         self.next_entry_id += 1;
         self.entries.push(Entry { id, kind });
+        // Anything appended outside the stream ends the previous live row:
+        // a tool call or a fresh block means the last one is finished.
+        self.live = None;
         self.entries.len() - 1
     }
 
@@ -564,6 +634,7 @@ impl Transcript {
                     | EntryKind::Thought { text: existing } => existing.push_str(&text),
                     _ => entry.kind = kind,
                 }
+                self.live = Some(index);
                 return TranscriptDelta {
                     changed: Some(index),
                     ..Default::default()
@@ -572,6 +643,7 @@ impl Transcript {
         }
         let index = self.append(kind);
         self.streaming.insert(key.to_string(), index);
+        self.live = Some(index);
         TranscriptDelta {
             appended: true,
             changed: Some(index),
@@ -724,4 +796,110 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
         }
     }
     ((!output.is_empty()).then_some(output), diffs, terminal_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+
+    fn thought(text: &str) -> SessionUpdate {
+        SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text.to_string(),
+        ))))
+    }
+
+    fn message(text: &str) -> SessionUpdate {
+        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
+            text.to_string(),
+        ))))
+    }
+
+    fn tool_call(id: &str, title: &str, status: ToolCallStatus) -> SessionUpdate {
+        SessionUpdate::ToolCall(
+            ToolCall::new(id.to_string(), title.to_string()).status(status),
+        )
+    }
+
+    #[test]
+    fn streaming_thoughts_grow_one_row_and_stay_live() {
+        let mut transcript = Transcript::default();
+        let first = transcript.apply_update(&thought("Let me "));
+        assert!(first.appended);
+        let second = transcript.apply_update(&thought("think."));
+        assert!(!second.appended, "chunks grow the row instead of appending");
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript.activity(), Some(Activity::Thinking));
+        assert_eq!(transcript.live_entry(), Some(0));
+        assert_eq!(transcript.entry(0).map(|row| row.summary()), Some("thought: Let me think.".to_string()));
+    }
+
+    #[test]
+    fn a_finished_thought_is_no_longer_live() {
+        let mut transcript = Transcript::default();
+        transcript.apply_update(&thought("Considering options"));
+        transcript.apply_update(&tool_call("t1", "Read src/main.rs", ToolCallStatus::InProgress));
+        assert_eq!(
+            transcript.live_entry(),
+            None,
+            "the live mark belongs to the streaming row only"
+        );
+        assert_eq!(
+            transcript.activity(),
+            Some(Activity::Tool { title: "Read src/main.rs".to_string() })
+        );
+        transcript.apply_update(&tool_call("t1", "Read src/main.rs", ToolCallStatus::Completed));
+        assert_eq!(transcript.activity(), None, "a finished turn is idle");
+    }
+
+    #[test]
+    fn writing_replaces_thinking_as_the_activity() {
+        let mut transcript = Transcript::default();
+        transcript.apply_update(&thought("Drafting"));
+        transcript.apply_update(&message("Here is the answer"));
+        assert_eq!(transcript.activity(), Some(Activity::Writing));
+        assert_eq!(transcript.len(), 2, "a message is its own row");
+        assert_eq!(transcript.live_entry(), Some(1));
+    }
+
+    #[test]
+    fn pending_permission_is_reported_until_it_is_answered() {
+        let mut transcript = Transcript::default();
+        assert!(!transcript.has_pending_permission());
+        let choice = PermissionChoice {
+            option_id: "allow".to_string(),
+            name: "Allow".to_string(),
+            kind: "allow_once".to_string(),
+        };
+        let entry_id =
+            transcript.push_permission("Write src/main.rs".to_string(), vec![choice.clone()]);
+        assert!(transcript.has_pending_permission());
+        transcript.resolve_permission(entry_id, PermissionRecord::from_choice(&choice, false));
+        assert!(!transcript.has_pending_permission());
+    }
+
+    #[test]
+    fn a_card_abandoned_in_an_earlier_turn_no_longer_counts_as_waiting() {
+        let mut transcript = Transcript::default();
+        let choice = PermissionChoice {
+            option_id: "allow".to_string(),
+            name: "Allow".to_string(),
+            kind: "allow_once".to_string(),
+        };
+        transcript.push_permission("Write src/main.rs".to_string(), vec![choice]);
+        assert!(transcript.has_pending_permission());
+        // The user cancelled that turn and asked something else; the abandoned
+        // card stays in the transcript but must not describe the new turn.
+        transcript.push_user_message("never mind, explain the parser instead");
+        assert!(!transcript.has_pending_permission());
+    }
+
+    #[test]
+    fn clearing_resets_the_live_row() {
+        let mut transcript = Transcript::default();
+        transcript.apply_update(&thought("half a thought"));
+        transcript.clear();
+        assert_eq!(transcript.live_entry(), None);
+        assert_eq!(transcript.activity(), None);
+    }
 }

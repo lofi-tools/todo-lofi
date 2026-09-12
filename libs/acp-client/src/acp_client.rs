@@ -35,8 +35,8 @@ pub use permissions::{
 };
 pub use session_store::{SessionStore, StoredSession};
 pub use thread::{
-    AuthMethodRow, Entry, EntryKind, NoticeLevel, PermissionChoice, PermissionRecord, PlanRow,
-    ToolStatus, Transcript, TranscriptDelta,
+    Activity, AuthMethodRow, Entry, EntryKind, NoticeLevel, PermissionChoice, PermissionRecord,
+    PlanRow, ToolStatus, Transcript, TranscriptDelta,
 };
 
 use acp::schema::v1::{PermissionOption, ToolCallUpdate};
