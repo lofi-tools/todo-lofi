@@ -584,6 +584,20 @@ impl Store {
         })
     }
 
+    /// Replace a task's direct tags (assigning new ones, unassigning removed).
+    pub fn set_task_tags(
+        &self,
+        task_id: u64,
+        tags: Vec<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.set_task_tags(task_id, &tags).await?)
+        })
+    }
+
     /// The recipe that manages `tag_id`, if the tag is owned by an
     /// automation (drives the special panel in the Layout).
     pub fn managed_recipe_for_tag(

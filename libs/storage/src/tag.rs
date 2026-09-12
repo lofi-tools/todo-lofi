@@ -447,6 +447,50 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Replace a task's direct tags: create and assign the ones it does not
+    /// already carry, and unassign the ones removed by the edit. Each edited
+    /// label is resolved against existing tags by name or display label
+    /// (case-insensitive), so unchanged labels keep their tag — including
+    /// app-managed `project:` tags, whose editable text is the directory
+    /// name, not the opaque `project:` name.
+    pub async fn set_task_tags(&mut self, task_id: u64, tags: &[String]) -> QueryResult<()> {
+        let desired: Vec<String> = tags
+            .iter()
+            .map(|tag| tag.trim().trim_start_matches('#').to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+
+        let all = self.list_tags().await?;
+        let mut kept_ids: Vec<u64> = Vec::new();
+        for tag in &desired {
+            let lower = tag.to_lowercase();
+            let matches = all.iter().find(|candidate| {
+                candidate.name.to_lowercase() == lower
+                    || candidate.label().to_lowercase() == lower
+            });
+            match matches {
+                Some(existing) if !kept_ids.contains(&existing.id) => {
+                    self.assign_tag_to_task(task_id, &existing.name).await?;
+                    kept_ids.push(existing.id);
+                }
+                Some(_) => {}
+                None => {
+                    let created = self.create_tag(tag.to_lowercase()).await?;
+                    self.assign_tag_to_task(task_id, &created.name).await?;
+                    kept_ids.push(created.id);
+                }
+            }
+        }
+
+        let current = self.get_direct_task_tags(task_id).await?;
+        for tag in &current {
+            if !kept_ids.contains(&tag.id) {
+                self.remove_tag_from_task(task_id, tag.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get_direct_task_tags(&mut self, task_id: u64) -> QueryResult<Vec<Tag>> {
         let rows = toasty::sql::query(
             r#"
@@ -804,6 +848,66 @@ mod tests {
         assert_eq!(tasks[0].id, task.id);
         assert_eq!(tasks[0].direct_tags, vec![tag.label()]);
         assert_eq!(tasks[0].inferred_tags, vec![tag.label()]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_task_tags_replaces_direct_tags() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let task = storage
+            .create_task(Task::create().title("Tagged task"))
+            .await?;
+        storage
+            .set_task_tags(task.id, &["alpha".to_string(), "beta".to_string()])
+            .await?;
+
+        let direct = storage.get_direct_task_tags(task.id).await?;
+        let names = direct.iter().map(|tag| tag.label()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+
+        // Editing to a new set: keep beta, drop alpha, add gamma.
+        storage
+            .set_task_tags(
+                task.id,
+                &["beta".to_string(), "GAMMA".to_string(), "beta".to_string()],
+            )
+            .await?;
+        let direct = storage.get_direct_task_tags(task.id).await?;
+        let names = direct.iter().map(|tag| tag.label()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["beta".to_string(), "gamma".to_string()]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_task_tags_keeps_project_tag_through_label_edit() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/Users/me/dev/about-me"))
+            .await?;
+        assert_eq!(project.label(), "about-me");
+
+        let task = storage
+            .create_task(Task::create().title("Directory task"))
+            .await?;
+        storage.set_task_tags(task.id, &[project.label()]).await?;
+
+        // Committing the label unchanged must reuse the existing project tag,
+        // not create a new plain tag named `about-me`.
+        storage
+            .set_task_tags(task.id, &["about-me".to_string(), "notes".to_string()])
+            .await?;
+        let direct = storage.get_direct_task_tags(task.id).await?;
+        assert_eq!(direct.len(), 2);
+        assert!(direct.iter().any(|tag| tag.is_project()));
+        assert!(
+            direct
+                .iter()
+                .any(|tag| tag.name == project.name && tag.label() == "about-me")
+        );
 
         Ok(())
     }

@@ -252,6 +252,9 @@ pub struct TaskDetails {
     editing_description: bool,
     description_input: Option<Entity<InputState>>,
     _description_subscription: Option<Subscription>,
+    editing_tags: bool,
+    tags_input: Option<Entity<InputState>>,
+    _tags_subscription: Option<Subscription>,
     confirming: bool,
     pending: Option<PendingSelection>,
     blockers: Vec<storage::Task>,
@@ -360,6 +363,9 @@ impl TaskDetails {
             editing_description: false,
             description_input: None,
             _description_subscription: None,
+            editing_tags: false,
+            tags_input: None,
+            _tags_subscription: None,
             confirming: false,
             pending: None,
             blockers: Vec::new(),
@@ -446,6 +452,7 @@ impl TaskDetails {
         self.close_time_edit();
         self.abandon_subtask();
         self.abandon_follow_up();
+        self.abandon_tags();
         self._blockers_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
             Ok(blockers) => {
                 this.update(cx, |this, cx| {
@@ -741,6 +748,7 @@ impl TaskDetails {
         self.abandon_edits();
         self.abandon_subtask();
         self.abandon_follow_up();
+        self.abandon_tags();
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
@@ -800,7 +808,7 @@ impl TaskDetails {
     }
 
     pub fn is_editing(&self) -> bool {
-        self.editing_title || self.editing_description
+        self.editing_title || self.editing_description || self.editing_tags
     }
 
     fn abandon_edits(&mut self) {
@@ -889,13 +897,14 @@ impl TaskDetails {
     }
 
     pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
-        if self.editing_title || self.editing_description {
+        if self.editing_title || self.editing_description || self.editing_tags {
             self.editing_title = false;
             self.title_input = None;
             self._title_subscription = None;
             self.editing_description = false;
             self.description_input = None;
             self._description_subscription = None;
+            self.abandon_tags();
             cx.notify();
         }
     }
@@ -1013,6 +1022,93 @@ impl TaskDetails {
                 cx.notify();
             })
             .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Drop the inline tag input without notifying (callers that clear state
+    /// on selection change notify themselves).
+    fn abandon_tags(&mut self) {
+        self.editing_tags = false;
+        self.tags_input = None;
+        self._tags_subscription = None;
+    }
+
+    /// Open the tags editor: a text field pre-filled with the task's direct
+    /// tags, comma-separated. Commit splits the text back into an array.
+    fn begin_tags_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_tags {
+            return;
+        }
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let text = task.direct_tags.join(", ");
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(&text, window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.commit_tags_edit(cx),
+            InputEvent::Blur => this.commit_tags_edit(cx),
+            _ => {}
+        });
+        self.editing_tags = true;
+        self.tags_input = Some(input.clone());
+        self._tags_subscription = Some(subscription);
+        cx.notify();
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    fn commit_tags_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.editing_tags {
+            return;
+        }
+        let Some(input) = self.tags_input.clone() else {
+            return;
+        };
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let raw = input.read(cx).text().to_string();
+        let tags: Vec<String> = raw
+            .split(',')
+            .map(|tag| tag.trim().trim_start_matches('#').to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        let task_id = task.id;
+        let store = self.store.clone();
+        let tags_for_write = tags.clone();
+        if let Some(selected) = &mut self.selected {
+            selected.direct_tags = tags;
+        }
+        self.abandon_tags();
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = store.set_task_tags(task_id, tags_for_write, cx).await {
+                tracing::error!("Failed to set tags: {e}");
+                return;
+            }
+            let reload = store.reload_task(task_id, cx);
+            match reload.await {
+                Ok(fresh) => {
+                    this.update(cx, |this, cx| {
+                        if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                            return;
+                        }
+                        this.selected = Some(fresh.clone());
+                        cx.emit(TaskDetailsEvent::TaskRefreshed(fresh));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!("Failed to reload task after tags write: {e}");
+                }
+            }
         })
         .detach();
         cx.notify();
@@ -3214,18 +3310,67 @@ impl Render for TaskDetails {
 
                 let mut details = div().v_flex().gap_3();
                 let mut header = div().v_flex().gap_1();
-                if !task.leaf_tags.is_empty() {
-                    header = header.child(div().h_flex().gap_1().flex_wrap().children(
-                        task.leaf_tags.iter().map(|tag| {
+                if self.editing_tags {
+                    if let Some(input) = self.tags_input.clone() {
+                        header = header.child(
                             div()
-                                .text_size(px(10.))
-                                .px(px(4.))
-                                .rounded(px(2.))
-                                .bg(rgb(0x2a2a2a))
-                                .text_color(rgb(0xa3a3a3))
-                                .child(format!("#{tag}"))
-                        }),
-                    ));
+                                .id(("details-tags-edit", task_id))
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    Input::new(&input)
+                                        .small()
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
+                                ),
+                        );
+                    }
+                } else {
+                    header = header.child(
+                        div()
+                            .h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .items_center()
+                            .children(task.leaf_tags.iter().enumerate().map(|(index, tag)| {
+                                let tag_name = tag.clone();
+                                div()
+                                    .id(("details-tag", index))
+                                    .text_size(px(10.))
+                                    .px(px(4.))
+                                    .py(px(2.))
+                                    .rounded(px(2.))
+                                    .bg(rgb(0x2a2a2a))
+                                    .text_color(rgb(0xa3a3a3))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(0x333333)))
+                                    .child(format!("#{tag_name}"))
+                                    .on_click(cx.listener(|this, event, window, cx| {
+                                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
+                                        {
+                                            this.begin_tags_edit(window, cx);
+                                        }
+                                    }))
+                            }))
+                            .child(
+                                div()
+                                    .id(("details-tag-add", task_id))
+                                    .text_size(px(10.))
+                                    .px(px(2.))
+                                    .py(px(2.))
+                                    .rounded(px(2.))
+                                    .text_color(rgb(0xa3a3a3))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(rgb(0x333333)))
+                                    .child("+")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.begin_tags_edit(window, cx);
+                                    })),
+                            ),
+                    );
                 }
                 header = header.child(
                     div()
