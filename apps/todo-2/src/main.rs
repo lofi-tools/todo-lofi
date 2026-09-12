@@ -60,11 +60,12 @@ enum RightPane {
     Agent,
 }
 
-/// Details pane geometry: 1.2x the original 560px default and 1.5x the
-/// original 1000px maximum.
+/// Details pane geometry: 1.2x the original 560px default, at most 60% of
+/// the app width. The agent split keeps its own fixed maximum.
 const DETAILS_PANE_WIDTH: f32 = 672.;
 const DETAILS_PANE_MIN_WIDTH: f32 = 320.;
-const DETAILS_PANE_MAX_WIDTH: f32 = 1500.;
+const DETAILS_PANE_MAX_FRACTION: f32 = 0.60;
+const SPLIT_RIGHT_PANE_MAX_WIDTH: f32 = 1500.;
 
 /// The selected tag that is owned by an automation: the Layout swaps the
 /// task list for the automation's special panel while it is selected.
@@ -649,6 +650,11 @@ async fn lookup_managed_tag(
         .detach();
     }
 
+    /// Details pane maximum width, tracking the live app width.
+    fn details_max_width(window: &Window) -> Pixels {
+        (window.viewport_size().width * DETAILS_PANE_MAX_FRACTION).max(px(DETAILS_PANE_MIN_WIDTH))
+    }
+
     /// Begin a left-edge details resize drag.
     fn begin_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
         self.details_resize_grab = Some((x, self.right_pane_width));
@@ -656,11 +662,12 @@ async fn lookup_managed_tag(
     }
 
     /// Continue a left-edge details resize drag, clamped to the pane limits.
-    fn update_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
+    fn update_details_resize(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
         if let Some((grab_x, grab_width)) = self.details_resize_grab {
-            let width = (grab_width + (grab_x - x))
-                .as_f32()
-                .clamp(DETAILS_PANE_MIN_WIDTH, DETAILS_PANE_MAX_WIDTH);
+            let width = (grab_width + (grab_x - x)).as_f32().clamp(
+                DETAILS_PANE_MIN_WIDTH,
+                Self::details_max_width(window).as_f32(),
+            );
             self.right_pane_width = px(width);
             cx.notify();
         }
@@ -688,7 +695,11 @@ async fn lookup_managed_tag(
 
     /// Details pane as a right-anchored overlay. It can be resized over the
     /// task list instead of shrinking it.
-    fn render_details_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_details_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("details-overlay")
             .absolute()
@@ -697,7 +708,7 @@ async fn lookup_managed_tag(
             .bottom_0()
             .w(self.right_pane_width)
             .min_w(px(DETAILS_PANE_MIN_WIDTH))
-            .max_w(px(DETAILS_PANE_MAX_WIDTH))
+            .max_w(Self::details_max_width(window))
             .child(self.details.clone())
             .child(
                 div()
@@ -1068,7 +1079,7 @@ impl Render for Layout {
                                         resizable_panel()
                                             .visible(self.right_pane_open(cx))
                                             .size(px(DETAILS_PANE_WIDTH))
-                                            .size_range(px(320.)..px(DETAILS_PANE_MAX_WIDTH))
+                                            .size_range(px(320.)..px(SPLIT_RIGHT_PANE_MAX_WIDTH))
                                             .flex_none()
                                             .child(self.render_right_pane(cx)),
                                     )
@@ -1077,7 +1088,7 @@ impl Render for Layout {
                                 self.render_full_task_list()
                             })
                             .when(details_open, |this| {
-                                this.child(self.render_details_overlay(cx))
+                                this.child(self.render_details_overlay(window, cx))
                             })
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
@@ -1132,7 +1143,7 @@ impl Render for Layout {
                                         resizable_panel()
                                             .visible(self.right_pane_open(cx))
                                             .size(px(DETAILS_PANE_WIDTH))
-                                            .size_range(px(320.)..px(DETAILS_PANE_MAX_WIDTH))
+                                            .size_range(px(320.)..px(SPLIT_RIGHT_PANE_MAX_WIDTH))
                                             .flex_none()
                                             .child(self.render_right_pane(cx)),
                                     )
@@ -1141,7 +1152,7 @@ impl Render for Layout {
                                 self.render_full_task_list()
                             })
                             .when(details_open, |this| {
-                                this.child(self.render_details_overlay(cx))
+                                this.child(self.render_details_overlay(window, cx))
                             })
                             .into_any_element(),
                         NavPanel::Integrations => div()
@@ -1189,8 +1200,8 @@ impl Render for Layout {
                         .bottom_0()
                         .left_0()
                         .cursor_col_resize()
-                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                            this.update_details_resize(event.position.x, cx);
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                            this.update_details_resize(event.position.x, window, cx);
                         }))
                         .on_mouse_up(
                             gpui::MouseButton::Left,
