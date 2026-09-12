@@ -55,6 +55,10 @@ const QUEUE_CAP: usize = 10;
 const TERMINAL_TAIL_LINES: usize = 200;
 /// Upper bound on retained terminal output per terminal.
 const TERMINAL_MAX_LINES: usize = 2_000;
+/// Upper bound on tool output lines rendered when a tool call is expanded.
+/// Bounding the input keeps the first synchronous shape+layout of the block
+/// cheap; the line-layout cache makes repeat frames fast.
+const TOOL_MAX_LINES: usize = 1_000;
 /// Lines of captured stderr shown inside an error card.
 const ERROR_TAIL_LINES: usize = 20;
 const MONO_FONT: &str = "ui-monospace";
@@ -2065,7 +2069,16 @@ impl AgentPane {
                     );
                 if expanded {
                     if let Some(output) = output.as_deref().filter(|text| !text.is_empty()) {
-                        element = element.child(block(output, None));
+                        let truncated = output.lines().count() > TOOL_MAX_LINES;
+                        element = element.child(block(&tail_lines(output, TOOL_MAX_LINES), None));
+                        if truncated {
+                            element = element.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_FAINT))
+                                    .child("Earlier output was truncated"),
+                            );
+                        }
                     }
                     for diff in diffs {
                         element = element.child(render_diff(diff));
@@ -2885,7 +2898,7 @@ fn render_terminal(
         .child(block(
             output,
             if expanded {
-                None
+                Some(TERMINAL_MAX_LINES)
             } else {
                 Some(TERMINAL_TAIL_LINES)
             },
