@@ -6,16 +6,17 @@ edition = "2024"
 [dependencies]
 tokio.workspace = true
 log.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 snafu.workspace = true
 dunce = "^1"
-regex.workspace = true
 time = { version = "0.3", features = ["serde", "parsing", "formatting"] }
 reqwest.workspace = true
-url.workspace = true
 async-trait.workspace = true
+argh = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

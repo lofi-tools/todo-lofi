@@ -25,7 +25,7 @@
     ];
 
     bash.wd = "$(git rev-parse --show-toplevel)";
-    bash.thisDir = "${bash.wd}/apps/desktop-gpui";
+    bash.thisDir = "${bash.wd}/demos/desktop-gpui";
     scripts = with bash;  mapAttrs pkgs.writeShellScriptBin {
       dbg-env = '' ${concatStringsSep "\n" (attrValues (mapAttrs (n: v: "printf \"${n}=${v}\\n\"") env))} '';
       dbg-store-xcode = '' DEVELOPER_DIR="${pkgs.own.install-xcode-global.DEV_DIR}" xcodebuild -version '';

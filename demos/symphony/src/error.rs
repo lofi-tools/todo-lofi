@@ -62,6 +62,42 @@ pub enum SymphonyError {
     #[snafu(display("Linear missing end cursor in pagination"))]
     LinearMissingEndCursor,
 
+    /// The coding-agent executable could not be launched
+    #[snafu(display("Codex executable not found for command: {}", command))]
+    CodexNotFound { command: String },
+
+    /// The agent was asked to run outside of its per-issue workspace
+    #[snafu(display("Invalid workspace cwd: {}", path))]
+    InvalidWorkspaceCwd { path: String },
+
+    /// A request/response exchange with the agent timed out
+    #[snafu(display("Agent response timeout for {} after {} ms", method, timeout_ms))]
+    ResponseTimeout { method: String, timeout_ms: u64 },
+
+    /// A coding-agent turn exceeded `codex.turn_timeout_ms`
+    #[snafu(display("Agent turn timeout after {} ms", timeout_ms))]
+    TurnTimeout { timeout_ms: u64 },
+
+    /// The agent subprocess exited unexpectedly
+    #[snafu(display("Agent subprocess exited: {}", message))]
+    PortExit { message: String },
+
+    /// The agent returned a JSON-RPC error for a request
+    #[snafu(display("Agent response error for {}: {}", method, message))]
+    ResponseError { method: String, message: String },
+
+    /// The agent reported a failed turn
+    #[snafu(display("Agent turn failed: {}", message))]
+    TurnFailed { message: String },
+
+    /// The agent reported a cancelled turn
+    #[snafu(display("Agent turn cancelled"))]
+    TurnCancelled,
+
+    /// The agent requested user input, which this implementation treats as a failure
+    #[snafu(display("Agent turn requires user input: {}", prompt))]
+    TurnInputRequired { prompt: String },
+
     /// Configuration validation failed
     #[snafu(display("Configuration validation failed: {}", message))]
     ConfigValidation { message: String },
@@ -99,6 +135,10 @@ pub enum SymphonyError {
     /// Orchestrator internal error
     #[snafu(display("Orchestrator error: {}", message))]
     OrchestratorError { message: String },
+
+    /// The optional HTTP observability server could not be started
+    #[snafu(display("HTTP server error: {}", message))]
+    HttpServerError { message: String },
 
     /// Generic catch-all error
     #[snafu(display("{}", message))]

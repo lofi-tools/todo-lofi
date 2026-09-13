@@ -1,17 +1,23 @@
 pub mod agent;
+pub mod clock;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod http;
 pub mod orchestrator;
+pub mod prompt;
 pub mod tracker;
 pub mod workflow;
 pub mod workspace;
 
 pub use agent::*;
+pub use clock::*;
 pub use config::*;
 pub use domain::*;
 pub use error::SymphonyError;
+pub use http::*;
 pub use orchestrator::*;
+pub use prompt::*;
 pub use tracker::*;
 pub use workflow::*;
 pub use workspace::*;
