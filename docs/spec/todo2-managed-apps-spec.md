@@ -619,12 +619,22 @@ Implemented and covered by tests (`cargo test -p storage`: 109 passed;
 - UI: task rows block rename and show a hover-only lock with "Managed by X";
   the details pane refuses to start title/description/tag edits on read-only
   tasks.
-- Apps settings panel (`ui_parts/apps.rs`, reached from the navbar's "Apps"
-  row): every app with the tags it manages, an attach picker over the
-  eligible ordinary tags (project folders and tags held by a `full_tag`
-  binding are shown with the reason), a capture toggle, per-tag **Detach**,
-  and the app-wide removal dialog asking whether its unfinished items go too
-  (decision #39).
+- App settings are embedded per app (`ui_parts/apps.rs`, an `AppSettings`
+  entity shared by the Automations and Integrations panels): each card shows a
+  gear that expands its settings as a list of one-per-line rows — one row per
+  managed tag with a capture toggle and per-tag **Detach**, an "Add a tag" row
+  whose tag list marks project folders and tags held by a `full_tag` binding
+  with the reason, an "Active runs" row with **Stop**, and an app-wide
+  **Disable…** dialog asking whether its unfinished items go too (decision
+  #39). There is no standalone Apps page; the builtin demo content is shipped
+  data and never gains settings, so it is not listed at all.
+- The old **Workflows** page is gone too: the Automations panel absorbed its
+  run cards (per-recipe, with Complete / Approve / Reject / Fire event / Cancel
+  run) and the coding "Branches to clean up" rows, and the Start buttons that
+  duplicated each card's Enable. The navbar footer now has Automations and
+  Integrations only, and each card's Enable opens the settings it must have:
+  for a tag-owning automation that is the tag list, from which the user either
+  attaches an existing tag or creates the recipe's own.
 - Attaching is functional, not just a row: `ensure_recipe_sections`
   provisions a recipe's sections inside the chosen tag, and `create_trip`
   now targets the *selected* tag, replacing the app's own unfinished items
@@ -661,10 +671,11 @@ Not yet implemented (deliberately staged, no code left in a broken state):
   than visibly disabled).
 - `with_transaction` was added but is only used by `disable_app`; multi-item
   generation in `create_trip` is not yet wrapped.
-- Only two of the four surfaces of decision #18 exist: the Apps panel and the
-  task row/details. There is still no tag-settings panel or section context
-  menu, so capture policy and section ownership are only visible in the Apps
-  panel.
+- Only two of the four surfaces of decision #18 exist: the per-app settings
+  block (in the Automations and Integrations panels) and the task
+  row/details. There is still no tag-settings panel or section context menu,
+  so capture policy and section ownership are only visible on the app's own
+  card.
 - The integrity check does not cover the *double representation* of
   sections (§7.1.1): a `tag_sections.managed_by` disagreeing with its child
   tag's `managed_by` is not reported, because matching the two needs the

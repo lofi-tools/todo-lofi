@@ -1,74 +1,144 @@
-//! Automations catalog: every workflow recipe presented as an automation
-//! the user can enable (start a run) or disable (cancel its active runs).
-//! Enabling spawns the recipe's first steps as ordinary tasks; disabling
-//! tombstones them and hides the run from the Workflows panel.
+//! Automations catalog: every workflow recipe presented as an automation the
+//! user can enable or disable, plus the runs it currently has.
+//!
+//! This panel replaces the old Workflows page. Each recipe card carries its own
+//! active runs (with the approve/reject/fire actions their steps expect), the
+//! branch cleanup rows for coding runs, and — behind the gear — the app's
+//! ownership settings, so there is one place per automation.
 
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div, px, rgb,
-    prelude::FluentBuilder,
+    Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div,
+    px, rgb, prelude::FluentBuilder,
 };
-use gpui_component::{Sizable, Size, StyledExt};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{Sizable, Size, StyledExt};
+use std::collections::HashSet;
 use storage::prelude::*;
 
 use crate::store::Store;
-use crate::theme::APP_BG;
+use crate::theme::{APP_BG, TEXT_FAINT};
+use crate::ui_parts::apps::AppSettings;
 
 #[derive(Clone)]
 pub enum AutomationsEvent {
-    /// An automation was enabled or disabled; the task list should refresh
-    /// (steps may have been spawned or tombstoned).
+    /// A run action ran, or an app's ownership changed; the task list and the
+    /// tag tree should refresh (steps may have been spawned or tombstoned).
     Changed,
 }
 
 pub struct AutomationsPanel {
     store: Store,
     automations: Vec<RecipeMeta>,
+    /// Active runs, grouped by recipe id when the cards render.
+    runs: Vec<RunView>,
+    /// Non-active coding runs that still hold a feature branch.
+    branch_runs: Vec<RunView>,
+    /// Branch rows the user chose to keep, dismissed for this session.
+    kept_branches: HashSet<u64>,
+    settings: Entity<AppSettings>,
     _fetch: Option<Task<()>>,
 }
 
+/// "Round 2 · Implement" for a coding run; `None` for ordinary recipes.
+fn phase_label(view: &RunView) -> Option<String> {
+    view.run.root_task_id?;
+    if view.run.status != "active" {
+        return Some(view.run.status.clone());
+    }
+    let round = view
+        .steps
+        .iter()
+        .filter(|step| step.node.id == "spec")
+        .count()
+        .max(1);
+    let phase = view
+        .steps
+        .iter()
+        .find(|step| !step.task.done)
+        .and_then(|step| step.node.phase.clone())
+        .unwrap_or_else(|| "done".to_string());
+    Some(format!("Round {round} · {phase}"))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// "in 3d 4h" / "in 2h" for a future timestamp, "" when already due.
+fn wait_label(until: u64) -> String {
+    let now = now_secs();
+    if until <= now {
+        return String::new();
+    }
+    let secs = until - now;
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    if days > 0 {
+        format!("in {days}d {hours}h")
+    } else {
+        format!("in {hours}h")
+    }
+}
+
+/// Button label for an `on_result` condition value: "Approve"/"Reject" for
+/// the familiar shape, the JSON otherwise.
+fn result_label(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map)
+            if map.get("approved").and_then(|v| v.as_bool()) == Some(true) =>
+        {
+            "Approve".to_string()
+        }
+        serde_json::Value::Object(map)
+            if map.get("approved").and_then(|v| v.as_bool()) == Some(false) =>
+        {
+            "Reject".to_string()
+        }
+        serde_json::Value::Object(map) if map.is_empty() => "Complete".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl AutomationsPanel {
-    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, settings: Entity<AppSettings>, cx: &mut Context<Self>) -> Self {
         let mut panel = Self {
             store,
             automations: Vec::new(),
+            runs: Vec::new(),
+            branch_runs: Vec::new(),
+            kept_branches: HashSet::new(),
+            settings,
             _fetch: None,
         };
         panel.refresh(cx);
         panel
     }
 
-    /// Re-fetch the automation list (name, description, active runs).
+    /// Re-fetch the automation list, the active runs, and the branches that
+    /// still need cleaning up.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        self._fetch = Some(cx.spawn(async move |this, cx| {
-            let automations = store.list_recipe_metas(cx).await.unwrap_or_default();
-            this.update(cx, |this, cx| {
-                this.automations = automations;
-                this._fetch = None;
-                cx.notify();
-            })
-            .ok();
-        }));
+        self.reload(None, cx);
     }
 
-    /// Run an action, then re-fetch and tell the task list to reload
-    /// (enabling spawns steps, disabling tombstones them). The action's
-    /// success value (if any) is discarded.
-    fn run_action<T: Send + 'static>(
-        &mut self,
-        action: Task<anyhow::Result<T>>,
-        cx: &mut Context<Self>,
-    ) {
+    fn reload(&mut self, action: Option<Task<anyhow::Result<()>>>, cx: &mut Context<Self>) {
         let store = self.store.clone();
         self._fetch = Some(cx.spawn(async move |this, cx| {
-            if let Err(e) = action.await {
-                tracing::error!("automation action failed: {e}");
+            if let Some(action) = action
+                && let Err(error) = action.await
+            {
+                tracing::error!("automation action failed: {error}");
             }
             let automations = store.list_recipe_metas(cx).await.unwrap_or_default();
+            let runs = store.list_active_run_views(cx).await.unwrap_or_default();
+            let branch_runs = store.list_branch_cleanup_runs(cx).await.unwrap_or_default();
             this.update(cx, |this, cx| {
                 this.automations = automations;
+                this.runs = runs;
+                this.branch_runs = branch_runs;
                 this._fetch = None;
                 cx.emit(AutomationsEvent::Changed);
                 cx.notify();
@@ -77,50 +147,54 @@ impl AutomationsPanel {
         }));
     }
 
-    fn enable(&mut self, recipe_id: u64, managed: bool, cx: &mut Context<Self>) {
-        // Managed-tag automations enable by creating their tag (their
-        // panel generates content on demand), not by starting a run.
-        if managed {
-            let enable = self.store.enable_managed_recipe(recipe_id, cx);
-            self.run_action(enable, cx);
-        } else {
-            let start = self.store.start_workflow_run(recipe_id, cx);
-            self.run_action(start, cx);
-        }
+    /// Start a run: its steps appear in the task list.
+    fn start_run(&mut self, recipe_id: u64, cx: &mut Context<Self>) {
+        let start = self.store.start_workflow_run(recipe_id, cx);
+        self.reload(Some(start), cx);
     }
 
-    fn disable(&mut self, recipe_id: u64, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        let disable = self.store.disable_automation(recipe_id, cx);
-        self._fetch = Some(cx.spawn(async move |this, cx| {
-            match disable.await {
-                Ok(0) => tracing::warn!(recipe_id, "disable: no active runs"),
-                Ok(cancelled) => tracing::info!(recipe_id, cancelled, "automation disabled"),
-                Err(e) => tracing::error!("failed to disable automation: {e}"),
-            }
-            let automations = store.list_recipe_metas(cx).await.unwrap_or_default();
-            this.update(cx, |this, cx| {
-                this.automations = automations;
-                this._fetch = None;
-                cx.emit(AutomationsEvent::Changed);
-                cx.notify();
-            })
-            .ok();
-        }));
+    fn complete_step(&mut self, task_id: u64, result: serde_json::Value, cx: &mut Context<Self>) {
+        let complete = self.store.complete_workflow_step(task_id, result, cx);
+        self.reload(Some(complete), cx);
+    }
+
+    fn fire_event(&mut self, run_id: u64, event_name: String, cx: &mut Context<Self>) {
+        let fire = self.store.fire_workflow_event(run_id, event_name, cx);
+        self.reload(Some(fire), cx);
+    }
+
+    fn cancel_run(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let cancel = self.store.cancel_workflow_run(run_id, cx);
+        self.reload(Some(cancel), cx);
+    }
+
+    /// Delete a run's feature branch and drop it from the cleanup list.
+    fn delete_branch(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let delete = self.store.delete_coding_branch(run_id, cx);
+        self.reload(Some(delete), cx);
+    }
+
+    /// Keep a branch: dismiss the row for this session without touching git.
+    fn keep_branch(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        self.kept_branches.insert(run_id);
+        cx.notify();
     }
 }
 
 impl EventEmitter<AutomationsEvent> for AutomationsPanel {}
 
 impl Render for AutomationsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let cards: Vec<gpui::AnyElement> = self
+            .automations
+            .iter()
+            .map(|meta| self.automation_card(meta, window, cx))
+            .collect();
         div()
             .flex_1()
             .h_full()
             // Same surface as the task list and integrations panels.
             .bg(rgb(APP_BG))
-            // Long catalogs scroll; flex-1 gives the scrollable a definite
-            // height inside the panel column.
             .overflow_y_scrollbar()
             .child(
                 div()
@@ -128,118 +202,431 @@ impl Render for AutomationsPanel {
                     .v_flex()
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Automations"))
-                    .children(self.automations.iter().map(|meta| self.automation_card(meta, cx))),
+                    .children(cards),
             )
     }
 }
 
 impl AutomationsPanel {
-    /// Subtle card shell for one automation, matching the integrations
-    /// panel's card treatment.
+    /// One automation: header row, its runs, its branches to clean up, and its
+    /// settings behind the gear.
     fn automation_card(
         &self,
         meta: &RecipeMeta,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let recipe_id = meta.id;
-        let running = meta.active_runs > 0;
+        let app = self
+            .settings
+            .read_with(cx, |settings, _| settings.app_for_recipe_slug(&meta.slug).cloned());
+        let app_id = app.as_ref().map(|app| app.id);
+        let expanded = app_id.is_some_and(|app_id| {
+            self.settings
+                .read_with(cx, |settings, _| settings.is_expanded(app_id))
+        });
+        let bound_tags = app_id.map_or(0, |app_id| {
+            self.settings
+                .read_with(cx, |settings, _| settings.binding_count(app_id))
+        });
         let managed = meta.managed_tag.is_some();
-        let enabled = if managed { meta.managed_enabled } else { running };
-        let toggle: gpui::AnyElement = if enabled && managed {
-            Button::new(format!("disable-{}", recipe_id))
-                .ghost()
-                .compact()
-                .label("Disable")
-                .tooltip("Remove this automation's tag and its content")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.disable(recipe_id, cx);
-                }))
-                .into_any_element()
-        } else if managed {
-            Button::new(format!("enable-{}", recipe_id))
-                .ghost()
-                .compact()
-                .label("Enable")
-                .tooltip("Create the tag with its special panel")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.enable(recipe_id, true, cx);
-                }))
-                .into_any_element()
-        } else if running {
-            Button::new(format!("disable-{}", recipe_id))
-                .ghost()
-                .compact()
-                .label("Disable")
-                .tooltip("Cancel this automation's active runs and hide their steps")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.disable(recipe_id, cx);
-                }))
-                .into_any_element()
+        let running = meta.active_runs > 0;
+        let enabled = if managed {
+            bound_tags > 0 || meta.managed_enabled
         } else {
-            Button::new(format!("enable-{}", recipe_id))
-                .ghost()
-                .compact()
-                .label("Enable")
-                .tooltip("Start a run: its steps appear in the task list")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.enable(recipe_id, false, cx);
-                }))
-                .into_any_element()
+            running
         };
+
+        // Enabled automations are disabled from their settings (which asks
+        // what should happen to the items); the card only ever turns one on.
+        // Managed automations open their settings, because a tag is the
+        // setting that has to be chosen before the automation can run.
+        let enable: Option<gpui::AnyElement> = if enabled || meta.phased {
+            None
+        } else if let Some(app_id) = app_id {
+            let settings = self.settings.clone();
+            Some(
+                Button::new(format!("enable-{recipe_id}"))
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
+                    .label("Enable")
+                    .tooltip(if managed {
+                        "Choose the tag this automation manages"
+                    } else {
+                        "Start a run: its steps appear in the task list"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if managed {
+                            settings.update(cx, |settings, cx| settings.begin_enable(app_id, cx));
+                        } else {
+                            this.start_run(recipe_id, cx);
+                        }
+                    }))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
+        // A gear only appears when there is something to set: the tag this app
+        // owns, or the runs that can be stopped.
+        let has_settings = app_id.is_some_and(|app_id| {
+            self.settings
+                .read_with(cx, |settings, _| settings.manages_tags(app_id))
+        }) || meta.active_runs > 0;
+        let gear = app_id.filter(|_| has_settings).map(|app_id| {
+            self.settings.update(cx, |settings, cx| {
+                settings.gear_button(app_id, &meta.name, cx)
+            })
+        });
+        let settings_block = app_id.map(|app_id| {
+            self.settings.update(cx, |settings, cx| {
+                settings.settings_block(app_id, meta.active_runs, cx)
+            })
+        });
+
+        let status = if running {
+            ("Running", 0x4ade80u32)
+        } else if meta.managed_enabled || bound_tags > 0 {
+            ("Enabled", 0x4ade80)
+        } else {
+            ("Not enabled", TEXT_FAINT)
+        };
+
+        let mut header_controls = div().h_flex().items_center().gap_2();
+        header_controls = header_controls.child(
+            div()
+                .text_sm()
+                .text_color(rgb(status.1))
+                .child(status.0),
+        );
+        if let Some(enable) = enable {
+            header_controls = header_controls.child(enable);
+        }
+        if let Some(gear) = gear {
+            header_controls = header_controls.child(gear);
+        }
+
+        let recipe_runs: Vec<gpui::AnyElement> = self
+            .runs
+            .iter()
+            .filter(|view| view.run.recipe_id == recipe_id)
+            .map(|view| self.run_card(view, window, cx))
+            .collect();
+
+        let cleanup = if meta.phased {
+            self.branch_cleanup(cx)
+        } else {
+            div().into_any_element()
+        };
+
         div()
             .rounded_lg()
             .border_1()
             .border_color(rgb(0x2e2e2e))
             .bg(rgb(0x232323))
             .p_4()
-            .h_flex()
-            .items_center()
+            .v_flex()
             .gap_3()
-            .child(
-                div()
-                    .w(px(40.))
-                    .h(px(40.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .bg(rgb(0x1e1e1e))
-                    .child(
-                        gpui_component::Icon::new(gpui_component_assets::IconName::Bot)
-                            .with_size(Size::Large),
-                    ),
-            )
-            .child(
-                div()
-                    .v_flex()
-                    .flex_1()
-                    .gap_0p5()
-                    .child(div().font_semibold().child(meta.name.clone()))
-                    .when_some(meta.description.clone(), |this, description| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xa3a3a3))
-                                .child(description),
-                        )
-                    }),
-            )
             .child(
                 div()
                     .h_flex()
                     .items_center()
-                    .gap_2()
-                    .when(enabled, |this| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x4ade80))
-                                .child(if managed { "Enabled" } else { "Running" }),
-                        )
-                    })
-                    .child(toggle),
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .h(px(40.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgb(0x1e1e1e))
+                            .child(
+                                gpui_component::Icon::new(gpui_component_assets::IconName::Bot)
+                                    .with_size(Size::Large),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().font_semibold().child(meta.name.clone()))
+                            .when_some(meta.description.clone(), |this, description| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child(description),
+                                )
+                            })
+                            .when(bound_tags > 1, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(TEXT_FAINT))
+                                        .child(format!("Managing {bound_tags} tags")),
+                                )
+                            }),
+                    )
+                    .child(header_controls),
             )
+            .when(expanded, |this| {
+                this.when_some(settings_block, |this, block| this.child(block))
+            })
+            .children(recipe_runs)
+            .child(cleanup)
             .into_any_element()
+    }
+
+    fn run_card(
+        &self,
+        view: &RunView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let run_id = view.run.id;
+        let cancel = Button::new(format!("cancel-run-{run_id}"))
+            .ghost()
+            .compact()
+            .label("Cancel run")
+            .tooltip("Cancel this run and hide its steps")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.cancel_run(run_id, cx);
+            }));
+        let steps: Vec<gpui::AnyElement> = view
+            .steps
+            .iter()
+            .map(|step| self.step_row(view, step, window, cx))
+            .collect();
+        div()
+            .border_1()
+            .border_color(rgb(0x2f2f2f))
+            .rounded_md()
+            .p_2()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(view.recipe_name.clone()),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(phase_label(view), |this, label| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .px(px(5.))
+                                        .py(px(1.))
+                                        .rounded(px(3.))
+                                        .bg(rgb(0x2a2a2a))
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child(label),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x8a8a8a))
+                                    .child(view.run.status.clone()),
+                            )
+                            .child(cancel),
+                    ),
+            )
+            .children(steps)
+            .into_any_element()
+    }
+
+    /// "Branches to clean up": cancelled or completed coding runs that still
+    /// hold a feature branch, so cleanup is deliberate rather than implicit.
+    fn branch_cleanup(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows: Vec<gpui::AnyElement> = self
+            .branch_runs
+            .iter()
+            .filter(|view| !self.kept_branches.contains(&view.run.id))
+            .filter_map(|view| view.run.branch.clone().map(|branch| (view.run.id, branch)))
+            .map(|(run_id, branch)| {
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(rgb(0xd4d4d4))
+                            .child(branch),
+                    )
+                    .child(
+                        Button::new(format!("delete-branch-{run_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Delete branch")
+                            .tooltip("Delete this feature branch")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.delete_branch(run_id, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("keep-branch-{run_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Keep")
+                            .tooltip("Keep the branch and hide this row")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.keep_branch(run_id, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        if rows.is_empty() {
+            return div().into_any_element();
+        }
+        div()
+            .v_flex()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x2f2f2f))
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Branches to clean up"),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn step_row(
+        &self,
+        view: &RunView,
+        step: &RunStepView,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let done = step.task.done;
+        let waiting = step
+            .task
+            .blocked_until
+            .is_some_and(|until| until > now_secs());
+
+        let title = if done {
+            format!("✓ {}", step.task.title)
+        } else if step.node.kind == "event" {
+            format!("⏳ {}", step.task.title)
+        } else {
+            step.task.title.clone()
+        };
+        let mut row = div()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(if done { rgb(0x6b6b6b) } else { rgb(0xd4d4d4) })
+                    .child(title),
+            )
+            .when_some(
+                step.task
+                    .blocked_until
+                    .and_then(|until| waiting.then(|| wait_label(until))),
+                |this, label| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x8a8a8a))
+                            .child(format!("({label})")),
+                    )
+                },
+            );
+
+        if !done {
+            if let Some(event_edge) = &step.incoming_event
+                && let Some(event_name) = event_edge
+                    .condition_value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+            {
+                let run_id = view.run.id;
+                let event_name = event_name.to_string();
+                row = row.child(
+                    Button::new(format!("fire-{}-{}", run_id, step.task.id))
+                        .ghost()
+                        .compact()
+                        .label(format!("Fire: {event_name}"))
+                        .tooltip("Resolve this wait (webhook or button)")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.fire_event(run_id, event_name.clone(), cx);
+                        })),
+                );
+            } else if step.outgoing.iter().any(|e| e.condition_type == "on_result") {
+                let values: Vec<serde_json::Value> = step
+                    .outgoing
+                    .iter()
+                    .filter(|e| e.condition_type == "on_result")
+                    .filter_map(|e| e.condition_value.clone())
+                    .collect();
+                let any_approval = values.iter().any(|v| {
+                    v.as_object().is_some_and(|m| m.contains_key("approved"))
+                });
+                if any_approval {
+                    for value in values {
+                        let label = result_label(&value);
+                        let task_id = step.task.id;
+                        row = row.child(
+                            Button::new(format!("result-{}-{}-{}", view.run.id, task_id, label))
+                                .ghost()
+                                .compact()
+                                .label(label)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.complete_step(task_id, value.clone(), cx);
+                                })),
+                        );
+                    }
+                } else {
+                    // "Continue" edges with an empty condition: plain tick.
+                    let task_id = step.task.id;
+                    row = row.child(
+                        Button::new(format!("continue-{}-{}", view.run.id, task_id))
+                            .ghost()
+                            .compact()
+                            .label("Complete")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.complete_step(task_id, serde_json::json!({}), cx);
+                            })),
+                    );
+                }
+            } else if !waiting {
+                let task_id = step.task.id;
+                row = row.child(
+                    Button::new(format!("tick-{}-{}", view.run.id, task_id))
+                        .ghost()
+                        .compact()
+                        .label("Complete")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.complete_step(task_id, serde_json::Value::Null, cx);
+                        })),
+                );
+            }
+        }
+        row.into_any_element()
     }
 }

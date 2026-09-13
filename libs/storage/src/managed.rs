@@ -639,6 +639,40 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Flip whether new tasks landing in `tag_id` are captured by `app_id`.
+    /// Errors when the app is not attached there, so a stale UI cannot
+    /// silently change nothing.
+    pub async fn set_binding_capture(
+        &mut self,
+        app_id: u64,
+        tag_id: u64,
+        capture: bool,
+    ) -> QueryResult<()> {
+        toasty::sql::statement(
+            r#"UPDATE app_tag_bindings SET capture_new_tasks = ?1
+               WHERE app_id = ?2 AND tag_id = ?3"#,
+        )
+        .bind(i64::from(capture))
+        .bind(app_id as i64)
+        .bind(tag_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "set binding capture",
+        })?;
+        let applied = self
+            .bindings_for_tag(tag_id)
+            .await?
+            .into_iter()
+            .any(|binding| binding.app_id == app_id && binding.capture_new_tasks == capture);
+        if !applied {
+            return Err(crate::QueryErr::UnexpectedValue {
+                message: format!("app {app_id} is not attached to tag {tag_id}"),
+            });
+        }
+        Ok(())
+    }
+
     pub async fn detach_app_from_tag(&mut self, app_id: u64, tag_id: u64) -> QueryResult<()> {
         toasty::sql::statement(
             r#"DELETE FROM app_tag_bindings WHERE app_id = ?1 AND tag_id = ?2"#,
@@ -1430,6 +1464,27 @@ mod tests {
         assert_eq!(binding.role, BindingRole::Partial);
         assert!(binding.capture_new_tasks);
         assert_eq!(store.bindings_for_tag(tag.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_capture_can_be_flipped_on_an_existing_binding() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let app = store.upsert_app("recipe", "travel", "Travel", None).await?;
+        let tag = store.create_tag("Travel").await?;
+        store
+            .attach_app_to_tag(app.id, tag.id, BindingRole::Partial, false)
+            .await?;
+        assert!(!store.bindings_for_tag(tag.id).await?[0].capture_new_tasks);
+
+        store.set_binding_capture(app.id, tag.id, true).await?;
+        assert!(store.bindings_for_tag(tag.id).await?[0].capture_new_tasks);
+        // The role is untouched by a capture flip.
+        assert_eq!(store.bindings_for_tag(tag.id).await?[0].role, BindingRole::Partial);
+
+        // A stale UI cannot flip capture on a tag the app is not on.
+        let other = store.create_tag("Home").await?;
+        assert!(store.set_binding_capture(app.id, other.id, true).await.is_err());
         Ok(())
     }
 

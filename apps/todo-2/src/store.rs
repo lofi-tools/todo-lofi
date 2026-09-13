@@ -745,6 +745,36 @@ impl Store {
         })
     }
 
+    /// Flip whether new tasks landing in a bound tag are captured by the app.
+    pub fn set_binding_capture(
+        &self,
+        app_id: u64,
+        tag_id: u64,
+        capture: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.set_binding_capture(app_id, tag_id, capture).await?;
+            Ok(())
+        })
+    }
+
+    /// The app registered for an integration, so the Integrations panel can
+    /// offer that app's settings on its card.
+    pub fn app_for_integration(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<App>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.app_for_integration(integration_id).await?)
+        })
+    }
+
     /// Detach one app from one tag: its sections there are downgraded (or
     /// removed when empty) and the binding goes; tasks keep their ownership.
     pub fn detach_app_from_tag(

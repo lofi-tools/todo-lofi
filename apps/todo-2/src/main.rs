@@ -22,13 +22,12 @@ use ui_parts::agent_pane::{AgentPane, AgentPaneEvent, AgentProject, build_task_c
 use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
 use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
-use ui_parts::apps::{AppsEvent, AppsPanel};
+use ui_parts::apps::{AppSettings, AppSettingsEvent};
 use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
 use ui_parts::travel::{TravelPanel, TravelPanelEvent};
-use ui_parts::workflows::{WorkflowPanel, WorkflowPanelEvent};
 
 mod coding_git;
 mod coding_mcp;
@@ -51,7 +50,6 @@ mod ui_parts {
     pub mod task_picker;
     pub mod task_row;
     pub mod travel;
-    pub mod workflows;
 }
 
 /// Which pane fills the right-hand column of the Tasks panel.
@@ -97,7 +95,6 @@ struct Layout {
     right_pane_width: Pixels,
     details_resize_grab: Option<(Pixels, Pixels)>,
     _agent_events: Subscription,
-    workflows: Entity<WorkflowPanel>,
     /// Special panel for the managed tag in `managed_tag`, if any.
     travel_panel: Entity<TravelPanel>,
     /// The managed tag currently selected (if the selected tag is owned
@@ -105,7 +102,9 @@ struct Layout {
     managed_tag: Option<ManagedTag>,
     integrations: Entity<IntegrationsView>,
     automations: Entity<AutomationsPanel>,
-    apps: Entity<AppsPanel>,
+    /// Ownership settings for every app, embedded by the Automations and
+    /// Integrations panels. Held so the panels share one instance.
+    _apps: Entity<AppSettings>,
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
     panel: NavPanel,
@@ -159,7 +158,7 @@ impl Layout {
                     this.details
                         .update(cx, |details, cx| details.refresh_coding(cx));
                     this.task_list.update(cx, |list, cx| list.refresh(cx));
-                    this.workflows.update(cx, |panel, cx| panel.refresh(cx));
+                    this.automations.update(cx, |panel, cx| panel.refresh(cx));
                 })
                 .ok();
             }
@@ -299,13 +298,6 @@ impl Layout {
                 NavBarEvent::OpenAutomations => {
                     this.show_panel(NavPanel::Automations, cx);
                 }
-                NavBarEvent::OpenApps => {
-                    this.show_panel(NavPanel::Apps, cx);
-                    this.apps.update(cx, |panel, cx| panel.refresh(cx));
-                }
-                NavBarEvent::OpenWorkflows => {
-                    this.show_panel(NavPanel::Workflows, cx);
-                }
                 NavBarEvent::OpenSettings => {
                     this.show_panel(NavPanel::Settings, cx);
                 }
@@ -313,30 +305,22 @@ impl Layout {
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
-        let automations = cx.new(|cx| AutomationsPanel::new(store.clone(), cx));
-        let workflows = cx.new(|cx| WorkflowPanel::new(store.clone(), cx));
-        // Enabling/disabling an automation spawns or tombstones tasks:
-        // reload the task list.
+        // One ownership-settings entity, embedded by the panels below.
+        let apps = cx.new(|cx| AppSettings::new(store.clone(), cx));
+        let automations = cx.new(|cx| AutomationsPanel::new(store.clone(), apps.clone(), cx));
+        // Enabling/disabling an automation spawns or tombstones tasks, and a
+        // run action can spawn or complete them: reload the task list and
+        // pick the change up in the details stepper.
         let list_for_automations = task_list.clone();
         let nav_for_automations = nav_bar.clone();
+        let details_for_automations = details.clone();
         cx.subscribe(&automations, move |_this, _panel, event, cx| match event {
             AutomationsEvent::Changed => {
                 list_for_automations.update(cx, |list, cx| list.refresh(cx));
                 // Enabling creates the managed tag, disabling removes it:
                 // the tag tree must reflect that.
                 nav_for_automations.update(cx, |nav, cx| nav.refresh_tags(cx));
-            }
-        })
-        .detach();
-        // A workflow action (start run, approve/reject, fire event) can
-        // spawn or complete tasks: reload the task list, and pick the change
-        // up in the details stepper when the run belongs to the selected task.
-        let list_for_workflow = task_list.clone();
-        let details_for_workflow = details.clone();
-        cx.subscribe(&workflows, move |_this, _panel, event, cx| match event {
-            WorkflowPanelEvent::Changed => {
-                list_for_workflow.update(cx, |list, cx| list.refresh(cx));
-                details_for_workflow.update(cx, |details, cx| details.refresh_coding(cx));
+                details_for_automations.update(cx, |details, cx| details.refresh_coding(cx));
             }
         })
         .detach();
@@ -350,16 +334,20 @@ impl Layout {
         })
         .detach();
         let integrations =
-            cx.new(|cx| IntegrationsView::new(store.clone(), cx));
-        let apps = cx.new(|cx| AppsPanel::new(store.clone(), cx));
+            cx.new(|cx| IntegrationsView::new(store.clone(), apps.clone(), cx));
         // Attaching, detaching, or removing an app changes tag ownership
-        // (and can delete tags outright): refresh the tree and the lists.
+        // (and can delete tags outright): refresh the tree, the lists, and
+        // the panels that show ownership.
         let list_for_apps = task_list.clone();
         let nav_for_apps = nav_bar.clone();
-        cx.subscribe(&apps, move |_this, _panel, event, cx| match event {
-            AppsEvent::Changed => {
+        let automations_for_apps = automations.clone();
+        let integrations_for_apps = integrations.clone();
+        cx.subscribe(&apps, move |_this, _settings, event, cx| match event {
+            AppSettingsEvent::Changed => {
                 list_for_apps.update(cx, |list, cx| list.refresh(cx));
                 nav_for_apps.update(cx, |nav, cx| nav.refresh_tags(cx));
+                automations_for_apps.update(cx, |panel, cx| panel.refresh(cx));
+                integrations_for_apps.update(cx, |view, cx| view.refresh(cx));
             }
         })
         .detach();
@@ -412,7 +400,7 @@ impl Layout {
         let list_for_toggle = task_list.clone();
         let list_for_pending = task_list.clone();
         let details_for_pending = details.clone();
-        let workflows_for_toggle = workflows.clone();
+        let automations_for_toggle = automations.clone();
         cx.subscribe_in(
             &details,
             window,
@@ -423,7 +411,7 @@ impl Layout {
                     });
                     // Steps can be ticked from the task list too; keep the
                     // run cards in sync.
-                    workflows_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
+                    automations_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
                 }
                 TaskDetailsEvent::TitleCommitted { task_id, title } => {
                     list_for_toggle.update(cx, |list, cx| {
@@ -453,7 +441,7 @@ impl Layout {
                 // list and the run cards.
                 TaskDetailsEvent::CodingChanged => {
                     list_for_pending.update(cx, |list, cx| list.refresh(cx));
-                    workflows_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
+                    automations_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
                 }
                 // A phase prompt is ready: drop it into the agent pane and
                 // show the pane. Sending stays manual so it can be edited.
@@ -568,12 +556,11 @@ impl Layout {
             right_pane_width: px(DETAILS_PANE_WIDTH),
             details_resize_grab: None,
             _agent_events,
-            workflows,
             travel_panel,
             managed_tag: None,
             integrations,
             automations,
-            apps,
+            _apps: apps,
             settings,
             panel: NavPanel::Tasks,
             store: store.clone(),
@@ -1196,20 +1183,6 @@ impl Render for Layout {
                             .flex_row()
                             .min_h_0()
                             .child(div().flex_1().child(self.automations.clone()))
-                            .into_any_element(),
-                        NavPanel::Apps => div()
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .min_h_0()
-                            .child(div().flex_1().child(self.apps.clone()))
-                            .into_any_element(),
-                        NavPanel::Workflows => div()
-                            .flex_1()
-                            .flex()
-                            .flex_row()
-                            .min_h_0()
-                            .child(div().flex_1().child(self.workflows.clone()))
                             .into_any_element(),
                         NavPanel::Settings => div()
                             .flex_1()

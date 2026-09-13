@@ -4,15 +4,16 @@
 //! integration.
 
 use gpui::{
-    Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
+    Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
     prelude::FluentBuilder,
 };
-use gpui_component::{Sizable, Size, StyledExt};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::{Sizable, Size, StyledExt};
 
 use crate::store::Store;
 use crate::theme::APP_BG;
 use crate::todoist_auth;
+use crate::ui_parts::apps::AppSettings;
 
 pub enum IntegrationsEvent {
     Changed,
@@ -21,6 +22,10 @@ pub enum IntegrationsEvent {
 pub struct IntegrationsView {
     store: Store,
     connected: Vec<storage::Integration>,
+    /// The app a connected provider manages content through, so its card can
+    /// carry the ownership settings (which tags it captures into).
+    todoist_app_id: Option<u64>,
+    settings: Entity<AppSettings>,
     connecting: bool,
     syncing: bool,
     status: Option<String>,
@@ -30,10 +35,12 @@ pub struct IntegrationsView {
 }
 
 impl IntegrationsView {
-    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, settings: Entity<AppSettings>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             store,
             connected: Vec::new(),
+            todoist_app_id: None,
+            settings,
             connecting: false,
             syncing: false,
             status: None,
@@ -45,12 +52,31 @@ impl IntegrationsView {
         this
     }
 
+    /// Re-read the connections and the app behind them (used when ownership
+    /// changed elsewhere).
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reload(cx);
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         let fetch = self.store.list_integrations(cx);
+        let store = self.store.clone();
         self._load = Some(cx.spawn(async move |this, cx| match fetch.await {
             Ok(list) => {
+                // The provider's app is what owns tags, so look it up for the
+                // card's settings before rendering.
+                let todoist_app_id = match list.iter().find(|i| i.provider == "todoist") {
+                    Some(integration) => store
+                        .app_for_integration(integration.id, cx)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|app| app.id),
+                    None => None,
+                };
                 this.update(cx, |this, cx| {
                     this.connected = list;
+                    this.todoist_app_id = todoist_app_id;
                     this._load = None;
                     cx.notify();
                 })
@@ -189,6 +215,107 @@ impl IntegrationsView {
 
 impl EventEmitter<IntegrationsEvent> for IntegrationsView {}
 
+impl IntegrationsView {
+    /// The Todoist card: connect/sync/disconnect, plus the app's ownership
+    /// settings behind the gear once connected (which tags it captures into).
+    fn todoist_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let connected = self.todoist_connected();
+        let app_id = self.todoist_app_id;
+        let expanded = app_id.is_some_and(|app_id| {
+            self.settings
+                .read_with(cx, |settings, _| settings.is_expanded(app_id))
+        });
+        let gear = app_id
+            .map(|app_id| {
+                self.settings
+                    .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
+            });
+        let settings_block = app_id.map(|app_id| {
+            self.settings
+                .update(cx, |settings, cx| settings.settings_block(app_id, 0, cx))
+        });
+
+        let actions: gpui::AnyElement = if connected {
+            div()
+                .h_flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new("todoist-sync")
+                        .ghost()
+                        .compact()
+                        .label(if self.syncing { "Syncing…" } else { "Sync now" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sync_now(cx);
+                        })),
+                )
+                .child(
+                    Button::new("todoist-disconnect")
+                        .ghost()
+                        .compact()
+                        .label("Disconnect")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.disconnect_todoist(cx);
+                        })),
+                )
+                .into_any_element()
+        } else {
+            Button::new("todoist-connect")
+                .ghost()
+                .compact()
+                .label(if self.connecting { "Waiting…" } else { "Connect" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_todoist_connect(cx);
+                }))
+                .into_any_element()
+        };
+
+        let mut controls = div().h_flex().items_center().gap_2().child(
+            div()
+                .text_sm()
+                .text_color(if connected {
+                    rgb(0x4ade80)
+                } else {
+                    rgb(0x737373)
+                })
+                .child(if connected { "Connected" } else { "Not connected" }),
+        );
+        controls = controls.child(actions);
+        if let Some(gear) = gear {
+            controls = controls.child(gear);
+        }
+
+        div()
+            .v_flex()
+            .gap_2()
+            .child(
+                integration_card(false)
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(provider_icon(todoist_icon()))
+                    .child(
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().font_semibold().child("Todoist"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xa3a3a3))
+                                    .child("Sync projects both ways with Todoist."),
+                            ),
+                    )
+                    .child(controls),
+            )
+            .when(expanded, |this| {
+                this.when_some(settings_block, |this, block| this.child(block))
+            })
+            .into_any_element()
+    }
+}
+
 /// Brand logo for Todoist (vendored SVG): the shared asset bundle only
 /// ships the kit's default icon list, so brand art renders from bytes,
 /// like the navbar's integrations icon.
@@ -239,7 +366,6 @@ fn provider_icon(icon: impl IntoElement) -> gpui::Div {
 
 impl Render for IntegrationsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let connected = self.todoist_connected();
         div()
             .flex_1()
             .h_full()
@@ -252,81 +378,7 @@ impl Render for IntegrationsView {
                     .v_flex()
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Integrations"))
-                    .child(
-                        integration_card(false)
-                            .h_flex()
-                            .items_center()
-                            .gap_3()
-                            .child(provider_icon(todoist_icon()))
-                            .child(
-                                div().v_flex().flex_1().gap_0p5().child(
-                                    div().font_semibold().child("Todoist"),
-                                ).child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xa3a3a3))
-                                        .child("Sync projects both ways with Todoist."),
-                                ),
-                            )
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(if connected {
-                                        rgb(0x4ade80)
-                                    } else {
-                                        rgb(0x737373)
-                                    })
-                                    .child(if connected { "Connected" } else { "Not connected" }),
-                            )
-                            .child(if connected {
-                                div()
-                                    .h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        Button::new("todoist-sync")
-                                            .ghost()
-                                            .compact()
-                                            .label(if self.syncing {
-                                                "Syncing…"
-                                            } else {
-                                                "Sync now"
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.sync_now(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("todoist-disconnect")
-                                            .ghost()
-                                            .compact()
-                                            .label("Disconnect")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.disconnect_todoist(cx);
-                                            })),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                Button::new("todoist-connect")
-                                    .ghost()
-                                    .compact()
-                                    .label(if self.connecting {
-                                        "Waiting…"
-                                    } else {
-                                        "Connect"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.start_todoist_connect(cx);
-                                    }))
-                                    .into_any_element()
-                            }),
-                    )
-                    )
+                    .child(self.todoist_card(cx))
                     .child(
                         integration_card(true)
                             .h_flex()

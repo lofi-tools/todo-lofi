@@ -98,13 +98,16 @@ Implemented per the v2 simplification spec:
 - Sync guard is implemented: `libs/storage/src/todoist.rs:554` skips
   `task.is_seed || task.workflow_run_id.is_some()`.
 
-### 3.2 Workflow UI — `apps/todo-2/src/ui_parts/workflows.rs`
+### 3.2 Workflow UI — `apps/todo-2/src/ui_parts/automations.rs`
 
-`WorkflowPanel` renders a "Workflows" header with a `▶ <recipe>` start button
-per recipe (managed-tag recipes filtered out), then one card per active run:
-recipe name, status, Cancel, and per-step rows with `Complete`, `Approve` /
-`Reject` (from `on_result` values), or `Fire: <event>` for event waiters.
-Emits `WorkflowPanelEvent::Changed`; `main.rs` reloads the task list on it.
+There is no longer a separate Workflows page: the run UI lives inside the
+Automations catalog. Each recipe card carries its own active runs as nested
+cards (recipe name, status, Cancel, and per-step rows with `Complete`,
+`Approve` / `Reject` from `on_result` values, or `Fire: <event>` for event
+waiters), plus the coding runs' "Branches to clean up" rows under the coding
+card. Starting a run is the card's **Enable** button; stopping it is the
+"Active runs → Stop" row in the card's settings. Emits
+`AutomationsEvent::Changed`; `main.rs` reloads the task list on it.
 
 ### 3.3 Task details — `apps/todo-2/src/ui_parts/task_details.rs`
 
