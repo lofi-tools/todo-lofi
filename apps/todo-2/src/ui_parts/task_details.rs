@@ -4,7 +4,6 @@ use gpui::{
     Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Disableable;
-use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -2461,6 +2460,10 @@ impl TaskDetails {
 /// color automatically.
 const REFRESH_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>"##;
 
+/// Description placeholder mark: the `file-text` strokes without the file
+/// outline. The first two strokes are full width; the third is half width.
+const DESCRIPTION_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h4"/></svg>"##;
+
 /// Small transparent relationship button: gray text with a gray hairline
 /// outline, shared by the buttons in the relationships section.
 fn relation_button(id: &'static str, label: &str) -> Button {
@@ -3487,7 +3490,11 @@ impl Render for TaskDetails {
                                     .text_color(rgb(0xa3a3a3))
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))
-                                    .child("+")
+                                    .child(if task.leaf_tags.is_empty() {
+                                        "+tags"
+                                    } else {
+                                        "+"
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.begin_tags_edit(window, cx);
                                     })),
@@ -3627,7 +3634,14 @@ impl Render for TaskDetails {
                             .text_sm()
                             .text_color(rgb(0x737373))
                             .cursor_pointer()
-                            .child(div().flex_none().child(IconName::FileText))
+                            .child(
+                                div().flex_none().child(
+                                    svg()
+                                        .data(DESCRIPTION_ICON_SVG)
+                                        .size(px(16.))
+                                        .text_color(rgb(0x737373)),
+                                ),
+                            )
                             .child("Description")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.begin_description_edit(window, cx);
