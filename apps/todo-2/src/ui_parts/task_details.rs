@@ -241,9 +241,16 @@ pub enum TaskDetailsEvent {
     },
 }
 
-/// A selection change that arrived while edits were unsaved. `Some` selects
-/// a task, `None` deselects.
-type PendingSelection = Option<TaskWithMeta>;
+/// Something that should happen once the current field edits are resolved.
+/// `Select`/`Deselect` navigate; `BeginField` opens another field editor;
+/// `Stay` only prompts for the dirty field itself.
+#[derive(Clone)]
+enum PendingTarget {
+    Select(TaskWithMeta),
+    Deselect,
+    BeginField(EditedField),
+    Stay,
+}
 
 /// A field with an open inline editor, in focus-stack order: the last entry
 /// is the innermost edit and is unwound first by Esc or sequential discard.
@@ -283,7 +290,7 @@ pub struct TaskDetails {
     /// not need to touch `Window`.
     needs_tag_input_clear: bool,
     confirming: bool,
-    pending: Option<PendingSelection>,
+    pending: Option<PendingTarget>,
     /// Open field editors, innermost last. Esc and the discard dialog unwind
     /// one entry at a time.
     focus_stack: Vec<EditedField>,
@@ -749,7 +756,7 @@ impl TaskDetails {
     pub fn request_select(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) -> bool {
         let same_task = self.selected.as_ref().is_some_and(|t| t.id == task.id);
         if self.is_editing() && !same_task {
-            self.pending = Some(Some(task));
+            self.pending = Some(PendingTarget::Select(task));
             self.confirming = true;
             cx.notify();
             true
@@ -763,7 +770,7 @@ impl TaskDetails {
     /// unsaved; returns true when deferred.
     pub fn request_clear(&mut self, cx: &mut Context<Self>) -> bool {
         if self.is_editing() {
-            self.pending = Some(None);
+            self.pending = Some(PendingTarget::Deselect);
             self.confirming = true;
             cx.notify();
             true
@@ -773,12 +780,128 @@ impl TaskDetails {
         }
     }
 
-    pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
-        // Discard one field at a time, innermost first: the dialog names the
-        // field being abandoned and reappears while edits remain.
-        if self.cancel_top_edit(cx) && self.is_editing() {
+    /// Request opening another field editor. When the current edits are
+    /// clean the switch happens immediately; when dirty, the save/discard
+    /// dialog names the field at risk first.
+    pub fn request_begin_field(
+        &mut self,
+        field: EditedField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected.is_none() {
             return;
         }
+        let already_open = match field {
+            EditedField::Title => self.editing_title,
+            EditedField::Description => self.editing_description,
+            EditedField::Tags => self.editing_tags,
+        };
+        if already_open {
+            self.focus_field_input(field, window, cx);
+            return;
+        }
+        if self.is_editing() {
+            if self.any_dirty(cx) {
+                self.pending = Some(PendingTarget::BeginField(field));
+                self.confirming = true;
+                cx.notify();
+                return;
+            }
+            self.cancel_editing(cx);
+        }
+        self.open_field(field, window, cx);
+    }
+
+    /// Single click on a field value: only switches when another field is
+    /// open, so plain clicks stay inert and double-click keeps opening.
+    fn maybe_switch_to(&mut self, field: EditedField, window: &mut Window, cx: &mut Context<Self>) {
+        let already_open = match field {
+            EditedField::Title => self.editing_title,
+            EditedField::Description => self.editing_description,
+            EditedField::Tags => self.editing_tags,
+        };
+        if !already_open && self.is_editing() {
+            self.request_begin_field(field, window, cx);
+        }
+    }
+
+    fn open_field(&mut self, field: EditedField, window: &mut Window, cx: &mut Context<Self>) {
+        match field {
+            EditedField::Title => self.begin_title_edit(window, cx),
+            EditedField::Description => self.begin_description_edit(window, cx),
+            EditedField::Tags => self.begin_tags_edit(window, cx),
+        }
+    }
+
+    fn focus_field_input(&self, field: EditedField, window: &mut Window, _cx: &mut Context<Self>) {
+        let input = match field {
+            EditedField::Title => self.title_input.clone(),
+            EditedField::Description => self.description_input.clone(),
+            EditedField::Tags => self.tags_input.clone(),
+        };
+        if let Some(input) = input {
+            window.on_next_frame(move |window, cx| {
+                input.update(cx, |state, cx| state.focus(window, cx));
+            });
+        }
+    }
+
+    /// Esc handling for the details pane. Dismisses the dialog first, then
+    /// unwinds one field edit (prompting when dirty), else returns false so
+    /// the caller can deselect.
+    pub fn escape_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.confirming {
+            self.cancel_pending(window, cx);
+            return true;
+        }
+        if !self.is_editing() {
+            return false;
+        }
+        if self.any_dirty(cx) {
+            self.pending = Some(PendingTarget::Stay);
+            self.confirming = true;
+            cx.notify();
+            return true;
+        }
+        self.cancel_top_edit(cx)
+    }
+
+    pub fn confirm_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Discard one field at a time, innermost first: the dialog names the
+        // field being abandoned and reappears while edits remain.
+        self.abandon_top_edit();
+        if self.is_editing() {
+            cx.notify();
+            return;
+        }
+        self.proceed_with_pending(window, cx);
+    }
+
+    /// Save the innermost dirty field, then continue like a discard: while
+    /// edits remain the dialog reappears, otherwise the pending target runs.
+    pub fn save_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.top_edit() {
+            Some(EditedField::Title) => self.commit_title_edit(cx),
+            Some(EditedField::Description) => self.commit_description_edit(cx),
+            Some(EditedField::Tags) => {
+                // Typed-but-unconfirmed text belongs to the draft being saved.
+                if let Some(input) = self.tags_input.clone() {
+                    let text = input.read(cx).text().to_string();
+                    self.add_pending_tag(&text);
+                }
+                self.commit_tags_edit(cx);
+            }
+            None => {}
+        }
+        if self.is_editing() {
+            cx.notify();
+            return;
+        }
+        self.proceed_with_pending(window, cx);
+    }
+
+    fn proceed_with_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = self.pending.take() else {
             self.confirming = false;
             cx.notify();
@@ -793,26 +916,35 @@ impl TaskDetails {
         self.close_after_picker();
         self.close_repeat_picker();
         match pending {
-            Some(task) => self.apply_selected(task, cx),
-            None => self.clear(cx),
+            PendingTarget::Select(task) => self.apply_selected(task, cx),
+            PendingTarget::Deselect => self.clear(cx),
+            PendingTarget::BeginField(field) => self.open_field(field, window, cx),
+            PendingTarget::Stay => {}
         }
         let selected = self.selected.clone();
         cx.emit(TaskDetailsEvent::PendingConfirmed { selected });
         cx.notify();
     }
 
-    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.confirming {
             return;
         }
         self.pending = None;
         self.confirming = false;
         cx.emit(TaskDetailsEvent::PendingCancelled);
+        if let Some(field) = self.top_edit() {
+            self.focus_field_input(field, window, cx);
+        }
         cx.notify();
     }
 
     pub fn has_selection(&self) -> bool {
         self.selected.is_some()
+    }
+
+    pub fn confirming(&self) -> bool {
+        self.confirming
     }
 
     pub fn update_title(&mut self, task_id: u64, title: String, cx: &mut Context<Self>) {
@@ -867,11 +999,11 @@ impl TaskDetails {
         self.focus_stack.last().copied()
     }
 
-    /// Abandon the innermost open field edit, if any. Returns true when an
-    /// edit was unwound, so Esc can fall through to deselect otherwise.
-    pub fn cancel_top_edit(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Abandon the innermost open field edit without notifying; callers that
+    /// resolve several edits notify themselves.
+    fn abandon_top_edit(&mut self) {
         let Some(field) = self.top_edit() else {
-            return false;
+            return;
         };
         match field {
             EditedField::Title => {
@@ -887,8 +1019,61 @@ impl TaskDetails {
             EditedField::Tags => self.abandon_tags(),
         }
         self.pop_edit(field);
+    }
+
+    /// Abandon the innermost open field edit, if any. Returns true when an
+    /// edit was unwound, so Esc can fall through to deselect otherwise.
+    pub fn cancel_top_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.top_edit().is_none() {
+            return false;
+        }
+        self.abandon_top_edit();
         cx.notify();
         true
+    }
+
+    fn title_dirty(&self, cx: &App) -> bool {
+        if !self.editing_title {
+            return false;
+        }
+        let (Some(input), Some(task)) = (&self.title_input, &self.selected) else {
+            return false;
+        };
+        input.read(cx).text().to_string().trim() != task.title
+    }
+
+    fn description_dirty(&self, cx: &App) -> bool {
+        if !self.editing_description {
+            return false;
+        }
+        let (Some(input), Some(task)) = (&self.description_input, &self.selected) else {
+            return false;
+        };
+        let current = task.description.clone().unwrap_or_default();
+        input.read(cx).text().to_string().trim() != current
+    }
+
+    fn tags_dirty(&self, cx: &App) -> bool {
+        if !self.editing_tags {
+            return false;
+        }
+        let Some(task) = &self.selected else {
+            return false;
+        };
+        if let Some(input) = &self.tags_input
+            && !input.read(cx).text().to_string().trim().is_empty()
+        {
+            return true;
+        }
+        let mut draft = self.tag_draft.clone();
+        let mut saved = task.direct_tags.clone();
+        draft.sort();
+        saved.sort();
+        draft != saved
+    }
+
+    fn any_dirty(&self, cx: &App) -> bool {
+        self.title_dirty(cx) || self.description_dirty(cx) || self.tags_dirty(cx)
     }
 
     fn abandon_edits(&mut self) {
@@ -3559,7 +3744,17 @@ impl Render for TaskDetails {
                                     .on_click(cx.listener(|this, event, window, cx| {
                                         if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
                                         {
-                                            this.begin_tags_edit(window, cx);
+                                            this.request_begin_field(
+                                                EditedField::Tags,
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.maybe_switch_to(
+                                                EditedField::Tags,
+                                                window,
+                                                cx,
+                                            );
                                         }
                                     }))
                             }))
@@ -3579,7 +3774,11 @@ impl Render for TaskDetails {
                                         "+"
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.begin_tags_edit(window, cx);
+                                        this.request_begin_field(
+                                            EditedField::Tags,
+                                            window,
+                                            cx,
+                                        );
                                     })),
                             ),
                     );
@@ -3649,7 +3848,13 @@ impl Render for TaskDetails {
                                     .on_click(cx.listener(|this, event, window, cx| {
                                         if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
                                         {
-                                            this.begin_title_edit(window, cx);
+                                            this.request_begin_field(
+                                                EditedField::Title,
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.maybe_switch_to(EditedField::Title, window, cx);
                                         }
                                     }))
                             },
@@ -3700,7 +3905,9 @@ impl Render for TaskDetails {
                             .child(desc.clone())
                             .on_click(cx.listener(|this, event, window, cx| {
                                 if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2) {
-                                    this.begin_description_edit(window, cx);
+                                    this.request_begin_field(EditedField::Description, window, cx);
+                                } else {
+                                    this.maybe_switch_to(EditedField::Description, window, cx);
                                 }
                             })),
                     );
@@ -3727,7 +3934,7 @@ impl Render for TaskDetails {
                             )
                             .child("Description")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_description_edit(window, cx);
+                                this.request_begin_field(EditedField::Description, window, cx);
                             })),
                     );
                 }
@@ -3811,7 +4018,8 @@ impl Render for TaskDetails {
                             div()
                                 .v_flex()
                                 .gap_3()
-                                .w(px(260.))
+                                .min_w(px(260.))
+                                .max_w(px(420.))
                                 .p_4()
                                 .rounded_md()
                                 .bg(rgb(0x2a2a2a))
@@ -3826,11 +4034,11 @@ impl Render for TaskDetails {
                                                 .text_sm()
                                                 .font_semibold()
                                                 .text_color(rgb(0xe5e5e5))
-                                                .child("Discard unsaved changes?"),
+                                                .child("Unsaved changes?"),
                                         )
                                         .child(div().text_xs().text_color(rgb(0xa3a3a3)).child(
                                             format!(
-                                                "Your {} edit will be lost.",
+                                                "Save or discard your {} edit?",
                                                 self.top_edit()
                                                     .map(EditedField::name)
                                                     .unwrap_or("unsaved"),
@@ -3846,18 +4054,23 @@ impl Render for TaskDetails {
                                             Button::new("keep-editing")
                                                 .ghost()
                                                 .label("Keep editing")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.cancel_pending(cx);
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.cancel_pending(window, cx);
                                                 })),
                                         )
                                         .child(
                                             Button::new("discard-changes")
                                                 .danger()
                                                 .label("Discard")
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.confirm_pending(cx);
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.confirm_pending(window, cx);
                                                 })),
-                                        ),
+                                        )
+                                        .child(Button::new("save-changes").label("Save").on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.save_pending(window, cx);
+                                            }),
+                                        )),
                                 ),
                         ),
                 )

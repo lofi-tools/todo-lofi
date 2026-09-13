@@ -454,7 +454,7 @@ impl Layout {
         // the focus path. Skipped while the project picker modal is open so
         // Esc there only dismisses the dialog.
         let escape_observer = cx.observe_keystrokes(
-            move |layout: &mut Layout, event, _window, cx| {
+            move |layout: &mut Layout, event, window, cx| {
                 if event.keystroke.key == "escape" {
                     if layout._picker_subscription.is_some() {
                         return;
@@ -520,17 +520,14 @@ impl Layout {
                             .update(cx, |list, cx| list.cancel_editing(cx));
                         return;
                     }
-                    if layout.details.read(cx).is_editing() {
-                        let unwound = layout
+                    if layout.details.read(cx).is_editing() || layout.details.read(cx).confirming()
+                    {
+                        let consumed = layout
                             .details
-                            .update(cx, |details, cx| details.cancel_top_edit(cx));
-                        if unwound {
+                            .update(cx, |details, cx| details.escape_details(window, cx));
+                        if consumed {
                             return;
                         }
-                        layout
-                            .details
-                            .update(cx, |details, cx| details.request_clear(cx));
-                        return;
                     }
                     layout.details.update(cx, |details, cx| details.clear(cx));
                     layout
