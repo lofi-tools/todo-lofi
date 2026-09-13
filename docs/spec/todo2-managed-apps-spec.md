@@ -583,3 +583,53 @@ Residual items that are mechanical rather than product decisions:
 4. Whether the attach picker sorts by `suggested_tags` or alphabetically.
 5. Whether `co_ownable` (decision #38's escape valve) is in v1 at all, or a
    `full_tag` tag is simply closed to partial attachment.
+
+---
+
+## 10. Implementation status
+
+Implemented and covered by tests (`cargo test -p storage`: 104 passed;
+`cargo test -p todo-2`: 44 passed; `cargo check --workspace` clean):
+
+- Schema: `libs/storage/toasty/migrations/0018_apps.sql` (apps table,
+  `recipes.app_id`, `integrations.app_id`) and `0019_managed_scope.sql`
+  (`app_tag_bindings`, `managed_by`/`managed_capture` on sections,
+  `managed_by`/`managed_mode`/`managed_editable`/`user_modified` on tasks).
+- `libs/storage/src/managed.rs`: `App`, `AppTagBinding`, `BindingRole`,
+  `ManagedMode`, `TaskOwnership`, and the full API — app registry, bindings
+  with first-come/full-tag conflict rules and project-tag rejection,
+  ownership flags, `assert_task_editable` guard, `capture_task`,
+  `release_app_from_tag`, transactional `disable_app`, `with_transaction`.
+- Startup backfill `ensure_builtin_apps`: registers the builtin demo app, gives
+  integrations and managed-tag recipes app rows, and converts legacy
+  `tags.managed_by_recipe_id` tags into partial bindings (a Rust-side
+  replacement for the spec's 0020 SQL backfill).
+- Hard-block guard wired into `update_task_title`, `update_task_description`,
+  `set_task_tags`, `delete_task`, and `update_blocked_until`;
+  `update_task_done` stays exempt; guarded edits set `user_modified`.
+- `TaskWithMeta` now carries `managed_by`, `managed_label`, `managed_mode`,
+  `managed_editable`, `user_modified`, plus `is_managed_read_only()`.
+- Travel app migrated to partial ownership (`trip.rs`): enable creates the app,
+  attaches it partially, and owns only its sections; disabling tombstones open
+  items and downgrades sections that still hold anything; the tag survives.
+- Todoist: a remote edit to an owned task calls `unlock_task_from_remote`, so
+  the remote value wins and the app spares it.
+- UI: task rows block rename and show a hover-only lock with "Managed by X";
+  the details pane refuses to start title/description/tag edits on read-only
+  tasks.
+
+Not yet implemented (deliberately staged, no code left in a broken state):
+
+- App settings panel and the attach/detach/release/removal dialogs (the
+  storage API for all of it exists; there is no UI entry point yet, so
+  attaching the travel app to an existing user tag is not user-reachable).
+- Todoist capture *push*: `capture_task` marks captured tasks, but the hook
+  that creates the remote item and links it (Sync `item_add` +
+  `temp_id_mapping`) is not written, so the "adding a task to a linked tag also
+  adds it to Todoist" behavior is not live.
+- Seed retirement: `is_seed` is kept (the demo app exists and is created, but
+  `is_seed` was not removed from the models or dropped by a migration).
+- Disabled-with-lock rendering in the details pane (fields are inert rather
+  than visibly disabled).
+- `with_transaction` was added but is only used by `disable_app`; multi-item
+  generation in `create_trip` is not yet wrapped.

@@ -162,6 +162,27 @@ pub struct TaskWithMeta {
     /// blocker exists or `blocked_until` lies in the future. Computed on
     /// load, so reopening a blocker re-blocks dependants automatically.
     pub blocked: bool,
+    /// The app that owns this task, if any (see [`crate::managed`]).
+    pub managed_by: Option<u64>,
+    /// Owning app's display label, for "Managed by …" tooltips.
+    pub managed_label: Option<String>,
+    /// Whether the app *owns* the task or merely captures (propagates) it.
+    pub managed_mode: Option<crate::managed::ManagedMode>,
+    /// The owning app's editability setting; remote edits also set it.
+    pub managed_editable: bool,
+    /// A local content edit made the task the user's: regeneration and app
+    /// removal spare it.
+    pub user_modified: bool,
+}
+
+impl TaskWithMeta {
+    /// True when the task's content fields are locked to the user because an
+    /// app owns it and has not made it editable.
+    pub fn is_managed_read_only(&self) -> bool {
+        self.managed_by.is_some()
+            && self.managed_mode == Some(crate::managed::ManagedMode::Managed)
+            && !self.managed_editable
+    }
 }
 impl std::ops::Deref for TaskWithMeta {
     type Target = Task;
@@ -275,6 +296,11 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         inferred_tags: Vec::new(),
         leaf_tags: Vec::new(),
         blocked: false,
+        managed_by: None,
+        managed_label: None,
+        managed_mode: None,
+        managed_editable: false,
+        user_modified: false,
     })
 }
 
@@ -318,6 +344,7 @@ impl TodoStore {
 
     #[fastrace::trace]
     pub async fn update_task_title(&mut self, id: u64, title: &str) -> crate::QueryResult<()> {
+        self.guard_and_mark_modified(id).await?;
         Task::update_by_id(id)
             .title(title)
             .exec(&mut self.db)
@@ -332,6 +359,7 @@ impl TodoStore {
         id: u64,
         description: Option<String>,
     ) -> crate::QueryResult<()> {
+        self.guard_and_mark_modified(id).await?;
         Task::update_by_id(id)
             .description(description)
             .exec(&mut self.db)
@@ -381,6 +409,11 @@ impl TodoStore {
             inferred_tags: Vec::new(),
             leaf_tags: Vec::new(),
             blocked: false,
+            managed_by: None,
+            managed_label: None,
+            managed_mode: None,
+            managed_editable: false,
+            user_modified: false,
         };
         self.load_all_meta(&mut meta).await?;
         Ok(meta)
@@ -397,6 +430,7 @@ impl TodoStore {
 
     #[fastrace::trace]
     pub async fn delete_task(&mut self, id: u64) -> crate::QueryResult<()> {
+        self.assert_task_editable(id).await?;
         Task::delete_by_id(&mut self.db, id)
             .await
             .context(crate::error::DeleteTaskSnafu { id })?;
@@ -734,7 +768,28 @@ impl TodoStore {
     pub async fn load_all_meta(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
         self.load_all_tags(task).await?;
         self.load_blocked(task).await?;
+        self.load_managed(task).await?;
         Ok(())
+    }
+
+    /// Who owns this task, and whether it is locked or spared.
+    pub async fn load_managed(&mut self, task: &mut TaskWithMeta) -> crate::QueryResult<()> {
+        let ownership = self.task_ownership(task.id).await?;
+        task.managed_by = ownership.managed_by;
+        task.managed_mode = ownership.managed_mode;
+        task.managed_editable = ownership.managed_editable;
+        task.user_modified = ownership.user_modified;
+        task.managed_label = match ownership.managed_by {
+            Some(app_id) => self.app_by_id(app_id).await?.map(|app| app.label),
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Guard for local content edits: fails with `TaskLocked` when an app
+    /// owns the task and has not made it editable. Completion is exempt.
+    pub async fn ensure_task_editable(&mut self, id: u64) -> crate::QueryResult<()> {
+        self.assert_task_editable(id).await
     }
 }
 

@@ -403,6 +403,10 @@ impl TodoStore {
                     .context(crate::error::UpdateTaskSnafu {
                         id: link.task_id,
                     })?;
+                // A remote edit to an app-owned task wins: unlock the whole
+                // task and spare it from regeneration, so the app does not
+                // clobber what the user changed on the Todoist side.
+                self.unlock_task_from_remote(link.task_id).await?;
                 self.link_task(
                     integration_id,
                     &remote.id,

@@ -496,6 +496,7 @@ impl TodoStore {
         id: u64,
         blocked_until: Option<u64>,
     ) -> QueryResult<()> {
+        self.guard_and_mark_modified(id).await?;
         crate::Task::update_by_id(id)
             .blocked_until(blocked_until)
             .exec(&mut self.db)

@@ -4,6 +4,7 @@ use toasty_driver_turso::Turso;
 pub mod error;
 pub mod external;
 pub mod link;
+pub mod managed;
 pub mod migrations;
 pub mod repeat;
 pub mod tag;
@@ -19,6 +20,10 @@ pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
     pub use crate::link::LinkKind;
+    pub use crate::managed::{
+        App, AppTagBinding, BindingRole, DEMO_APP_SLUG, ManagedMode, TRAVEL_APP_SLUG,
+        TaskOwnership,
+    };
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::repeat::RepeatTaskTemplate;
     pub use crate::tag::{Tag, TagId, TagNode};
@@ -66,6 +71,7 @@ impl TodoStore {
 
         let mut store = Self { db };
         store.apply_pending_migrations().await?;
+        store.ensure_builtin_apps().await?;
 
         tracing::info!("TodoStore initialized");
         Ok(store)

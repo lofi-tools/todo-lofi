@@ -454,6 +454,7 @@ impl TodoStore {
     /// app-managed `project:` tags, whose editable text is the directory
     /// name, not the opaque `project:` name.
     pub async fn set_task_tags(&mut self, task_id: u64, tags: &[String]) -> QueryResult<()> {
+        self.guard_and_mark_modified(task_id).await?;
         let desired: Vec<String> = tags
             .iter()
             .map(|tag| tag.trim().trim_start_matches('#').to_string())

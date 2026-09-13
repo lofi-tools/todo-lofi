@@ -301,6 +301,7 @@ impl Render for TaskRow {
 
         div()
             .id(("task", task_id))
+            .group("task-row")
             .v_flex()
             .gap_1()
             .px_3()
@@ -391,10 +392,45 @@ impl Render for TaskRow {
                                 if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2)
                                 {
                                     cx.stop_propagation();
+                                    // App-owned read-only rows do not enter
+                                    // edit mode; the hover lock explains why.
+                                    if this.task.is_managed_read_only() {
+                                        return;
+                                    }
                                     this.begin_edit(window, cx);
                                 }
                             })),
                     )
+                    // Ownership marker: appears only on hover so the list
+                    // stays uncluttered, and names the owning app.
+                    .when(self.task.is_managed_read_only(), |this| {
+                        let label = self
+                            .task
+                            .managed_label
+                            .clone()
+                            .unwrap_or_else(|| "an app".to_string());
+                        this.child(
+                            div()
+                                .id(("task-lock", task_id))
+                                .h_flex()
+                                .items_center()
+                                .gap_1()
+                                .opacity(0.0)
+                                .group_hover("task-row", |s| s.opacity(1.0))
+                                .child(
+                                    svg()
+                                        .size(px(12.))
+                                        .data(LOCK_SVG)
+                                        .text_color(rgb(0xa3a3a3)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(0xa3a3a3))
+                                        .child(format!("Managed by {label}")),
+                                ),
+                        )
+                    })
                     .children(
                         self.blocking
                             .blocked
@@ -754,6 +790,10 @@ const ARROW_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24"
 /// Todoist's subtask glyph: three bars, each indented further right (the
 /// classic "indent list" icon). Opaque stroke so the alpha-mask rendering
 /// tints it with the element's text color.
+/// Lucide `lock`, drawn with an opaque stroke so the alpha-mask rendering
+/// tints it with the element's text color (same technique as the arrows).
+const LOCK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>"##;
+
 const SUBTASK_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M8 12h12"/><path d="M12 18h8"/></svg>"##;
 
 #[cfg(test)]

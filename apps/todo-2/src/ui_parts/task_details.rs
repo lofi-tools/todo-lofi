@@ -1279,7 +1279,18 @@ impl TaskDetails {
         }
     }
 
+    /// An app owns the selected task and has not made it editable: its
+    /// content fields are locked here too (completion stays available).
+    fn selected_read_only(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(|task| task.is_managed_read_only())
+    }
+
     fn begin_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_read_only() {
+            return;
+        }
         let Some(task) = &self.selected else {
             return;
         };
@@ -1338,6 +1349,9 @@ impl TaskDetails {
     }
 
     fn begin_description_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_read_only() {
+            return;
+        }
         let Some(task) = &self.selected else {
             return;
         };
@@ -1424,6 +1438,9 @@ impl TaskDetails {
     /// with a blank text slot after the last one. Enter turns the pending
     /// text into a chip; Enter with no pending text saves the lot.
     fn begin_tags_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_read_only() {
+            return;
+        }
         if self.editing_tags {
             return;
         }
@@ -4600,6 +4617,11 @@ mod coding_tests {
             inferred_tags: Vec::new(),
             leaf_tags: Vec::new(),
             blocked: false,
+            managed_by: None,
+            managed_label: None,
+            managed_mode: None,
+            managed_editable: false,
+            user_modified: false,
         }
     }
 

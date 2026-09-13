@@ -15,6 +15,15 @@ pub enum StorageSetupErr {
     Migration {
         source: crate::migrations::MigrationError,
     },
+
+    #[snafu(display("managed-content backfill failed: {source}"))]
+    ManagedBackfill { source: QueryErr },
+}
+
+impl From<QueryErr> for StorageSetupErr {
+    fn from(source: QueryErr) -> Self {
+        StorageSetupErr::ManagedBackfill { source }
+    }
 }
 
 // -- Query errors (runtime) --
@@ -90,6 +99,10 @@ pub enum QueryErr {
 
     #[snafu(display("load tags for task {task_id}: {source}"))]
     LoadTaskTags { task_id: u64, source: toasty::Error },
+
+    // -- Managed content --
+    #[snafu(display("task {task_id} is managed by app {app_id} and is read-only"))]
+    TaskLocked { task_id: u64, app_id: u64 },
 
     // -- Task link operations --
     #[snafu(display("add task link {task_id} -> {other_id}: {source}"))]

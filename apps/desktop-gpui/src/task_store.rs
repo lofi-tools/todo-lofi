@@ -218,6 +218,11 @@ impl TaskStore {
                 inferred_tags: Vec::new(),
                 leaf_tags: Vec::new(),
                 blocked: false,
+                managed_by: None,
+                managed_label: None,
+                managed_mode: None,
+                managed_editable: false,
+                user_modified: false,
             };
             s.load_all_meta(&mut meta).await?;
             Ok(meta)

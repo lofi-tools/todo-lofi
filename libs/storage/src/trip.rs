@@ -193,47 +193,25 @@ fn section_key(section: &str) -> &'static str {
 }
 
 impl TodoStore {
-    /// The recipe that owns `tag_id`, if the tag is a managed tag.
+    /// The recipe that manages `tag_id` through an app binding, if any.
     pub async fn managed_recipe_for_tag(&mut self, tag_id: u64) -> QueryResult<Option<u64>> {
-        let rows = toasty::sql::query(
-            r#"SELECT managed_by_recipe_id FROM tags WHERE id = ?1 LIMIT 1"#,
-        )
-        .column_types([toasty::stmt::Type::I64])
-        .bind(tag_id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "recipe for managed tag",
-        })?;
-        Ok(rows.first().and_then(|row| match row {
-            toasty::stmt::Value::Record(record) => {
-                record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
+        for binding in self.bindings_for_tag(tag_id).await? {
+            if let Some(recipe_id) = self.recipe_for_app(binding.app_id).await? {
+                return Ok(Some(recipe_id));
             }
-            _ => None,
-        }))
+        }
+        Ok(None)
     }
 
-    /// The tag owned by `recipe_id`, if any.
+    /// One tag managed by `recipe_id` through its app, if any.
     async fn tag_managed_by_recipe(&mut self, recipe_id: u64) -> QueryResult<Option<crate::Tag>> {
-        let rows = toasty::sql::query(
-            r#"SELECT id FROM tags WHERE managed_by_recipe_id = ?1 LIMIT 1"#,
-        )
-        .column_types([toasty::stmt::Type::I64])
-        .bind(recipe_id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "managed tag for recipe",
-        })?;
-        let Some(id) = rows.first().and_then(|row| match row {
-            toasty::stmt::Value::Record(record) => {
-                record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
-            }
-            _ => None,
-        }) else {
+        let Some(app) = self.app_for_recipe(recipe_id).await? else {
             return Ok(None);
         };
-        Ok(Some(self.get_tag(id).await?))
+        for binding in self.bindings_for_app(app.id).await? {
+            return Ok(Some(self.get_tag(binding.tag_id).await?));
+        }
+        Ok(None)
     }
 
     /// Enable a managed-tag automation: create the tag it owns (marked
@@ -255,21 +233,38 @@ impl TodoStore {
             self.create_tag_with_display_name(tag_name.clone(), Some(parsed.name.clone()))
                 .await?
         };
-        // Idempotent: mark the tag as managed and give it the recipe's
-        // display name, even when it pre-existed without one.
-        toasty::sql::statement(
-            r#"UPDATE tags SET managed_by_recipe_id = ?1, display_name = ?2 WHERE id = ?3"#,
+        // Register the app and attach it *partially*: the tag stays the
+        // user's, and the app owns only the sections it creates.
+        let app = self
+            .upsert_app(
+                "recipe",
+                &recipe_row.slug,
+                &parsed.name,
+                parsed.description.clone(),
+            )
+            .await?;
+        self.set_recipe_app(recipe_id, app.id).await?;
+        self.set_app_enabled(app.id, true).await?;
+        // Idempotent: give the tag the recipe's display name, even when it
+        // pre-existed without one.
+        toasty::sql::statement(r#"UPDATE tags SET display_name = ?1 WHERE id = ?2"#)
+            .bind(parsed.name.as_str())
+            .bind(tag.id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "name managed tag",
+            })?;
+        self.attach_app_to_tag(
+            app.id,
+            tag.id,
+            crate::managed::BindingRole::Partial,
+            true,
         )
-        .bind(recipe_id as i64)
-        .bind(parsed.name.as_str())
-        .bind(tag.id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "mark managed tag",
-        })?;
-        // Checklist sections: child tags under the managed tag, ordered
-        // via `tag_sections` so the task list groups items under them.
+        .await?;
+        // Checklist sections: child tags under the tag, owned by the app,
+        // ordered via `tag_sections` so the task list groups items under
+        // them.
         for (key, display) in SECTION_DEFS {
             let section_name = section_tag_name(&tag_name, key);
             if self.get_tag_by_name(&section_name).await?.is_none() {
@@ -278,15 +273,20 @@ impl TodoStore {
                     .await?;
                 self.add_tag_implication(section.id, tag.id).await?;
             }
-            self.add_tag_section(tag.id, display.to_string()).await?;
+            let section = self.add_tag_section(tag.id, display.to_string()).await?;
+            self.set_section_managed(section.id, Some(app.id), false)
+                .await?;
         }
         Ok(tag)
     }
 
-    /// Remove the managed tag of `recipe_id` and everything it owns: all
-    /// of the recipe's runs (their step tasks are tombstoned first) and
-    /// the tag itself with its section tags.
+    /// Disable a managed-tag automation's app: tombstone its open items,
+    /// downgrade or remove its sections, and delete its runs. The tag
+    /// itself survives as an ordinary user tag.
     pub async fn remove_managed_tag_content(&mut self, recipe_id: u64) -> QueryResult<()> {
+        if let Some(app) = self.app_for_recipe(recipe_id).await? {
+            self.disable_app(app.id, true).await?;
+        }
         let run_ids: Vec<u64> = self
             .list_workflow_runs()
             .await?
@@ -295,43 +295,12 @@ impl TodoStore {
             .map(|run| run.id)
             .collect();
         for run_id in run_ids {
-            let rows = toasty::sql::query(
-                r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND deleted_at IS NULL"#,
-            )
-            .column_types([toasty::stmt::Type::I64])
-            .bind(run_id as i64)
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::QueryTagsSnafu {
-                context: "list trip items to remove",
-            })?;
-            for row in rows {
-                if let Some(id) = match &row {
-                    toasty::stmt::Value::Record(record) => {
-                        record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
-                    }
-                    _ => None,
-                } {
-                    self.tombstone_task(id).await?;
-                }
-            }
             crate::WorkflowRun::delete_by_id(&mut self.db, run_id)
                 .await
                 .context(crate::error::QueryTagsSnafu {
                     context: "delete trip run",
                 })?;
         }
-        let Some(tag) = self.tag_managed_by_recipe(recipe_id).await? else {
-            return Ok(());
-        };
-        for child in self.get_children(tag.id).await? {
-            self.remove_tag_implication(child.id, tag.id).await?;
-            self.delete_tag(child.id).await?;
-        }
-        for section in self.tag_sections(tag.id).await? {
-            self.remove_tag_section(section.id).await?;
-        }
-        self.delete_tag(tag.id).await?;
         Ok(())
     }
 
@@ -382,6 +351,15 @@ impl TodoStore {
                 .await?;
             let tag_name = section_tag_name(&managed_tag_name, section_key(&section));
             self.assign_tag_to_task(task.id, &tag_name).await?;
+            if let Some(app) = self.app_for_recipe(recipe_id).await? {
+                self.set_task_managed(
+                    task.id,
+                    app.id,
+                    crate::managed::ManagedMode::Managed,
+                    false,
+                )
+                .await?;
+            }
         }
         Ok(run)
     }
@@ -613,13 +591,28 @@ mod tests {
         }
         assert_eq!(store.find_run(run.id).await?.unwrap().status, "completed");
 
-        // Disabling removes the tag, its sections, and the run.
+        // Disabling removes the run and the app's ownership, but the tag
+        // survives as the user's and completed items are kept: every item
+        // was completed above, so every used section survives too.
         store.remove_managed_tag_content(recipe_id).await?;
-        assert!(store.get_tag_by_name("managed:packing-list").await?.is_none());
+        let tag = store
+            .get_tag_by_name("managed:packing-list")
+            .await?
+            .expect("the tag is the user's and survives");
+        assert_eq!(store.tag_owner(tag.id).await?, None);
+        assert!(store.bindings_for_tag(tag.id).await?.is_empty());
         assert!(store.list_workflow_runs().await?.is_empty());
-        assert_eq!(store.list_tags().await?.len(), 0);
-        // Items are tombstoned, not hard-deleted.
-        assert!(store.list_tasks().await?.iter().all(|t| t.deleted_at.is_some()));
+        // Main tag plus the five sections that held completed items; the
+        // empty sections (Pack, Pack / swim, Pack / wedding) are gone.
+        assert_eq!(store.list_tags().await?.len(), 6);
+        // Completed items survive as ordinary tasks.
+        assert!(
+            store
+                .list_tasks()
+                .await?
+                .iter()
+                .all(|t| t.deleted_at.is_none())
+        );
         Ok(())
     }
 }

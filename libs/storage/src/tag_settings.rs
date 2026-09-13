@@ -40,6 +40,11 @@ pub struct TagSection {
     pub tag_id: u64,
     pub name: String,
     pub position: i64,
+    /// The app that owns this section, if any. `None` means a user section
+    /// (or an app-owned one that was downgraded on app removal).
+    pub managed_by: Option<u64>,
+    /// Whether new tasks landing in this section are captured by the owner.
+    pub managed_capture: bool,
 }
 
 fn parse_dirs(value: &toasty::stmt::Value) -> Vec<String> {
@@ -171,24 +176,30 @@ impl TodoStore {
         let toasty::stmt::Value::Record(record) = row else {
             return None;
         };
+        let managed_by = record.get(4).and_then(|v| v.to_i64()).map(|id| id as u64);
         Some(TagSection {
             id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
             tag_id: record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64,
             name: record.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
             position: record.get(3).and_then(|v| v.to_i64()).unwrap_or(0),
+            managed_by,
+            managed_capture: record.get(5).and_then(|v| v.to_i64()).unwrap_or(0) != 0,
         })
     }
 
     /// Sections of a tag in display order.
     pub async fn tag_sections(&mut self, tag_id: u64) -> QueryResult<Vec<TagSection>> {
         let rows = toasty::sql::query(
-            r#"SELECT id, tag_id, name, position FROM tag_sections
+            r#"SELECT id, tag_id, name, position, managed_by, managed_capture
+               FROM tag_sections
                WHERE tag_id = ?1 ORDER BY position, id"#,
         )
         .column_types([
             toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::I64,
             toasty::stmt::Type::I64,
         ])
         .bind(tag_id as i64)
@@ -240,6 +251,8 @@ impl TodoStore {
             tag_id,
             name,
             position,
+            managed_by: None,
+            managed_capture: false,
         })
     }
 
