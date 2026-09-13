@@ -22,6 +22,7 @@ use ui_parts::agent_pane::{AgentPane, AgentPaneEvent, AgentProject, build_task_c
 use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
 use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
+use ui_parts::apps::{AppsEvent, AppsPanel};
 use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
@@ -38,6 +39,7 @@ mod theme;
 mod todoist_auth;
 mod ui_parts {
     pub mod agent_pane;
+    pub mod apps;
     pub mod automations;
     pub mod integrations;
     pub mod navbar;
@@ -103,6 +105,7 @@ struct Layout {
     managed_tag: Option<ManagedTag>,
     integrations: Entity<IntegrationsView>,
     automations: Entity<AutomationsPanel>,
+    apps: Entity<AppsPanel>,
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
     panel: NavPanel,
@@ -196,7 +199,7 @@ impl Layout {
         // The managed-tag panel is created up front (it needs a window for
         // its input) and reconfigured when a managed tag is selected.
         let travel_panel = cx.new(|cx| {
-            TravelPanel::new(store.clone(), 0, String::new(), window, cx)
+            TravelPanel::new(store.clone(), 0, 0, String::new(), window, cx)
         });
         // Captured by the nav subscription below: managed-tag detection is
         // async (a DB lookup), so it spawns on the app executor and
@@ -296,6 +299,10 @@ impl Layout {
                 NavBarEvent::OpenAutomations => {
                     this.show_panel(NavPanel::Automations, cx);
                 }
+                NavBarEvent::OpenApps => {
+                    this.show_panel(NavPanel::Apps, cx);
+                    this.apps.update(cx, |panel, cx| panel.refresh(cx));
+                }
                 NavBarEvent::OpenWorkflows => {
                     this.show_panel(NavPanel::Workflows, cx);
                 }
@@ -344,6 +351,18 @@ impl Layout {
         .detach();
         let integrations =
             cx.new(|cx| IntegrationsView::new(store.clone(), cx));
+        let apps = cx.new(|cx| AppsPanel::new(store.clone(), cx));
+        // Attaching, detaching, or removing an app changes tag ownership
+        // (and can delete tags outright): refresh the tree and the lists.
+        let list_for_apps = task_list.clone();
+        let nav_for_apps = nav_bar.clone();
+        cx.subscribe(&apps, move |_this, _panel, event, cx| match event {
+            AppsEvent::Changed => {
+                list_for_apps.update(cx, |list, cx| list.refresh(cx));
+                nav_for_apps.update(cx, |nav, cx| nav.refresh_tags(cx));
+            }
+        })
+        .detach();
         let settings = cx.new(|cx| SettingsView::new(cx));
         // Syncs create tags (sections, labels): refresh the tag tree.
         cx.subscribe_in(
@@ -554,6 +573,7 @@ impl Layout {
             managed_tag: None,
             integrations,
             automations,
+            apps,
             settings,
             panel: NavPanel::Tasks,
             store: store.clone(),
@@ -629,7 +649,12 @@ async fn lookup_managed_tag(
                     this.managed_tag = managed;
                 if let Some(managed) = &this.managed_tag {
                     this.travel_panel.update(cx, |panel, cx| {
-                        panel.set_tag(managed.recipe_id, managed.label.clone(), cx);
+                        panel.set_tag(
+                            managed.recipe_id,
+                            managed.tag_id,
+                            managed.label.clone(),
+                            cx,
+                        );
                     });
                     // Managed tag: the "+ New trip" button moves into the
                     // task list's title row, and the empty list offers it
@@ -1171,6 +1196,13 @@ impl Render for Layout {
                             .flex_row()
                             .min_h_0()
                             .child(div().flex_1().child(self.automations.clone()))
+                            .into_any_element(),
+                        NavPanel::Apps => div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .min_h_0()
+                            .child(div().flex_1().child(self.apps.clone()))
                             .into_any_element(),
                         NavPanel::Workflows => div()
                             .flex_1()

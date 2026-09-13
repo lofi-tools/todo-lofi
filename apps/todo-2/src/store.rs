@@ -8,6 +8,25 @@ use crate::coding_git;
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
 
+/// Tell the apps that captured a freshly created task about it. Todoist
+/// turns that into a remote item, so adding a task to a linked tag also
+/// adds it to the user's Todoist project. Failures are logged rather than
+/// returned: the local task already exists, and failing here would leave
+/// the UI showing stale state instead of the task the user just typed.
+async fn push_captured_task(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
+    let has_todoist = store
+        .list_integrations()
+        .await?
+        .iter()
+        .any(|integration| integration.provider == "todoist");
+    if !has_todoist {
+        return Ok(());
+    }
+    let token = crate::todoist_auth::access_token().await?;
+    store.push_todoist_new_task(&token, task_id).await?;
+    Ok(())
+}
+
 /// Push a field delta to every Todoist task linked to `task_id`. No links
 /// (or no token) → no-op, so purely local tasks never touch the network.
 /// Must run on the Tokio runtime. A push failure fails the whole edit so
@@ -69,6 +88,19 @@ impl Store {
                         .await?
                         .map(|t| t.id)
                         .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
+                    // An app managing this tag may capture new tasks (e.g.
+                    // push them to Todoist). The task itself stays the
+                    // user's: capture never makes it read-only.
+                    let captured = s.capture_task(task.id).await?;
+                    if !captured.is_empty()
+                        && let Err(error) = push_captured_task(&mut s, task.id).await
+                    {
+                        tracing::error!(
+                            task_id = task.id,
+                            %error,
+                            "capture push failed; the task stays local"
+                        );
+                    }
                     s.list_tasks_by_tag(tag_id).await.unwrap_or_default()
                 }
                 None => s.list_tasks_by_priority().await.unwrap_or_default(),
@@ -585,6 +617,8 @@ impl Store {
     }
 
     /// Replace a task's direct tags (assigning new ones, unassigning removed).
+    /// Tagging an existing task with a linked tag captures it, so the task
+    /// shows up in Todoist too; an already-mirrored task is left alone.
     pub fn set_task_tags(
         &self,
         task_id: u64,
@@ -594,7 +628,18 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.set_task_tags(task_id, &tags).await?)
+            s.set_task_tags(task_id, &tags).await?;
+            let captured = s.capture_task(task_id).await?;
+            if !captured.is_empty()
+                && let Err(error) = push_captured_task(&mut s, task_id).await
+            {
+                tracing::error!(
+                    task_id,
+                    %error,
+                    "capture push failed; the task stays local"
+                );
+            }
+            Ok(())
         })
     }
 
@@ -634,11 +679,13 @@ impl Store {
         })
     }
 
-    /// Create a trip of the travel automation: starts a workflow run and
-    /// spawns its checklist items into the Pack / Before leaving sections.
+    /// Create a trip of the travel automation inside `tag_id`: replaces the
+    /// app's own unfinished items there and spawns the new checklist into
+    /// the tag's Pack / Before leaving sections.
     pub fn create_trip(
         &self,
         recipe_id: u64,
+        tag_id: u64,
         name: String,
         days: String,
         activities: Vec<String>,
@@ -647,7 +694,87 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.create_trip(recipe_id, name, days, activities).await?)
+            Ok(s.create_trip(recipe_id, tag_id, name, days, activities)
+                .await?)
+        })
+    }
+
+    /// ─── Apps ─────────────────────────────────────────────────────────────
+    /// Every registered app with the tags it is bound to, for the Apps panel.
+    pub fn list_apps(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<(App, Vec<(AppTagBinding, storage::Tag)>)>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let mut apps = Vec::new();
+            for app in s.list_apps().await? {
+                let mut bindings = Vec::new();
+                for binding in s.bindings_for_app(app.id).await? {
+                    let tag = s.get_tag(binding.tag_id).await?;
+                    bindings.push((binding, tag));
+                }
+                apps.push((app, bindings));
+            }
+            Ok(apps)
+        })
+    }
+
+    /// Attach an app to a tag and mark it installed. Recipe apps also get
+    /// their sections provisioned in the tag, so the attachment works
+    /// immediately (the tag gets the automation's panel).
+    pub fn attach_app_to_tag(
+        &self,
+        app_id: u64,
+        tag_id: u64,
+        role: BindingRole,
+        capture_new_tasks: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.attach_app_to_tag(app_id, tag_id, role, capture_new_tasks)
+                .await?;
+            if let Some(recipe_id) = s.recipe_for_app(app_id).await? {
+                s.ensure_recipe_sections(recipe_id, tag_id).await?;
+            }
+            s.set_app_enabled(app_id, true).await?;
+            Ok(())
+        })
+    }
+
+    /// Detach one app from one tag: its sections there are downgraded (or
+    /// removed when empty) and the binding goes; tasks keep their ownership.
+    pub fn detach_app_from_tag(
+        &self,
+        app_id: u64,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.release_app_from_tag(app_id, tag_id).await?;
+            Ok(())
+        })
+    }
+
+    /// Remove an app everywhere. When `remove_owned_items`, its unfinished
+    /// generated items are tombstoned; completed and user-modified items
+    /// survive as ordinary tasks.
+    pub fn remove_app(
+        &self,
+        app_id: u64,
+        remove_owned_items: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.disable_app(app_id, remove_owned_items).await?;
+            Ok(())
         })
     }
 

@@ -21,8 +21,8 @@ pub mod prelude {
     pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
     pub use crate::link::LinkKind;
     pub use crate::managed::{
-        App, AppTagBinding, BindingRole, DEMO_APP_SLUG, ManagedMode, TRAVEL_APP_SLUG,
-        TaskOwnership,
+        App, AppTagBinding, BindingRole, DEMO_APP_SLUG, ManagedIntegrityReport, ManagedMode,
+        TRAVEL_APP_SLUG, TaskOwnership,
     };
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::repeat::RepeatTaskTemplate;
@@ -72,6 +72,9 @@ impl TodoStore {
         let mut store = Self { db };
         store.apply_pending_migrations().await?;
         store.ensure_builtin_apps().await?;
+        // Report (never repair) any ownership rows left pointing at content
+        // that no longer exists; SQLite does not enforce these references.
+        store.log_managed_integrity().await;
 
         tracing::info!("TodoStore initialized");
         Ok(store)

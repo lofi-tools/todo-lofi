@@ -491,12 +491,14 @@ fn sync_command(command_type: &str, args: serde_json::Value) -> serde_json::Valu
 
 /// Send Sync commands and fail unless every `sync_status[uuid]` is `"ok"`.
 /// UUIDs make retries idempotent: the server never re-executes a UUID.
+/// Returns the response body so `item_add` callers can read
+/// `temp_id_mapping`.
 async fn send_commands(
     token: &str,
     commands: Vec<serde_json::Value>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<serde_json::Value> {
     if commands.is_empty() {
-        return Ok(());
+        return Ok(serde_json::Value::Null);
     }
     let body: serde_json::Value = client()
         .post(SYNC_URL)
@@ -530,7 +532,7 @@ async fn send_commands(
         })
         .collect();
     if failures.is_empty() {
-        Ok(())
+        Ok(body)
     } else {
         Err(anyhow::anyhow!(
             "Todoist rejected sync commands: {}",
@@ -539,13 +541,30 @@ async fn send_commands(
     }
 }
 
+/// The real remote id Todoist assigned to an `item_add` sent with `temp_id`.
+fn remote_id_for_temp(body: &serde_json::Value, temp_id: &str) -> Option<String> {
+    body.get("temp_id_mapping")
+        .and_then(|mapping| mapping.get(temp_id))
+        .and_then(|id| id.as_str())
+        .map(str::to_owned)
+}
+
+/// Where a captured task should be created remotely.
+struct TodoistDestination {
+    integration_id: u64,
+    project_id: String,
+    /// Set when the task landed in a linked *section* rather than directly
+    /// in the project.
+    section_id: Option<String>,
+}
+
 impl TodoStore {
     /// Push a field delta for one linked task via Sync commands
     /// (`item_update` for partial fields, `item_close`/`item_uncomplete`
     /// for completion — `item_update` explicitly does not support those).
-    /// Seed rows and workflow steps never sync: silently skips them.
-    /// Refreshes the link timestamp so the next import sees remote state
-    /// as current.
+    /// Shipped content (owned by a builtin app) and workflow steps never
+    /// sync: silently skips them. Refreshes the link timestamp so the next
+    /// import sees remote state as current.
     pub async fn push_todoist_patch(
         &mut self,
         token: &str,
@@ -555,7 +574,7 @@ impl TodoStore {
         patch: &TaskPatch,
     ) -> QueryResult<()> {
         let task = self.get_task(task_id).await?;
-        if task.is_seed || task.workflow_run_id.is_some() {
+        if task.workflow_run_id.is_some() || self.is_builtin_owned(task_id).await? {
             return Ok(());
         }
         let mut update_args = serde_json::Map::new();
@@ -617,6 +636,195 @@ impl TodoStore {
             Some(jiff::Timestamp::now()),
         )
         .await
+    }
+
+    /// Push a locally created task to Todoist and link the result, so a task
+    /// added to a linked tag also appears in the user's Todoist project.
+    ///
+    /// Returns the new remote id, or `None` when nothing was created: no
+    /// linked tag applies, the task must never sync, or it already has a
+    /// remote item for that integration. The last case is what makes this
+    /// safe to call every time a task's tags change — a task may only ever
+    /// map to one Todoist item per integration, even when it carries two
+    /// tags linked to different projects.
+    pub async fn push_todoist_new_task(
+        &mut self,
+        token: &str,
+        task_id: u64,
+    ) -> QueryResult<Option<String>> {
+        let task = self.get_task(task_id).await?;
+        if task.workflow_run_id.is_some() || self.is_builtin_owned(task_id).await? {
+            return Ok(None);
+        }
+        let Some(destination) = self.todoist_destination_for_task(task_id).await? else {
+            return Ok(None);
+        };
+        let already_remote = self
+            .task_links_for_task(task_id)
+            .await?
+            .iter()
+            .any(|link| link.integration_id == destination.integration_id);
+        if already_remote {
+            return Ok(None);
+        }
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "content".to_string(),
+            serde_json::Value::String(task.title.clone()),
+        );
+        if let Some(description) = task.description.clone().filter(|text| !text.is_empty()) {
+            args.insert(
+                "description".to_string(),
+                serde_json::Value::String(description),
+            );
+        }
+        if let Some(date) = task.deadline.and_then(due_date_for_deadline) {
+            args.insert("due".to_string(), serde_json::json!({ "date": date }));
+        }
+        let priority = priority_for_urgency(task.urgency_factor);
+        if priority != 1 {
+            args.insert("priority".to_string(), serde_json::Value::from(priority));
+        }
+        args.insert(
+            "project_id".to_string(),
+            serde_json::Value::String(destination.project_id.clone()),
+        );
+        if let Some(section_id) = &destination.section_id {
+            args.insert(
+                "section_id".to_string(),
+                serde_json::Value::String(section_id.clone()),
+            );
+        }
+        // `item_add` has no id until the server answers, so it is sent with a
+        // client-generated `temp_id` whose real id comes back in
+        // `temp_id_mapping`.
+        let temp_id = uuid::Uuid::new_v4().to_string();
+        args.insert(
+            "temp_id".to_string(),
+            serde_json::Value::String(temp_id.clone()),
+        );
+        let response = send_commands(
+            token,
+            vec![sync_command(
+                "item_add",
+                serde_json::Value::Object(args),
+            )],
+        )
+        .await
+        .map_err(|e| crate::QueryErr::UnexpectedValue {
+            message: format!("Todoist capture failed for task {task_id}: {e}"),
+        })?;
+        let remote_id = remote_id_for_temp(&response, &temp_id).ok_or_else(|| {
+            crate::QueryErr::UnexpectedValue {
+                message: format!(
+                    "Todoist capture for task {task_id} returned no id for {temp_id}"
+                ),
+            }
+        })?;
+        self.link_task(
+            destination.integration_id,
+            &remote_id,
+            task_id,
+            Some(jiff::Timestamp::now()),
+        )
+        .await?;
+        Ok(Some(remote_id))
+    }
+
+    /// Where a task should be created remotely: the first of its direct tags
+    /// (or of those tags' parents) that carries a Todoist project link.
+    async fn todoist_destination_for_task(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Option<TodoistDestination>> {
+        for tag in self.get_direct_task_tags(task_id).await? {
+            if let Some(destination) = self.todoist_destination_for_tag(tag.id).await? {
+                return Ok(Some(destination));
+            }
+            for parent in self.get_parents(tag.id).await? {
+                if let Some(destination) = self.todoist_destination_for_tag(parent.id).await? {
+                    return Ok(Some(destination));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolve one tag's Todoist destination. A project link gives the
+    /// project; a section link gives the section plus its parent project.
+    async fn todoist_destination_for_tag(
+        &mut self,
+        tag_id: u64,
+    ) -> QueryResult<Option<TodoistDestination>> {
+        let links = self.todoist_tag_links(tag_id).await?;
+        if let Some((integration_id, project_id, _)) = links
+            .iter()
+            .find(|(_, _, source_kind)| source_kind == "project")
+        {
+            return Ok(Some(TodoistDestination {
+                integration_id: *integration_id,
+                project_id: project_id.clone(),
+                section_id: None,
+            }));
+        }
+        let Some((integration_id, section_id, _)) = links
+            .iter()
+            .find(|(_, _, source_kind)| source_kind == "section")
+        else {
+            return Ok(None);
+        };
+        for parent in self.get_parents(tag_id).await? {
+            if let Some((parent_integration, project_id, _)) = self
+                .todoist_tag_links(parent.id)
+                .await?
+                .into_iter()
+                .find(|(_, _, source_kind)| source_kind == "project")
+                && parent_integration == *integration_id
+            {
+                return Ok(Some(TodoistDestination {
+                    integration_id: *integration_id,
+                    project_id,
+                    section_id: Some(section_id.clone()),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Todoist links on one tag as `(integration_id, external_id,
+    /// source_kind)`.
+    async fn todoist_tag_links(
+        &mut self,
+        tag_id: u64,
+    ) -> QueryResult<Vec<(u64, String, String)>> {
+        let rows = toasty::sql::query(
+            r#"SELECT l.integration_id, l.external_id, l.source_kind
+               FROM external_tag_links l
+               JOIN integrations i ON i.id = l.integration_id
+               WHERE l.tag_id = ?1 AND i.provider = 'todoist'"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
+        .bind(tag_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "todoist links for tag",
+        })?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => Some((
+                    record.first().and_then(|v| v.to_i64())? as u64,
+                    record.get(1).and_then(|v| v.as_str())?.to_string(),
+                    record.get(2).and_then(|v| v.as_str())?.to_string(),
+                )),
+                _ => None,
+            })
+            .collect())
     }
 }
 
@@ -695,21 +903,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_push_skips_seed_tasks() -> anyhow::Result<()> {
+    async fn test_push_skips_builtin_owned_tasks() -> anyhow::Result<()> {
         use crate::TodoStore;
         let mut storage = TodoStore::for_test().await?;
-        // Bogus token: a seed task must return before any network happens.
-        let seed = storage
-            .create_task(crate::Task::create().title("seed").is_seed(true))
+        let demo = storage.demo_app().await?;
+        // Bogus token: builtin-owned content must return before any network
+        // happens.
+        let shipped = storage
+            .create_task(crate::Task::create().title("shipped"))
             .await?;
         storage
-            .push_todoist_patch("bogus", 1, "ext-1", seed.id, &TaskPatch {
+            .set_task_managed(
+                shipped.id,
+                demo.id,
+                crate::managed::ManagedMode::Captured,
+                true,
+            )
+            .await?;
+        storage
+            .push_todoist_patch("bogus", 1, "ext-1", shipped.id, &TaskPatch {
                 content: Some("changed".to_string()),
                 ..Default::default()
             })
             .await?;
         // A real task with the same bogus token fails at the network —
-        // proving the guard above is what skipped the seed row.
+        // proving the guard above is what skipped the builtin-owned row.
         let live = storage
             .create_task(crate::Task::create().title("live"))
             .await?;
@@ -721,6 +939,104 @@ mod tests {
                 })
                 .await
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_new_tasks_in_linked_tags_are_captured() -> anyhow::Result<()> {
+        use crate::TodoStore;
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("todoist", None).await?;
+        let app = storage
+            .app_for_integration(integration.id)
+            .await?
+            .expect("creating an integration registers its app");
+        let project = storage.create_tag("Work").await?;
+        storage
+            .link_tag(integration.id, "proj-1", project.id, "project", false)
+            .await?;
+        let section = storage.create_tag("Backlog").await?;
+        storage.add_tag_implication(section.id, project.id).await?;
+        storage
+            .link_tag(integration.id, "sec-1", section.id, "section", false)
+            .await?;
+
+        // A task typed into a linked tag is captured, and capture keeps it
+        // fully editable.
+        let task = storage
+            .create_task(crate::Task::create().title("Ship it"))
+            .await?;
+        storage.assign_tag_to_task(task.id, "Work").await?;
+        assert_eq!(storage.capture_task(task.id).await?, vec![app.id]);
+        let ownership = storage.task_ownership(task.id).await?;
+        assert_eq!(ownership.managed_by, Some(app.id));
+        assert_eq!(
+            ownership.managed_mode,
+            Some(crate::managed::ManagedMode::Captured)
+        );
+        storage
+            .update_task_title(task.id, "Ship it tomorrow")
+            .await?;
+
+        // The push resolves the remote project (and section) from the tag
+        // the task landed in.
+        let destination = storage
+            .todoist_destination_for_task(task.id)
+            .await?
+            .expect("a linked tag gives a destination");
+        assert_eq!(destination.project_id, "proj-1");
+        assert!(destination.section_id.is_none());
+
+        let in_section = storage
+            .create_task(crate::Task::create().title("Refine"))
+            .await?;
+        storage.assign_tag_to_task(in_section.id, "Backlog").await?;
+        let destination = storage
+            .todoist_destination_for_task(in_section.id)
+            .await?
+            .expect("a linked section gives a destination");
+        assert_eq!(destination.project_id, "proj-1");
+        assert_eq!(destination.section_id.as_deref(), Some("sec-1"));
+
+        // Ordinary tags are not captured at all.
+        storage.create_tag("Home").await?;
+        let personal = storage
+            .create_task(crate::Task::create().title("Water plants"))
+            .await?;
+        storage.assign_tag_to_task(personal.id, "Home").await?;
+        assert!(storage.capture_task(personal.id).await?.is_empty());
+        assert!(storage
+            .todoist_destination_for_task(personal.id)
+            .await?
+            .is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_capture_does_not_duplicate_an_already_linked_task() -> anyhow::Result<()> {
+        use crate::TodoStore;
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("todoist", None).await?;
+        let project = storage.create_tag("Work").await?;
+        storage
+            .link_tag(integration.id, "proj-1", project.id, "project", false)
+            .await?;
+        let task = storage
+            .create_task(crate::Task::create().title("Ship it"))
+            .await?;
+        storage.assign_tag_to_task(task.id, "Work").await?;
+        // The task is already mirrored remotely, as it would be after the
+        // first capture or an import.
+        storage
+            .link_task(integration.id, "remote-1", task.id, None)
+            .await?;
+        // A bogus token proves the guard returns before any network call.
+        assert!(
+            storage
+                .push_todoist_new_task("bogus", task.id)
+                .await?
+                .is_none()
         );
         Ok(())
     }

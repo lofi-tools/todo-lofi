@@ -262,22 +262,45 @@ impl TodoStore {
             true,
         )
         .await?;
-        // Checklist sections: child tags under the tag, owned by the app,
-        // ordered via `tag_sections` so the task list groups items under
-        // them.
+        self.ensure_recipe_sections(recipe_id, tag.id).await?;
+        Ok(tag)
+    }
+
+    /// Create the recipe's checklist sections inside `tag_id`, owned by the
+    /// recipe's app. Each section is both a child tag (so tasks attach to
+    /// it) and a `tag_sections` row (so the task list groups by it).
+    /// Idempotent, so attaching an existing user tag provisions its
+    /// sections the same way enabling the automation does.
+    pub async fn ensure_recipe_sections(
+        &mut self,
+        recipe_id: u64,
+        tag_id: u64,
+    ) -> QueryResult<()> {
+        let Some(app) = self.app_for_recipe(recipe_id).await? else {
+            return Ok(());
+        };
+        // Only recipes that declare a managed tag have checklist sections;
+        // attaching a plain automation to a tag provisions nothing.
+        let recipe_row = self.get_recipe(recipe_id).await?;
+        let parsed = crate::workflow::parse_recipe(&recipe_row.recipe_json.0)
+            .map_err(|message| crate::QueryErr::UnexpectedValue { message })?;
+        if parsed.managed_tag.is_none() {
+            return Ok(());
+        }
+        let tag = self.get_tag(tag_id).await?;
         for (key, display) in SECTION_DEFS {
-            let section_name = section_tag_name(&tag_name, key);
+            let section_name = section_tag_name(&tag.name, key);
             if self.get_tag_by_name(&section_name).await?.is_none() {
                 let section = self
-                    .create_tag_with_display_name(section_name.clone(), Some(display.to_string()))
+                    .create_tag_with_display_name(section_name, Some(display.to_string()))
                     .await?;
                 self.add_tag_implication(section.id, tag.id).await?;
             }
-            let section = self.add_tag_section(tag.id, display.to_string()).await?;
+            let section = self.add_tag_section(tag_id, display.to_string()).await?;
             self.set_section_managed(section.id, Some(app.id), false)
                 .await?;
         }
-        Ok(tag)
+        Ok(())
     }
 
     /// Disable a managed-tag automation's app: tombstone its open items,
@@ -304,26 +327,43 @@ impl TodoStore {
         Ok(())
     }
 
-    /// Create a trip of a managed-tag recipe: starts a workflow run whose
-    /// params record the trip (name, days, activities), then spawns the
-    /// checklist items as ordinary tasks carrying the run's id, tagged
-    /// with the recipe's section tags.
+    /// Create a trip of a managed-tag recipe inside `tag_id`: replaces the
+    /// app's own unfinished items there, then starts a workflow run whose
+    /// params record the trip (name, days, activities) and spawns the
+    /// checklist items as ordinary tasks carrying the run's id, tagged with
+    /// the recipe's section tags of that tag.
     pub async fn create_trip(
         &mut self,
         recipe_id: u64,
+        tag_id: u64,
         name: String,
         days: String,
         activities: Vec<String>,
     ) -> QueryResult<crate::WorkflowRun> {
-        let recipe_row = self.get_recipe(recipe_id).await?;
-        let parsed = crate::workflow::parse_recipe(&recipe_row.recipe_json.0)
-            .map_err(|message| crate::QueryErr::UnexpectedValue { message })?;
-        let managed_tag_name = parsed
-            .managed_tag
-            .clone()
+        let tag = self.get_tag(tag_id).await?;
+        let app = self
+            .app_for_recipe(recipe_id)
+            .await?
             .ok_or_else(|| crate::QueryErr::UnexpectedValue {
                 message: "recipe does not manage a tag".to_string(),
             })?;
+        let bound = self
+            .bindings_for_tag(tag_id)
+            .await?
+            .iter()
+            .any(|binding| binding.app_id == app.id);
+        if !bound {
+            return Err(crate::QueryErr::UnexpectedValue {
+                message: format!("tag '{}' is not managed by this recipe", tag.label()),
+            });
+        }
+        // Regeneration: the app's own unfinished, unmodified items in this
+        // tag are discarded and recreated below. User tasks and completed
+        // items are untouched.
+        for stale in self.managed_tasks_in_tag(tag_id, app.id).await? {
+            self.tombstone_task(stale).await?;
+        }
+        self.ensure_recipe_sections(recipe_id, tag_id).await?;
         let mut activities = activities;
         activities.sort();
         activities.dedup();
@@ -349,17 +389,15 @@ impl TodoStore {
                         .workflow_run_id(Some(run.id)),
                 )
                 .await?;
-            let tag_name = section_tag_name(&managed_tag_name, section_key(&section));
+            let tag_name = section_tag_name(&tag.name, section_key(&section));
             self.assign_tag_to_task(task.id, &tag_name).await?;
-            if let Some(app) = self.app_for_recipe(recipe_id).await? {
-                self.set_task_managed(
-                    task.id,
-                    app.id,
-                    crate::managed::ManagedMode::Managed,
-                    false,
-                )
-                .await?;
-            }
+            self.set_task_managed(
+                task.id,
+                app.id,
+                crate::managed::ManagedMode::Managed,
+                false,
+            )
+            .await?;
         }
         Ok(run)
     }
@@ -508,6 +546,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_trip_in_an_existing_user_tag() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let recipe_id = make_travel_recipe(&mut store).await;
+        // The user already keeps a travel list with a task of their own.
+        let tag = store.create_tag("Travel").await?;
+        let mine = store
+            .create_task(crate::Task::create().title("Book dog sitter"))
+            .await?;
+        store.assign_tag_to_task(mine.id, "Travel").await?;
+
+        let app = store
+            .upsert_app("recipe", "packing-list", "Travel checklists", None)
+            .await?;
+        store.set_recipe_app(recipe_id, app.id).await?;
+        store
+            .attach_app_to_tag(
+                app.id,
+                tag.id,
+                crate::managed::BindingRole::Partial,
+                false,
+            )
+            .await?;
+        store.ensure_recipe_sections(recipe_id, tag.id).await?;
+        // The sections land under the user's tag, not the recipe's own.
+        assert!(
+            store
+                .get_children(tag.id)
+                .await?
+                .iter()
+                .any(|child| child.display_name.as_deref() == Some(PACK_TRAVEL_SECTION))
+        );
+
+        let first = store
+            .create_trip(
+                recipe_id,
+                tag.id,
+                "Costa Rica".to_string(),
+                "5".to_string(),
+                Vec::new(),
+            )
+            .await?;
+        let items = store.list_tasks_by_tag(tag.id).await?;
+        assert!(
+            items.iter().any(|t| t.task.id == mine.id),
+            "the user's own task is untouched"
+        );
+        assert!(
+            items.iter().any(|t| t.workflow_run_id == Some(first.id)),
+            "the trip's checklist is generated into the tag"
+        );
+
+        // A second trip replaces the first checklist but spares the user's
+        // task.
+        let second = store
+            .create_trip(
+                recipe_id,
+                tag.id,
+                "Iceland".to_string(),
+                "8".to_string(),
+                Vec::new(),
+            )
+            .await?;
+        let items = store.list_tasks_by_tag(tag.id).await?;
+        assert!(items.iter().any(|t| t.task.id == mine.id));
+        assert!(
+            items.iter().all(|t| t.workflow_run_id != Some(first.id)),
+            "the previous checklist is replaced"
+        );
+        assert!(items.iter().any(|t| t.workflow_run_id == Some(second.id)));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_managed_tag_lifecycle() -> anyhow::Result<()> {
         let mut store = TodoStore::for_test().await?;
         let recipe_id = make_travel_recipe(&mut store).await;
@@ -545,6 +656,7 @@ mod tests {
         let run = store
             .create_trip(
                 recipe_id,
+                tag.id,
                 "Hiking · 5 days".to_string(),
                 "5".to_string(),
                 vec!["hiking".to_string()],

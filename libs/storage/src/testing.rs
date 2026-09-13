@@ -510,6 +510,7 @@ impl TodoStore {
 
         let tasks = seed_tasks();
         let mut task_map = std::collections::HashMap::new();
+        let demo = self.demo_app().await?;
 
         for seed in &tasks {
             let parent_id = if let Some(ref parent_title) = seed.parent_title {
@@ -529,10 +530,18 @@ impl TodoStore {
                         .blocked_until(seed.blocked_until)
                         .importance_factor(seed.importance_factor)
                         .urgency_factor(seed.urgency_factor)
-                        .parent_id(parent_id)
-                        .is_seed(true),
+                        .parent_id(parent_id),
                 )
                 .await?;
+            // Shipped content belongs to the builtin app in `captured` mode:
+            // fully editable, never regenerated, never pushed.
+            self.set_task_managed(
+                task.id,
+                demo.id,
+                crate::managed::ManagedMode::Captured,
+                true,
+            )
+            .await?;
 
             task_map.insert(seed.title.clone(), task.id);
         }
@@ -837,27 +846,12 @@ impl TodoStore {
             ids.insert(slug, recipe.id);
         }
         // No runs are created: every automation starts disabled, except
-        // travel checklists, which is enabled by default: its managed
-        // tag and checklist sections are created here (and marked as
-        // seed data, like the rest of the seed) so the travel panel
-        // shows up without a trip to the Automations panel.
+        // travel checklists, which is enabled by default: its tag and
+        // checklist sections are created here so the travel panel shows up
+        // without a trip to the Automations panel. The tag belongs to the
+        // travel app, not the builtin demo app.
         let travel_id = ids["packing-list"];
-        let travel_tag = self.enable_managed_recipe(travel_id).await?;
-        let mut seed_tag_ids = vec![travel_tag.id];
-        for child in self.get_children(travel_tag.id).await? {
-            seed_tag_ids.push(child.id);
-        }
-        let id_list: Vec<String> = seed_tag_ids.iter().map(|id| id.to_string()).collect();
-        let placeholders: Vec<&str> = id_list.iter().map(|s| s.as_str()).collect();
-        toasty::sql::statement(format!(
-            "UPDATE tags SET is_seed = 1 WHERE id IN ({})",
-            placeholders.join(",")
-        ))
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "mark travel tags as seed",
-        })?;
+        self.enable_managed_recipe(travel_id).await?;
 
         // Yearly schedule for the Birthday recipe: fires March 1 each year
         // via the repeat materializer, creating a brand new isolated run.
@@ -900,10 +894,32 @@ mod tests {
         // its 8 checklist sections, enabled by default.
         assert_eq!(tags.len(), 20);
 
-        // Every seed row is marked so sync never touches it; workflow
-        // steps are covered by the workflow_run_id sync guard instead.
-        assert!(tasks.iter().all(|t| t.is_seed));
-        assert!(tags.iter().all(|t| t.is_seed));
+        // The builtin demo app owns the shipped rows so sync never touches
+        // them; workflow steps are covered by the workflow_run_id guard
+        // instead. Directory-backed project tags stay user-owned, and the
+        // enabled travel app owns the sections of its own tag.
+        let demo = store.demo_app().await?;
+        for task in &tasks {
+            let ownership = store.task_ownership(task.id).await?;
+            assert_eq!(
+                ownership.managed_by,
+                Some(demo.id),
+                "{} must belong to the demo app",
+                task.title
+            );
+            assert_eq!(
+                ownership.managed_mode,
+                Some(crate::managed::ManagedMode::Captured),
+                "demo content is captured, never regenerated"
+            );
+        }
+        let mut demo_tags = 0;
+        for tag in &tags {
+            if store.tag_owner(tag.id).await? == Some(demo.id) {
+                demo_tags += 1;
+            }
+        }
+        assert_eq!(demo_tags, 9, "the nine seeded tags belong to the demo app");
 
         // Automations start disabled: no runs exist until enabled — except
         // travel checklists, which is enabled by default: its managed tag
@@ -976,7 +992,6 @@ mod tests {
         // green from Sep 7, gray from Sep 14; enabled 4pm, due 9pm.
         for title in ["green bin", "recycling bin (gray)"] {
             let bin = tasks.iter().find(|t| t.title == title).unwrap();
-            assert!(bin.is_seed, "{title} must be marked as seed data");
             let template = store.repeat_template_for_task(bin.id).await?.unwrap();
             assert_eq!(template.interval_days, 14);
             assert_eq!(template.time_of_day, Some(21 * 60));

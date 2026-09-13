@@ -50,10 +50,6 @@ pub struct Task {
     pub timezone: Option<String>,
     /// One-way imported remote comments as JSON.
     pub comments: Option<toasty::Json<Vec<crate::external::ExternalComment>>>,
-    /// Seed data marker: demo content that must never sync to any
-    /// integration (push skips it, import never relinks it).
-    #[default(false)]
-    pub is_seed: bool,
     /// The workflow run this task is a step of, if it was created by the
     /// workflow engine. `NULL` for ordinary user tasks. Workflow steps
     /// never sync to any integration.
@@ -278,9 +274,6 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         deleted_at: None,
         timezone: None,
         comments: None,
-        // Raw list queries don't select the seed marker; only `get_task`
-        // (used by sync guards) needs it accurate.
-        is_seed: false,
         workflow_run_id,
         node_id,
         spec,

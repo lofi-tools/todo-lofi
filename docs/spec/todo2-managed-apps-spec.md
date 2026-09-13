@@ -272,7 +272,9 @@ must pick a single source of truth. This spec keeps both but requires that:
      behavior.
 4. `0021_drop_is_seed.sql` — drop `tasks.is_seed` / `tags.is_seed` once the
    built-in app owns the behavior (decision #33).
-5. Later: drop `tags.managed_by_recipe_id`.
+5. `0022_drop_managed_by_recipe_id.sql` — drop `tags.managed_by_recipe_id`
+   once the Rust backfill has been retired (the column is only historical
+   now; see §10).
 
 Note: the migration runner splits statements and has no transaction support
 today; the backfill must be written as plain `UPDATE ... WHERE` statements and
@@ -588,7 +590,7 @@ Residual items that are mechanical rather than product decisions:
 
 ## 10. Implementation status
 
-Implemented and covered by tests (`cargo test -p storage`: 104 passed;
+Implemented and covered by tests (`cargo test -p storage`: 109 passed;
 `cargo test -p todo-2`: 44 passed; `cargo check --workspace` clean):
 
 - Schema: `libs/storage/toasty/migrations/0018_apps.sql` (apps table,
@@ -617,19 +619,54 @@ Implemented and covered by tests (`cargo test -p storage`: 104 passed;
 - UI: task rows block rename and show a hover-only lock with "Managed by X";
   the details pane refuses to start title/description/tag edits on read-only
   tasks.
+- Apps settings panel (`ui_parts/apps.rs`, reached from the navbar's "Apps"
+  row): every app with the tags it manages, an attach picker over the
+  eligible ordinary tags (project folders and tags held by a `full_tag`
+  binding are shown with the reason), a capture toggle, per-tag **Detach**,
+  and the app-wide removal dialog asking whether its unfinished items go too
+  (decision #39).
+- Attaching is functional, not just a row: `ensure_recipe_sections`
+  provisions a recipe's sections inside the chosen tag, and `create_trip`
+  now targets the *selected* tag, replacing the app's own unfinished items
+  there while sparing the user's tasks and completed items.
+- Todoist capture push (`push_todoist_new_task`): `item_add` is sent with a
+  client `temp_id` and the real remote id is read back from
+  `temp_id_mapping` and linked. Linking a remote project/section gives the
+  integration's app a capturing binding (`ensure_capture_binding`), and
+  `insert_task` runs capture and then the push after assigning the tag, so
+  a task typed into a linked tag also appears in Todoist. The details-pane
+  tag editor captures the same way when an existing task is tagged into a
+  linked tag, and a task already mirrored for that integration is never
+  added twice. Disconnecting an integration disables its app and releases
+  those bindings.
+- `is_seed` is retired: `0020_seed_ownership.sql` moves existing demo rows
+  onto the builtin app (captured, so they stay editable but never sync) and
+  `0021_drop_is_seed.sql` drops `tasks.is_seed` / `tags.is_seed`. Seeding
+  and the Todoist push guard now read app ownership instead of the marker.
+- `tags.managed_by_recipe_id` is retired too: the Rust backfill
+  (`migrate_legacy_managed_tag`) is gone — every database opened by a build
+  that contained it has already had its legacy tags converted into partial
+  bindings — and `0022_drop_managed_by_recipe_id.sql` drops the column, so
+  `app_tag_bindings` is the single source of recipe ownership.
+- Startup integrity check: `check_managed_integrity` reports (never repairs)
+  `managed_by` / `app_id` columns naming a missing app and `app_tag_bindings`
+  naming a missing app or tag, as a `ManagedIntegrityReport` with
+  `is_clean()`, `issue_count()` and a capped per-category `describe()`. It is
+  logged at startup via `log_managed_integrity` from `TodoStore::new`, and
+  never fails startup.
 
 Not yet implemented (deliberately staged, no code left in a broken state):
 
-- App settings panel and the attach/detach/release/removal dialogs (the
-  storage API for all of it exists; there is no UI entry point yet, so
-  attaching the travel app to an existing user tag is not user-reachable).
-- Todoist capture *push*: `capture_task` marks captured tasks, but the hook
-  that creates the remote item and links it (Sync `item_add` +
-  `temp_id_mapping`) is not written, so the "adding a task to a linked tag also
-  adds it to Todoist" behavior is not live.
-- Seed retirement: `is_seed` is kept (the demo app exists and is created, but
-  `is_seed` was not removed from the models or dropped by a migration).
 - Disabled-with-lock rendering in the details pane (fields are inert rather
   than visibly disabled).
 - `with_transaction` was added but is only used by `disable_app`; multi-item
   generation in `create_trip` is not yet wrapped.
+- Only two of the four surfaces of decision #18 exist: the Apps panel and the
+  task row/details. There is still no tag-settings panel or section context
+  menu, so capture policy and section ownership are only visible in the Apps
+  panel.
+- The integrity check does not cover the *double representation* of
+  sections (§7.1.1): a `tag_sections.managed_by` disagreeing with its child
+  tag's `managed_by` is not reported, because matching the two needs the
+  section's display label. It also does not repair anything, so a report
+  currently has no in-app surface beyond the log.

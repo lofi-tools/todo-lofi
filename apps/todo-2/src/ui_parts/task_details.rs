@@ -4604,7 +4604,6 @@ mod coding_tests {
                 deleted_at: None,
                 timezone: None,
                 comments: None,
-                is_seed: false,
                 workflow_run_id: None,
                 node_id: Some(node_id.to_string()),
                 spec: None,

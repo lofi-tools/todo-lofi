@@ -81,6 +81,17 @@ impl TodoStore {
             context: "create integration",
         })?;
         let id = self.last_insert_id().await?;
+        // Every integration is an app in the unified model, so links can
+        // attach it and capture new tasks in the tags it syncs.
+        let label = account_label
+            .clone()
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| provider.to_string());
+        let app = self
+            .upsert_app("integration", &format!("{provider}-{id}"), &label, None)
+            .await?;
+        self.set_app_enabled(app.id, true).await?;
+        self.set_integration_app(id, app.id).await?;
         Ok(Integration {
             id,
             provider: provider.to_string(),
@@ -158,6 +169,12 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "delete integration links",
             })?;
+        }
+        // The integration's app goes with it: its capture bindings would
+        // otherwise keep marking new tasks as owned by an app that no
+        // longer syncs anywhere.
+        if let Some(app) = self.app_for_integration(integration_id).await? {
+            self.disable_app(app.id, false).await?;
         }
         toasty::sql::statement("DELETE FROM integrations WHERE id = ?1")
             .bind(integration_id as i64)
@@ -312,6 +329,10 @@ impl TodoStore {
         .context(crate::error::QueryTagsSnafu {
             context: "link external tag",
         })?;
+        if let Some(app) = self.app_for_integration(integration_id).await? {
+            // A task added to the linked tag is propagated to the provider.
+            self.ensure_capture_binding(app.id, tag_id).await?;
+        }
         Ok(())
     }
 
@@ -560,6 +581,38 @@ mod tests {
         storage.unlink_task(first.id, "ext-1").await?;
         assert!(storage.task_link(first.id, "ext-1").await?.is_none());
         assert_eq!(storage.task_links_for_task(task.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_deleting_an_integration_releases_its_capture_bindings() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("todoist", None).await?;
+        let app = storage
+            .app_for_integration(integration.id)
+            .await?
+            .expect("creating an integration registers its app");
+        let tag = storage.create_tag("Work").await?;
+        storage
+            .link_tag(integration.id, "proj-1", tag.id, "project", false)
+            .await?;
+        assert_eq!(storage.bindings_for_tag(tag.id).await?.len(), 1);
+
+        storage.delete_integration(integration.id).await?;
+        assert!(storage.bindings_for_tag(tag.id).await?.is_empty());
+        assert!(
+            !storage
+                .app_by_id(app.id)
+                .await?
+                .expect("the app row stays for the history")
+                .enabled
+        );
+        // Tasks added to the tag are the user's own again.
+        let task = storage
+            .create_task(Task::create().title("After disconnect"))
+            .await?;
+        storage.assign_tag_to_task(task.id, "Work").await?;
+        assert!(storage.capture_task(task.id).await?.is_empty());
         Ok(())
     }
 

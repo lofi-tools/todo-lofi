@@ -54,6 +54,9 @@ pub enum TravelPanelEvent {
 pub struct TravelPanel {
     store: Store,
     recipe_id: u64,
+    /// The tag the panel is open on. An app may be attached to several tags,
+    /// so trips are generated into the selected one.
+    tag_id: u64,
     tag_label: String,
     /// The add-trip popover is open.
     adding: bool,
@@ -76,6 +79,7 @@ impl TravelPanel {
     pub fn new(
         store: Store,
         recipe_id: u64,
+        tag_id: u64,
         tag_label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -83,6 +87,7 @@ impl TravelPanel {
         Self {
             store,
             recipe_id,
+            tag_id,
             tag_label,
             adding: false,
             last_outside_close: None,
@@ -103,8 +108,15 @@ impl TravelPanel {
     }
 
     /// Point the panel at another managed tag (reused across selections).
-    pub fn set_tag(&mut self, recipe_id: u64, tag_label: String, cx: &mut Context<Self>) {
+    pub fn set_tag(
+        &mut self,
+        recipe_id: u64,
+        tag_id: u64,
+        tag_label: String,
+        cx: &mut Context<Self>,
+    ) {
         self.recipe_id = recipe_id;
+        self.tag_id = tag_id;
         self.tag_label = tag_label;
         self.close_add(cx);
     }
@@ -172,7 +184,8 @@ impl TravelPanel {
             return;
         };
         let recipe_id = self.recipe_id;
-        if recipe_id == 0 {
+        let tag_id = self.tag_id;
+        if recipe_id == 0 || tag_id == 0 {
             return;
         }
         let typed_name = self.name.read(cx).text().to_string();
@@ -185,7 +198,10 @@ impl TravelPanel {
         let activities = self.activities.clone();
         let store = self.store.clone();
         self._add = Some(cx.spawn(async move |this, cx| {
-            if let Err(e) = store.create_trip(recipe_id, name, days, activities, cx).await {
+            if let Err(e) = store
+                .create_trip(recipe_id, tag_id, name, days, activities, cx)
+                .await
+            {
                 tracing::error!("failed to create trip: {e}");
             }
             this.update(cx, |this, cx| {

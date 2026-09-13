@@ -147,6 +147,7 @@ impl TaskListView {
                 NavBarEvent::OpenProjectPicker
                 | NavBarEvent::OpenIntegrations
                 | NavBarEvent::OpenAutomations
+                | NavBarEvent::OpenApps
                 | NavBarEvent::OpenWorkflows
                 | NavBarEvent::OpenSettings => {
                     // Picker/dialog open is handled by the Layout; the task
@@ -1005,7 +1006,6 @@ mod tests {
                 deleted_at: None,
                 timezone: None,
                 comments: None,
-                is_seed: false,
                 workflow_run_id: None,
                 node_id: None,
                 spec: None,

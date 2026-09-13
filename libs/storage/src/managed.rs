@@ -115,6 +115,121 @@ pub struct TaskOwnership {
     pub user_modified: bool,
 }
 
+/// Ownership damage found by [`TodoStore::check_managed_integrity`]. Empty
+/// vectors mean the ownership tables are consistent; every entry is a
+/// `(row_id, missing_id)` pair.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ManagedIntegrityReport {
+    /// `tags.managed_by` naming an app that does not exist.
+    pub orphaned_tag_owners: Vec<(u64, u64)>,
+    /// `tag_sections.managed_by` naming an app that does not exist.
+    pub orphaned_section_owners: Vec<(u64, u64)>,
+    /// `tasks.managed_by` naming an app that does not exist.
+    pub orphaned_task_owners: Vec<(u64, u64)>,
+    /// `workflow_recipes.app_id` naming an app that does not exist.
+    pub orphaned_recipe_apps: Vec<(u64, u64)>,
+    /// `integrations.app_id` naming an app that does not exist.
+    pub orphaned_integration_apps: Vec<(u64, u64)>,
+    /// `app_tag_bindings` rows whose app does not exist.
+    pub dangling_binding_apps: Vec<(u64, u64)>,
+    /// `app_tag_bindings` rows whose tag does not exist.
+    pub dangling_binding_tags: Vec<(u64, u64)>,
+}
+
+/// How many rows of one category [`ManagedIntegrityReport::describe`] lists
+/// before summarising the rest.
+const MAX_REPORTED_ROWS: usize = 10;
+
+impl ManagedIntegrityReport {
+    /// Whether every ownership reference resolves.
+    pub fn is_clean(&self) -> bool {
+        self.issue_count() == 0
+    }
+
+    /// Total number of broken rows.
+    pub fn issue_count(&self) -> usize {
+        self.orphaned_tag_owners.len()
+            + self.orphaned_section_owners.len()
+            + self.orphaned_task_owners.len()
+            + self.orphaned_recipe_apps.len()
+            + self.orphaned_integration_apps.len()
+            + self.dangling_binding_apps.len()
+            + self.dangling_binding_tags.len()
+    }
+
+    /// One line per non-empty category, for logs. Only the first
+    /// [`MAX_REPORTED_ROWS`] rows of a category are listed, so a badly
+    /// damaged database cannot flood the log.
+    pub fn describe(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        describe_rows(
+            &mut lines,
+            "orphaned tag owner",
+            &self.orphaned_tag_owners,
+            "tags.managed_by names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "orphaned section owner",
+            &self.orphaned_section_owners,
+            "tag_sections.managed_by names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "orphaned task owner",
+            &self.orphaned_task_owners,
+            "tasks.managed_by names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "orphaned recipe app",
+            &self.orphaned_recipe_apps,
+            "workflow_recipes.app_id names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "orphaned integration app",
+            &self.orphaned_integration_apps,
+            "integrations.app_id names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "binding without an app",
+            &self.dangling_binding_apps,
+            "app_tag_bindings.app_id names a missing app",
+        );
+        describe_rows(
+            &mut lines,
+            "binding without a tag",
+            &self.dangling_binding_tags,
+            "app_tag_bindings.tag_id names a missing tag",
+        );
+        lines
+    }
+}
+
+fn describe_rows(lines: &mut Vec<String>, label: &str, rows: &[(u64, u64)], why: &str) {
+    if rows.is_empty() {
+        return;
+    }
+    let shown: Vec<String> = rows
+        .iter()
+        .take(MAX_REPORTED_ROWS)
+        .map(|(id, missing)| format!("{id}->{missing}"))
+        .collect();
+    let hidden = rows.len().saturating_sub(MAX_REPORTED_ROWS);
+    let suffix = if hidden == 0 {
+        String::new()
+    } else {
+        format!(" (+{hidden} more)")
+    };
+    lines.push(format!(
+        "{label}: {} row(s) [{}]{suffix} - {why}",
+        rows.len(),
+        shown.join(", ")
+    ));
+}
+
 fn parse_app(row: &toasty::stmt::Value) -> Option<App> {
     let toasty::stmt::Value::Record(record) = row else {
         return None;
@@ -500,6 +615,30 @@ impl TodoStore {
             })
     }
 
+    /// Bind an app to a tag with capture on, without the user-facing attach
+    /// rules. Used when an integration links a remote project/section:
+    /// tasks typed into the linked tag must propagate back to the provider,
+    /// and that is only possible with a binding. Existing bindings keep
+    /// their role and merely gain capture.
+    pub async fn ensure_capture_binding(&mut self, app_id: u64, tag_id: u64) -> QueryResult<()> {
+        let created_at = jiff::Timestamp::now().to_string();
+        toasty::sql::statement(
+            r#"INSERT INTO app_tag_bindings
+               (app_id, tag_id, role, capture_new_tasks, created_at)
+               VALUES (?1, ?2, 'partial', 1, ?3)
+               ON CONFLICT (app_id, tag_id) DO UPDATE SET capture_new_tasks = 1"#,
+        )
+        .bind(app_id as i64)
+        .bind(tag_id as i64)
+        .bind(created_at)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "ensure capture binding",
+        })?;
+        Ok(())
+    }
+
     pub async fn detach_app_from_tag(&mut self, app_id: u64, tag_id: u64) -> QueryResult<()> {
         toasty::sql::statement(
             r#"DELETE FROM app_tag_bindings WHERE app_id = ?1 AND tag_id = ?2"#,
@@ -729,6 +868,25 @@ impl TodoStore {
             return Err(crate::QueryErr::TaskLocked { task_id, app_id });
         }
         Ok(())
+    }
+
+    /// Whether a task belongs to a `kind='builtin'` app (shipped/demo
+    /// content). Such rows never sync to an integration.
+    pub async fn is_builtin_owned(&mut self, task_id: u64) -> QueryResult<bool> {
+        let rows = toasty::sql::query(
+            r#"SELECT 1 FROM tasks t
+               JOIN apps a ON a.id = t.managed_by
+               WHERE t.id = ?1 AND a.kind = 'builtin'
+               LIMIT 1"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(task_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "check builtin task owner",
+        })?;
+        Ok(!rows.is_empty())
     }
 
     /// Content edits through the guard also mark the task user-modified, so
@@ -1070,9 +1228,8 @@ impl TodoStore {
         .await
     }
 
-    /// Idempotent startup backfill: register the builtin demo app, give every
-    /// integration and managed-tag recipe an app row, and convert legacy
-    /// `tags.managed_by_recipe_id` ownership into partial bindings.
+    /// Idempotent startup backfill: register the builtin demo app and give
+    /// every integration and recipe an app row.
     pub async fn ensure_builtin_apps(&mut self) -> QueryResult<()> {
         self.demo_app().await?;
 
@@ -1136,88 +1293,110 @@ impl TodoStore {
                 .upsert_app("recipe", &slug, &recipe.name, recipe.description.clone())
                 .await?;
             self.set_recipe_app(recipe_id, app.id).await?;
-            if let Some(legacy_tag) = recipe.managed_tag {
-                self.migrate_legacy_managed_tag(app.id, recipe_id, &legacy_tag)
-                    .await?;
-            }
         }
         Ok(())
     }
 
-    /// Convert a `managed_by_recipe_id` tag into a `partial` binding: the tag
-    /// stays an ordinary user tag, its sections and their tasks become the
-    /// app's, and the legacy marker is cleared.
-    async fn migrate_legacy_managed_tag(
+    // -- integrity --------------------------------------------------------
+
+    /// Read-only consistency check over the ownership tables.
+    ///
+    /// SQLite does not enforce the foreign keys here, so a crash or a direct
+    /// database edit can leave a `managed_by` naming an app that no longer
+    /// exists, or a binding naming a missing app or tag. This *reports* those
+    /// rows; it never repairs them.
+    pub async fn check_managed_integrity(&mut self) -> QueryResult<ManagedIntegrityReport> {
+        Ok(ManagedIntegrityReport {
+            orphaned_tag_owners: self.orphaned_owners("tags", "managed_by").await?,
+            orphaned_section_owners: self
+                .orphaned_owners("tag_sections", "managed_by")
+                .await?,
+            orphaned_task_owners: self.orphaned_owners("tasks", "managed_by").await?,
+            orphaned_recipe_apps: self
+                .orphaned_owners("workflow_recipes", "app_id")
+                .await?,
+            orphaned_integration_apps: self.orphaned_owners("integrations", "app_id").await?,
+            dangling_binding_apps: self.dangling_bindings("app_id", "apps").await?,
+            dangling_binding_tags: self.dangling_bindings("tag_id", "tags").await?,
+        })
+    }
+
+    /// Log the result of [`Self::check_managed_integrity`]. Ownership damage
+    /// is never fatal: it is reported and the app keeps running.
+    pub async fn log_managed_integrity(&mut self) {
+        match self.check_managed_integrity().await {
+            Ok(report) if report.is_clean() => {
+                tracing::debug!("managed ownership tables are consistent");
+            }
+            Ok(report) => {
+                tracing::warn!(
+                    issues = report.issue_count(),
+                    "managed ownership tables are inconsistent"
+                );
+                for line in report.describe() {
+                    tracing::warn!("managed ownership issue: {line}");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "managed ownership integrity check failed");
+            }
+        }
+    }
+
+    /// `(row_id, owner_id)` for rows of `table` whose `owner_column` names an
+    /// app that does not exist. Both names are internal constants, never user
+    /// input.
+    async fn orphaned_owners(
         &mut self,
-        app_id: u64,
-        recipe_id: u64,
-        tag_name: &str,
-    ) -> QueryResult<()> {
-        if self.get_tag_by_name(tag_name).await?.is_none() {
-            return Ok(());
-        }
-        let owned = self.managed_recipe_for_tag_by_name(tag_name, recipe_id).await?;
-        if !owned {
-            return Ok(());
-        }
-        let tag = self
-            .get_tag_by_name(tag_name)
-            .await?
-            .ok_or_else(|| crate::QueryErr::UnexpectedValue {
-                message: format!("legacy managed tag '{tag_name}' vanished during migration"),
+        table: &str,
+        owner_column: &str,
+    ) -> QueryResult<Vec<(u64, u64)>> {
+        let sql = format!(
+            r#"SELECT r.id, r.{owner_column} FROM {table} r
+               WHERE r.{owner_column} IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM apps a WHERE a.id = r.{owner_column}
+                 )
+               ORDER BY r.id"#
+        );
+        self.id_pairs(&sql).await
+    }
+
+    /// `(binding_id, missing_id)` for bindings whose `column` has no matching
+    /// row in `parent_table`.
+    async fn dangling_bindings(
+        &mut self,
+        column: &str,
+        parent_table: &str,
+    ) -> QueryResult<Vec<(u64, u64)>> {
+        let sql = format!(
+            r#"SELECT b.id, b.{column} FROM app_tag_bindings b
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM {parent_table} p WHERE p.id = b.{column}
+               )
+               ORDER BY b.id"#
+        );
+        self.id_pairs(&sql).await
+    }
+
+    async fn id_pairs(&mut self, sql: &str) -> QueryResult<Vec<(u64, u64)>> {
+        let rows = toasty::sql::query(sql)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "managed integrity query",
             })?;
-        self.attach_app_to_tag(app_id, tag.id, BindingRole::Partial, false)
-            .await?;
-        for section in self.tag_sections(tag.id).await? {
-            self.set_section_managed(section.id, Some(app_id), false)
-                .await?;
-            if let Some(child) = self.section_child_tag(tag.id, &section.name).await? {
-                toasty::sql::statement(
-                    r#"UPDATE tasks
-                       SET managed_by = ?1, managed_mode = 'managed', managed_editable = 0
-                       WHERE id IN (SELECT task_id FROM direct_task_tags WHERE tag_id = ?2)
-                         AND deleted_at IS NULL"#,
-                )
-                .bind(app_id as i64)
-                .bind(child.id as i64)
-                .exec(&mut self.db)
-                .await
-                .context(crate::error::QueryTagsSnafu {
-                    context: "own legacy managed section tasks",
-                })?;
-            }
-        }
-        toasty::sql::statement(
-            r#"UPDATE tags SET managed_by_recipe_id = NULL, managed_by = NULL WHERE id = ?1"#,
-        )
-        .bind(tag.id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "clear legacy managed tag",
-        })?;
-        Ok(())
-    }
-
-    /// Whether `tag_name` is still marked as owned by `recipe_id`.
-    async fn managed_recipe_for_tag_by_name(
-        &mut self,
-        tag_name: &str,
-        recipe_id: u64,
-    ) -> QueryResult<bool> {
-        let rows = toasty::sql::query(
-            r#"SELECT 1 FROM tags
-               WHERE LOWER(name) = LOWER(?1) AND managed_by_recipe_id = ?2"#,
-        )
-        .column_types([toasty::stmt::Type::I64])
-        .bind(tag_name)
-        .bind(recipe_id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "check legacy managed tag",
-        })?;
-        Ok(!rows.is_empty())
+        Ok(rows
+            .iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => Some((
+                    record.first().and_then(|value| value.to_i64())? as u64,
+                    record.get(1).and_then(|value| value.to_i64())? as u64,
+                )),
+                _ => None,
+            })
+            .collect())
     }
 }
 
@@ -1251,6 +1430,61 @@ mod tests {
         assert_eq!(binding.role, BindingRole::Partial);
         assert!(binding.capture_new_tasks);
         assert_eq!(store.bindings_for_tag(tag.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_integrity_check_reports_orphans_and_dangling_bindings() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        // A freshly opened database is consistent.
+        let report = store.check_managed_integrity().await?;
+        assert!(report.is_clean(), "{:?}", report.describe());
+
+        // An owner id with no app row, on a tag and on a task.
+        let tag = store.create_tag("Orphan").await?;
+        store.set_tag_managed(tag.id, Some(9001)).await?;
+        let task = store.create_task(Task::create().title("Orphaned")).await?;
+        store
+            .set_task_managed(task.id, 9001, ManagedMode::Captured, true)
+            .await?;
+
+        // A binding pointing at a tag that does not exist.
+        let ghost = store.upsert_app("recipe", "ghost", "Ghost", None).await?;
+        store.ensure_capture_binding(ghost.id, 9002).await?;
+        let missing_tag_binding = store.bindings_for_tag(9002).await?.remove(0);
+
+        let report = store.check_managed_integrity().await?;
+        assert!(!report.is_clean());
+        assert_eq!(report.issue_count(), 3);
+        assert_eq!(report.orphaned_tag_owners, vec![(tag.id, 9001)]);
+        assert_eq!(report.orphaned_task_owners, vec![(task.id, 9001)]);
+        assert_eq!(
+            report.dangling_binding_tags,
+            vec![(missing_tag_binding.id, 9002)]
+        );
+        assert!(report.dangling_binding_apps.is_empty());
+        // One log line per broken category.
+        assert_eq!(report.describe().len(), 3);
+
+        // A binding whose app row vanished outright: both of the app's
+        // bindings are now dangling on the app side.
+        let kept = store.create_tag("Kept").await?;
+        store.ensure_capture_binding(ghost.id, kept.id).await?;
+        let missing_app_binding = store.bindings_for_tag(kept.id).await?.remove(0);
+        toasty::sql::statement("DELETE FROM apps WHERE id = ?1")
+            .bind(ghost.id as i64)
+            .exec(&mut store.db)
+            .await?;
+
+        let report = store.check_managed_integrity().await?;
+        let mut dangling = report.dangling_binding_apps.clone();
+        dangling.sort();
+        let mut expected = vec![
+            (missing_tag_binding.id, ghost.id),
+            (missing_app_binding.id, ghost.id),
+        ];
+        expected.sort();
+        assert_eq!(dangling, expected);
         Ok(())
     }
 

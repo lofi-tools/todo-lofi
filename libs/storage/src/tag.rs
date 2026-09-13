@@ -19,10 +19,6 @@ pub struct Tag {
     /// unique opaque `name` (so different directories never collide) and
     /// carry the directory name here for display.
     pub display_name: Option<String>,
-    /// Seed data marker: demo content that must never sync to any
-    /// integration.
-    #[default(false)]
-    pub is_seed: bool,
 }
 
 impl Tag {
@@ -64,8 +60,6 @@ fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
             id,
             name,
             display_name,
-            // Raw tag queries don't select the seed marker.
-            is_seed: false,
         })
     } else {
         None
@@ -77,21 +71,20 @@ impl TodoStore {
         self.create_tag_with_display_name(name, None).await
     }
 
-    /// Seed data tag: marked so sync never touches it.
+    /// Seed data tag: demo content owned by the builtin app, so it is never
+    /// pushed to an integration.
     pub async fn create_seed_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
-        let name = name.into();
-        let tag = Tag::create()
-            .name(name.clone())
-            .display_name(None)
-            .is_seed(true)
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::CreateTagSnafu { name })?;
+        let tag = self
+            .create_tag_with_display_name(name, None)
+            .await?;
+        let demo = self.demo_app().await?;
+        self.set_tag_managed(tag.id, Some(demo.id)).await?;
         Ok(tag)
     }
 
     /// Seed project tag: a `project:{path}` tag with a human-friendly display
-    /// name, marked as seed data so sync never touches it.
+    /// name. Directory-backed tags stay user-owned (an app may not manage
+    /// them); the demo tasks inside carry the builtin app's ownership instead.
     pub async fn create_seed_project_tag(
         &mut self,
         path: &std::path::Path,
@@ -102,7 +95,6 @@ impl TodoStore {
         let tag = Tag::create()
             .name(name.clone())
             .display_name(Some(display_name))
-            .is_seed(true)
             .exec(&mut self.db)
             .await
             .context(crate::error::CreateTagSnafu { name })?;
