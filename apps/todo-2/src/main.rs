@@ -521,6 +521,12 @@ impl Layout {
                         return;
                     }
                     if layout.details.read(cx).is_editing() {
+                        let unwound = layout
+                            .details
+                            .update(cx, |details, cx| details.cancel_top_edit(cx));
+                        if unwound {
+                            return;
+                        }
                         layout
                             .details
                             .update(cx, |details, cx| details.request_clear(cx));

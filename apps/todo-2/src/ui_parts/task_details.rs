@@ -245,6 +245,25 @@ pub enum TaskDetailsEvent {
 /// a task, `None` deselects.
 type PendingSelection = Option<TaskWithMeta>;
 
+/// A field with an open inline editor, in focus-stack order: the last entry
+/// is the innermost edit and is unwound first by Esc or sequential discard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditedField {
+    Title,
+    Description,
+    Tags,
+}
+
+impl EditedField {
+    fn name(self) -> &'static str {
+        match self {
+            EditedField::Title => "title",
+            EditedField::Description => "description",
+            EditedField::Tags => "tags",
+        }
+    }
+}
+
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
     store: Store,
@@ -265,6 +284,9 @@ pub struct TaskDetails {
     needs_tag_input_clear: bool,
     confirming: bool,
     pending: Option<PendingSelection>,
+    /// Open field editors, innermost last. Esc and the discard dialog unwind
+    /// one entry at a time.
+    focus_stack: Vec<EditedField>,
     blockers: Vec<storage::Task>,
     _blockers_fetch: Option<gpui::Task<()>>,
     until_picker: Option<Entity<DateTimePicker>>,
@@ -378,6 +400,7 @@ impl TaskDetails {
             needs_tag_input_clear: false,
             confirming: false,
             pending: None,
+            focus_stack: Vec::new(),
             blockers: Vec::new(),
             _blockers_fetch: None,
             until_picker: None,
@@ -751,7 +774,14 @@ impl TaskDetails {
     }
 
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
+        // Discard one field at a time, innermost first: the dialog names the
+        // field being abandoned and reappears while edits remain.
+        if self.cancel_top_edit(cx) && self.is_editing() {
+            return;
+        }
         let Some(pending) = self.pending.take() else {
+            self.confirming = false;
+            cx.notify();
             return;
         };
         self.confirming = false;
@@ -821,6 +851,46 @@ impl TaskDetails {
         self.editing_title || self.editing_description || self.editing_tags
     }
 
+    fn push_edit(&mut self, field: EditedField) {
+        if !self.focus_stack.contains(&field) {
+            self.focus_stack.push(field);
+        }
+    }
+
+    fn pop_edit(&mut self, field: EditedField) {
+        if let Some(position) = self.focus_stack.iter().rposition(|entry| *entry == field) {
+            self.focus_stack.remove(position);
+        }
+    }
+
+    fn top_edit(&self) -> Option<EditedField> {
+        self.focus_stack.last().copied()
+    }
+
+    /// Abandon the innermost open field edit, if any. Returns true when an
+    /// edit was unwound, so Esc can fall through to deselect otherwise.
+    pub fn cancel_top_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(field) = self.top_edit() else {
+            return false;
+        };
+        match field {
+            EditedField::Title => {
+                self.editing_title = false;
+                self.title_input = None;
+                self._title_subscription = None;
+            }
+            EditedField::Description => {
+                self.editing_description = false;
+                self.description_input = None;
+                self._description_subscription = None;
+            }
+            EditedField::Tags => self.abandon_tags(),
+        }
+        self.pop_edit(field);
+        cx.notify();
+        true
+    }
+
     fn abandon_edits(&mut self) {
         self.editing_title = false;
         self.title_input = None;
@@ -828,6 +898,8 @@ impl TaskDetails {
         self.editing_description = false;
         self.description_input = None;
         self._description_subscription = None;
+        self.pop_edit(EditedField::Title);
+        self.pop_edit(EditedField::Description);
         self.close_time_edit();
     }
 
@@ -915,6 +987,7 @@ impl TaskDetails {
             self.description_input = None;
             self._description_subscription = None;
             self.abandon_tags();
+            self.focus_stack.clear();
             cx.notify();
         }
     }
@@ -940,6 +1013,7 @@ impl TaskDetails {
         self.title_input = Some(input.clone());
         self._title_subscription = Some(subscription);
         self.editing_title = true;
+        self.push_edit(EditedField::Title);
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
@@ -956,7 +1030,11 @@ impl TaskDetails {
         let title = input.read(cx).text().to_string();
         let title = title.trim().to_string();
         if title.is_empty() {
-            self.cancel_editing(cx);
+            self.editing_title = false;
+            self.title_input = None;
+            self._title_subscription = None;
+            self.pop_edit(EditedField::Title);
+            cx.notify();
             return;
         }
         let task_id = task.id;
@@ -966,6 +1044,7 @@ impl TaskDetails {
         self.editing_title = false;
         self.title_input = None;
         self._title_subscription = None;
+        self.pop_edit(EditedField::Title);
         self.store.rename_task(task_id, title.clone(), cx).detach();
         cx.emit(TaskDetailsEvent::TitleCommitted { task_id, title });
         cx.notify();
@@ -992,6 +1071,7 @@ impl TaskDetails {
         self.description_input = Some(input.clone());
         self._description_subscription = Some(subscription);
         self.editing_description = true;
+        self.push_edit(EditedField::Description);
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
@@ -1019,6 +1099,7 @@ impl TaskDetails {
         self.editing_description = false;
         self.description_input = None;
         self._description_subscription = None;
+        self.pop_edit(EditedField::Description);
         let value = if description.is_empty() {
             None
         } else {
@@ -1045,6 +1126,7 @@ impl TaskDetails {
         self._tags_subscription = None;
         self.tag_draft = Vec::new();
         self.needs_tag_input_clear = false;
+        self.pop_edit(EditedField::Tags);
     }
 
     /// Open the tags editor: the current tags as chips inline in the field,
@@ -1060,6 +1142,7 @@ impl TaskDetails {
         self.tag_draft = task.direct_tags.clone();
         self.reset_tag_input(window, cx);
         self.editing_tags = true;
+        self.push_edit(EditedField::Tags);
         cx.notify();
     }
 
@@ -3491,7 +3574,7 @@ impl Render for TaskDetails {
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))
                                     .child(if task.leaf_tags.is_empty() {
-                                        "+tags"
+                                        "+ tags"
                                     } else {
                                         "+"
                                     })
@@ -3746,7 +3829,12 @@ impl Render for TaskDetails {
                                                 .child("Discard unsaved changes?"),
                                         )
                                         .child(div().text_xs().text_color(rgb(0xa3a3a3)).child(
-                                            "Your title and description edits will be lost.",
+                                            format!(
+                                                "Your {} edit will be lost.",
+                                                self.top_edit()
+                                                    .map(EditedField::name)
+                                                    .unwrap_or("unsaved"),
+                                            ),
                                         )),
                                 )
                                 .child(
