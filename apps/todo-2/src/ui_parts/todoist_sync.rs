@@ -27,12 +27,10 @@ pub enum TodoistSyncEvent {
     Changed,
 }
 
-/// One pairing row: `(remote project id, remote name or fallback, tag id,
-/// tag label)`.
+/// One pairing row: `(remote project id, remote name or fallback, tag label)`.
 struct Pair {
     external_id: String,
     remote_name: String,
-    tag_id: u64,
     tag_label: String,
 }
 
@@ -113,9 +111,7 @@ impl TodoistSyncPicker {
                     let tags = store.list_tags(cx).await.unwrap_or_default();
                     let pairs = links
                         .into_iter()
-                        .map(|(external_id, _, tag_id, tag_label)| {
-                            (external_id, tag_id, tag_label)
-                        })
+                        .map(|(external_id, _, _tag_id, tag_label)| (external_id, tag_label))
                         .collect::<Vec<_>>();
                     let locals = tags.iter().map(|tag| (tag.id, tag.label())).collect();
                     (pairs, locals)
@@ -137,7 +133,7 @@ impl TodoistSyncPicker {
                             .collect();
                         this.pairs = pairs
                             .into_iter()
-                            .map(|(external_id, tag_id, tag_label)| {
+                            .map(|(external_id, tag_label)| {
                                 let remote_name = names
                                     .get(&external_id)
                                     .map(|name| (*name).clone())
@@ -145,7 +141,6 @@ impl TodoistSyncPicker {
                                 Pair {
                                     external_id,
                                     remote_name,
-                                    tag_id,
                                     tag_label,
                                 }
                             })
@@ -157,10 +152,9 @@ impl TodoistSyncPicker {
                             Some(format!("Could not load Todoist projects: {error}"));
                         this.pairs = pairs
                             .into_iter()
-                            .map(|(external_id, tag_id, tag_label)| Pair {
+                            .map(|(external_id, tag_label)| Pair {
                                 remote_name: external_id.clone(),
                                 external_id,
-                                tag_id,
                                 tag_label,
                             })
                             .collect();

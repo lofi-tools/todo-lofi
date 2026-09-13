@@ -291,23 +291,6 @@ impl TodoStore {
         Ok(())
     }
 
-    async fn app_last_insert_id(&mut self) -> QueryResult<u64> {
-        let rows = toasty::sql::query("SELECT last_insert_rowid()")
-            .column_types([toasty::stmt::Type::I64])
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::QueryTagsSnafu {
-                context: "last app insert id",
-            })?;
-        match rows.first() {
-            Some(toasty::stmt::Value::Record(record)) => Ok(record
-                .first()
-                .and_then(|v| v.to_i64())
-                .unwrap_or(0) as u64),
-            _ => Ok(0),
-        }
-    }
-
     /// Run `f` inside a `BEGIN`/`COMMIT` transaction, rolling back on error.
     ///
     /// Not re-entrant: nested calls would issue a second `BEGIN`, so callers

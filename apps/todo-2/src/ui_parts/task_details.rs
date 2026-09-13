@@ -256,7 +256,7 @@ enum PendingTarget {
 /// A field with an open inline editor, in focus-stack order: the last entry
 /// is the innermost edit and is unwound first by Esc or sequential discard.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum EditedField {
+pub enum EditedField {
     Title,
     Description,
     Tags,

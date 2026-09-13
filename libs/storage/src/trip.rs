@@ -203,17 +203,6 @@ impl TodoStore {
         Ok(None)
     }
 
-    /// One tag managed by `recipe_id` through its app, if any.
-    async fn tag_managed_by_recipe(&mut self, recipe_id: u64) -> QueryResult<Option<crate::Tag>> {
-        let Some(app) = self.app_for_recipe(recipe_id).await? else {
-            return Ok(None);
-        };
-        for binding in self.bindings_for_app(app.id).await? {
-            return Ok(Some(self.get_tag(binding.tag_id).await?));
-        }
-        Ok(None)
-    }
-
     /// Enable a managed-tag automation: create the tag it owns (marked
     /// with the recipe id) plus its checklist section tags, idempotently.
     /// No run is created — trips are built from the Automations panel.

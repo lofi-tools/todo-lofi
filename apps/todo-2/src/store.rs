@@ -613,26 +613,6 @@ impl Store {
         })
     }
 
-    /// Labels of the apps bound to `tag_id`, for the sync-collision dialog
-    /// ("Travel checklists" is managed by the travel app, …).
-    pub fn tag_owner_labels(
-        &self,
-        tag_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<String>>> {
-        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            let mut labels = Vec::new();
-            for binding in s.bindings_for_tag(tag_id).await? {
-                if let Some(app) = s.app_by_id(binding.app_id).await? {
-                    labels.push(app.label.clone());
-                }
-            }
-            Ok(labels)
-        })
-    }
-
     /// The Todoist integration, if connected.
     pub fn todoist_integration(
         &self,

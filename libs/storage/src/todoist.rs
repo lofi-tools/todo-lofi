@@ -34,6 +34,7 @@ struct RemoteDue {
     #[serde(default)]
     timezone: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)] // part of the Todoist due wire format
     is_recurring: bool,
 }
 
@@ -105,7 +106,7 @@ pub fn due_date_for_deadline(deadline: u64) -> Option<String> {
 
 /// Due date → UTC epoch seconds. Prefers `datetime`, falls back to `date`
 /// at midnight UTC. Returns `None` when nothing parses.
-pub fn deadline_for_due(due: &RemoteDue) -> Option<u64> {
+fn deadline_for_due(due: &RemoteDue) -> Option<u64> {
     if let Some(datetime) = due.datetime.as_deref()
         && let Ok(stamp) = datetime.parse::<jiff::Timestamp>()
     {

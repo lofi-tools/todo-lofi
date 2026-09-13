@@ -463,7 +463,7 @@ async fn permission_request_reaches_the_ui_and_the_answer_goes_back() {
     let session_id = new_session(&connection, &dir).await;
     // The turn cannot finish until the request is answered, so it runs
     // concurrently with the answer loop rather than being awaited first.
-    let mut turn = tokio::spawn({
+    let turn = tokio::spawn({
         let requester = connection.requester.clone();
         let session_id = session_id.clone();
         async move { requester.prompt(&session_id, "go".into()).await }
@@ -601,7 +601,7 @@ async fn file_requests_are_confined_to_the_session_roots() {
     // are expressed before the temporary directory exists.
     let target = PathBuf::from("notes.txt");
     let outside = std::env::temp_dir().join("acp-client-outside.txt");
-    let (mut connection, observations, dir) = connect_to_fake(
+    let (connection, observations, dir) = connect_to_fake(
         FakeScript {
             read_path: Some(outside),
             write: Some((target.clone(), "hello".to_string())),
@@ -634,7 +634,7 @@ async fn file_requests_are_confined_to_the_session_roots() {
 
 #[tokio::test]
 async fn terminals_round_trip_through_the_client() {
-    let (mut connection, observations, dir) = connect_to_fake(
+    let (connection, observations, dir) = connect_to_fake(
         FakeScript {
             terminal: Some(("echo".to_string(), vec!["terminal-ok".to_string()])),
             ..Default::default()

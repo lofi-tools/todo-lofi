@@ -8,7 +8,7 @@
 use gpui::{
     AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement, Styled, Task, Window, div,
-    prelude::FluentBuilder, px, rgb,
+    px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
@@ -41,16 +41,6 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     Light,
-}
-
-impl ThemeChoice {
-    fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Dark => "Dark",
-            Self::Light => "Light",
-        }
-    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
