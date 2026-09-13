@@ -6,8 +6,9 @@
 //! `~/.config/my-todo/settings.json` (`MY_TODO_CONFIG_DIR` overrides).
 
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
+    AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Task, Window, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
@@ -15,7 +16,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 use std::collections::HashMap;
 
 use crate::store::Store;
-use crate::ui_parts::apps::AppSettings;
+use crate::ui_parts::apps::{AppSettings, TagAttachPicker};
 
 fn config_dir() -> anyhow::Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
@@ -140,6 +141,7 @@ pub struct SettingsView {
     selected: String,
     apps_expanded: bool,
     app_list: Vec<AppEntry>,
+    tag_pickers: HashMap<String, Entity<TagAttachPicker>>,
     status: Option<String>,
     _load: Option<Task<()>>,
 }
@@ -153,6 +155,7 @@ impl SettingsView {
             selected: "general".to_string(),
             apps_expanded: true,
             app_list: Vec::new(),
+            tag_pickers: HashMap::new(),
             status: None,
             _load: None,
         };
@@ -199,7 +202,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
             .h_full()
@@ -208,7 +211,7 @@ impl Render for SettingsView {
             .min_h_0()
             .bg(rgb(0x1e1e1e))
             .child(self.nav_column(cx))
-            .child(self.controls_column(cx))
+            .child(self.controls_column(window, cx))
     }
 }
 
@@ -305,7 +308,7 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn controls_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn controls_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.selected.clone();
         let body: AnyElement = if selected == "general" {
             self.general_controls(cx)
@@ -314,7 +317,7 @@ impl SettingsView {
         } else if selected == "apps" {
             self.apps_node_controls(cx)
         } else if let Some(slug) = selected.strip_prefix("app:") {
-            self.app_leaf_controls(slug.to_string(), cx)
+            self.app_leaf_controls(slug.to_string(), window, cx)
         } else {
             self.about_controls()
         };
@@ -603,7 +606,12 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn app_leaf_controls(&mut self, slug: String, cx: &mut Context<Self>) -> AnyElement {
+    fn app_leaf_controls(
+        &mut self,
+        slug: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entry = self.app_list.iter().find(|app| app.slug == slug);
         let Some(entry) = entry else {
             return div()
@@ -615,6 +623,8 @@ impl SettingsView {
         let app_id = entry.id;
         let label = display_name(&entry.label);
         let kind = entry.kind.clone();
+        let is_demo = slug == "demo" || kind == "builtin";
+        let is_integration = kind == "integration";
         let notify = self.file.app_notify.get(&slug).copied().unwrap_or(true);
         let slug_for_toggle = slug.clone();
         let header = div()
@@ -649,16 +659,67 @@ impl SettingsView {
                 ),
             )],
         );
+        let mut page = div().v_flex().gap_4().child(header).child(preferences);
+        if is_demo {
+            return page
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xa3a3a3))
+                        .child("Demo content needs no tag or run settings."),
+                )
+                .into_any_element();
+        }
+        if is_integration {
+            let picker_id = format!("settings-tags-{slug}");
+            let picker = self.tag_picker(&slug, app_id, true, window, cx);
+            page = page.child(Self::section(
+                "Synced tags",
+                vec![
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x737373))
+                        .child("Tags this integration syncs. Type to find one, Enter to attach.")
+                        .into_any_element(),
+                    picker.update(cx, |picker, cx| {
+                        picker.render_picker(&picker_id, window, cx)
+                    }),
+                ],
+            ));
+        }
         let block = self.apps.update(cx, |settings, cx| {
             settings.settings_block(app_id, 1, cx)
         });
-        div()
-            .v_flex()
-            .gap_4()
-            .child(header)
-            .child(preferences)
+        page
             .child(Self::section("Tags & runs", vec![block]))
             .into_any_element()
+    }
+
+    /// Lazily created fuzzy tag picker for one app, refreshing the app list
+    /// when its attachments change.
+    fn tag_picker(
+        &mut self,
+        slug: &str,
+        app_id: u64,
+        capture_default: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TagAttachPicker> {
+        if let Some(picker) = self.tag_pickers.get(slug) {
+            return picker.clone();
+        }
+        let store = self.store.clone();
+        let apps = self.apps.clone();
+        let picker = cx.new(|cx| TagAttachPicker::new(store, app_id, capture_default, window, cx));
+        cx.subscribe(&picker, move |this, _picker, event, cx| match event {
+            crate::ui_parts::apps::TagAttachEvent::Changed => {
+                apps.update(cx, |settings, cx| settings.refresh(cx));
+                this.refresh(cx);
+            }
+        })
+        .detach();
+        self.tag_pickers.insert(slug.to_string(), picker.clone());
+        picker
     }
 
     fn about_controls(&self) -> AnyElement {

@@ -4,7 +4,7 @@
 //! integration.
 
 use gpui::{
-    Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
+    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
     prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
@@ -13,7 +13,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 use crate::store::Store;
 use crate::theme::APP_BG;
 use crate::todoist_auth;
-use crate::ui_parts::apps::AppSettings;
+use crate::ui_parts::apps::{AppSettings, TagAttachEvent, TagAttachPicker};
 
 pub enum IntegrationsEvent {
     Changed,
@@ -26,6 +26,7 @@ pub struct IntegrationsView {
     /// carry the ownership settings (which tags it captures into).
     todoist_app_id: Option<u64>,
     settings: Entity<AppSettings>,
+    todoist_tags: Option<Entity<TagAttachPicker>>,
     connecting: bool,
     syncing: bool,
     status: Option<String>,
@@ -41,6 +42,7 @@ impl IntegrationsView {
             connected: Vec::new(),
             todoist_app_id: None,
             settings,
+            todoist_tags: None,
             connecting: false,
             syncing: false,
             status: None,
@@ -76,6 +78,11 @@ impl IntegrationsView {
                 };
                 this.update(cx, |this, cx| {
                     this.connected = list;
+                    if this.todoist_app_id != todoist_app_id {
+                        // New (or removed) provider app: drop the cached tag
+                        // picker so it rebuilds for the right app.
+                        this.todoist_tags = None;
+                    }
                     this.todoist_app_id = todoist_app_id;
                     this._load = None;
                     cx.notify();
@@ -216,9 +223,10 @@ impl IntegrationsView {
 impl EventEmitter<IntegrationsEvent> for IntegrationsView {}
 
 impl IntegrationsView {
-    /// The Todoist card: connect/sync/disconnect, plus the app's ownership
-    /// settings behind the gear once connected (which tags it captures into).
-    fn todoist_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    /// The Todoist card: connect/sync/disconnect, the synced-tags picker,
+    /// plus the app's ownership settings behind the gear once connected
+    /// (which tags it captures into).
+    fn todoist_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let connected = self.todoist_connected();
         let app_id = self.todoist_app_id;
         let expanded = app_id.is_some_and(|app_id| {
@@ -309,9 +317,59 @@ impl IntegrationsView {
                     )
                     .child(controls),
             )
+            .when(connected, |this| {
+                this.child(self.todoist_tags_block(window, cx))
+            })
             .when(expanded, |this| {
                 this.when_some(settings_block, |this, block| this.child(block))
             })
+            .into_any_element()
+    }
+
+    /// Synced-tags picker for Todoist: the same fuzzy chips + input used in
+    /// settings, so both menus stay in sync.
+    fn todoist_tags_block(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(app_id) = self.todoist_app_id else {
+            return div().into_any_element();
+        };
+        let picker = match self.todoist_tags.clone() {
+            Some(picker) => picker,
+            None => {
+                let store = self.store.clone();
+                let settings = self.settings.clone();
+                let picker = cx.new(|cx| {
+                    TagAttachPicker::new(store, app_id, true, window, cx)
+                });
+                cx.subscribe(&picker, move |this, _picker, event, cx| match event {
+                    TagAttachEvent::Changed => {
+                        settings.update(cx, |settings, cx| settings.refresh(cx));
+                        this.refresh(cx);
+                        cx.emit(IntegrationsEvent::Changed);
+                    }
+                })
+                .detach();
+                self.todoist_tags = Some(picker.clone());
+                picker
+            }
+        };
+        div()
+            .v_flex()
+            .gap_1()
+            .px_4()
+            .pb_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x737373))
+                    .child("Synced tags"),
+            )
+            .child(picker.update(cx, |picker, cx| {
+                picker.render_picker("integrations-todoist", window, cx)
+            }))
             .into_any_element()
     }
 }
@@ -365,7 +423,7 @@ fn provider_icon(icon: impl IntoElement) -> gpui::Div {
 }
 
 impl Render for IntegrationsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
             .h_full()
@@ -378,7 +436,7 @@ impl Render for IntegrationsView {
                     .v_flex()
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Integrations"))
-                    .child(self.todoist_card(cx))
+                    .child(self.todoist_card(window, cx))
                     .child(
                         integration_card(true)
                             .h_flex()

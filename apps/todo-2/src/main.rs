@@ -944,9 +944,11 @@ async fn lookup_managed_tag(
         .detach();
     }
 
-    /// Create the tag backing a Todoist project: the project name as-is,
-    /// or a `todoist/<name>` namespaced copy on collision (spec §4.5),
-    /// linked to the remote project so re-syncs reuse it.
+    /// Create the tag backing a Todoist project and link it so re-syncs
+    /// reuse it. When a tag with the project name already exists and another
+    /// app manages it (e.g. the travel app's "Travel checklists"), a dialog
+    /// offers to sync into the same tag or remap to a new `todoist/<name>`
+    /// tag; unmanaged collisions keep the old namespaced copy.
     fn handle_pick_todoist_project(
         &mut self,
         id: String,
@@ -957,34 +959,208 @@ async fn lookup_managed_tag(
         window.close_dialog(cx);
         self._picker_subscription = None;
         let store = self.store.clone();
-        // Link the tag, then pull the project's sections and tasks right
-        // away so the new tag is populated without waiting for a manual
-        // sync. One Tokio hop: token fetch and network must never run on
-        // GPUI's executor.
-        let flow = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let integration_id = {
-                let mut backend = store.0.lock().await;
-                let integration = backend
-                    .list_integrations()
-                    .await?
-                    .into_iter()
-                    .find(|i| i.provider == "todoist")
-                    .ok_or_else(|| anyhow::anyhow!("Todoist is not connected"))?;
-                let (tag, namespaced) = match backend.get_tag_by_name(&name).await? {
-                    Some(_) => {
-                        let scoped = format!("todoist/{name}");
-                        let tag = match backend.get_tag_by_name(&scoped).await? {
-                            Some(tag) => tag,
-                            None => backend.create_tag(&scoped).await?,
-                        };
-                        (tag, true)
+        let layout = cx.weak_entity();
+        let lookup_name = name.clone();
+        let lookup = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut backend = store.0.lock().await;
+            let integration = backend
+                .list_integrations()
+                .await?
+                .into_iter()
+                .find(|i| i.provider == "todoist")
+                .ok_or_else(|| anyhow::anyhow!("Todoist is not connected"))?;
+            let existing = backend.get_tag_by_name(&lookup_name).await?;
+            let owners = match &existing {
+                Some(tag) => {
+                    let mut labels = Vec::new();
+                    for binding in backend.bindings_for_tag(tag.id).await? {
+                        if let Some(app) = backend.app_by_id(binding.app_id).await? {
+                            labels.push(app.label.clone());
+                        }
                     }
-                    None => (backend.create_tag(&name).await?, false),
-                };
-                backend
-                    .link_tag(integration.id, &id, tag.id, "project", namespaced)
-                    .await?;
-                integration.id
+                    labels
+                }
+                None => Vec::new(),
+            };
+            Ok::<_, anyhow::Error>((integration.id, existing.map(|tag| tag.id), owners))
+        });
+        cx.spawn_in(window, async move |_this, cx| {
+            let (integration_id, existing, owners) = match lookup.await {
+                Ok(found) => found,
+                Err(error) => {
+                    tracing::error!("Todoist sync after project pick failed: {error}");
+                    return;
+                }
+            };
+            if let (Some(tag_id), owners) = (existing, owners)
+                && !owners.is_empty()
+            {
+                layout
+                    .update_in(cx, |layout, window, cx| {
+                        let weak = cx.weak_entity();
+                        let store = layout.store.clone();
+                        Self::open_todoist_collision_dialog(
+                            weak,
+                            store,
+                            integration_id,
+                            id.clone(),
+                            name.clone(),
+                            tag_id,
+                            owners,
+                            window,
+                            cx,
+                        );
+                    })
+                    .ok();
+                return;
+            }
+            layout
+                .update(cx, |layout, cx| {
+                    let weak = cx.weak_entity();
+                    let store = layout.store.clone();
+                    Self::start_todoist_link_sync(
+                        store,
+                        weak,
+                        integration_id,
+                        id,
+                        name,
+                        existing,
+                        cx,
+                    );
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Collision dialog: sync the Todoist project into the existing managed
+    /// tag, or remap it to a fresh `todoist/<name>` tag.
+    fn open_todoist_collision_dialog(
+        layout: gpui::WeakEntity<Self>,
+        store: Store,
+        integration_id: u64,
+        external_id: String,
+        name: String,
+        tag_id: u64,
+        owners: Vec<String>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let owned_by = owners.join(", ");
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let owned_by = owned_by.clone();
+            let (layout, store) = (layout.clone(), store.clone());
+            let (external_id, name) = (external_id.clone(), name.clone());
+            dialog
+                .title(format!("\"{name}\" already exists"))
+                .content(move |content, _window, _cx| {
+                    let (same_layout, remap_layout) = (layout.clone(), layout.clone());
+                    let (same_store, remap_store) = (store.clone(), store.clone());
+                    let (same_id, remap_id) = (external_id.clone(), external_id.clone());
+                    let (same_name, remap_name) = (name.clone(), name.clone());
+                    content.child(
+                        div()
+                            .v_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xa3a3a3))
+                                    .child(format!(
+                                        "#{same_name} is managed by {owned_by}. Sync the Todoist \
+                                         project into the same tag, or remap it to a new \
+                                         \"todoist/{same_name}\" tag."
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("todoist-collision-same")
+                                            .compact()
+                                            .label(format!("Sync into #{same_name}"))
+                                            .on_click(move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                                Self::start_todoist_link_sync(
+                                                    same_store.clone(),
+                                                    same_layout.clone(),
+                                                    integration_id,
+                                                    same_id.clone(),
+                                                    same_name.clone(),
+                                                    Some(tag_id),
+                                                    cx,
+                                                );
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("todoist-collision-remap")
+                                            .compact()
+                                            .label("Use a new tag")
+                                            .on_click(move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                                Self::start_todoist_link_sync(
+                                                    remap_store.clone(),
+                                                    remap_layout.clone(),
+                                                    integration_id,
+                                                    remap_id.clone(),
+                                                    remap_name.clone(),
+                                                    None,
+                                                    cx,
+                                                );
+                                            }),
+                                    ),
+                            ),
+                    )
+                })
+        });
+    }
+
+    /// Link the Todoist project to a tag (existing, or a fresh namespaced
+    /// one on collision) and pull its sections and tasks right away.
+    /// One Tokio hop: token fetch and network must never run on GPUI's
+    /// executor.
+    fn start_todoist_link_sync(
+        store: Store,
+        layout: gpui::WeakEntity<Self>,
+        integration_id: u64,
+        external_id: String,
+        name: String,
+        existing: Option<u64>,
+        cx: &mut App,
+    ) {
+        let flow = gpui_tokio::Tokio::spawn_result(&*cx, async move {
+            let tag_id = {
+                let mut backend = store.0.lock().await;
+                match existing {
+                    Some(tag_id) => {
+                        backend
+                            .link_tag(integration_id, &external_id, tag_id, "project", false)
+                            .await?;
+                        tag_id
+                    }
+                    None => match backend.get_tag_by_name(&name).await? {
+                        Some(_) => {
+                            let scoped = format!("todoist/{name}");
+                            let tag = match backend.get_tag_by_name(&scoped).await? {
+                                Some(tag) => tag,
+                                None => backend.create_tag(&scoped).await?,
+                            };
+                            backend
+                                .link_tag(integration_id, &external_id, tag.id, "project", true)
+                                .await?;
+                            tag.id
+                        }
+                        None => {
+                            let tag = backend.create_tag(&name).await?;
+                            backend
+                                .link_tag(integration_id, &external_id, tag.id, "project", false)
+                                .await?;
+                            tag.id
+                        }
+                    },
+                }
             };
             let token = crate::todoist_auth::access_token().await?;
             let summary = {
@@ -993,21 +1169,19 @@ async fn lookup_managed_tag(
                     .sync_todoist_integration(&token, integration_id)
                     .await?
             };
-            Ok::<_, anyhow::Error>(summary)
+            Ok::<_, anyhow::Error>((tag_id, summary))
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |cx| {
             match flow.await {
-                Ok(summary) => tracing::info!(
-                    "Todoist project synced: {} task(s), {} section(s)",
-                    summary.tasks_upserted,
-                    summary.sections,
-                ),
-                Err(e) => tracing::error!("Todoist sync after project pick failed: {e}"),
+                Ok(_) => {
+                    layout
+                        .update(cx, |this, cx| {
+                            this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                        })
+                        .ok();
+                }
+                Err(error) => tracing::error!("Todoist sync after project pick failed: {error}"),
             }
-            this.update(cx, |this, cx| {
-                this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
-            })
-            .ok();
         })
         .detach();
     }

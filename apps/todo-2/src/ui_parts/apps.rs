@@ -16,11 +16,13 @@
 //!   items should go too. Completed and user-edited items always survive.
 
 use gpui::{
-    AnyElement, Context, EventEmitter, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
+    AnyElement, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Sizable, Size, StyledExt};
 use std::collections::HashMap;
@@ -799,3 +801,317 @@ impl AppSettings {
             .into_any_element()
     }
 }
+
+/// Subsequence fuzzy rank, lower is better. Same matching as the task
+/// details tag editor so tag search feels the same.
+fn rank_tag(query: &str, label: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let query = query.to_lowercase();
+    let label_lower = label.to_lowercase();
+    if let Some(rest) = label_lower.strip_prefix(&query) {
+        return Some(rest.len());
+    }
+    let mut search = label_lower.char_indices().peekable();
+    let mut matched: Vec<usize> = Vec::new();
+    for q in query.chars() {
+        loop {
+            match search.next() {
+                Some((index, c)) if c == q => {
+                    matched.push(index);
+                    break;
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    }
+    let spread = matched.last().copied().unwrap_or(0) - matched.first().copied().unwrap_or(0);
+    Some(label_lower.len() + spread)
+}
+
+#[derive(Clone)]
+pub enum TagAttachEvent {
+    Changed,
+}
+
+/// Tag multi-select for one app: attached tags as inline chips (× detaches)
+/// plus an input field with a fuzzy suggestion dropdown (Enter attaches).
+/// Shared by the settings Apps leaves and the integrations cards.
+pub struct TagAttachPicker {
+    store: Store,
+    app_id: u64,
+    capture_default: bool,
+    attached: Vec<(u64, String)>,
+    all_tags: Vec<(u64, String)>,
+    input: Entity<InputState>,
+    _input_sub: Subscription,
+    pending_clear: bool,
+    status: Option<String>,
+    _task: Option<Task<()>>,
+}
+
+impl TagAttachPicker {
+    pub fn new(
+        store: Store,
+        app_id: u64,
+        capture_default: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Type to find a tag…", window, cx);
+            state
+        });
+        let _input_sub = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.attach_highlighted(cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        });
+        let mut picker = Self {
+            store,
+            app_id,
+            capture_default,
+            attached: Vec::new(),
+            all_tags: Vec::new(),
+            input,
+            _input_sub,
+            pending_clear: false,
+            status: None,
+            _task: None,
+        };
+        picker.refresh(cx);
+        picker
+    }
+
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let app_id = self.app_id;
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let apps = store.list_apps(cx).await.unwrap_or_default();
+            let tags = store.list_tags(cx).await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.attached = apps
+                    .iter()
+                    .find(|(app, _)| app.id == app_id)
+                    .map(|(_, bindings)| {
+                        bindings
+                            .iter()
+                            .map(|(_, tag)| (tag.id, tag.label()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                this.attached.sort_by(|a, b| a.1.cmp(&b.1));
+                this.all_tags = tags.iter().map(|tag| (tag.id, tag.label())).collect();
+                this.all_tags.sort_by(|a, b| a.1.cmp(&b.1));
+                this._task = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn query(&self, cx: &gpui::App) -> String {
+        self.input.read(cx).text().to_string()
+    }
+
+    fn suggestions(&self, cx: &gpui::App) -> Vec<(u64, String)> {
+        let query = self.query(cx).trim().trim_start_matches('#').to_string();
+        let mut ranked: Vec<(usize, u64, String)> = self
+            .all_tags
+            .iter()
+            .filter(|(id, _)| !self.attached.iter().any(|(attached, _)| attached == id))
+            .filter_map(|(id, label)| rank_tag(&query, label).map(|rank| (rank, *id, label.clone())))
+            .collect();
+        ranked.sort();
+        ranked
+            .into_iter()
+            .take(8)
+            .map(|(_, id, label)| (id, label))
+            .collect()
+    }
+
+    fn attach_highlighted(&mut self, cx: &mut Context<Self>) {
+        let top = self.suggestions(cx).into_iter().next();
+        if let Some((tag_id, _)) = top {
+            self.attach(tag_id, cx);
+        }
+    }
+
+    fn attach(&mut self, tag_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.attach_app_to_tag(
+            self.app_id,
+            tag_id,
+            BindingRole::Partial,
+            self.capture_default,
+            cx,
+        );
+        let store = self.store.clone();
+        let app_id = self.app_id;
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let outcome = action.await;
+            let apps = store.list_apps(cx).await.unwrap_or_default();
+            let tags = store.list_tags(cx).await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => {
+                        this.status = Some("Attached to the tag.".to_string());
+                        this.pending_clear = true;
+                    }
+                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                }
+                this.attached = apps
+                    .iter()
+                    .find(|(app, _)| app.id == app_id)
+                    .map(|(_, bindings)| {
+                        bindings
+                            .iter()
+                            .map(|(_, tag)| (tag.id, tag.label()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                this.all_tags = tags.iter().map(|tag| (tag.id, tag.label())).collect();
+                this._task = None;
+                cx.emit(TagAttachEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn detach(&mut self, tag_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.detach_app_from_tag(self.app_id, tag_id, cx);
+        let store = self.store.clone();
+        let app_id = self.app_id;
+        self._task = Some(cx.spawn(async move |this, cx| {
+            let outcome = action.await;
+            let apps = store.list_apps(cx).await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => this.status = Some("Detached from the tag.".to_string()),
+                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                }
+                this.attached = apps
+                    .iter()
+                    .find(|(app, _)| app.id == app_id)
+                    .map(|(_, bindings)| {
+                        bindings
+                            .iter()
+                            .map(|(_, tag)| (tag.id, tag.label()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                this._task = None;
+                cx.emit(TagAttachEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Inline chips + input + fuzzy dropdown. `id_prefix` keeps element ids
+    /// unique per embedding site.
+    pub fn render_picker(
+        &mut self,
+        id_prefix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.pending_clear {
+            self.pending_clear = false;
+            self.input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        let chips: Vec<AnyElement> = self
+            .attached
+            .iter()
+            .map(|(tag_id, label)| {
+                let tag_id = *tag_id;
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(0x4a6fa5))
+                    .bg(rgb(0x2f4057))
+                    .text_xs()
+                    .text_color(rgb(0xdbe6f5))
+                    .child(format!("#{label}"))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("{id_prefix}-detach-{tag_id}")))
+                            .text_color(rgb(TEXT_FAINT))
+                            .hover(|this| this.text_color(rgb(0xffffff)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.detach(tag_id, cx);
+                            }))
+                            .child("×"),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let suggestions = self.suggestions(cx);
+        let rows: Vec<AnyElement> = suggestions
+            .into_iter()
+            .map(|(tag_id, label)| {
+                div()
+                    .id(SharedString::from(format!("{id_prefix}-suggest-{tag_id}")))
+                    .w_full()
+                    .h_flex()
+                    .items_center()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_sm()
+                    .text_color(rgb(0xd4d4d4))
+                    .hover(|this| this.bg(rgb(0x2a2a2a)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.attach(tag_id, cx);
+                    }))
+                    .child(format!("#{label}"))
+                    .into_any_element()
+            })
+            .collect();
+        let mut block = div()
+            .v_flex()
+            .gap_2()
+            .when(!chips.is_empty(), |this| {
+                this.child(div().h_flex().flex_wrap().gap_1().children(chips))
+            })
+            .child(Input::new(&self.input).with_size(Size::Small));
+        if !rows.is_empty() {
+            block = block.child(
+                div()
+                    .v_flex()
+                    .gap_0p5()
+                    .max_h(px(200.))
+                    .overflow_y_scrollbar()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .bg(rgb(CARD_BG))
+                    .p_1()
+                    .children(rows),
+            );
+        } else if !self.query(cx).trim().is_empty() {
+            block = block.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(TEXT_FAINT))
+                    .child("No matching tags."),
+            );
+        }
+        if let Some(status) = self.status.clone() {
+            block = block.child(div().text_xs().text_color(rgb(TEXT_FAINT)).child(status));
+        }
+        block.into_any_element()
+    }
+}
+
+impl EventEmitter<TagAttachEvent> for TagAttachPicker {}

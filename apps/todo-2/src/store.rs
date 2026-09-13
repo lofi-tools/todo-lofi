@@ -593,6 +593,46 @@ impl Store {
         })
     }
 
+    /// Link a local tag to a remote (Todoist) project so re-syncs reuse it.
+    /// Used by the collision dialog's "sync into the same tag" choice.
+    pub fn link_tag(
+        &self,
+        integration_id: u64,
+        external_id: String,
+        tag_id: u64,
+        source_kind: String,
+        namespaced: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s
+                .link_tag(integration_id, &external_id, tag_id, &source_kind, namespaced)
+                .await?)
+        })
+    }
+
+    /// Labels of the apps bound to `tag_id`, for the sync-collision dialog
+    /// ("Travel checklists" is managed by the travel app, …).
+    pub fn tag_owner_labels(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<String>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let mut labels = Vec::new();
+            for binding in s.bindings_for_tag(tag_id).await? {
+                if let Some(app) = s.app_by_id(binding.app_id).await? {
+                    labels.push(app.label.clone());
+                }
+            }
+            Ok(labels)
+        })
+    }
+
     /// Directories configured for a tag (`tag_settings.dirs`), used by the
     /// agent pane to resolve a project's launch directory.
     pub fn tag_dirs(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<String>>> {
