@@ -1,7 +1,8 @@
 use gpui::{
     AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
+    Styled, Subscription, Window, deferred, div, hsla, prelude::FluentBuilder, px, relative, rgb,
+    svg,
 };
 use gpui_component::Disableable;
 use gpui_component::Sizable;
@@ -3978,30 +3979,30 @@ impl Render for TaskDetails {
                     let suggest_cursor = self.tag_suggest_cursor;
                     header = header.child(
                         div()
-                            .id(("details-tags-edit", task_id))
-                            .key_context(TAG_EDITOR_CONTEXT)
-                            .on_action(cx.listener(|this, _: &TagConfirmText, _, cx| {
-                                this.on_tag_text_action(cx);
-                            }))
-                            .on_action(cx.listener(|this, _: &TagSuggestPrev, _, cx| {
-                                this.move_tag_suggestion(-1, cx);
-                            }))
-                            .on_action(cx.listener(|this, _: &TagSuggestNext, _, cx| {
-                                this.move_tag_suggestion(1, cx);
-                            }))
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(4.))
-                            .py(px(0.))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(HAIRLINE))
-                            .bg(rgb(APP_BG))
-                            .when_some(input, |this, input| {
-                                this.v_flex()
-                                    .child(
-                                        div()
-                                            .h_flex()
+                            .relative()
+                            .child(
+                                div()
+                                    .id(("details-tags-edit", task_id))
+                                    .key_context(TAG_EDITOR_CONTEXT)
+                                    .on_action(cx.listener(|this, _: &TagConfirmText, _, cx| {
+                                        this.on_tag_text_action(cx);
+                                    }))
+                                    .on_action(cx.listener(|this, _: &TagSuggestPrev, _, cx| {
+                                        this.move_tag_suggestion(-1, cx);
+                                    }))
+                                    .on_action(cx.listener(|this, _: &TagSuggestNext, _, cx| {
+                                        this.move_tag_suggestion(1, cx);
+                                    }))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px(px(4.))
+                                    .py(px(0.))
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(HAIRLINE))
+                                    .bg(rgb(APP_BG))
+                                    .when_some(input, |this, input| {
+                                        this.h_flex()
                                             .items_center()
                                             .gap_1()
                                             .children(self.tag_draft.iter().enumerate().map(
@@ -4036,35 +4037,63 @@ impl Render for TaskDetails {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .child(Input::new(&input).appearance(false)),
-                                            ),
-                                    )
-                                    .children(suggestions.iter().take(6).enumerate().map(
-                                        |(idx, label)| {
-                                            let label = label.clone();
-                                            div()
-                                                .id(("tag-suggest", idx))
-                                                .h_flex()
-                                                .items_center()
-                                                .w_full()
-                                                .px(px(4.))
-                                                .py(px(1.))
-                                                .rounded(px(2.))
-                                                .text_size(px(10.))
-                                                .text_color(rgb(0xa3a3a3))
-                                                .cursor_pointer()
-                                                .when(idx == suggest_cursor, |this| {
-                                                    this.bg(rgb(0x333333))
-                                                })
-                                                .child(format!("#{label}"))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.push_draft_label(&label);
-                                                    this.tag_suggest_active = false;
-                                                    this.needs_tag_input_clear = true;
-                                                    cx.notify();
-                                                }))
-                                        },
+                                            )
+                                    }),
+                            )
+                            .when(
+                                !suggestions.is_empty()
+                                    && self.tag_confirm.is_none()
+                                    && !self.confirming,
+                                |this| {
+                                    // Deferred paint: the card keeps its
+                                    // in-place layout below the field but
+                                    // draws after the rest of the pane, so it
+                                    // floats over the content underneath.
+                                    this.child(deferred(
+                                        div()
+                                            .absolute()
+                                            .top(relative(1.))
+                                            .left(px(0.))
+                                            .mt(px(4.))
+                                            .w_full()
+                                            .max_w(px(540.))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .bg(rgb(CARD_BG))
+                                            .border_1()
+                                            .border_color(rgb(HAIRLINE))
+                                            .children(suggestions.iter().take(6).enumerate().map(
+                                                |(idx, label)| {
+                                                    let label = label.clone();
+                                                    div()
+                                                        .id(("tag-suggest", idx))
+                                                        .h_flex()
+                                                        .items_center()
+                                                        .w_full()
+                                                        .px(px(4.))
+                                                        .py(px(1.))
+                                                        .rounded(px(2.))
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(0xa3a3a3))
+                                                        .cursor_pointer()
+                                                        .when(idx == suggest_cursor, |this| {
+                                                            this.bg(rgb(0x333333))
+                                                        })
+                                                        .child(format!("#{label}"))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.push_draft_label(&label);
+                                                                this.tag_suggest_active = false;
+                                                                this.needs_tag_input_clear = true;
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                },
+                                            )),
                                     ))
-                            }),
+                                },
+                            ),
                     );
                 } else {
                     header = header.child(
@@ -4452,9 +4481,7 @@ impl Render for TaskDetails {
                                             div()
                                                 .text_xs()
                                                 .text_color(rgb(0xa3a3a3))
-                                                .child(format!(
-                                                    "Did you mean \"{suggestion}\"?"
-                                                )),
+                                                .child(format!("Did you mean \"{suggestion}\"?")),
                                         ),
                                 )
                                 .child(
@@ -4466,20 +4493,16 @@ impl Render for TaskDetails {
                                             Button::new("tag-confirm-new")
                                                 .ghost()
                                                 .label(format!("Create \"{typed}\""))
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        this.resolve_create_new(cx);
-                                                    },
-                                                )),
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.resolve_create_new(cx);
+                                                })),
                                         )
                                         .child(
                                             Button::new("tag-confirm-use")
                                                 .label(format!("Use \"{suggestion}\""))
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| {
-                                                        this.resolve_use_existing(cx);
-                                                    },
-                                                )),
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.resolve_use_existing(cx);
+                                                })),
                                         ),
                                 ),
                         ),
