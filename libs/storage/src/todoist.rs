@@ -446,6 +446,10 @@ impl TodoStore {
                 // Already-implied edges report a cycle; either way the
                 // nesting holds.
                 let _ = self.add_tag_implication(sub_id, pack_id).await;
+                // Drop the direct edge to the travel tag so the subtag
+                // renders only under Pack, not also flattened at the tag
+                // level.
+                let _ = self.remove_tag_implication(sub_id, project_tag_id).await;
             }
         }
         Ok(())
@@ -1220,12 +1224,15 @@ mod tests {
 
         // Sub-sections nest under the common Pack via implication edges.
         storage.nest_travel_subsections(tag.id).await?;
+        // Pack / stay is no longer a direct child of the travel tag.
+        let travel_children = storage.get_children(tag.id).await?;
+        assert!(!travel_children.iter().any(|child| child.label() == "Pack / stay"));
         let stay = storage
-            .get_children(tag.id)
+            .get_children(travel_pack.id)
             .await?
             .into_iter()
             .find(|child| child.label() == "Pack / stay")
-            .expect("travel seeds Pack sub-sections");
+            .expect("Pack / stay is now nested under Pack");
         let parents = storage.get_parents(stay.id).await?;
         assert!(
             parents.iter().any(|parent| parent.id == travel_pack.id),

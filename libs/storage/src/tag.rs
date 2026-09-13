@@ -334,6 +334,7 @@ impl TodoStore {
             FROM tags t
             JOIN tag_implications ti ON ti.implier_id = t.id
             WHERE ti.implied_id = ?1
+              AND ti.implier_id IS NOT NULL
             "#,
         )
         .column_types([
