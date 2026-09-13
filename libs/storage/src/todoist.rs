@@ -287,6 +287,11 @@ impl TodoStore {
                 .await?;
             section_tags.insert(section.id.clone(), tag_id);
         }
+        // Inside travel-managed tags the local sub-sections nest under the
+        // common (possibly newly synced) Pack section tag.
+        if self.is_travel_managed_tag(project_tag_id).await? {
+            self.nest_travel_subsections(project_tag_id).await?;
+        }
 
         let tasks = fetch_tasks(token, project_id).await?;
         let mut local_ids: HashMap<String, u64> = HashMap::new();
@@ -325,6 +330,11 @@ impl TodoStore {
 
     /// Get-or-create the child tag for a remote section, linked for
     /// idempotent re-syncs and implied by the project tag.
+    ///
+    /// Inside a travel-managed tag the remote section first merges into an
+    /// existing child tag with the same display label (so a remote "Pack"
+    /// reuses travel's "Pack" instead of creating a `todoist/Pack`
+    /// duplicate); elsewhere the global lookup below applies.
     async fn todoist_section_tag(
         &mut self,
         integration_id: u64,
@@ -335,6 +345,15 @@ impl TodoStore {
             && self.get_tag(link.tag_id).await.is_ok()
         {
             return Ok(link.tag_id);
+        }
+        if self.is_travel_managed_tag(project_tag_id).await?
+            && let Some(tag_id) = self
+                .travel_section_tag(project_tag_id, &section.name)
+                .await?
+        {
+            self.link_tag(integration_id, &section.id, tag_id, "section", false)
+                .await?;
+            return Ok(tag_id);
         }
         let tag = match self.get_tag_by_name(&section.name).await? {
             Some(tag) => tag,
@@ -359,6 +378,77 @@ impl TodoStore {
         self.link_tag(integration_id, &section.id, tag.id, "section", namespaced)
             .await?;
         Ok(tag.id)
+    }
+
+    /// Slugs identifying the travel recipe/app: `packing-list` in the
+    /// seeded app database, `travel` in some test fixtures. Only tags
+    /// managed through these merge remote sections instead of
+    /// namespacing them.
+    const TRAVEL_RECIPE_SLUGS: &'static [&'static str] = &["packing-list", "travel"];
+
+    /// Whether `tag_id` is managed by the travel recipe (through its app
+    /// binding), as opposed to an ordinary user tag.
+    async fn is_travel_managed_tag(&mut self, tag_id: u64) -> QueryResult<bool> {
+        for binding in self.bindings_for_tag(tag_id).await? {
+            let Some(app) = self.app_by_id(binding.app_id).await? else {
+                continue;
+            };
+            if app.slug == "travel" {
+                return Ok(true);
+            }
+            if let Some(recipe_id) = self.recipe_for_app(binding.app_id).await?
+                && let Ok(recipe) = self.get_recipe(recipe_id).await
+                && Self::TRAVEL_RECIPE_SLUGS.contains(&recipe.slug.as_str())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// An existing child tag of the travel-managed `project_tag_id` whose
+    /// display label matches the remote section (case-insensitive): both
+    /// top-level sections ("Pack", "Before leaving") and sub-sections
+    /// ("Pack / stay") merge instead of duplicating.
+    async fn travel_section_tag(
+        &mut self,
+        project_tag_id: u64,
+        section_name: &str,
+    ) -> QueryResult<Option<u64>> {
+        let wanted = section_name.to_lowercase();
+        for child in self.get_children(project_tag_id).await? {
+            if child.label().to_lowercase() == wanted {
+                return Ok(Some(child.id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Nest the travel sub-sections ("Pack / …") under the common Pack
+    /// section tag via implication edges (child → parent), so they read as
+    /// one group. Idempotent; runs only inside travel-managed tags.
+    async fn nest_travel_subsections(&mut self, project_tag_id: u64) -> QueryResult<()> {
+        let mut pack_id = None;
+        let mut sub_ids = Vec::new();
+        for child in self.get_children(project_tag_id).await? {
+            let label = child.label().to_lowercase();
+            if label == "pack" {
+                pack_id = Some(child.id);
+            } else if label.starts_with("pack / ") {
+                sub_ids.push(child.id);
+            }
+        }
+        let Some(pack_id) = pack_id else {
+            return Ok(());
+        };
+        for sub_id in sub_ids {
+            if sub_id != pack_id {
+                // Already-implied edges report a cycle; either way the
+                // nesting holds.
+                let _ = self.add_tag_implication(sub_id, pack_id).await;
+            }
+        }
+        Ok(())
     }
 
     /// Create a new local task for a remote one, or merge remote fields
@@ -1064,6 +1154,83 @@ mod tests {
         // Section tag implies the project tag.
         let parents = storage.get_parents(first).await?;
         assert!(parents.iter().any(|t| t.id == project.id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_travel_section_merge_and_nesting() -> anyhow::Result<()> {
+        use crate::TodoStore;
+        let mut storage = TodoStore::for_test().await?;
+        let recipe_id = storage
+            .create_recipe(
+                "travel",
+                serde_json::json!({
+                    "name": "Travel checklists",
+                    "managed_tag": "managed:packing-list",
+                    "params": {},
+                    "nodes": [{ "id": "trip", "kind": "action", "title": "Trip checklist" }],
+                    "edges": []
+                }),
+            )
+            .await?
+            .id;
+        let app = storage
+            .upsert_app("recipe", "travel", "Travel checklists", None)
+            .await?;
+        storage.set_recipe_app(recipe_id, app.id).await?;
+        let tag = storage.create_tag("Travel").await?;
+        storage
+            .attach_app_to_tag(app.id, tag.id, crate::managed::BindingRole::Partial, false)
+            .await?;
+        storage.ensure_recipe_sections(recipe_id, tag.id).await?;
+        assert!(storage.is_travel_managed_tag(tag.id).await?);
+
+        let plain = storage.create_tag("Work").await?;
+        assert!(!storage.is_travel_managed_tag(plain.id).await?);
+
+        let integration = storage.create_integration("todoist", None).await?;
+        let pack = RemoteSection {
+            id: "sec-pack".to_string(),
+            name: "Pack".to_string(),
+        };
+        let merged = storage
+            .todoist_section_tag(integration.id, tag.id, &pack)
+            .await?;
+        let travel_pack = storage
+            .get_children(tag.id)
+            .await?
+            .into_iter()
+            .find(|child| child.label() == "Pack")
+            .expect("travel seeds a Pack section");
+        assert_eq!(merged, travel_pack.id, "remote Pack reuses travel's Pack");
+        // No `todoist/Pack` duplicate was created.
+        assert!(storage.get_tag_by_name("todoist/Pack").await?.is_none());
+        let link = storage.tag_link(integration.id, "sec-pack").await?.unwrap();
+        assert_eq!(link.tag_id, travel_pack.id);
+
+        // Plain tags keep the old namespaced behavior.
+        let other_section = RemoteSection {
+            id: "sec-pack-plain".to_string(),
+            name: "Pack".to_string(),
+        };
+        let other = storage
+            .todoist_section_tag(integration.id, plain.id, &other_section)
+            .await?;
+        assert_ne!(other, travel_pack.id);
+
+        // Sub-sections nest under the common Pack via implication edges.
+        storage.nest_travel_subsections(tag.id).await?;
+        let stay = storage
+            .get_children(tag.id)
+            .await?
+            .into_iter()
+            .find(|child| child.label() == "Pack / stay")
+            .expect("travel seeds Pack sub-sections");
+        let parents = storage.get_parents(stay.id).await?;
+        assert!(
+            parents.iter().any(|parent| parent.id == travel_pack.id),
+            "Pack / stay implies Pack"
+        );
         Ok(())
     }
 }

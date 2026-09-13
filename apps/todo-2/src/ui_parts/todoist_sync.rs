@@ -51,6 +51,10 @@ pub struct TodoistSyncPicker {
     local_filter: Entity<InputState>,
     _remote_sub: Subscription,
     _local_sub: Subscription,
+    /// Deferred input clears (event handlers lack `Window`; render has it):
+    /// remote after picking a project, local after pairing completes.
+    pending_clear_remote: bool,
+    pending_clear_local: bool,
     status: Option<String>,
     _task: Option<Task<()>>,
 }
@@ -89,6 +93,8 @@ impl TodoistSyncPicker {
             local_filter,
             _remote_sub,
             _local_sub,
+            pending_clear_remote: false,
+            pending_clear_local: false,
             status: None,
             _task: None,
         };
@@ -220,6 +226,7 @@ impl TodoistSyncPicker {
     fn pick_highlighted_remote(&mut self, cx: &mut Context<Self>) {
         if let Some(remote) = self.unpaired_remotes(cx).into_iter().next() {
             self.selected_remote = Some(remote);
+            self.pending_clear_remote = true;
             cx.notify();
         }
     }
@@ -268,6 +275,7 @@ impl TodoistSyncPicker {
                     Err(error) => this.status = Some(format!("Paired, but sync failed: {error}")),
                 }
                 this.selected_remote = None;
+                this.pending_clear_local = true;
                 cx.emit(TodoistSyncEvent::Changed);
                 this.refresh(cx);
                 cx.notify();
@@ -301,9 +309,21 @@ impl TodoistSyncPicker {
     pub fn render_picker(
         &mut self,
         id_prefix: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.pending_clear_remote {
+            self.pending_clear_remote = false;
+            self.remote_filter.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        if self.pending_clear_local {
+            self.pending_clear_local = false;
+            self.local_filter.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
         if self.integration_id.is_none() {
             return div()
                 .text_sm()
@@ -393,6 +413,7 @@ impl TodoistSyncPicker {
                                     .map(|(_, name)| name.clone())
                                     .unwrap_or_else(|| id.clone());
                                 this.selected_remote = Some((id.clone(), name));
+                                this.pending_clear_remote = true;
                                 cx.notify();
                             }))
                             .child(format!("Pair “{name}”…"))
