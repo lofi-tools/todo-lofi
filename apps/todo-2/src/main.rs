@@ -49,6 +49,7 @@ mod ui_parts {
     pub mod task_list;
     pub mod task_picker;
     pub mod task_row;
+    pub mod todoist_sync;
     pub mod travel;
 }
 

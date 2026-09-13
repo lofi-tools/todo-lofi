@@ -13,7 +13,8 @@ use gpui_component::{Sizable, Size, StyledExt};
 use crate::store::Store;
 use crate::theme::APP_BG;
 use crate::todoist_auth;
-use crate::ui_parts::apps::{AppSettings, TagAttachEvent, TagAttachPicker};
+use crate::ui_parts::apps::AppSettings;
+use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 pub enum IntegrationsEvent {
     Changed,
@@ -26,7 +27,7 @@ pub struct IntegrationsView {
     /// carry the ownership settings (which tags it captures into).
     todoist_app_id: Option<u64>,
     settings: Entity<AppSettings>,
-    todoist_tags: Option<Entity<TagAttachPicker>>,
+    todoist_sync: Option<Entity<TodoistSyncPicker>>,
     connecting: bool,
     syncing: bool,
     status: Option<String>,
@@ -42,7 +43,7 @@ impl IntegrationsView {
             connected: Vec::new(),
             todoist_app_id: None,
             settings,
-            todoist_tags: None,
+            todoist_sync: None,
             connecting: false,
             syncing: false,
             status: None,
@@ -81,7 +82,7 @@ impl IntegrationsView {
                     if this.todoist_app_id != todoist_app_id {
                         // New (or removed) provider app: drop the cached tag
                         // picker so it rebuilds for the right app.
-                        this.todoist_tags = None;
+                        this.todoist_sync = None;
                     }
                     this.todoist_app_id = todoist_app_id;
                     this._load = None;
@@ -318,7 +319,7 @@ impl IntegrationsView {
                     .child(controls),
             )
             .when(connected, |this| {
-                this.child(self.todoist_tags_block(window, cx))
+                this.child(self.todoist_sync_block(window, cx))
             })
             .when(expanded, |this| {
                 this.when_some(settings_block, |this, block| this.child(block))
@@ -326,33 +327,31 @@ impl IntegrationsView {
             .into_any_element()
     }
 
-    /// Synced-tags picker for Todoist: the same fuzzy chips + input used in
+    /// Project ↔ tag pairings for Todoist: the same picker used in
     /// settings, so both menus stay in sync.
-    fn todoist_tags_block(
+    fn todoist_sync_block(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(app_id) = self.todoist_app_id else {
+        if self.todoist_app_id.is_none() {
             return div().into_any_element();
-        };
-        let picker = match self.todoist_tags.clone() {
+        }
+        let picker = match self.todoist_sync.clone() {
             Some(picker) => picker,
             None => {
                 let store = self.store.clone();
                 let settings = self.settings.clone();
-                let picker = cx.new(|cx| {
-                    TagAttachPicker::new(store, app_id, true, window, cx)
-                });
+                let picker = cx.new(|cx| TodoistSyncPicker::new(store, window, cx));
                 cx.subscribe(&picker, move |this, _picker, event, cx| match event {
-                    TagAttachEvent::Changed => {
+                    TodoistSyncEvent::Changed => {
                         settings.update(cx, |settings, cx| settings.refresh(cx));
                         this.refresh(cx);
                         cx.emit(IntegrationsEvent::Changed);
                     }
                 })
                 .detach();
-                self.todoist_tags = Some(picker.clone());
+                self.todoist_sync = Some(picker.clone());
                 picker
             }
         };

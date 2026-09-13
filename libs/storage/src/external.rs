@@ -310,6 +310,22 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Remove the pairing between a remote project and a local tag. Synced
+    /// tasks keep their local copies; they just stop syncing.
+    pub async fn unlink_tag(&mut self, integration_id: u64, external_id: &str) -> QueryResult<()> {
+        toasty::sql::statement(
+            r#"DELETE FROM external_tag_links WHERE integration_id = ?1 AND external_id = ?2"#,
+        )
+        .bind(integration_id as i64)
+        .bind(external_id)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "unlink external tag",
+        })?;
+        Ok(())
+    }
+
     pub async fn link_tag(
         &mut self,
         integration_id: u64,

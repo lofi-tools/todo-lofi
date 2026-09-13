@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use crate::store::Store;
 use crate::ui_parts::apps::{AppSettings, TagAttachPicker};
+use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 fn config_dir() -> anyhow::Result<std::path::PathBuf> {
     if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
@@ -142,6 +143,7 @@ pub struct SettingsView {
     apps_expanded: bool,
     app_list: Vec<AppEntry>,
     tag_pickers: HashMap<String, Entity<TagAttachPicker>>,
+    sync_pickers: HashMap<String, Entity<TodoistSyncPicker>>,
     status: Option<String>,
     _load: Option<Task<()>>,
 }
@@ -156,6 +158,7 @@ impl SettingsView {
             apps_expanded: true,
             app_list: Vec::new(),
             tag_pickers: HashMap::new(),
+            sync_pickers: HashMap::new(),
             status: None,
             _load: None,
         };
@@ -671,21 +674,42 @@ impl SettingsView {
                 .into_any_element();
         }
         if is_integration {
-            let picker_id = format!("settings-tags-{slug}");
-            let picker = self.tag_picker(&slug, app_id, true, window, cx);
-            page = page.child(Self::section(
-                "Synced tags",
-                vec![
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x737373))
-                        .child("Tags this integration syncs. Type to find one, Enter to attach.")
-                        .into_any_element(),
-                    picker.update(cx, |picker, cx| {
-                        picker.render_picker(&picker_id, window, cx)
-                    }),
-                ],
-            ));
+            if slug.starts_with("todoist") {
+                let picker_id = format!("settings-sync-{slug}");
+                let picker = self.sync_picker(&slug, window, cx);
+                page = page.child(Self::section(
+                    "Synced tags",
+                    vec![
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(
+                                "Which Todoist projects sync into which local tags. \
+                                 Pick a project first, then pair it with a tag.",
+                            )
+                            .into_any_element(),
+                        picker.update(cx, |picker, cx| {
+                            picker.render_picker(&picker_id, window, cx)
+                        }),
+                    ],
+                ));
+            } else {
+                let picker_id = format!("settings-tags-{slug}");
+                let picker = self.tag_picker(&slug, app_id, true, window, cx);
+                page = page.child(Self::section(
+                    "Synced tags",
+                    vec![
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child("Tags this integration syncs. Type to find one, Enter to attach.")
+                            .into_any_element(),
+                        picker.update(cx, |picker, cx| {
+                            picker.render_picker(&picker_id, window, cx)
+                        }),
+                    ],
+                ));
+            }
         }
         let block = self.apps.update(cx, |settings, cx| {
             settings.settings_block(app_id, 1, cx)
@@ -719,6 +743,31 @@ impl SettingsView {
         })
         .detach();
         self.tag_pickers.insert(slug.to_string(), picker.clone());
+        picker
+    }
+
+    /// Lazily created Todoist project ↔ tag pairing picker, refreshing the
+    /// app list when pairs change (syncs create tags and sections).
+    fn sync_picker(
+        &mut self,
+        slug: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TodoistSyncPicker> {
+        if let Some(picker) = self.sync_pickers.get(slug) {
+            return picker.clone();
+        }
+        let store = self.store.clone();
+        let apps = self.apps.clone();
+        let picker = cx.new(|cx| TodoistSyncPicker::new(store, window, cx));
+        cx.subscribe(&picker, move |this, _picker, event, cx| match event {
+            TodoistSyncEvent::Changed => {
+                apps.update(cx, |settings, cx| settings.refresh(cx));
+                this.refresh(cx);
+            }
+        })
+        .detach();
+        self.sync_pickers.insert(slug.to_string(), picker.clone());
         picker
     }
 

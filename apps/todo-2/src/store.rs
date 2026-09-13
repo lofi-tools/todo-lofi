@@ -633,6 +633,75 @@ impl Store {
         })
     }
 
+    /// The Todoist integration, if connected.
+    pub fn todoist_integration(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::Integration>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s
+                .list_integrations()
+                .await?
+                .into_iter()
+                .find(|i| i.provider == "todoist"))
+        })
+    }
+
+    /// Remote-project links of one integration with their local tag labels:
+    /// `(external_id, source_kind, tag_id, tag_label)`.
+    pub fn integration_tag_pairs(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<(String, String, u64, String)>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let mut pairs = Vec::new();
+            for link in s.tag_links_for_integration(integration_id).await? {
+                let label = s
+                    .get_tag(link.tag_id)
+                    .await
+                    .map(|tag| tag.label())
+                    .unwrap_or_else(|_| "(deleted tag)".to_string());
+                pairs.push((link.external_id, link.source_kind, link.tag_id, label));
+            }
+            pairs.sort_by(|a, b| a.3.cmp(&b.3));
+            Ok(pairs)
+        })
+    }
+
+    /// Remove a remote-project ↔ local-tag pairing. Local tasks are kept.
+    pub fn unlink_tag(
+        &self,
+        integration_id: u64,
+        external_id: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.unlink_tag(integration_id, &external_id).await?)
+        })
+    }
+
+    /// Remote Todoist projects for the stored account. Network I/O runs on
+    /// the Tokio runtime via `Tokio::spawn_result`.
+    pub fn todoist_remote_projects(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<(String, String)>>> {
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let projects = crate::todoist_auth::list_projects().await?;
+            Ok(projects
+                .into_iter()
+                .map(|project| (project.id, project.name))
+                .collect())
+        })
+    }
+
     /// Directories configured for a tag (`tag_settings.dirs`), used by the
     /// agent pane to resolve a project's launch directory.
     pub fn tag_dirs(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<String>>> {

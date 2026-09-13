@@ -803,8 +803,9 @@ impl AppSettings {
 }
 
 /// Subsequence fuzzy rank, lower is better. Same matching as the task
-/// details tag editor so tag search feels the same.
-fn rank_tag(query: &str, label: &str) -> Option<usize> {
+/// details tag editor so tag search feels the same. Shared with the
+/// Todoist pairing picker.
+pub(crate) fn rank_tag(query: &str, label: &str) -> Option<usize> {
     if query.is_empty() {
         return Some(0);
     }
