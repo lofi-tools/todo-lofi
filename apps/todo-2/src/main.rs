@@ -1230,6 +1230,7 @@ fn main() {
         gpui_component::init(cx);
         ui_parts::project_picker::init(cx);
         ui_parts::task_picker::init(cx);
+        ui_parts::task_details::init_tag_editor_keys(cx);
         ui_parts::agent_pane::init(cx);
 
         let init_store = gpui_tokio::Tokio::spawn_result(cx, async move {

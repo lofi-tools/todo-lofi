@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Div, Entity, EventEmitter,
-    InteractiveElement, IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled,
-    Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
+    Styled, Subscription, Window, div, hsla, prelude::FluentBuilder, px, rgb, svg,
 };
 use gpui_component::Disableable;
 use gpui_component::Sizable;
@@ -271,6 +271,88 @@ impl EditedField {
     }
 }
 
+/// Key context for the inline tag editor, so Tab/Up/Down act on the
+/// suggestion list instead of the bare input bindings.
+const TAG_EDITOR_CONTEXT: &str = "TagEditor";
+
+/// Tab while typing a tag: flush the pending text as a chip.
+#[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tag_editor, no_json)]
+struct TagConfirmText;
+
+/// Move the tag suggestion highlight.
+#[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tag_editor, no_json)]
+struct TagSuggestPrev;
+
+/// Move the tag suggestion highlight.
+#[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tag_editor, no_json)]
+struct TagSuggestNext;
+
+/// Register the tag editor's key bindings. Called once at startup, after
+/// `gpui_component::init`, so these win over the bare input bindings.
+pub fn init_tag_editor_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("tab", TagConfirmText, Some(TAG_EDITOR_CONTEXT)),
+        KeyBinding::new("up", TagSuggestPrev, Some(TAG_EDITOR_CONTEXT)),
+        KeyBinding::new("down", TagSuggestNext, Some(TAG_EDITOR_CONTEXT)),
+    ]);
+}
+
+/// Pending misspelling choice in the tag editor: the typed text plus the
+/// close existing tag it may have meant.
+#[derive(Clone)]
+struct TagConfirm {
+    typed: String,
+    suggestion: String,
+}
+
+/// Subsequence fuzzy rank, lower is better. Mirrors the task picker's
+/// matching so tag search feels the same.
+fn rank_tag(query: &str, label: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let query = query.to_lowercase();
+    let label_lower = label.to_lowercase();
+    if let Some(rest) = label_lower.strip_prefix(&query) {
+        return Some(rest.len());
+    }
+    let mut search = label_lower.char_indices().peekable();
+    let mut matched: Vec<usize> = Vec::new();
+    for q in query.chars() {
+        loop {
+            match search.next() {
+                Some((index, c)) if c == q => {
+                    matched.push(index);
+                    break;
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    }
+    let spread = matched.last().copied().unwrap_or(0) - matched.first().copied().unwrap_or(0);
+    Some(label_lower.len() + spread)
+}
+
+/// Levenshtein edit distance over chars, for the misspelling check.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut next = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            next[j] = (row[j] + 1).min(next[j - 1] + 1).min(row[j - 1] + cost);
+        }
+        row = next;
+    }
+    row[b.len()]
+}
+
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
     store: Store,
@@ -289,6 +371,16 @@ pub struct TaskDetails {
     /// the next render — defers the recreation so the subscriber callback does
     /// not need to touch `Window`.
     needs_tag_input_clear: bool,
+    /// Display labels of all known tags, for the fuzzy finder and the
+    /// misspelling check. Loaded when the editor opens.
+    all_tags: Vec<String>,
+    /// Highlight position in the current tag suggestion list.
+    tag_suggest_cursor: usize,
+    /// True once Up/Down moved the highlight, so Enter picks it instead of
+    /// flushing the typed text.
+    tag_suggest_active: bool,
+    /// Pending misspelling choice: typed text plus the close existing tag.
+    tag_confirm: Option<TagConfirm>,
     confirming: bool,
     pending: Option<PendingTarget>,
     /// Open field editors, innermost last. Esc and the discard dialog unwind
@@ -405,6 +497,10 @@ impl TaskDetails {
             _tags_subscription: None,
             tag_draft: Vec::new(),
             needs_tag_input_clear: false,
+            all_tags: Vec::new(),
+            tag_suggest_cursor: 0,
+            tag_suggest_active: false,
+            tag_confirm: None,
             confirming: false,
             pending: None,
             focus_stack: Vec::new(),
@@ -851,6 +947,11 @@ impl TaskDetails {
     /// unwinds one field edit (prompting when dirty), else returns false so
     /// the caller can deselect.
     pub fn escape_details(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.tag_confirm.is_some() {
+            self.tag_confirm = None;
+            cx.notify();
+            return true;
+        }
         if self.confirming {
             self.cancel_pending(window, cx);
             return true;
@@ -1311,6 +1412,10 @@ impl TaskDetails {
         self._tags_subscription = None;
         self.tag_draft = Vec::new();
         self.needs_tag_input_clear = false;
+        self.all_tags = Vec::new();
+        self.tag_suggest_cursor = 0;
+        self.tag_suggest_active = false;
+        self.tag_confirm = None;
         self.pop_edit(EditedField::Tags);
     }
 
@@ -1328,6 +1433,19 @@ impl TaskDetails {
         self.reset_tag_input(window, cx);
         self.editing_tags = true;
         self.push_edit(EditedField::Tags);
+        let store = self.store.clone();
+        cx.spawn(async move |this, cx| {
+            let tags = store.list_tags(cx).await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                if !this.editing_tags {
+                    return;
+                }
+                this.all_tags = tags.into_iter().map(|tag| tag.label()).collect();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1335,6 +1453,8 @@ impl TaskDetails {
     /// after Enter turns the pending text into a chip, to restart typing.
     fn reset_tag_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.needs_tag_input_clear = false;
+        self.tag_suggest_cursor = 0;
+        self.tag_suggest_active = false;
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("Add tags…", window, cx);
@@ -1353,9 +1473,29 @@ impl TaskDetails {
         });
     }
 
-    /// Enter in the tag input: non-empty text becomes a chip (and typing
-    /// restarts empty); empty text saves all current chips.
+    /// Enter in the tag input: with an open misspelling choice it picks the
+    /// existing tag; with a keyboard-highlighted suggestion it adds it;
+    /// otherwise the typed text goes through the resolve flow (exact match,
+    /// misspelling check, or new chip). Empty text saves all current chips.
     fn on_tag_input_enter(&mut self, cx: &mut Context<Self>) {
+        if self.tag_confirm.is_some() {
+            self.resolve_use_existing(cx);
+            return;
+        }
+        self.flush_pending_text(cx);
+    }
+
+    /// Tab in the tag input: with an open misspelling choice it creates the
+    /// typed text as a new tag; otherwise it behaves like Enter.
+    fn on_tag_text_action(&mut self, cx: &mut Context<Self>) {
+        if self.tag_confirm.is_some() {
+            self.resolve_create_new(cx);
+            return;
+        }
+        self.flush_pending_text(cx);
+    }
+
+    fn flush_pending_text(&mut self, cx: &mut Context<Self>) {
         let Some(input) = self.tags_input.clone() else {
             return;
         };
@@ -1364,7 +1504,137 @@ impl TaskDetails {
             self.commit_tags_edit(cx);
             return;
         }
-        self.add_pending_tag(&text);
+        if self.tag_suggest_active
+            && let Some(label) = self.highlighted_suggestion(&text)
+        {
+            self.push_draft_label(&label);
+            self.tag_suggest_active = false;
+            self.needs_tag_input_clear = true;
+            cx.notify();
+            return;
+        }
+        self.resolve_tag_text(&text, cx);
+    }
+
+    /// Resolve typed text into a chip: exact matches of existing tags apply
+    /// silently, close-but-inexact text opens the misspelling choice,
+    /// anything else becomes a new tag.
+    fn resolve_tag_text(&mut self, raw: &str, cx: &mut Context<Self>) {
+        let typed = raw.trim().trim_start_matches('#').to_lowercase();
+        if typed.is_empty() {
+            self.needs_tag_input_clear = true;
+            cx.notify();
+            return;
+        }
+        if let Some(label) = self
+            .all_tags
+            .iter()
+            .find(|label| label.to_lowercase() == typed)
+            .cloned()
+        {
+            self.push_draft_label(&label);
+            self.needs_tag_input_clear = true;
+            cx.notify();
+            return;
+        }
+        if let Some(suggestion) = self.closest_tag(&typed) {
+            self.tag_confirm = Some(TagConfirm { typed, suggestion });
+            cx.notify();
+            return;
+        }
+        self.add_pending_tag(&typed);
+        self.needs_tag_input_clear = true;
+        cx.notify();
+    }
+
+    /// Closest existing tag by edit distance, if close enough to be a
+    /// misspelling rather than a genuinely new tag.
+    fn closest_tag(&self, typed: &str) -> Option<String> {
+        if typed.len() < 3 {
+            return None;
+        }
+        let mut best: Option<(usize, String)> = None;
+        for label in &self.all_tags {
+            let candidate = label.to_lowercase();
+            if candidate == typed
+                || self
+                    .tag_draft
+                    .iter()
+                    .any(|draft| draft.to_lowercase() == candidate)
+            {
+                continue;
+            }
+            let distance = edit_distance(typed, &candidate);
+            if distance == 0 || distance > 2 {
+                continue;
+            }
+            if best.as_ref().is_some_and(|(best, _)| *best <= distance) {
+                continue;
+            }
+            best = Some((distance, label.clone()));
+        }
+        best.map(|(_, label)| label)
+    }
+
+    /// Ranked suggestion labels for the current query, excluding chips
+    /// already in the draft.
+    fn tag_suggestions_for(&self, query: &str) -> Vec<String> {
+        let query = query.trim().trim_start_matches('#').to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut ranked: Vec<(usize, String)> = self
+            .all_tags
+            .iter()
+            .filter(|label| {
+                !self
+                    .tag_draft
+                    .iter()
+                    .any(|draft| draft.to_lowercase() == label.to_lowercase())
+            })
+            .filter_map(|label| rank_tag(&query, label).map(|score| (score, label.clone())))
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(_, label)| label).collect()
+    }
+
+    fn highlighted_suggestion(&self, query: &str) -> Option<String> {
+        self.tag_suggestions_for(query)
+            .get(self.tag_suggest_cursor)
+            .cloned()
+    }
+
+    fn move_tag_suggestion(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(input) = self.tags_input.clone() else {
+            return;
+        };
+        let query = input.read(cx).text().to_string();
+        let count = self.tag_suggestions_for(&query).len();
+        if count == 0 {
+            return;
+        }
+        self.tag_suggest_cursor =
+            (self.tag_suggest_cursor as isize + delta).rem_euclid(count as isize) as usize;
+        self.tag_suggest_active = true;
+        cx.notify();
+    }
+
+    /// Use the suggested existing tag for the pending misspelling choice.
+    fn resolve_use_existing(&mut self, cx: &mut Context<Self>) {
+        if let Some(confirm) = self.tag_confirm.take() {
+            self.push_draft_label(&confirm.suggestion);
+        }
+        self.tag_suggest_active = false;
+        self.needs_tag_input_clear = true;
+        cx.notify();
+    }
+
+    /// Create the typed text as a new tag for the pending misspelling choice.
+    fn resolve_create_new(&mut self, cx: &mut Context<Self>) {
+        if let Some(confirm) = self.tag_confirm.take() {
+            self.add_pending_tag(&confirm.typed);
+        }
+        self.tag_suggest_active = false;
         self.needs_tag_input_clear = true;
         cx.notify();
     }
@@ -1377,11 +1647,20 @@ impl TaskDetails {
         };
         let text = input.read(cx).text().to_string();
         if !text.trim_end().ends_with(',') {
+            self.tag_suggest_cursor = 0;
+            self.tag_suggest_active = false;
             return;
         }
-        self.add_pending_tag(text.trim_end_matches(',').trim());
-        self.needs_tag_input_clear = true;
-        cx.notify();
+        if self.tag_confirm.is_some() {
+            return;
+        }
+        let text = text.trim_end_matches(',').trim().to_string();
+        if text.is_empty() {
+            self.needs_tag_input_clear = true;
+            cx.notify();
+            return;
+        }
+        self.resolve_tag_text(&text, cx);
     }
 
     /// Turn raw pending text into a chip, unless it is empty or already present.
@@ -1390,12 +1669,17 @@ impl TaskDetails {
         if tag.is_empty() {
             return;
         }
+        self.push_draft_label(&tag);
+    }
+
+    /// Add a chip unless an equal (case-insensitive) one is already present.
+    fn push_draft_label(&mut self, label: &str) {
         if !self
             .tag_draft
             .iter()
-            .any(|draft| draft.to_lowercase() == tag)
+            .any(|draft| draft.eq_ignore_ascii_case(label))
         {
-            self.tag_draft.push(tag);
+            self.tag_draft.push(label.to_string());
         }
     }
 
@@ -3681,9 +3965,30 @@ impl Render for TaskDetails {
                         self.reset_tag_input(window, cx);
                     }
                     let input = self.tags_input.clone();
+                    let query = input
+                        .clone()
+                        .map(|input| input.read(cx).text().to_string())
+                        .unwrap_or_default();
+                    let suggestions = self.tag_suggestions_for(&query);
+                    if suggestions.is_empty() {
+                        self.tag_suggest_cursor = 0;
+                    } else if self.tag_suggest_cursor >= suggestions.len() {
+                        self.tag_suggest_cursor = suggestions.len() - 1;
+                    }
+                    let suggest_cursor = self.tag_suggest_cursor;
                     header = header.child(
                         div()
                             .id(("details-tags-edit", task_id))
+                            .key_context(TAG_EDITOR_CONTEXT)
+                            .on_action(cx.listener(|this, _: &TagConfirmText, _, cx| {
+                                this.on_tag_text_action(cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &TagSuggestPrev, _, cx| {
+                                this.move_tag_suggestion(-1, cx);
+                            }))
+                            .on_action(cx.listener(|this, _: &TagSuggestNext, _, cx| {
+                                this.move_tag_suggestion(1, cx);
+                            }))
                             .flex_1()
                             .min_w_0()
                             .px(px(4.))
@@ -3693,40 +3998,72 @@ impl Render for TaskDetails {
                             .border_color(rgb(HAIRLINE))
                             .bg(rgb(APP_BG))
                             .when_some(input, |this, input| {
-                                this.h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .children(self.tag_draft.iter().enumerate().map(
-                                        |(idx, tag)| {
-                                            tag_chip(tag)
-                                                .id(("tag-chip", idx))
-                                                .h_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .id(("tag-chip-remove", idx))
-                                                        .text_size(px(10.))
-                                                        .text_color(rgb(0x737373))
-                                                        .cursor_pointer()
-                                                        .hover(|this| {
-                                                            this.text_color(rgb(0xe5e5e5))
-                                                        })
-                                                        .child("×")
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.remove_tag_draft(idx, cx);
-                                                            },
-                                                        )),
-                                                )
-                                        },
-                                    ))
+                                this.v_flex()
                                     .child(
                                         div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(Input::new(&input).appearance(false)),
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .children(self.tag_draft.iter().enumerate().map(
+                                                |(idx, tag)| {
+                                                    tag_chip(tag)
+                                                        .id(("tag-chip", idx))
+                                                        .h_flex()
+                                                        .items_center()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .id(("tag-chip-remove", idx))
+                                                                .text_size(px(10.))
+                                                                .text_color(rgb(0x737373))
+                                                                .cursor_pointer()
+                                                                .hover(|this| {
+                                                                    this.text_color(rgb(0xe5e5e5))
+                                                                })
+                                                                .child("×")
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.remove_tag_draft(
+                                                                            idx, cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        )
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(Input::new(&input).appearance(false)),
+                                            ),
                                     )
+                                    .children(suggestions.iter().take(6).enumerate().map(
+                                        |(idx, label)| {
+                                            let label = label.clone();
+                                            div()
+                                                .id(("tag-suggest", idx))
+                                                .h_flex()
+                                                .items_center()
+                                                .w_full()
+                                                .px(px(4.))
+                                                .py(px(1.))
+                                                .rounded(px(2.))
+                                                .text_size(px(10.))
+                                                .text_color(rgb(0xa3a3a3))
+                                                .cursor_pointer()
+                                                .when(idx == suggest_cursor, |this| {
+                                                    this.bg(rgb(0x333333))
+                                                })
+                                                .child(format!("#{label}"))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.push_draft_label(&label);
+                                                    this.tag_suggest_active = false;
+                                                    this.needs_tag_input_clear = true;
+                                                    cx.notify();
+                                                }))
+                                        },
+                                    ))
                             }),
                     );
                 } else {
@@ -4075,6 +4412,102 @@ impl Render for TaskDetails {
                         ),
                 )
             })
+            .when_some(self.tag_confirm.clone(), |this, confirm| {
+                let suggestion = confirm.suggestion.clone();
+                let typed = confirm.typed.clone();
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .bottom(px(0.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x000000cc))
+                        .child(
+                            div()
+                                .v_flex()
+                                .gap_3()
+                                .min_w(px(260.))
+                                .max_w(px(420.))
+                                .p_4()
+                                .rounded_md()
+                                .bg(rgb(0x2a2a2a))
+                                .border_1()
+                                .border_color(rgb(HAIRLINE))
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .text_color(rgb(0xe5e5e5))
+                                                .child(format!("\"{typed}\" isn't a tag yet")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0xa3a3a3))
+                                                .child(format!(
+                                                    "Did you mean \"{suggestion}\"?"
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("tag-confirm-new")
+                                                .ghost()
+                                                .label(format!("Create \"{typed}\""))
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.resolve_create_new(cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new("tag-confirm-use")
+                                                .label(format!("Use \"{suggestion}\""))
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.resolve_use_existing(cx);
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        ),
+                )
+            })
+    }
+}
+
+#[cfg(test)]
+mod tag_match_tests {
+    use super::{edit_distance, rank_tag};
+
+    #[test]
+    fn edit_distance_counts_single_edits() {
+        assert_eq!(edit_distance("work", "work"), 0);
+        assert_eq!(edit_distance("wrok", "work"), 2);
+        assert_eq!(edit_distance("wrk", "work"), 1);
+        assert_eq!(edit_distance("wor", "work"), 1);
+        assert_eq!(edit_distance("", "work"), 4);
+    }
+
+    #[test]
+    fn rank_tag_prefers_prefix_then_subsequence() {
+        assert!(rank_tag("work", "unrelated").is_none());
+        let prefix = rank_tag("wo", "work").unwrap();
+        let scattered = rank_tag("wk", "work").unwrap();
+        assert!(prefix < scattered);
+        assert!(rank_tag("", "work").is_some());
     }
 }
 

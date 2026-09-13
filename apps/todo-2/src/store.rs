@@ -598,6 +598,15 @@ impl Store {
         })
     }
 
+    /// All known tags, for the tag editor's fuzzy finder and misspelling check.
+    pub fn list_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_tags().await?)
+        })
+    }
+
     /// The recipe that manages `tag_id`, if the tag is owned by an
     /// automation (drives the special panel in the Layout).
     pub fn managed_recipe_for_tag(
