@@ -351,7 +351,14 @@ impl Layout {
             }
         })
         .detach();
-        let settings = cx.new(|cx| SettingsView::new(cx));
+        let settings = cx.new(|cx| SettingsView::new(store.clone(), apps.clone(), cx));
+        let settings_for_apps = settings.clone();
+        cx.subscribe(&apps, move |_this, _settings, event, cx| match event {
+            AppSettingsEvent::Changed => {
+                settings_for_apps.update(cx, |view, cx| view.refresh(cx));
+            }
+        })
+        .detach();
         // Syncs create tags (sections, labels): refresh the tag tree.
         cx.subscribe_in(
             &integrations,
