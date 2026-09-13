@@ -1375,9 +1375,10 @@ impl Render for Layout {
                             .into_any_element(),
                     }),
             )
-            .when(self.panel == NavPanel::Tasks, |this| {
-                this.child(self.render_pane_footer(cx))
-            })
+            // The footer is window-wide chrome: it stays pinned to the
+            // bottom on every panel, including Integrations, Automations
+            // and Settings.
+            .child(self.render_pane_footer(cx))
             // Keep the dialog layer last so dialogs paint above everything.
             .children(dialog_layer)
             .when(self.details_resize_grab.is_some(), |this| {
