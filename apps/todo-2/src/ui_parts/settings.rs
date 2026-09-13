@@ -119,6 +119,13 @@ impl SettingsFile {
     }
 }
 
+fn display_name(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
 struct AppEntry {
     id: u64,
     slug: String,
@@ -215,7 +222,7 @@ impl SettingsView {
         let app_rows: Vec<(String, String)> = self
             .app_list
             .iter()
-            .map(|app| (format!("app:{}", app.slug), app.label.clone()))
+            .map(|app| (format!("app:{}", app.slug), display_name(&app.label)))
             .collect();
         if self.apps_expanded {
             for (id, label) in &app_rows {
@@ -606,7 +613,7 @@ impl SettingsView {
                 .into_any_element();
         };
         let app_id = entry.id;
-        let label = entry.label.clone();
+        let label = display_name(&entry.label);
         let kind = entry.kind.clone();
         let notify = self.file.app_notify.get(&slug).copied().unwrap_or(true);
         let slug_for_toggle = slug.clone();
@@ -618,7 +625,7 @@ impl SettingsView {
                 div()
                     .text_sm()
                     .text_color(rgb(0xa3a3a3))
-                    .child(format!("{kind} app · {slug}")),
+                    .child(format!("{} app · {}", display_name(&kind), display_name(&slug))),
             );
         let preferences = Self::section(
             "Preferences",

@@ -86,7 +86,15 @@ impl TodoStore {
         let label = account_label
             .clone()
             .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| provider.to_string());
+            .unwrap_or_else(|| {
+                let mut chars = provider.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => {
+                        first.to_uppercase().collect::<String>() + chars.as_str()
+                    }
+                }
+            });
         let app = self
             .upsert_app("integration", &format!("{provider}-{id}"), &label, None)
             .await?;
