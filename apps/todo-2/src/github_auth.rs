@@ -111,9 +111,7 @@ pub fn parse_device_login(body: &serde_json::Value) -> anyhow::Result<DeviceLogi
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| {
-                anyhow::anyhow!("GitHub device flow response had no `{name}`: {body}")
-            })
+            .ok_or_else(|| anyhow::anyhow!("GitHub device flow response had no `{name}`: {body}"))
     };
     Ok(DeviceLogin {
         user_code: field("user_code")?,
@@ -144,7 +142,10 @@ pub enum PollAction {
     /// later poll too, as the flow requires.
     SlowDown,
     /// The user approved.
-    Done { access_token: String, scope: Option<String> },
+    Done {
+        access_token: String,
+        scope: Option<String>,
+    },
     /// Stop polling: the code expired, the user denied it, or the app is
     /// misconfigured.
     Failed(String),
@@ -200,8 +201,7 @@ impl PollSchedule {
             }
             Some("access_denied") => PollAction::Failed("The sign-in was denied".to_string()),
             Some("incorrect_client_credentials") => PollAction::Failed(
-                "GitHub rejected the app's client id; reconnect the integration"
-                    .to_string(),
+                "GitHub rejected the app's client id; reconnect the integration".to_string(),
             ),
             Some(other) => PollAction::Failed(format!("GitHub sign-in failed: {other}")),
             None => PollAction::Failed(format!("Unexpected GitHub response: {body}")),
@@ -253,9 +253,7 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
             "client_id={}&device_code={}&grant_type={}",
             crate::todoist_auth::url_encode(&client_id),
             crate::todoist_auth::url_encode(&login.device_code),
-            crate::todoist_auth::url_encode(
-                "urn:ietf:params:oauth:grant-type:device_code"
-            ),
+            crate::todoist_auth::url_encode("urn:ietf:params:oauth:grant-type:device_code"),
         );
         let response = client
             .post(TOKEN_URL)
@@ -275,19 +273,25 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
         match schedule.absorb(&body) {
             PollAction::Wait | PollAction::SlowDown => continue,
             PollAction::Failed(message) => return Err(anyhow::anyhow!(message)),
-            PollAction::Done { access_token, scope } => {
+            PollAction::Done {
+                access_token,
+                scope,
+            } => {
                 let login = account_login(&access_token).await.ok();
                 // A client id from the environment means a developer's own
                 // app, so its token is kept in memory rather than overwriting
                 // a real connection in the config file.
                 if !from_env {
-                    save_at(&client_file_path()?, &GithubFile {
-                        client_id,
-                        access_token: Some(access_token.clone()),
-                        scope,
-                        login,
-                        created_at: Some(jiff::Timestamp::now().as_second()),
-                    })?;
+                    save_at(
+                        &client_file_path()?,
+                        &GithubFile {
+                            client_id,
+                            access_token: Some(access_token.clone()),
+                            scope,
+                            login,
+                            created_at: Some(jiff::Timestamp::now().as_second()),
+                        },
+                    )?;
                 }
                 return Ok(access_token);
             }
@@ -311,7 +315,9 @@ pub async fn account_login(token: &str) -> anyhow::Result<String> {
         .await
         .map_err(|e| anyhow::anyhow!("Account response was not JSON: {e}"))?;
     if !status.is_success() {
-        return Err(anyhow::anyhow!("Could not read the GitHub account ({status}): {body}"));
+        return Err(anyhow::anyhow!(
+            "Could not read the GitHub account ({status}): {body}"
+        ));
     }
     body.get("login")
         .and_then(|value| value.as_str())
@@ -397,9 +403,7 @@ mod tests {
         assert!(parse_device_login(&json!({ "user_code": "ABCD" })).is_err());
         assert!(parse_device_login(&json!({ "device_code": "dc" })).is_err());
         // An empty string is not a code.
-        assert!(
-            parse_device_login(&json!({ "device_code": "dc", "user_code": "" })).is_err()
-        );
+        assert!(parse_device_login(&json!({ "device_code": "dc", "user_code": "" })).is_err());
     }
 
     #[test]
@@ -496,8 +500,7 @@ mod tests {
             },
         )
         .unwrap();
-        let credentials =
-            stored_credentials_at(&path).expect("token round-trips through the file");
+        let credentials = stored_credentials_at(&path).expect("token round-trips through the file");
         assert_eq!(credentials.token, "gho_token");
         assert_eq!(credentials.login.as_deref(), Some("me"));
 
@@ -505,7 +508,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "the token file must not be world-readable");
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the token file must not be world-readable"
+            );
         }
 
         std::fs::remove_file(&path).unwrap();
@@ -529,7 +536,10 @@ mod tests {
             );
             unsafe { std::env::remove_var("GITHUB_CLIENT_ID") };
         } else {
-            assert_eq!(env_override.unwrap(), (DEFAULT_CLIENT_ID.to_string(), false));
+            assert_eq!(
+                env_override.unwrap(),
+                (DEFAULT_CLIENT_ID.to_string(), false)
+            );
         }
     }
 

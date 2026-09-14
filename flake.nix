@@ -134,11 +134,37 @@
                 fi
               fi
 
+              # open hands the bundle to launchd, so the app is neither a child of
+              # this script nor in its process group: signals sent here never reach
+              # it. Kill it by process name instead - launchd resolves the
+              # Contents/MacOS symlink, so "-f Contents/MacOS/todo-2" would only
+              # ever match cargo-watch's own command line (killing the watcher).
+              watcher=""
+              stop_app() {
+                [ -z "$watcher" ] || kill "$watcher" 2>/dev/null || true
+                pkill -x todo-2 2>/dev/null || true
+              }
+              trap stop_app EXIT INT TERM HUP
+
+              # The devshell exports CARGO_BUILD_TARGET, so cargo writes to
+              # target/<triple>/debug; without it, to target/debug. The bundle
+              # symlink must point at the artifact cargo actually produces,
+              # otherwise `open` keeps launching a stale binary.
+              BIN_DIR="target/debug"
+              [ -n "''${CARGO_BUILD_TARGET:-}" ] && BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
+
               # Build, link binary, launch
               cargo build -p todo-2
-              ln -sf "$(pwd)/target/debug/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
+              ln -sf "$(pwd)/$BIN_DIR/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
               open "$APP_DIR"
-              cargo watch -x "build -p todo-2" -s 'pkill -f "Contents/MacOS/todo-2" 2>/dev/null; sleep 0.3; open "target/debug/todo-lofi.app"'
+
+              # Run the watcher in the background and wait: bash defers traps while
+              # a foreground command runs, so killing the script would leave both
+              # the watcher and the app alive. wait is interrupted by the signal,
+              # letting the trap take them down.
+              cargo watch -x "build -p todo-2" -s 'pkill -x todo-2 2>/dev/null || true; sleep 0.3; open "target/debug/todo-lofi.app"' &
+              watcher=$!
+              wait "$watcher"
             '';
 
             # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
