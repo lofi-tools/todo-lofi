@@ -12,7 +12,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - **Semi-automated workflows** — for instance, coding tasks all go through: interview, spec, coding, review, merge.
 <!--- **Tag-to-directory binding** — associate tags with local filesystem directories (for lofi git-note workflows).-->
 <!--- **Keyboard-first** — all core actions reachable via keybindings; mouse always optional.-->
-- **Nix reproducible dev environment** — `nix develop` gives you every tool, every time.
+<!--- **Nix reproducible dev environment** — `nix develop` gives you every tool, every time.-->
 - **2-way sync with your current Todo-list app** — 
   - Todoist
   - Github issues & projects
@@ -20,7 +20,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
   - Travel checklist templates
   - <span style="color: #8b949e">Message follow-ups & birthday wishes</span> <span style="background:#2d333b;color:#8b949e;border-radius:999px;padding:2px 8px;font-size:12px">coming soon</span>
   - <span style="color: #8b949e">Job application tracking</span> <span style="background:#2d333b;color:#8b949e;border-radius:999px;padding:2px 8px;font-size:12px">coming soon</span>
-- **Let outside apps manage part of your task lists**
+- <span style="color: #8b949e">**Let outside apps manage part of your task lists**</span> <span style="background:#2d333b;color:#8b949e;border-radius:999px;padding:2px 8px;font-size:12px">coming soon</span>
 
 ## Quickstart
 
@@ -53,6 +53,8 @@ todo-lofi/
 ```
 
 ## Contributing
+
+### Temporary docs website: https://deepwiki.com/lofi-tools/todo-lofi
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.
 
