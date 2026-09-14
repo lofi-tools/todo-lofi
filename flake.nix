@@ -28,6 +28,8 @@
 
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
 
+          lsRegister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
           infoPlist = pkgs.writeText "Info.plist" ''
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,7 +53,7 @@
             </plist>
           '';
 
-          todoAppWrapper = pkgs.runCommand "todo-lofi-app-wrapper" {} ''
+          todoAppWrapper = pkgs.runCommand "todo-lofi-app-wrapper" { } ''
             mkdir -p $out/Contents/Resources
             cp ${infoPlist} $out/Contents/Info.plist
             cp ${./apps/todo-2/assets/icons/do-list-app.svg} $out/Contents/Resources/todo-lofi.svg
@@ -89,24 +91,40 @@
             t2 = with bash; ''
               set -e
               APP_DIR="target/debug/todo-lofi.app"
+              ICON="$APP_DIR/Contents/Resources/todo-lofi.icns"
+              ICON_SVG="${wd}/apps/todo-2/assets/icons/do-list-app.svg"
 
-              # First-run: build .app wrapper with icon
-              if [ ! -f "$APP_DIR/Contents/Resources/todo-lofi.icns" ]; then
-                mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-                cp "${todoAppWrapper}/Contents/Info.plist" "$APP_DIR/Contents/"
+              mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+              cp -f "${todoAppWrapper}/Contents/Info.plist" "$APP_DIR/Contents/Info.plist"
 
-                # Generate .icns from SVG via iconutil (one-time, ~4s)
-                ICONSET_TMP=$(mktemp -d)
-                ICONSET="$ICONSET_TMP.iconset"
-                mv "$ICONSET_TMP" "$ICONSET"
+              # Regenerate whenever the source SVG is newer, so an icon baked
+              # earlier (qlmanage composites the SVG on a white matte) can't stick.
+              ICON_SUM=$(cksum "$ICON" 2>/dev/null | cut -d' ' -f1,2)
+              if [ ! -f "$ICON" ] || [ "$ICON_SVG" -nt "$ICON" ]; then
+                # sips rasterizes an SVG at its intrinsic size, so paint the icon
+                # on a 1024px canvas instead of upscaling a 155px bitmap; sips
+                # keeps the canvas transparent where the SVG has no fill.
+                ICON_TMP=$(mktemp -d)
+                ICONSET="$ICON_TMP/icon.iconset"
+                mkdir -p "$ICONSET"
+                sed 's|<svg |<svg width="1024" height="1024" |' "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" > "$ICON_TMP/icon-1024.svg"
+                sips -s format png "$ICON_TMP/icon-1024.svg" --out "$ICONSET/master.png" >/dev/null
                 for size in 16 32 128 256 512; do
-                  qlmanage -t -s "$size" -o "$ICONSET" "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" 2>/dev/null
-                  mv "$ICONSET/"*.svg.png "$ICONSET/icon_''${size}x''${size}.png"
-                  qlmanage -t -s "$(( size * 2 ))" -o "$ICONSET" "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" 2>/dev/null
-                  mv "$ICONSET/"*.svg.png "$ICONSET/icon_''${size}x''${size}@2x.png"
+                  sips -z "$size" "$size" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}.png" >/dev/null
+                  sips -z "$(( size * 2 ))" "$(( size * 2 ))" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}@2x.png" >/dev/null
                 done
-                iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/todo-lofi.icns"
-                rm -rf "$ICONSET"
+                rm -f "$ICONSET/master.png"
+                iconutil -c icns "$ICONSET" -o "$ICON"
+                rm -rf "$ICON_TMP"
+
+                # IconServices caches rendered tiles, so the Dock goes on painting
+                # the previous icon until the bundle is re-registered and the Dock
+                # restarts. Only pay for that when the icon actually changed.
+                if [ "$ICON_SUM" != "$(cksum "$ICON" | cut -d' ' -f1,2)" ]; then
+                  touch "$APP_DIR" "$ICON"
+                  "${lsRegister}" -f "$APP_DIR" 2>/dev/null || true
+                  killall Dock 2>/dev/null || true
+                fi
               fi
 
               # Build, link binary, launch
@@ -115,6 +133,8 @@
               open "$APP_DIR"
               cargo watch -x "build -p todo-2" -s 'pkill -f "Contents/MacOS/todo-2" 2>/dev/null; sleep 0.3; open "target/debug/todo-lofi.app"'
             '';
+
+            # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
 
             skills = with bash; ''set -ex;
               for f in "${wd}"/docs/agent_skills/*.md; do
@@ -155,6 +175,7 @@
           myDevShell.env = env;
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
+          myDevShell.cleanups.icons.script = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
         };
     });
 
