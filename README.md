@@ -8,8 +8,9 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 
 - **Integrated AI agent** — integrated AI assistant for doing tasks.
 - **Repeat & scheduling** — recurring task configuration via a dedicated picker.
-- **Nested tag hierarchy** — tree-structured project/area organization with drag-and-drop reordering.
-- **Tag-to-directory binding** — associate tags with local filesystem directories (for lofi git-note workflows).
+- **Group & filter tasks using tags** — tree-structured project/area organization with drag-and-drop reordering.
+- **Semi-automated workflows** — for instance, coding tasks all go through: interview, spec, coding, review, merge.
+<!--- **Tag-to-directory binding** — associate tags with local filesystem directories (for lofi git-note workflows).-->
 <!--- **Keyboard-first** — all core actions reachable via keybindings; mouse always optional.-->
 - **Nix reproducible dev environment** — `nix develop` gives you every tool, every time.
 - **2-way sync with your current Todo-list app** — 
@@ -17,9 +18,9 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
   - Github issues & projects
 - **Integrated mini-apps (extensions)** — 
   - Travel checklist templates
-  - Message follow-ups & birthday wishes
-  - Job application tracking
-
+  - <span style="color: #8b949e">Message follow-ups & birthday wishes</span> <span style="background:#2d333b;color:#8b949e;border-radius:999px;padding:2px 8px;font-size:12px">coming soon</span>
+  - <span style="color: #8b949e">Job application tracking</span> <span style="background:#2d333b;color:#8b949e;border-radius:999px;padding:2px 8px;font-size:12px">coming soon</span>
+- **Let outside apps manage part of your task lists**
 
 ## Quickstart
 
