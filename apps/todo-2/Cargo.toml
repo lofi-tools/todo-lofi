@@ -3,6 +3,14 @@ name = "todo-2"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.bundle]
+name = "todo-lofi"
+identifier = "io.github.lofi-tools.todo-lofi"
+icon = ["apps/todo-2/assets/icons/do-list-app.svg"]
+short_description = "A lofi, local-first task manager"
+category = "Productivity"
+osx_minimum_system_version = "12.0"
+
 [dependencies]
 acp-client = { path = "../../libs/acp-client" }
 storage = { path = "../../libs/storage" }

@@ -28,6 +28,35 @@
 
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
 
+          infoPlist = pkgs.writeText "Info.plist" ''
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleDevelopmentRegion</key><string>English</string>
+              <key>CFBundleDisplayName</key><string>todo-lofi</string>
+              <key>CFBundleExecutable</key><string>todo-2</string>
+              <key>CFBundleIconFile</key><string>todo-lofi.icns</string>
+              <key>CFBundleIdentifier</key><string>io.github.lofi-tools.todo-lofi</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundleName</key><string>todo-lofi</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleShortVersionString</key><string>0.1.0</string>
+              <key>CSResourcesFileMapped</key><true/>
+              <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+              <key>LSMinimumSystemVersion</key><string>12.0</string>
+              <key>LSRequiresCarbon</key><true/>
+              <key>NSHighResolutionCapable</key><true/>
+            </dict>
+            </plist>
+          '';
+
+          todoAppWrapper = pkgs.runCommand "todo-lofi-app-wrapper" {} ''
+            mkdir -p $out/Contents/Resources
+            cp ${infoPlist} $out/Contents/Info.plist
+            cp ${./apps/todo-2/assets/icons/do-list-app.svg} $out/Contents/Resources/todo-lofi.svg
+          '';
+
           bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs pkgs.writeShellScriptBin {
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
@@ -57,7 +86,35 @@
             mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
             testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
 
-            t2 = '' cargo watch -x "run -p todo-2" '';
+            t2 = with bash; ''
+              set -e
+              APP_DIR="target/debug/todo-lofi.app"
+
+              # First-run: build .app wrapper with icon
+              if [ ! -f "$APP_DIR/Contents/Resources/todo-lofi.icns" ]; then
+                mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+                cp "${todoAppWrapper}/Contents/Info.plist" "$APP_DIR/Contents/"
+
+                # Generate .icns from SVG via iconutil (one-time, ~4s)
+                ICONSET_TMP=$(mktemp -d)
+                ICONSET="$ICONSET_TMP.iconset"
+                mv "$ICONSET_TMP" "$ICONSET"
+                for size in 16 32 128 256 512; do
+                  qlmanage -t -s "$size" -o "$ICONSET" "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" 2>/dev/null
+                  mv "$ICONSET/"*.svg.png "$ICONSET/icon_''${size}x''${size}.png"
+                  qlmanage -t -s "$(( size * 2 ))" -o "$ICONSET" "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" 2>/dev/null
+                  mv "$ICONSET/"*.svg.png "$ICONSET/icon_''${size}x''${size}@2x.png"
+                done
+                iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/todo-lofi.icns"
+                rm -rf "$ICONSET"
+              fi
+
+              # Build, link binary, launch
+              cargo build -p todo-2
+              ln -sf "$(pwd)/target/debug/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
+              open "$APP_DIR"
+              cargo watch -x "build -p todo-2" -s 'pkill -f "Contents/MacOS/todo-2" 2>/dev/null; sleep 0.3; open "target/debug/todo-lofi.app"'
+            '';
 
             skills = with bash; ''set -ex;
               for f in "${wd}"/docs/agent_skills/*.md; do
