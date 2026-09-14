@@ -107,7 +107,7 @@
                 ICON_TMP=$(mktemp -d)
                 ICONSET="$ICON_TMP/icon.iconset"
                 mkdir -p "$ICONSET"
-                sed 's|<svg |<svg width="1024" height="1024" |' "${todoAppWrapper}/Contents/Resources/todo-lofi.svg" > "$ICON_TMP/icon-1024.svg"
+                sed 's|<svg |<svg width="1024" height="1024" |' "$ICON_SVG" > "$ICON_TMP/icon-1024.svg"
                 sips -s format png "$ICON_TMP/icon-1024.svg" --out "$ICONSET/master.png" >/dev/null
                 for size in 16 32 128 256 512; do
                   sips -z "$size" "$size" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}.png" >/dev/null
