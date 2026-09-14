@@ -410,14 +410,18 @@ to actually bite.
     is stranded in `acp-sessions.json`. The fix is cheap because `tag_id` is
     already stored — key by tag id, or migrate the entry when dirs change — but
     it has to be decided before the dirs picker ships. See §9.G.
-12. **Placement durability is assumed, not verified.** Decision #3 rests on
-    placements being ordinary rows that survive a restart. `~/.config/my-todo/`
-    holds a `todo.db` plus a 900 KB WAL, so the store does persist on disk — but
-    `libs/acp-client/src/session_store.rs:4-5` asserts "the app's database is
-    in-memory", and the repo seeds project tags on startup
-    (`testing.rs:508`). Before building on edges, confirm that a placement
-    written today is still there after a restart and a `projects::scan`, rather
-    than being recreated from seed data each launch.
+12. **Placement durability — confirmed: nothing persists.** Decision #3 rests on
+    placements being ordinary rows, but the app opens `turso::memory:` and
+    re-seeds at startup (`apps/todo-2/src/main.rs`: `StorageConfig { db_uri:
+    "turso::memory:" }` followed by `store.seed()`, with the app's own comment
+    "The database is in-memory, so re-register the Todoist connection row when
+    tokens survived"). So a placement — like every tag edit the user makes —
+    lives for one session. `libs/acp-client/src/session_store.rs:4-5` was right
+    and the `todo.db` under `~/.config/my-todo` is written by
+    `libs/storage/src/bin/migrate.rs`, not by the app. This is not specific to
+    placements and is not a regression, but it means the feature has no durable
+    effect until the store moves to a file, and that is worth stating up front
+    rather than discovering after the fact.
 
 ### 5.2 UI and UX
 
@@ -569,22 +573,22 @@ Storage (`cargo test -p storage`):
   and a child tag whose name matches `section_tag_name`, and is a child in
   `get_children`.
 
+The tree shape the rows render from (nesting, kind order, duplication, the
+cycle guard, dirs-backed classification) is asserted in the storage tests
+listed above, because the navbar is a mapper over `TagTreeRow` and holds no
+logic of its own.
+
 App (`cargo test -p todo-2`):
 
-- navbar renders a project nested under its tag **with no expansion step** (the
-  graph is bulk-loaded) and keeps the flat top-level layout for unplaced
-  projects (GPUI test, mirroring the existing `task_list`/navbar tests);
-- a multi-parented project renders once per parent, each copy with its own
-  subtree, and a cycle inserted directly in the DB does not hang or loop the
-  walk;
-- the folder icon appears for a directory-backed tag that is not a `project:`
-  tag;
-- children render in the group-then-alphabetical order;
-- the gear opens the popover for a selected tag and is absent for `All Tasks`;
-- the tag picker omits the tag itself, its descendants, and its existing
-  parents;
-- removing a parent chip requires confirming the modal, and the edge is only
-  gone after confirmation.
+- the placement picker omits the tag itself, its descendants, and its existing
+  parents (unit test over `eligible_parents`, which is why that filter lives in
+  a free function rather than inline in the render).
+
+**Correction:** this workspace has no `#[gpui::test]` anywhere — every app test
+is a plain unit test — so "GPUI UI tests" as originally written here cannot be
+delivered without first building a test harness (a window, a Tokio-backed
+store, and a fixture). The render-level behaviour below is verified by hand
+instead:
 
 Manual walkthrough: place a project under a tag and confirm the project row
 appears under that tag immediately (no expanding, no selecting); confirm the
@@ -601,6 +605,80 @@ updated; and the session keying in G is decided (tag id, or migrated on dir
 change) rather than left implicit.
 
 Expected commit prefix: `todo2:`.
+
+---
+
+## 10. Implementation status
+
+Implemented, no schema change:
+
+- **`libs/storage/src/tag.rs`**
+  - `delete_tag` is transactional and removes the tag's implication rows in
+    **both** directions plus its `tag_sections` and `tag_settings` rows, so a
+    placed child falls back to the top level instead of becoming unreachable
+    (§5.1.1).
+  - `get_top_level_tags` / `get_children` now have a deterministic total order
+    (label, then id).
+  - `tag_tree` / `tag_tree_rows` (`TagTreeNode`, `TagTreeRow`): the whole
+    hierarchy in three queries, fully expanded and already ordered
+    (projects → plain tags → sections, then alphabetically), with a per-path
+    visited guard and a `MAX_TREE_DEPTH` cap so a cycle that reached the table
+    behind the API cannot hang a render.
+  - `directory_backed_tag_ids` / `tag_is_directory_backed`: the one definition
+    of "this tag is a project" (`project:` name **or** non-empty dirs).
+- **`libs/storage/src/tag_settings.rs`** — `create_section` writes *both*
+  representations (row, child tag, implication), `remove_section` removes both,
+  `move_section` reorders. `add_tag_section` alone is now the wrong entry point
+  for a caller that wants a usable section (§3.9).
+- **`libs/storage/src/managed.rs`** — `attach_app_to_tag` refuses any
+  directory-backed tag, not just `project:` ones (#25); `with_transaction` is
+  **re-entrant**, so a nested frame joins the outer transaction and
+  `delete_tag` can be transactional without `disable_app` →
+  `release_app_from_tag` → `delete_tag` issuing a second `BEGIN` (§7.1.5 / #36).
+- **`ui_parts/navbar.rs`** — bulk-loads `tag_tree_rows` (no `children_cache`,
+  no per-tag fetch) and renders every level at once (#14 as revised, #31): no
+  chevron, no count, no expand state. Folder icon for any directory-backed tag
+  (#19). Selection and the row's element id are the row's **full path**, so the
+  copies of a multi-parented project are distinct rows and only the clicked one
+  highlights (§5.1.3). One-item row context menu: *Tag settings…* (#23).
+- **`ui_parts/tag_settings.rs`** (new) — the popover: Placed under (chips with a
+  hover cross and a confirm dialog), Add to a tag (filtered picker with the
+  path as secondary text, #28), Directories, Sections, Apps (capture toggle +
+  Detach). Writes immediately (#27); Esc and outside-click close it.
+- **`ui_parts/task_list.rs`** — the gear beside the tag title (absent for All
+  tasks).
+- **`main.rs`** — the popover slot; `NavBarEvent::OpenTagSettings` and
+  `TaskListEvent::OpenTagSettings` open/retarget the panel;
+  `TagSettingsEvent::Changed` reloads the nav and the list;
+  `sync_agent_project` seeds its candidate directories from `dirs`, falling back
+  to the legacy name only when there are none (§9.C).
+- **`store.rs`** — wrappers for the popover, and `project_dir` prefers
+  `tag_settings.dirs` over the name.
+
+Verified: `cargo check --workspace` clean (no warnings); `cargo test -p storage`
+119 passed (9 new); `cargo test -p todo-2` 47 passed (3 new). Not yet run: the
+app under a real window, so the manual walkthrough at the end of §8 is still a
+checklist, not a completed step.
+
+Deliberately not done:
+
+1. **Persistence** (§5.1.12): the app's store is in-memory and re-seeded each
+   launch, so a placement lasts one session. Nothing in this change can fix
+   that; it needs the store to move to a file.
+2. **Agent session keying** (§5.1.11): sessions are still keyed by the resolved
+   directory, so editing dirs strands the previous session. The fix (key by
+   `tag_id`, or migrate the entry on change) needs an `acp-sessions.json` format
+   migration and was left out to keep this change reviewable.
+3. **The picker is a list, not the details pane's input-with-chips editor.**
+   Adding a parent is a filtered list of eligible tags; removing one is the
+   chip's cross. Extracting the details-pane editor into a shared component is
+   its own refactor.
+4. **A tag that already holds a binding can still be given directories**
+   (§5.1.8 / §3.10's ordering hazard): the new eligibility rule closes the
+   attach direction only, so attaching first and adding a directory second still
+   leaves an app managing a project directory.
+5. **No render-level tests** (§8's correction): no `#[gpui::test]` harness exists
+   in this workspace.
 
 ---
 

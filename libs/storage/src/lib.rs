@@ -26,7 +26,7 @@ pub mod prelude {
     };
     pub use crate::migrations::{MigrationEntry, MigrationError};
     pub use crate::repeat::RepeatTaskTemplate;
-    pub use crate::tag::{Tag, TagId, TagNode};
+    pub use crate::tag::{Tag, TagId, TagNode, TagTreeNode, TagTreeRow};
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta, factors_between};
@@ -51,6 +51,10 @@ impl std::fmt::Display for StorageConfig {
 
 pub struct TodoStore {
     pub db: toasty::db::Db,
+    /// How many `with_transaction` frames are open. A nested call joins the
+    /// transaction already in progress instead of issuing a second `BEGIN`,
+    /// which SQLite rejects.
+    pub(crate) transaction_depth: u32,
 }
 impl TodoStore {
     #[fastrace::trace(properties = { "config": "{config}" })]
@@ -69,7 +73,10 @@ impl TodoStore {
             .await
             .context(error::DbBuildSnafu)?;
 
-        let mut store = Self { db };
+        let mut store = Self {
+            db,
+            transaction_depth: 0,
+        };
         store.apply_pending_migrations().await?;
         store.ensure_builtin_apps().await?;
         // Report (never repair) any ownership rows left pointing at content

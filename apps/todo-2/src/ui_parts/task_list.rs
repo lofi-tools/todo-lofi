@@ -3,7 +3,7 @@ use gpui::{
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
-use gpui_component::Sizable;
+use gpui_component::{IconName, Sizable};
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
@@ -23,6 +23,9 @@ pub enum TaskListEvent {
     TitleCommitted { task_id: u64, title: String },
     /// The empty-list action button was clicked (managed tags).
     EmptyActionRequested,
+    /// The gear beside the tag title was clicked: open tag settings for the
+    /// selected tag (the name is the tag's unique name, not its label).
+    OpenTagSettings(String),
 }
 
 /// The display shape of one task-list row: the top-level task plus what it
@@ -145,10 +148,11 @@ impl TaskListView {
                     this.refresh(cx);
                 }
                 NavBarEvent::OpenProjectPicker
+                | NavBarEvent::OpenTagSettings(_)
                 | NavBarEvent::OpenIntegrations
                 | NavBarEvent::OpenAutomations
                 | NavBarEvent::OpenSettings => {
-                    // Picker/dialog open is handled by the Layout; the task
+                    // Picker/popover open is handled by the Layout; the task
                     // list is unaffected.
                 }
             });
@@ -1382,6 +1386,8 @@ impl Render for TaskListView {
             .cloned()
             .or_else(|| self.selected_path.last().cloned())
             .unwrap_or_else(|| "Tasks".to_string());
+        // The gear opens tag settings by unique name; `All Tasks` has no tag.
+        let selected_tag_name = self.selected_path.last().cloned();
 
         div()
             .id("task-list")
@@ -1408,13 +1414,35 @@ impl Render for TaskListView {
                             .text_color(rgb(0xe5e5e5))
                             .child(heading),
                     )
-                    .when_some(
-                        self.travel_panel.clone(),
-                        |this, panel: Entity<super::travel::TravelPanel>| {
-                            this.child(panel.update(cx, |panel, cx| {
-                                panel.new_trip_button(cx)
-                            }))
-                        },
+                    .child(
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(
+                                self.travel_panel.clone(),
+                                |this, panel: Entity<super::travel::TravelPanel>| {
+                                    this.child(panel.update(cx, |panel, cx| {
+                                        panel.new_trip_button(cx)
+                                    }))
+                                },
+                            )
+                            // Tag settings live behind the gear: what the tag is
+                            // placed under, its directories, sections, and apps.
+                            .when_some(selected_tag_name, |this, tag_name| {
+                                this.child(
+                                    Button::new("tag-settings")
+                                        .ghost()
+                                        .compact()
+                                        .icon(IconName::Settings)
+                                        .tooltip("Tag settings")
+                                        .on_click(cx.listener(move |_this, _, _, cx| {
+                                            cx.emit(TaskListEvent::OpenTagSettings(
+                                                tag_name.clone(),
+                                            ));
+                                        })),
+                                )
+                            }),
                     ),
             )
             // Shrink below the placeholder's intrinsic width when the right

@@ -27,6 +27,7 @@ use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
+use ui_parts::tag_settings::{TagSettingsEvent, TagSettingsPanel};
 use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 
 mod coding_git;
@@ -48,6 +49,7 @@ mod ui_parts {
     pub mod task_details;
     pub mod task_list;
     pub mod task_picker;
+    pub mod tag_settings;
     pub mod task_row;
     pub mod todoist_sync;
     pub mod travel;
@@ -98,6 +100,10 @@ struct Layout {
     _agent_events: Subscription,
     /// Special panel for the managed tag in `managed_tag`, if any.
     travel_panel: Entity<TravelPanel>,
+    /// The tag settings popover: placements, directories, sections, and app
+    /// bindings for the selected tag. Created up front (its section input
+    /// needs a window) and retargeted when it is opened for another tag.
+    tag_settings: Entity<TagSettingsPanel>,
     /// The managed tag currently selected (if the selected tag is owned
     /// by an automation).
     managed_tag: Option<ManagedTag>,
@@ -201,6 +207,7 @@ impl Layout {
         let travel_panel = cx.new(|cx| {
             TravelPanel::new(store.clone(), 0, 0, String::new(), window, cx)
         });
+        let tag_settings = cx.new(|cx| TagSettingsPanel::new(store.clone(), window, cx));
         // Captured by the nav subscription below: managed-tag detection is
         // async (a DB lookup), so it spawns on the app executor and
         // updates this entity when the lookup lands.
@@ -293,6 +300,18 @@ impl Layout {
                             .content(move |content, _, _| content.child(picker.clone()))
                     });
                 }
+                // A tag row's context menu: show the tag settings popover for
+                // that tag, wherever the user is.
+                NavBarEvent::OpenTagSettings(name) => {
+                    let candidates = this
+                        ._projects
+                        .iter()
+                        .map(|project| project.path.clone())
+                        .collect();
+                    this.tag_settings
+                        .update(cx, |panel, cx| panel.open(name.clone(), candidates, cx));
+                    cx.notify();
+                }
                 NavBarEvent::OpenIntegrations => {
                     this.show_panel(NavPanel::Integrations, cx);
                 }
@@ -331,6 +350,17 @@ impl Layout {
         cx.subscribe(&travel_panel, move |_this, _panel, event, cx| match event {
             TravelPanelEvent::TripAdded => {
                 list_for_trip.update(cx, |list, cx| list.refresh(cx));
+            }
+        })
+        .detach();
+        // Tag settings writes move the tag tree (placements), change which
+        // tags are projects (directories), and add sections (child tags), so
+        // every write reloads the nav and the list.
+        let list_for_tag_settings = task_list.clone();
+        cx.subscribe(&tag_settings, move |this, _panel, event, cx| match event {
+            TagSettingsEvent::Changed => {
+                this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                list_for_tag_settings.update(cx, |list, cx| list.refresh(cx));
             }
         })
         .detach();
@@ -394,6 +424,17 @@ impl Layout {
                 details_for_list.update(cx, |details, cx| {
                     details.update_title(*task_id, title.clone(), cx)
                 });
+            }
+            // The gear beside the tag title: show the tag settings popover.
+            TaskListEvent::OpenTagSettings(name) => {
+                let candidates = this
+                    ._projects
+                    .iter()
+                    .map(|project| project.path.clone())
+                    .collect();
+                this.tag_settings
+                    .update(cx, |panel, cx| panel.open(name.clone(), candidates, cx));
+                cx.notify();
             }
             // Empty managed tag: open the travel panel's add-trip popover.
             TaskListEvent::EmptyActionRequested => {
@@ -483,6 +524,12 @@ impl Layout {
                     {
                         return;
                     }
+                    if layout.tag_settings.read(cx).is_open() {
+                        layout
+                            .tag_settings
+                            .update(cx, |panel, cx| panel.close(cx));
+                        return;
+                    }
                     if layout.travel_panel.read(cx).is_adding() {
                         layout
                             .travel_panel
@@ -565,6 +612,7 @@ impl Layout {
             details_resize_grab: None,
             _agent_events,
             travel_panel,
+            tag_settings,
             managed_tag: None,
             integrations,
             automations,
@@ -801,7 +849,13 @@ async fn lookup_managed_tag(
             };
             let dirs = store.tag_dirs(tag.id, cx).await.unwrap_or_default();
             let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-            if let Some(path) = tag.name.strip_prefix("project:") {
+            // Directory settings are the source of truth once set: the path
+            // encoded in a legacy `project:` name only counts while the tag has
+            // none, so a directory removed in tag settings is not offered again
+            // by the name.
+            if dirs.is_empty()
+                && let Some(path) = tag.name.strip_prefix("project:")
+            {
                 candidates.push(std::path::PathBuf::from(path));
             }
             candidates.extend(dirs.iter().map(std::path::PathBuf::from));
@@ -1292,6 +1346,10 @@ impl Render for Layout {
                             // order).
                             .child(
                                 self.travel_panel
+                                    .update(cx, |panel, cx| panel.popover(window, cx)),
+                            )
+                            .child(
+                                self.tag_settings
                                     .update(cx, |panel, cx| panel.popover(window, cx)),
                             )
                             .into_any_element(),

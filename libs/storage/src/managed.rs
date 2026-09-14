@@ -293,14 +293,27 @@ impl TodoStore {
 
     /// Run `f` inside a `BEGIN`/`COMMIT` transaction, rolling back on error.
     ///
-    /// Not re-entrant: nested calls would issue a second `BEGIN`, so callers
-    /// must keep transactions flat.
+    /// Re-entrant: a nested call joins the outer transaction and returns its
+    /// result to it, so only the outermost frame issues `BEGIN`/`COMMIT`. The
+    /// inner caller therefore cannot commit its own half of a larger unit of
+    /// work (e.g. `disable_app` -> `release_app_from_tag` -> `delete_tag`).
     pub async fn with_transaction<T, F>(&mut self, f: F) -> QueryResult<T>
     where
         F: for<'a> FnOnce(&'a mut TodoStore) -> BoxQueryFuture<'a, T>,
     {
+        if self.transaction_depth > 0 {
+            self.transaction_depth += 1;
+            let result = f(self).await;
+            self.transaction_depth -= 1;
+            return result;
+        }
         self.run_sql("BEGIN").await?;
-        match f(self).await {
+        self.transaction_depth = 1;
+        let result = f(self).await;
+        // Cleared before COMMIT/ROLLBACK so a failure while finishing the
+        // transaction cannot leave the depth counter stuck above zero.
+        self.transaction_depth = 0;
+        match result {
             Ok(value) => {
                 self.run_sql("COMMIT").await?;
                 Ok(value)
@@ -532,10 +545,11 @@ impl TodoStore {
 
     // -- bindings ---------------------------------------------------------
 
-    /// Attach an app to a tag, enforcing the ownership rules:
-    /// directory-backed project tags are ineligible, a tag held with a
-    /// `full_tag` binding is closed to other apps, and only one app may hold
-    /// a `full_tag` binding.
+    /// Attach an app to a tag, enforcing the ownership rules: directory-backed
+    /// tags are ineligible (`project:{path}` naming or a non-empty
+    /// `tag_settings.dirs`, the same test the agent pane uses to decide a tag
+    /// is a project), a tag held with a `full_tag` binding is closed to other
+    /// apps, and only one app may hold a `full_tag` binding.
     pub async fn attach_app_to_tag(
         &mut self,
         app_id: u64,
@@ -544,7 +558,7 @@ impl TodoStore {
         capture_new_tasks: bool,
     ) -> QueryResult<AppTagBinding> {
         let tag = self.get_tag(tag_id).await?;
-        if tag.is_project() {
+        if self.tag_is_directory_backed(tag_id).await? {
             return Err(crate::QueryErr::UnexpectedValue {
                 message: format!(
                     "tag '{}' backs a local directory and cannot be managed by an app",
@@ -1447,6 +1461,98 @@ mod tests {
         assert_eq!(binding.role, BindingRole::Partial);
         assert!(binding.capture_new_tasks);
         assert_eq!(store.bindings_for_tag(tag.id).await?.len(), 1);
+        Ok(())
+    }
+
+    /// Directory-backed tags are closed to app bindings, and "directory
+    /// backed" means dirs as well as the legacy `project:` name — the same
+    /// test the agent pane uses to decide a tag is a project.
+    #[tokio::test]
+    async fn test_directory_backed_tag_is_ineligible_for_bindings() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let app = store.upsert_app("recipe", "travel", "Travel", None).await?;
+
+        let tag = store.create_tag("WithDirs").await?;
+        // Eligible while it is an ordinary tag…
+        store
+            .attach_app_to_tag(app.id, tag.id, BindingRole::Partial, false)
+            .await?;
+        store.detach_app_from_tag(app.id, tag.id).await?;
+
+        // …and not once it backs a directory, even without a `project:` name.
+        store.add_tag_dir(tag.id, "/tmp/binding/api".to_string()).await?;
+        assert!(
+            store
+                .attach_app_to_tag(app.id, tag.id, BindingRole::Partial, false)
+                .await
+                .is_err(),
+            "a tag with dirs must not accept a binding"
+        );
+
+        // The legacy naming keeps behaving as before.
+        let project = store
+            .get_or_create_project_tag(std::path::Path::new("/tmp/binding/legacy"))
+            .await?;
+        assert!(
+            store
+                .attach_app_to_tag(app.id, project.id, BindingRole::Partial, false)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// `disable_app` opens a transaction and calls code that deletes tags, so
+    /// nesting must join the outer transaction rather than issue a second
+    /// `BEGIN`.
+    #[tokio::test]
+    async fn test_nested_transactions_join_the_outer_one() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+
+        store
+            .with_transaction(|store| {
+                Box::pin(async move {
+                    store.create_tag("Outer").await?;
+                    store
+                        .with_transaction(|store| {
+                            Box::pin(async move {
+                                store.create_tag("Inner").await?;
+                                Ok(())
+                            })
+                        })
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await?;
+
+        assert!(store.get_tag_by_name("Outer").await?.is_some());
+        assert!(store.get_tag_by_name("Inner").await?.is_some());
+        assert_eq!(store.transaction_depth, 0, "depth must unwind on success");
+
+        // A failure inside the nested frame rolls the whole thing back.
+        let nested = store
+            .with_transaction(|store| {
+                Box::pin(async move {
+                    store.create_tag("Kept").await?;
+                    store
+                        .with_transaction(|store| {
+                            Box::pin(async move {
+                                store.create_tag("Discarded").await?;
+                                Err(crate::QueryErr::UnexpectedValue {
+                                    message: "fail the nested frame".to_string(),
+                                })
+                            })
+                        })
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await;
+        assert!(nested.is_err());
+        assert_eq!(store.transaction_depth, 0, "depth must unwind on failure");
+        assert!(store.get_tag_by_name("Kept").await?.is_none());
+        assert!(store.get_tag_by_name("Discarded").await?.is_none());
         Ok(())
     }
 

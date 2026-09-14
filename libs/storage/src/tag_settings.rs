@@ -325,6 +325,78 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Create a section *and* its child tag, which is the only supported way
+    /// to add one.
+    ///
+    /// A section exists twice: a `tag_sections` row (its name and order) and a
+    /// child tag (what tasks are actually assigned to, and what
+    /// `section_groups_for_tasks` and `capture_task` match on by label).
+    /// [`Self::add_tag_section`] writes only the row, so a caller that stops
+    /// there gets a section that never appears in the nav and can never hold a
+    /// task.
+    pub async fn create_section(&mut self, tag_id: u64, name: String) -> QueryResult<TagSection> {
+        let tag = self.get_tag(tag_id).await?;
+        let section = self.add_tag_section(tag_id, name.clone()).await?;
+        // Idempotent: an existing section of the same name already has its
+        // child tag. The child's name is opaque and unique (`<tag>:<section
+        // id>`) while its label is the section name, which is what every
+        // label-based lookup matches on.
+        if self
+            .get_children(tag_id)
+            .await?
+            .iter()
+            .all(|child| child.label() != name)
+        {
+            let child = self
+                .create_tag_with_display_name(
+                    format!("{}:{}", tag.name, section.id),
+                    Some(name),
+                )
+                .await?;
+            self.add_tag_implication(child.id, tag_id).await?;
+        }
+        Ok(section)
+    }
+
+    /// Remove a section together with its child tag.
+    ///
+    /// Tasks that carried the section tag lose that one assignment (the tag is
+    /// deleted with its `direct_task_tags` rows); the tasks themselves and
+    /// their other tags are untouched.
+    pub async fn remove_section(&mut self, tag_id: u64, section_id: u64) -> QueryResult<()> {
+        let section = self
+            .tag_sections(tag_id)
+            .await?
+            .into_iter()
+            .find(|section| section.id == section_id);
+        if let Some(section) = section
+            && let Some(child) = self.section_child_tag(tag_id, &section.name).await?
+        {
+            self.remove_tag_implication(child.id, tag_id).await?;
+            self.delete_tag(child.id).await?;
+        }
+        self.remove_tag_section(section_id).await?;
+        Ok(())
+    }
+
+    /// Move a section one slot up or down among its tag's sections.
+    pub async fn move_section(&mut self, tag_id: u64, section_id: u64, delta: i64) -> QueryResult<()> {
+        let sections = self.tag_sections(tag_id).await?;
+        let Some(index) = sections.iter().position(|section| section.id == section_id) else {
+            return Ok(());
+        };
+        let target = index as i64 + delta;
+        if target < 0 || target >= sections.len() as i64 {
+            return Ok(());
+        }
+        let mut order = sections
+            .into_iter()
+            .map(|section| section.id)
+            .collect::<Vec<_>>();
+        order.swap(index, target as usize);
+        self.reorder_tag_sections(tag_id, &order).await
+    }
+
     /// Group tasks under the sections of `tag_id` for sectioned display.
     ///
     /// A task belongs to the first (by child-tag id) direct tag that is a

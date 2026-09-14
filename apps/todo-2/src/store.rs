@@ -129,27 +129,6 @@ impl Store {
         })
     }
 
-    pub fn list_top_level_tags(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            let tags = s.get_top_level_tags().await.unwrap_or_default();
-            Ok(tags)
-        })
-    }
-
-    pub fn get_children(
-        &self,
-        tag_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<Tag>>> {
-        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            let children = s.get_children(tag_id).await.unwrap_or_default();
-            Ok(children)
-        })
-    }
-
     pub fn toggle_task_done(
         &self,
         task_id: u64,
@@ -689,6 +668,174 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             Ok(s.tag_settings(tag_id).await?.dirs)
+        })
+    }
+
+    /// The whole tag hierarchy, fully expanded and already in render order:
+    /// projects first, then plain tags, then sections, each alphabetically.
+    /// The nav shows every level at once, so this replaces the old
+    /// top-level-tags-plus-lazy-children pair.
+    pub fn tag_tree_rows(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::TagTreeRow>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_tree_rows().await?)
+        })
+    }
+
+    /// The tags `tag_id` is placed under.
+    pub fn tag_parents(&self, tag_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<Vec<Tag>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_parents(tag_id).await?)
+        })
+    }
+
+    /// Ids of every tag below `tag_id`, so a parent picker can leave out the
+    /// choices the store would reject as a cycle.
+    pub fn tag_descendant_ids(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<u64>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.get_all_descendants(tag_id)
+                .await?
+                .into_iter()
+                .map(|tag| tag.id)
+                .collect())
+        })
+    }
+
+    /// Place `child_id` under `parent_id`. One edge: a tag can sit under
+    /// several parents and appears once under each.
+    pub fn place_tag_under(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.add_tag_implication(child_id, parent_id).await?)
+        })
+    }
+
+    /// Remove one placement (other parents, if any, are untouched).
+    pub fn unplace_tag_from(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.remove_tag_implication(child_id, parent_id).await?)
+        })
+    }
+
+    /// Replace a tag's directory list. Any tag may have dirs; that is what
+    /// makes it directory-backed (folder icon, agent pane, and ineligibility
+    /// for app bindings).
+    pub fn set_tag_dirs(
+        &self,
+        tag_id: u64,
+        dirs: Vec<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.set_tag_dirs(tag_id, dirs).await?)
+        })
+    }
+
+    /// The sections of a tag, in display order.
+    pub fn tag_sections(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<TagSection>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_sections(tag_id).await?)
+        })
+    }
+
+    /// Create a section: the `tag_sections` row *and* its child tag, so it
+    /// appears in the nav and can hold tasks.
+    pub fn create_section(
+        &self,
+        tag_id: u64,
+        name: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.create_section(tag_id, name).await?;
+            Ok(())
+        })
+    }
+
+    /// Remove a section and its child tag.
+    pub fn remove_section(
+        &self,
+        tag_id: u64,
+        section_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.remove_section(tag_id, section_id).await?)
+        })
+    }
+
+    /// Move a section one slot up (`-1`) or down (`1`).
+    pub fn move_section(
+        &self,
+        tag_id: u64,
+        section_id: u64,
+        delta: i64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.move_section(tag_id, section_id, delta).await?)
+        })
+    }
+
+    /// The app bindings on a tag, paired with the owning app for display.
+    pub fn bindings_for_tag(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<(App, AppTagBinding)>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let bindings = s.bindings_for_tag(tag_id).await?;
+            let apps = s.list_apps().await?;
+            Ok(bindings
+                .into_iter()
+                .filter_map(|binding| {
+                    apps.iter()
+                        .find(|app| app.id == binding.app_id)
+                        .cloned()
+                        .map(|app| (app, binding))
+                })
+                .collect())
         })
     }
 
@@ -1365,16 +1512,23 @@ impl Store {
                 return Ok(None);
             };
             let task = store.get_task(id).await?;
-            for tag in store.get_direct_task_tags(id).await? {
-                if let Some(path) = tag.name.strip_prefix("project:") {
-                    let path = std::path::PathBuf::from(path);
-                    if path.is_dir() {
-                        return Ok(Some(path));
+            let direct_tags = store.get_direct_task_tags(id).await?;
+            for tag in &direct_tags {
+                let dirs = store.tag_settings(tag.id).await?.dirs;
+                if dirs.is_empty() {
+                    // Legacy shape: the directory encoded in a `project:` name,
+                    // used only while the tag has no directory settings.
+                    if let Some(path) = tag.name.strip_prefix("project:") {
+                        let path = std::path::PathBuf::from(path);
+                        if path.is_dir() {
+                            return Ok(Some(path));
+                        }
                     }
+                    continue;
                 }
-            }
-            for tag in store.get_direct_task_tags(id).await? {
-                for dir in store.tag_settings(tag.id).await?.dirs {
+                // Directory settings win over the name: they are the tag's
+                // real (and editable) list of working directories.
+                for dir in dirs {
                     let path = std::path::PathBuf::from(dir);
                     if path.is_dir() {
                         return Ok(Some(path));

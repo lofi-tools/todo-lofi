@@ -44,6 +44,135 @@ pub struct TagNode {
     pub children: Vec<TagNode>,
 }
 
+/// How deep the render walk descends before it stops. The store refuses to
+/// create a cycle, but one that reached the table another way must still not
+/// hang a render, so depth is bounded in addition to the per-path guard.
+const MAX_TREE_DEPTH: usize = 32;
+
+/// One tag in the nav tree, expanded and already in render order.
+#[derive(Debug, Clone)]
+pub struct TagTreeNode {
+    pub tag: Tag,
+    /// Backs a local directory: folder icon, agent pane, app-binding exclusion.
+    pub is_directory_backed: bool,
+    /// A section of the parent it hangs under (its label matches one of that
+    /// parent's `tag_sections`), rather than a placed project or child tag.
+    pub is_section: bool,
+    pub children: Vec<TagTreeNode>,
+}
+
+impl TagTreeNode {
+    /// Depth-first rows in render order. A tag with several parents appears
+    /// once per path.
+    pub fn flatten(&self) -> Vec<TagTreeRow> {
+        let mut rows = Vec::new();
+        let mut path = Vec::new();
+        self.push_rows(0, &mut path, &mut rows);
+        rows
+    }
+
+    fn push_rows(&self, depth: usize, path: &mut Vec<String>, out: &mut Vec<TagTreeRow>) {
+        path.push(self.tag.name.clone());
+        out.push(TagTreeRow {
+            depth,
+            path: path.clone(),
+            tag: self.tag.clone(),
+            is_directory_backed: self.is_directory_backed,
+            is_section: self.is_section,
+        });
+        for child in &self.children {
+            child.push_rows(depth + 1, path, out);
+        }
+        path.pop();
+    }
+}
+
+/// One nav row: a tag plus where it sits in the tree. `path` is the ancestor
+/// chain of tag *names*, which is what selecting the row navigates by.
+#[derive(Debug, Clone)]
+pub struct TagTreeRow {
+    pub tag: Tag,
+    /// Indent depth; 0 for a top-level tag.
+    pub depth: usize,
+    pub path: Vec<String>,
+    pub is_directory_backed: bool,
+    pub is_section: bool,
+}
+
+/// In-memory view of the implication DAG used to build one `tag_tree` result.
+struct TreeBuild<'a> {
+    by_id: &'a HashMap<u64, Tag>,
+    children: &'a HashMap<u64, Vec<u64>>,
+    sections: &'a HashMap<u64, Vec<String>>,
+    directory_backed: &'a HashSet<u64>,
+}
+
+impl TreeBuild<'_> {
+    /// Projects first, then plain tags, then sections; each group by label
+    /// (case-insensitively), finally by id so the order is total.
+    fn order_key(&self, parent: Option<u64>, id: u64) -> (u8, String, u64) {
+        let group = if self.directory_backed.contains(&id) {
+            0
+        } else if parent.is_some_and(|parent| self.is_section_of(parent, id)) {
+            2
+        } else {
+            1
+        };
+        let label = self
+            .by_id
+            .get(&id)
+            .map(|tag| tag.label().to_lowercase())
+            .unwrap_or_default();
+        (group, label, id)
+    }
+
+    /// A child tag is a section of `parent` when its label matches a section
+    /// name on that parent — the same rule `section_child_tag` uses.
+    fn is_section_of(&self, parent: u64, id: u64) -> bool {
+        let Some(tag) = self.by_id.get(&id) else {
+            return false;
+        };
+        let label = tag.label();
+        self.sections
+            .get(&parent)
+            .is_some_and(|names| names.iter().any(|name| name == &label))
+    }
+
+    fn node(
+        &self,
+        id: u64,
+        parent: Option<u64>,
+        path: &mut HashSet<u64>,
+        depth: usize,
+    ) -> Option<TagTreeNode> {
+        let tag = self.by_id.get(&id)?.clone();
+        // Per-path guard: the same tag repeats under different parents on
+        // purpose, so only the current branch is checked, not every id already
+        // emitted somewhere else in the tree.
+        if !path.insert(id) {
+            return None;
+        }
+        let mut child_ids = self.children.get(&id).cloned().unwrap_or_default();
+        child_ids.sort_by_key(|child| self.order_key(Some(id), *child));
+        child_ids.dedup();
+        let mut children = Vec::new();
+        if depth < MAX_TREE_DEPTH {
+            for child in child_ids {
+                if let Some(node) = self.node(child, Some(id), path, depth + 1) {
+                    children.push(node);
+                }
+            }
+        }
+        path.remove(&id);
+        Some(TagTreeNode {
+            is_directory_backed: self.directory_backed.contains(&id),
+            is_section: parent.is_some_and(|parent| self.is_section_of(parent, id)),
+            tag,
+            children,
+        })
+    }
+}
+
 fn parse_tag_row(record: &toasty::stmt::Value) -> Option<Tag> {
     if let toasty::stmt::Value::Record(record) = record {
         let id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
@@ -176,11 +305,42 @@ impl TodoStore {
         Ok(tags)
     }
 
+    /// Delete a tag, its placement edges, and its settings.
+    ///
+    /// Edges are removed in *both* directions: a tag can be both placed (its
+    /// `implier_id` rows) and a parent (its `implied_id` rows). Leaving the
+    /// incoming rows behind makes a placed child unreachable — it is no longer
+    /// top-level (it still appears as an implier) and the parent that used to
+    /// render it is gone — so it would disappear from the tree entirely. Its
+    /// children therefore fall back to the top level.
+    ///
+    /// Transactional so a failure cannot leave the tag gone but its edges
+    /// behind (or the reverse). Re-entrant, so calling this from inside
+    /// `disable_app`'s transaction joins that transaction rather than nesting
+    /// a second `BEGIN`.
     pub async fn delete_tag(&mut self, id: u64) -> QueryResult<()> {
-        Tag::delete_by_id(&mut self.db, id)
-            .await
-            .context(crate::error::DeleteTagSnafu { id })?;
-        Ok(())
+        self.with_transaction(|store| {
+            Box::pin(async move {
+                for statement in [
+                    "DELETE FROM tag_implications WHERE implier_id = ?1 OR implied_id = ?1",
+                    "DELETE FROM tag_sections WHERE tag_id = ?1",
+                    "DELETE FROM tag_settings WHERE tag_id = ?1",
+                ] {
+                    toasty::sql::statement(statement)
+                        .bind(id as i64)
+                        .exec(&mut store.db)
+                        .await
+                        .context(crate::error::QueryTagsSnafu {
+                            context: "delete tag cleanup",
+                        })?;
+                }
+                Tag::delete_by_id(&mut store.db, id)
+                    .await
+                    .context(crate::error::DeleteTagSnafu { id })?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     pub async fn add_tag_implication(
@@ -305,6 +465,7 @@ impl TodoStore {
             SELECT t.id, t.name, t.display_name
             FROM tags t
             WHERE t.id NOT IN (SELECT implier_id FROM tag_implications)
+            ORDER BY LOWER(COALESCE(NULLIF(t.display_name, ''), t.name)), t.id
             "#,
         )
         .column_types([
@@ -335,6 +496,7 @@ impl TodoStore {
             JOIN tag_implications ti ON ti.implier_id = t.id
             WHERE ti.implied_id = ?1
               AND ti.implier_id IS NOT NULL
+            ORDER BY LOWER(COALESCE(NULLIF(t.display_name, ''), t.name)), t.id
             "#,
         )
         .column_types([
@@ -386,6 +548,143 @@ impl TodoStore {
             }
         }
         Ok(tags)
+    }
+
+    /// Ids of every tag that backs a local directory: a `project:{path}` name
+    /// or a non-empty `tag_settings.dirs`. This is the app-facing definition of
+    /// "this tag is a project" — the navbar's folder icon, the agent pane, and
+    /// app-binding eligibility all use it, so a tag that only has `dirs` set is
+    /// a project everywhere rather than an ordinary tag with a stray setting.
+    pub async fn directory_backed_tag_ids(&mut self) -> QueryResult<HashSet<u64>> {
+        let rows = toasty::sql::query(
+            r#"
+            SELECT t.id
+            FROM tags t
+            LEFT JOIN tag_settings s ON s.tag_id = t.id
+            WHERE t.name LIKE 'project:%'
+               OR (s.dirs IS NOT NULL AND s.dirs <> '' AND s.dirs <> '[]')
+            "#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list directory-backed tags",
+        })?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => {
+                    record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
+                }
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Whether one tag backs a local directory; the single-tag form of
+    /// [`Self::directory_backed_tag_ids`].
+    pub async fn tag_is_directory_backed(&mut self, tag_id: u64) -> QueryResult<bool> {
+        if self.get_tag(tag_id).await?.is_project() {
+            return Ok(true);
+        }
+        Ok(!self.tag_settings(tag_id).await?.dirs.is_empty())
+    }
+
+    /// The whole tag hierarchy, fully expanded and already in render order.
+    ///
+    /// The nav shows every level at once (there is no disclosure state), so the
+    /// tree is built in memory from all tags, all implication edges, and all
+    /// sections — three queries total, rather than one per expanded tag. A tag
+    /// placed under several parents appears once per parent, each copy with its
+    /// own subtree.
+    pub async fn tag_tree(&mut self) -> QueryResult<Vec<TagTreeNode>> {
+        let by_id: HashMap<u64, Tag> = self
+            .list_tags()
+            .await?
+            .into_iter()
+            .map(|tag| (tag.id, tag))
+            .collect();
+        let directory_backed = self.directory_backed_tag_ids().await?;
+
+        let imp_rows = toasty::sql::query(r#"SELECT implier_id, implied_id FROM tag_implications"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "load tag tree edges",
+            })?;
+        let mut children: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut has_parent: HashSet<u64> = HashSet::new();
+        for row in imp_rows {
+            if let toasty::stmt::Value::Record(record) = row
+                && let (Some(child), Some(parent)) = (
+                    record.first().and_then(|v| v.to_i64()),
+                    record.get(1).and_then(|v| v.to_i64()),
+                )
+            {
+                children.entry(parent as u64).or_default().push(child as u64);
+                // A tag whose parent row is missing (hand-edited database)
+                // still counts as a child, so it is not also rendered as a
+                // root while its edge is skipped during the walk.
+                has_parent.insert(child as u64);
+            }
+        }
+
+        let section_rows = toasty::sql::query(r#"SELECT tag_id, name FROM tag_sections"#)
+            .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::String])
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "load tag tree sections",
+            })?;
+        let mut sections: HashMap<u64, Vec<String>> = HashMap::new();
+        for row in section_rows {
+            if let toasty::stmt::Value::Record(record) = row
+                && let (Some(tag_id), Some(name)) = (
+                    record.first().and_then(|v| v.to_i64()),
+                    record.get(1).and_then(|v| v.as_str()),
+                )
+            {
+                sections
+                    .entry(tag_id as u64)
+                    .or_default()
+                    .push(name.to_string());
+            }
+        }
+
+        let build = TreeBuild {
+            by_id: &by_id,
+            children: &children,
+            sections: &sections,
+            directory_backed: &directory_backed,
+        };
+        let mut roots: Vec<u64> = by_id
+            .keys()
+            .copied()
+            .filter(|id| !has_parent.contains(id))
+            .collect();
+        roots.sort_by_key(|id| build.order_key(None, *id));
+
+        let mut tree = Vec::new();
+        for root in roots {
+            let mut path = HashSet::new();
+            if let Some(node) = build.node(root, None, &mut path, 0) {
+                tree.push(node);
+            }
+        }
+        Ok(tree)
+    }
+
+    /// [`Self::tag_tree`] flattened to render rows, each with its indent depth
+    /// and the names of the path it was reached through.
+    pub async fn tag_tree_rows(&mut self) -> QueryResult<Vec<TagTreeRow>> {
+        Ok(self
+            .tag_tree()
+            .await?
+            .iter()
+            .flat_map(TagTreeNode::flatten)
+            .collect())
     }
 
     pub async fn assign_tag_to_task(&mut self, task_id: u64, tag_name: &str) -> QueryResult<()> {
@@ -1311,6 +1610,199 @@ mod tests {
         let react_tasks = storage.list_tasks_by_tag(react.id).await?;
         assert_eq!(react_tasks.len(), 1);
         assert_eq!(react_tasks[0].inferred_tags.len(), 3);
+
+        Ok(())
+    }
+
+    /// Deleting a parent must take its edges with it in both directions.
+    /// Otherwise the placed child is neither top-level (it still appears as an
+    /// implier) nor rendered (its parent is gone), so it vanishes from the nav
+    /// entirely.
+    #[tokio::test]
+    async fn test_delete_tag_removes_placement_edges_both_ways() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let area = storage.create_tag("Area").await?;
+        let work = storage.create_tag("Work").await?;
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/nested/api"))
+            .await?;
+        // Work hangs under Area; the project's folder is placed under Work.
+        storage.add_tag_implication(work.id, area.id).await?;
+        storage.add_tag_implication(project.id, work.id).await?;
+
+        storage.delete_tag(work.id).await?;
+
+        assert!(storage.get_parents(project.id).await?.is_empty());
+        assert!(storage.get_parents(area.id).await?.is_empty());
+        let top = storage.get_top_level_tags().await?;
+        assert!(top.iter().any(|tag| tag.id == project.id), "{top:?}");
+        assert!(top.iter().any(|tag| tag.id == area.id));
+        // …and the project is reachable in the rendered tree, not orphaned.
+        let rows = storage.tag_tree_rows().await?;
+        assert!(rows.iter().any(|row| row.tag.id == project.id));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tag_tree_nests_projects_under_a_tag_in_kind_order() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let work = storage.create_tag("Work").await?;
+        let zebra = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/tree/zebra"))
+            .await?;
+        let alpha = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/tree/alpha"))
+            .await?;
+        let note = storage.create_tag("Backburner").await?;
+        for child in [zebra.id, alpha.id, note.id] {
+            storage.add_tag_implication(child, work.id).await?;
+        }
+
+        let rows = storage.tag_tree_rows().await?;
+        let at = |id: u64| {
+            rows.iter()
+                .position(|row| row.tag.id == id)
+                .expect("row for tag")
+        };
+        let work_at = at(work.id);
+        assert_eq!(rows[work_at].depth, 0);
+        assert!(!rows[work_at].is_directory_backed);
+        // Projects first (alphabetically), then the plain child tag.
+        assert_eq!(rows[work_at + 1].tag.id, alpha.id);
+        assert_eq!(rows[work_at + 2].tag.id, zebra.id);
+        assert_eq!(rows[work_at + 3].tag.id, note.id);
+        assert_eq!(rows[work_at + 1].depth, 1);
+        assert!(rows[work_at + 1].is_directory_backed);
+        assert!(!rows[work_at + 3].is_directory_backed);
+        // A nested row knows the path it was reached through.
+        assert_eq!(
+            rows[work_at + 1].path,
+            vec!["Work".to_string(), alpha.name.clone()]
+        );
+        // The order is total, so repeated loads agree.
+        let again = storage.tag_tree_rows().await?;
+        let ids = |rows: &[TagTreeRow]| rows.iter().map(|row| row.tag.id).collect::<Vec<_>>();
+        assert_eq!(ids(&rows), ids(&again));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tag_tree_orders_sections_last_and_marks_them() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/sectioned/api"))
+            .await?;
+        let plan = storage.create_tag("Plan").await?;
+        let backlog = storage.create_tag("Backlog").await?;
+        storage.add_tag_implication(plan.id, project.id).await?;
+        storage.add_tag_implication(backlog.id, project.id).await?;
+        // "Backlog" is a section of the project, so it sorts after plain tags.
+        storage
+            .add_tag_section(project.id, "Backlog".to_string())
+            .await?;
+
+        let rows = storage.tag_tree_rows().await?;
+        let project_at = rows
+            .iter()
+            .position(|row| row.tag.id == project.id)
+            .expect("project row");
+        assert_eq!(rows[project_at + 1].tag.id, plan.id);
+        assert!(!rows[project_at + 1].is_section);
+        assert_eq!(rows[project_at + 2].tag.id, backlog.id);
+        assert!(rows[project_at + 2].is_section);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tag_tree_repeats_a_multi_parent_project_per_parent() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let work = storage.create_tag("Work").await?;
+        let home = storage.create_tag("Home").await?;
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/dup/api"))
+            .await?;
+        storage.add_tag_implication(project.id, work.id).await?;
+        storage.add_tag_implication(project.id, home.id).await?;
+
+        let rows = storage.tag_tree_rows().await?;
+        let copies = rows
+            .iter()
+            .filter(|row| row.tag.id == project.id)
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|row| row.depth == 1));
+        assert!(copies.iter().any(|row| row.path[0] == "Work"));
+        assert!(copies.iter().any(|row| row.path[0] == "Home"));
+
+        Ok(())
+    }
+
+    /// A cycle can only reach the table behind the API's back, but the render
+    /// walk still has to terminate when it does.
+    #[tokio::test]
+    async fn test_tag_tree_terminates_on_a_cycle_written_behind_the_api() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let root = storage.create_tag("Root").await?;
+        let a = storage.create_tag("A").await?;
+        let b = storage.create_tag("B").await?;
+        storage.add_tag_implication(a.id, root.id).await?;
+        storage.add_tag_implication(b.id, a.id).await?;
+        // The API refuses this direction, so write it directly.
+        assert!(storage.add_tag_implication(a.id, b.id).await.is_err());
+        toasty::sql::statement(
+            r#"INSERT INTO tag_implications (implier_id, implied_id) VALUES (?1, ?2)"#,
+        )
+        .bind(a.id as i64)
+        .bind(b.id as i64)
+        .exec(&mut storage.db)
+        .await?;
+
+        let rows = storage.tag_tree_rows().await?;
+        // Root -> A -> B, and the back edge to A is cut rather than followed.
+        let ids = rows.iter().map(|row| row.tag.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec![root.id, a.id, b.id]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_directory_backed_covers_dirs_alone() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let plain = storage.create_tag("Plain").await?;
+        let with_dirs = storage.create_tag("WithDirs").await?;
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/dirs/api"))
+            .await?;
+
+        assert!(!storage.tag_is_directory_backed(plain.id).await?);
+        assert!(!storage.tag_is_directory_backed(with_dirs.id).await?);
+        assert!(storage.tag_is_directory_backed(project.id).await?);
+
+        storage
+            .add_tag_dir(with_dirs.id, "/tmp/dirs/extra".to_string())
+            .await?;
+        assert!(storage.tag_is_directory_backed(with_dirs.id).await?);
+
+        let ids = storage.directory_backed_tag_ids().await?;
+        assert!(ids.contains(&project.id));
+        assert!(ids.contains(&with_dirs.id));
+        assert!(!ids.contains(&plain.id));
+
+        let rows = storage.tag_tree_rows().await?;
+        let row = rows
+            .iter()
+            .find(|row| row.tag.id == with_dirs.id)
+            .expect("row for the dirs-backed tag");
+        assert!(row.is_directory_backed);
 
         Ok(())
     }

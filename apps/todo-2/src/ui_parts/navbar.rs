@@ -5,6 +5,7 @@ use gpui::{
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::IconName;
+use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -19,6 +20,9 @@ pub enum NavBarEvent {
     AllTasks,
     /// The + button was clicked; the parent should open the project picker.
     OpenProjectPicker,
+    /// A tag row's context menu asked for its settings; the parent shows the
+    /// tag settings popover for that tag.
+    OpenTagSettings(String),
     /// The footer "Integrations" row was clicked.
     OpenIntegrations,
     /// The footer "Automations" row was clicked.
@@ -40,8 +44,10 @@ pub enum NavPanel {
 
 pub struct NavBar {
     store: Store,
-    top_level_tags: Vec<Tag>,
-    children_cache: HashMap<u64, Vec<Tag>>,
+    /// Every tag row, already ordered and indented by the store: the tree is
+    /// rendered fully expanded, so there is no per-tag expand state and no
+    /// lazy child fetch.
+    rows: Vec<TagTreeRow>,
     selected_path: Vec<String>,
     active_panel: NavPanel,
     /// Provider per synced tag (`tag_id → provider`), for the corner badge
@@ -51,18 +57,17 @@ pub struct NavBar {
     /// row shows a pulsing dot while its project is busy.
     busy_tags: HashSet<String>,
     _fetch_tags: Option<Task<()>>,
-    _fetch_children: Option<Task<()>>,
 }
 
 impl NavBar {
     pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
         let fetch_store = store.clone();
-        let tags_task = fetch_store.list_top_level_tags(cx);
+        let tags_task = fetch_store.tag_tree_rows(cx);
         let providers_task = fetch_store.tag_link_providers(cx);
 
         let _fetch_tags = Some(cx.spawn(async move |this, cx| {
-            let tags = match tags_task.await {
-                Ok(tags) => tags,
+            let rows = match tags_task.await {
+                Ok(rows) => rows,
                 Err(e) => {
                     tracing::error!("Failed to fetch tags: {e}");
                     return;
@@ -70,7 +75,7 @@ impl NavBar {
             };
             let providers = providers_task.await.unwrap_or_default();
             this.update(cx, |this, cx| {
-                this.top_level_tags = tags;
+                this.rows = rows;
                 this.linked_providers = providers;
                 this._fetch_tags = None;
                 cx.notify();
@@ -80,14 +85,12 @@ impl NavBar {
 
         Self {
             store,
-            top_level_tags: Vec::new(),
-            children_cache: HashMap::new(),
+            rows: Vec::new(),
             selected_path: Vec::new(),
             active_panel: NavPanel::Tasks,
             linked_providers: HashMap::new(),
             busy_tags: HashSet::new(),
             _fetch_tags,
-            _fetch_children: None,
         }
     }
 
@@ -117,20 +120,19 @@ impl NavBar {
         }
     }
 
-    /// The currently selected tag path (used to drop stale async
-    /// navigation results).
+    /// The currently selected tag path.
     pub fn selected_path(&self) -> &[String] {
         &self.selected_path
     }
 
-    /// Re-fetch the tag tree after a new tag was created elsewhere (e.g. the
-    /// project picker modal).
+    /// Re-fetch the tag tree after a tag, placement, or section changed
+    /// elsewhere (the tag settings popover, the project picker).
     pub fn refresh_tags(&mut self, cx: &mut Context<Self>) {
-        let tags_task = self.store.list_top_level_tags(cx);
+        let tags_task = self.store.tag_tree_rows(cx);
         let providers_task = self.store.tag_link_providers(cx);
         self._fetch_tags = Some(cx.spawn(async move |this, cx| {
-            let tags = match tags_task.await {
-                Ok(tags) => tags,
+            let rows = match tags_task.await {
+                Ok(rows) => rows,
                 Err(e) => {
                     tracing::error!("Failed to refresh tags: {e}");
                     return;
@@ -138,9 +140,8 @@ impl NavBar {
             };
             let providers = providers_task.await.unwrap_or_default();
             this.update(cx, |this, cx| {
-                this.top_level_tags = tags;
+                this.rows = rows;
                 this.linked_providers = providers;
-                this.children_cache.clear();
                 this._fetch_tags = None;
                 cx.notify();
             })
@@ -148,122 +149,16 @@ impl NavBar {
         }));
     }
 
-    fn navigate_to_tag(
-        &mut self,
-        _tag_name: &str,
-        _tag_id: u64,
-        path: &[String],
-        cx: &mut Context<Self>,
-    ) {
+    /// Select a tag by the path it was reached through. The path is what
+    /// disambiguates a project that is placed under several parents.
+    fn navigate_to_tag(&mut self, path: &[String], cx: &mut Context<Self>) {
         if self.selected_path == path {
             return;
         }
         self.selected_path = path.to_vec();
         cx.emit(NavBarEvent::TagSelected(path.to_vec()));
-
-        let mut current_children = self.top_level_tags.clone();
-        for name in &self.selected_path {
-            if let Some(tag) = current_children.iter().find(|t| t.name == *name) {
-                if !self.children_cache.contains_key(&tag.id) {
-                    let store = self.store.clone();
-                    let id = tag.id;
-                    let fetch_task = store.get_children(id, cx);
-                    self._fetch_children =
-                        Some(cx.spawn(async move |this, cx| match fetch_task.await {
-                            Ok(children) => {
-                                this.update(cx, |this, cx| {
-                                    this.children_cache.insert(id, children);
-                                    this._fetch_children = None;
-                                    cx.notify();
-                                })
-                                .ok();
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to fetch children: {e}");
-                            }
-                        }));
-                    break;
-                }
-                current_children = self
-                    .children_cache
-                    .get(&tag.id)
-                    .cloned()
-                    .unwrap_or_default();
-            }
-        }
         cx.notify();
     }
-
-    fn collect_visible_tags(&self) -> Vec<VisibleTag> {
-        let mut result = Vec::new();
-
-        fn walk(
-            tag: &Tag,
-            depth: usize,
-            ancestors: &[String],
-            selected_path: &[String],
-            children_cache: &HashMap<u64, Vec<Tag>>,
-            busy_tags: &HashSet<String>,
-            result: &mut Vec<VisibleTag>,
-        ) {
-            let children = children_cache.get(&tag.id).cloned().unwrap_or_default();
-            let has_children = !children.is_empty();
-            let mut path = ancestors.to_vec();
-            path.push(tag.name.clone());
-            result.push(VisibleTag {
-                name: tag.name.clone(),
-                label: tag_label(tag),
-                id: tag.id,
-                depth,
-                has_children,
-                path: path.clone(),
-                is_project: tag.is_project(),
-                busy: busy_tags.contains(&tag.name),
-            });
-
-            let is_on_path = selected_path.iter().any(|p| p == &tag.name);
-            if is_on_path {
-                for child in &children {
-                    walk(
-                        child,
-                        depth + 1,
-                        &path,
-                        selected_path,
-                        children_cache,
-                        busy_tags,
-                        result,
-                    );
-                }
-            }
-        }
-
-        for tag in &self.top_level_tags {
-            walk(
-                tag,
-                0,
-                &[],
-                &self.selected_path,
-                &self.children_cache,
-                &self.busy_tags,
-                &mut result,
-            );
-        }
-
-        result
-    }
-}
-
-/// One rendered navbar row: the tag's identity plus the decorations the row
-/// needs (depth indent, project icon, busy dot).
-struct VisibleTag {
-    name: String,
-    label: String,
-    id: u64,
-    depth: usize,
-    has_children: bool,
-    path: Vec<String>,
-    is_project: bool,
-    busy: bool,
 }
 
 /// A small pulsing dot shown on a project row while its agent turn streams.
@@ -283,19 +178,18 @@ fn busy_dot() -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// The user-facing label of a tag: the display name when set (project
-/// tags), otherwise the plain name.
-fn tag_label(tag: &Tag) -> String {
-    tag.label()
-}
-
 impl EventEmitter<NavBarEvent> for NavBar {}
 
 impl Render for NavBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let visible_tags = self.collect_visible_tags();
-        let selected_tag = self.selected_path.last().cloned();
         let is_all_tasks = self.selected_path.is_empty();
+        // Cloned so the row closures do not borrow `self` while `cx.listener`
+        // borrows `cx`.
+        let rows = self.rows.clone();
+        let selected_path = self.selected_path.clone();
+        let linked_providers = self.linked_providers.clone();
+        let busy_tags = self.busy_tags.clone();
+        let nav = cx.weak_entity();
 
         div()
             .h_full()
@@ -308,8 +202,8 @@ impl Render for NavBar {
             .child(
                 div()
                     .flex_1()
-                    // Deep tag trees can exceed the viewport height, so make
-                    // the nav scrollable while the footer stays pinned.
+                    // The tree is fully expanded, so it can easily exceed the
+                    // viewport height; scroll it while the footer stays pinned.
                     .overflow_y_scrollbar()
                     .v_flex()
                     .gap_0p5()
@@ -357,94 +251,99 @@ impl Render for NavBar {
                                 cx.notify();
                             })),
                     )
-                    .children(visible_tags.into_iter().map(
-                        |VisibleTag {
-                             name: tag_name,
-                             label: tag_label,
-                             id: tag_id,
-                             depth,
-                             has_children: _has_children,
-                             path,
-                             is_project,
-                             busy,
-                         }| {
-                            let tag_for_click = tag_name.clone();
-                            let path_for_click = path;
-                            let is_selected = selected_tag.as_deref() == Some(&tag_name);
+                    .children(rows.into_iter().map(|row| {
+                        let TagTreeRow {
+                            tag,
+                            depth,
+                            path,
+                            is_directory_backed,
+                            is_section: _is_section,
+                        } = row;
+                        let tag_id = tag.id;
+                        let tag_name = tag.name.clone();
+                        let label = tag.label();
+                        let is_selected = path == selected_path;
+                        let busy = busy_tags.contains(&tag_name);
+                        // A duplicated row (the same project under several
+                        // parents) must not reuse an element id, so the path
+                        // identifies the row rather than the tag.
+                        let row_id = format!("tag-row:{}", path.join("/"));
 
-                            let prefix: gpui::AnyElement = if is_project {
-                                div()
-                                    .w(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgb(TEXT_FAINT))
-                                    .child(IconName::Folder)
-                                    .into_any_element()
-                            } else {
-                                let badge = self
-                                    .linked_providers
-                                    .get(&tag_id)
-                                    .map(|provider| provider.as_str());
-                                div()
-                                    .w(px(16.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgb(TEXT_FAINT))
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .child("#")
-                                            .when_some(badge, |this, provider| {
-                                                this.child(sync_badge(provider))
-                                            }),
-                                    )
-                                    .into_any_element()
-                            };
-
+                        let prefix: gpui::AnyElement = if is_directory_backed {
                             div()
-                                .h_flex()
+                                .w(px(16.))
+                                .flex_none()
+                                .flex()
                                 .items_center()
-                                .ml(px(depth as f32 * 8.0))
+                                .justify_center()
+                                .text_color(rgb(TEXT_FAINT))
+                                .child(IconName::Folder)
+                                .into_any_element()
+                        } else {
+                            let badge = linked_providers.get(&tag_id).map(|provider| provider.as_str());
+                            div()
+                                .w(px(16.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(TEXT_FAINT))
                                 .child(
                                     div()
-                                        .id(("tag", tag_id))
-                                        .flex_1()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(prefix)
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(tag_label),
-                                        )
-                                        .when(busy, |this| this.child(busy_dot()))
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_md()
-                                        .bg(if is_selected {
-                                            rgb(0x2a2a2a)
-                                        } else {
-                                            rgb(0x1e1e1e)
-                                        })
-                                        .hover(|s| s.bg(rgb(0x2a2a2a)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.navigate_to_tag(
-                                                &tag_for_click,
-                                                tag_id,
-                                                &path_for_click,
-                                                cx,
-                                            );
-                                        })),
+                                        .relative()
+                                        .child("#")
+                                        .when_some(badge, |this, provider| {
+                                            this.child(sync_badge(provider))
+                                        }),
                                 )
-                        },
-                    )),
+                                .into_any_element()
+                        };
+
+                        let click_path = path.clone();
+                        let menu_tag_name = tag_name.clone();
+                        let menu_nav = nav.clone();
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .ml(px(depth as f32 * 8.0))
+                            .child(
+                                div()
+                                    .id(row_id)
+                                    .flex_1()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(prefix)
+                                    .child(div().flex_1().min_w_0().truncate().child(label))
+                                    .when(busy, |this| this.child(busy_dot()))
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .bg(if is_selected {
+                                        rgb(0x2a2a2a)
+                                    } else {
+                                        rgb(0x1e1e1e)
+                                    })
+                                    .hover(|s| s.bg(rgb(0x2a2a2a)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.navigate_to_tag(&click_path, cx);
+                                    }))
+                                    .context_menu(move |menu, _window, _cx| {
+                                        let nav = menu_nav.clone();
+                                        let tag_name = menu_tag_name.clone();
+                                        menu.item(PopupMenuItem::new("Tag settings…").on_click(
+                                            move |_, _window, cx| {
+                                                nav.update(cx, |_this, cx| {
+                                                    cx.emit(NavBarEvent::OpenTagSettings(
+                                                        tag_name.clone(),
+                                                    ));
+                                                })
+                                                .ok();
+                                            },
+                                        ))
+                                    }),
+                            )
+                    })),
             )
             .child(
                 div()
