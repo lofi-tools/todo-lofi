@@ -18,9 +18,9 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
   - Github issues & projects
 - **Integrated mini-apps (extensions)** — 
   - Travel checklist templates
-  - Message follow-ups & birthday wishes — `coming soon`
-  - Job application tracking — `coming soon`
-- **Let outside apps manage part of your task lists** — `coming soon`
+  - Message follow-ups & birthday wishes — `$\color{#8b949e}\textsf{coming soon}$`
+  - Job application tracking — $\color{#8b949e}\textsf{coming soon}$
+- **Let outside apps manage part of your task lists** — $\color{#8b949e}\textsf{coming soon}$
 
 ## Quickstart
 
