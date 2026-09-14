@@ -37,8 +37,15 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 
 ### Useful commands
 
+#### Launching
 - `cargo run -p todo-2` — run the desktop app
-- `t2` — run the desktop app with auto-rebuilds
+- `t2` (or `cargo watch -x "run -p todo-2"`) — run the desktop app with auto-rebuilds
+#### Testing
+- `ccheck` — cargo check all workspace packages (todo-2, storage, report_proc, agent-cli)
+- `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)
+#### Contributions
+- `mig <args>` — run a storage migration (`cargo run --bin migrate -- migration ...`)
+- `clone-patch <crate>` — clone a crate's repo into `patched/` to vendor a fork
 
 ## Project Structure
 

@@ -31,7 +31,7 @@
           bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs pkgs.writeShellScriptBin {
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
-            dt = ''set -e;  cd desktop; cargo tauri dev '';
+            dt = ''set -e;  cd demos/desktop-tauri; cargo tauri dev '';
             ccheck = ''set -ex;
               cargo check -p desktop-gpui
               cargo check -p storage
