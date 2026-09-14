@@ -29,9 +29,6 @@ use super::task_details::{TAG_EDITOR_CONTEXT, TagConfirmText, TagSuggestNext, Ta
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE, TEXT_MUTED};
 
-/// How many picker rows render at once; the lists scroll past this.
-const PICKER_ROWS: usize = 40;
-
 #[derive(Clone)]
 pub enum TagSettingsEvent {
     /// A placement, directory, section, or binding changed, so the nav tree
@@ -68,6 +65,11 @@ pub struct TagSettingsPanel {
     blocked: HashSet<u64>,
     /// Directories offered for this tag, from the home-directory scan.
     dir_candidates: Vec<PathBuf>,
+    /// The "+" directory-picker fuzzy search.
+    dir_picker_open: bool,
+    dir_picker_input: Entity<InputState>,
+    _dir_picker_sub: Subscription,
+    dir_picker_cursor: usize,
     section_name: Entity<InputState>,
     /// One-line result of the last action, so writes are visible.
     notice: Option<String>,
@@ -89,6 +91,19 @@ impl TagSettingsPanel {
             InputEvent::Blur => this.commit_placements(cx),
             _ => {}
         });
+let dir_picker_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Search directories…", window, cx);
+            state
+        });
+        let _dir_picker_sub = cx.subscribe(&dir_picker_input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.on_dir_picker_enter(cx),
+            InputEvent::Change => {
+                this.dir_picker_cursor = 0;
+                cx.notify();
+            }
+            _ => {}
+        });
         Self {
             store,
             open: false,
@@ -107,6 +122,10 @@ impl TagSettingsPanel {
             pending_placement_input_clear: false,
             blocked: HashSet::new(),
             dir_candidates: Vec::new(),
+            dir_picker_open: false,
+            dir_picker_input,
+            _dir_picker_sub,
+            dir_picker_cursor: 0,
             section_name: cx.new(|cx| {
                 let mut input = InputState::new(window, cx);
                 input.set_placeholder("New section", window, cx);
@@ -514,6 +533,91 @@ impl TagSettingsPanel {
         self.run(action, "Directory removed.", cx);
     }
 
+    fn toggle_dir_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dir_picker_open = !self.dir_picker_open;
+        if self.dir_picker_open {
+            self.dir_picker_cursor = 0;
+            self.reset_dir_picker_input(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// All scanned directories not yet bound to this tag, fuzzy-filtered by
+    /// `query`. Empty query returns nothing (no dropdown without intent).
+    fn dir_picker_results(&self, query: &str) -> Vec<PathBuf> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(usize, PathBuf)> = self
+            .dir_candidates
+            .iter()
+            .filter(|candidate| {
+                let text = candidate.display().to_string();
+                !self.dirs.contains(&text)
+            })
+            .filter_map(|candidate| {
+                let text = candidate.display().to_string();
+                let lower = text.to_lowercase();
+                let score = if lower.starts_with(&query) {
+                    0
+                } else if lower.contains(&query) {
+                    1
+                } else {
+                    return None;
+                };
+                Some((score, candidate.clone()))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().take(10).map(|(_, p)| p).collect()
+    }
+
+    fn on_dir_picker_enter(&mut self, cx: &mut Context<Self>) {
+        let results = self.dir_picker_results(
+            &self.dir_picker_input.read(cx).text().to_string(),
+        );
+        if let Some(path) = results.get(self.dir_picker_cursor) {
+            let value = path.display().to_string();
+            self.dir_picker_open = false;
+            self.add_dir(value, cx);
+        }
+    }
+
+    fn move_dir_picker_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let results = self.dir_picker_results(
+            &self.dir_picker_input.read(cx).text().to_string(),
+        );
+        if results.is_empty() {
+            return;
+        }
+        self.dir_picker_cursor =
+            (self.dir_picker_cursor as isize + delta).rem_euclid(results.len() as isize)
+                as usize;
+        cx.notify();
+    }
+
+    fn reset_dir_picker_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Search directories…", window, cx);
+            state
+        });
+        let sub = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.on_dir_picker_enter(cx),
+            InputEvent::Change => {
+                this.dir_picker_cursor = 0;
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.dir_picker_input = input.clone();
+        self._dir_picker_sub = sub;
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
     fn add_section(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tag) = self.tag.clone() else {
             return;
@@ -740,25 +844,6 @@ impl TagSettingsPanel {
                 )
             })
             .collect();
-        let dir_choices: Vec<AnyElement> = self
-            .dir_candidates
-            .iter()
-            .filter(|candidate| {
-                let text = candidate.display().to_string();
-                !self.dirs.contains(&text)
-            })
-            .take(PICKER_ROWS)
-            .map(|candidate| {
-                let value = candidate.display().to_string();
-                picker_row(
-                    format!("add-dir-{value}"),
-                    value.clone(),
-                    None,
-                    cx.listener(move |this, _, _, cx| this.add_dir(value.clone(), cx)),
-                )
-            })
-            .collect();
-
         // -- sections ------------------------------------------------------
         let section_count = self.sections.len();
         let section_rows: Vec<AnyElement> = self
@@ -896,10 +981,96 @@ impl TagSettingsPanel {
                          bindings. The first one that exists is the agent's working directory.",
                     ))
                     .child(div().v_flex().children(dir_rows))
-                    .when(dir_choices.is_empty(), |this| {
-                        this.child(hint("No other directory from the project scan fits here."))
-                    })
-                    .child(div().v_flex().children(dir_choices)),
+                    .child(
+                        div()
+                            .relative()
+                            .id("tag-settings-dir-picker")
+                            .child(
+                                Button::new("tag-settings-add-dir")
+                                    .ghost()
+                                    .compact()
+                                    .icon(IconName::Plus)
+                                    .tooltip("Add directory")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_dir_picker(window, cx);
+                                    })),
+                            )
+                            .when(self.dir_picker_open, |this| {
+                                let input = self.dir_picker_input.clone();
+                                let query = input.read(cx).text().to_string();
+                                let results = self.dir_picker_results(&query);
+                                let cursor = self.dir_picker_cursor;
+                                let rows: Vec<AnyElement> = results
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(idx, path)| {
+                                        let value = path.display().to_string();
+                                        let display = value.clone();
+                                        div()
+                                            .id(("dir-picker-row", idx))
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .text_sm()
+                                            .hover(|s| s.bg(rgb(0x2a2a2a)))
+                                            .when(idx == cursor, |s| s.bg(rgb(0x333333)))
+                                            .child(div().truncate().child(display))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.dir_picker_open = false;
+                                                this.add_dir(value.clone(), cx);
+                                            }))
+                                            .into_any_element()
+                                    })
+                                    .collect();
+                                this.child(deferred(
+                                    div()
+                                        .absolute()
+                                        .top(px(28.))
+                                        .left(px(0.))
+                                        .w_full()
+                                        .min_w(px(300.))
+                                        .max_h(px(200.))
+                                        .rounded_md()
+                                        .bg(rgb(CARD_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .child(
+                                            div()
+                                                .id("tag-settings-dir-picker-search")
+                                                .key_context(TAG_EDITOR_CONTEXT)
+                                                .on_action(cx.listener(
+                                                    |this, _: &TagConfirmText, _, cx| {
+                                                        this.on_dir_picker_enter(cx);
+                                                    },
+                                                ))
+                                                .on_action(cx.listener(
+                                                    |this, _: &TagSuggestPrev, _, cx| {
+                                                        this.move_dir_picker_cursor(-1, cx);
+                                                    },
+                                                ))
+                                                .on_action(cx.listener(
+                                                    |this, _: &TagSuggestNext, _, cx| {
+                                                        this.move_dir_picker_cursor(1, cx);
+                                                    },
+                                                ))
+                                                .p_1()
+                                                .border_b_1()
+                                                .border_color(rgb(HAIRLINE))
+                                                .child(Input::new(&input).appearance(false)),
+                                        )
+                                        .child(
+                                            div()
+                                                .v_flex()
+                                                .overflow_y_scrollbar()
+                                                .children(rows),
+                                        ),
+                                ))
+                            }),
+                    ),
             )
             .child(div().border_t_1().border_color(rgb(HAIRLINE)))
             .child(
@@ -1035,36 +1206,6 @@ fn removable_row(
                 .child("×")
                 .on_click(on_remove),
         )
-        .into_any_element()
-}
-
-/// A clickable picker row: flat label with the path as secondary text.
-fn picker_row(
-    id: String,
-    label: String,
-    path: Option<String>,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id)
-        .h_flex()
-        .items_center()
-        .gap_2()
-        .px_2()
-        .py_0p5()
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x2a2a2a)))
-        .child(div().flex_1().min_w_0().truncate().text_sm().child(label))
-        .when_some(path, |this, path| {
-            this.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
-                    .child(path),
-            )
-        })
-        .on_click(on_click)
         .into_any_element()
 }
 
