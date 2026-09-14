@@ -97,10 +97,10 @@
               mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
               cp -f "${todoAppWrapper}/Contents/Info.plist" "$APP_DIR/Contents/Info.plist"
 
-              # Regenerate whenever the source SVG is newer, so an icon baked
-              # earlier (qlmanage composites the SVG on a white matte) can't stick.
+              # Regenerate whenever the artwork or this recipe changed, so an icon
+              # baked earlier (qlmanage composites the SVG on a white matte) can't stick.
               ICON_SUM=$(cksum "$ICON" 2>/dev/null | cut -d' ' -f1,2)
-              if [ ! -f "$ICON" ] || [ "$ICON_SVG" -nt "$ICON" ]; then
+              if [ ! -f "$ICON" ] || [ "$ICON_SVG" -nt "$ICON" ] || [ "${wd}/flake.nix" -nt "$ICON" ]; then
                 # sips rasterizes an SVG at its intrinsic size, so paint the icon
                 # on a 1024px canvas instead of upscaling a 155px bitmap; sips
                 # keeps the canvas transparent where the SVG has no fill.
@@ -109,10 +109,17 @@
                 mkdir -p "$ICONSET"
                 sed 's|<svg |<svg width="1024" height="1024" |' "$ICON_SVG" > "$ICON_TMP/icon-1024.svg"
                 sips -s format png "$ICON_TMP/icon-1024.svg" --out "$ICONSET/master.png" >/dev/null
+                # Grain is composited into the raster rather than committed in the SVG,
+                # so the artwork stays clean for other consumers and only the built
+                # icon pays for the texture (cell px at 1024, amplitude, seed).
+                python3 "${wd}/scripts/icon-grain.py" "$ICONSET/master.png" 20 5 11
                 for size in 16 32 128 256 512; do
                   sips -z "$size" "$size" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}.png" >/dev/null
                   sips -z "$(( size * 2 ))" "$(( size * 2 ))" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}@2x.png" >/dev/null
                 done
+                # The master already is the 1024px rep; copying it keeps the grained
+                # pixels instead of letting sips re-encode noise (which grows it ~20%).
+                cp "$ICONSET/master.png" "$ICONSET/icon_512x512@2x.png"
                 rm -f "$ICONSET/master.png"
                 iconutil -c icns "$ICONSET" -o "$ICON"
                 rm -rf "$ICON_TMP"
