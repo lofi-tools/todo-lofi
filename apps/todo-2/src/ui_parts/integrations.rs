@@ -47,6 +47,7 @@ pub struct IntegrationsView {
     _sync: Option<gpui::Task<()>>,
     _github_poll: Option<gpui::Task<()>>,
     _github_sync: Option<gpui::Task<()>>,
+    _github_pr_poll: Option<gpui::Task<()>>,
     _github_poller: Option<gpui::Task<()>>,
 }
 
@@ -69,6 +70,7 @@ impl IntegrationsView {
             _sync: None,
             _github_poll: None,
             _github_sync: None,
+            _github_pr_poll: None,
             _github_poller: None,
         };
         this.reload(cx);
@@ -97,8 +99,26 @@ impl IntegrationsView {
             }
             this.update(cx, |this, cx| {
                 this.start_github_sync(false, cx);
+                this.poll_pull_requests(cx);
             })
             .ok();
+        }));
+    }
+
+    /// Check the open pull requests of every active run on the same tick as
+    /// the issue sync, so a merge completes its run without the user asking
+    /// (decision 19). Transient failures simply retry on the next tick.
+    fn poll_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let poll = self.store.poll_pull_requests(cx);
+        self._github_pr_poll = Some(cx.spawn(async move |this, cx| match poll.await {
+            Ok(changed) if changed > 0 => {
+                // A PR changed state: the task list and the run's stepper both
+                // have something new to show.
+                this.update(cx, |_this, cx| cx.emit(IntegrationsEvent::Changed))
+                    .ok();
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("Could not poll pull requests: {error}"),
         }));
     }
 

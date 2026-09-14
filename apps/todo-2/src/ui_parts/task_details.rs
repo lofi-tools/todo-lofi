@@ -74,6 +74,66 @@ fn round_number(notes: &[RunNote]) -> usize {
     1 + notes.iter().filter(|note| note.kind == "reject").count()
 }
 
+/// The PR step refusing over uncommitted work is a state, not a failure: the
+/// panel lists the changed paths and offers to commit them and continue
+/// (§6.7). Returns those paths when the action refused for that reason, and
+/// `None` for every other error, which stays an inline reason.
+fn refused_worktrees(failure: Option<&anyhow::Error>) -> Option<Vec<(String, Vec<String>)>> {
+    failure
+        .and_then(|error| error.downcast_ref::<storage::DirtyWorktrees>())
+        .map(|dirty| dirty.worktrees.clone())
+}
+
+/// Whether a run's merge step acts as the PR step: one of its worktrees pushes
+/// to a github.com remote (decision 17 selects the local merge only where no
+/// such remote exists, and decision 35 forbids both at once).
+fn acts_as_pull_request_step(worktrees: &[storage::RunWorktree], run_id: u64) -> bool {
+    worktrees
+        .iter()
+        .any(|worktree| worktree.run_id == run_id && !worktree.remote.is_empty())
+}
+
+/// Everything the stepper needs beyond the run view itself: the sub-tasks the
+/// model hung off each phase step, and the run's worktrees and pull requests
+/// (§6.5). Fetched in one pass after an action so the panel cannot show a step
+/// list from one moment and a PR list from another.
+async fn load_run_extras(
+    store: &Store,
+    run_id: Option<u64>,
+    step_ids: Vec<u64>,
+    cx: &impl gpui::AppContext,
+) -> (
+    std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    Vec<storage::RunWorktree>,
+    Vec<storage::RunPullRequest>,
+) {
+    let step_subtasks = if step_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        match store.subtasks_map(step_ids, cx).await {
+            Ok(map) => map,
+            Err(error) => {
+                tracing::error!("Failed to fetch step sub-tasks: {error}");
+                std::collections::HashMap::new()
+            }
+        }
+    };
+    let (run_worktrees, run_pull_requests) = match run_id {
+        Some(run_id) => (
+            store
+                .coding_run_worktrees(run_id, cx)
+                .await
+                .unwrap_or_default(),
+            store
+                .coding_run_pull_requests(run_id, cx)
+                .await
+                .unwrap_or_default(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    (step_subtasks, run_worktrees, run_pull_requests)
+}
+
 /// Assign each log entry its cycle (1-based) by counting rejections, then
 /// return the log newest-first for display.
 fn notes_by_round(notes: &[RunNote]) -> Vec<(usize, RunNote)> {
@@ -440,6 +500,13 @@ pub struct TaskDetails {
     coding: Option<RunView>,
     /// Sub-tasks the model created *under* a phase step, keyed by step task id.
     step_subtasks: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    /// The run's worktrees and its opened pull requests. A worktree with a
+    /// GitHub remote turns the merge step into the PR step (§6.5).
+    run_worktrees: Vec<storage::RunWorktree>,
+    run_pull_requests: Vec<storage::RunPullRequest>,
+    /// Worktrees the PR step refused over: uncommitted work, with its changed
+    /// paths, which the panel offers to commit and continue past (§6.7).
+    coding_dirty: Vec<(String, Vec<String>)>,
     _coding_fetch: Option<gpui::Task<()>>,
     /// Inline reason a coding action could not run (missing directory, dirty
     /// tree, merge conflict, …).
@@ -546,6 +613,9 @@ impl TaskDetails {
             _repeat_template_fetch: None,
             coding: None,
             step_subtasks: std::collections::HashMap::new(),
+            run_worktrees: Vec::new(),
+            run_pull_requests: Vec::new(),
+            coding_dirty: Vec::new(),
             _coding_fetch: None,
             coding_error: None,
             coding_auto_started: false,
@@ -585,6 +655,9 @@ impl TaskDetails {
         self.link_error = None;
         self.coding = None;
         self.step_subtasks = std::collections::HashMap::new();
+        self.run_worktrees = Vec::new();
+        self.run_pull_requests = Vec::new();
+        self.coding_dirty = Vec::new();
         self.coding_error = None;
         self.coding_auto_started = false;
         self.coding_directory_backed = false;
@@ -783,17 +856,13 @@ impl TaskDetails {
                 .as_ref()
                 .map(|view| view.steps.iter().map(|step| step.task.id).collect())
                 .unwrap_or_default();
-            let step_subtasks = if step_ids.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                match store.subtasks_map(step_ids, cx).await {
-                    Ok(map) => map,
-                    Err(error) => {
-                        tracing::error!("Failed to fetch step sub-tasks: {error}");
-                        std::collections::HashMap::new()
-                    }
-                }
-            };
+            let (step_subtasks, run_worktrees, run_pull_requests) = load_run_extras(
+                &store,
+                view.as_ref().map(|view| view.run.id),
+                step_ids,
+                cx,
+            )
+            .await;
             let auto_started = view.is_some() && auto_start;
             let has_run = view.is_some();
             this.update(cx, |this, cx| {
@@ -802,6 +871,8 @@ impl TaskDetails {
                 }
                 this.coding = view;
                 this.step_subtasks = step_subtasks;
+                this.run_worktrees = run_worktrees;
+                this.run_pull_requests = run_pull_requests;
                 this._coding_fetch = None;
                 if has_run {
                     this.coding_directory_backed = true;
@@ -3157,7 +3228,13 @@ impl TaskDetails {
         let store = self.store.clone();
         let target = self.selected.as_ref().map(|task| task.id);
         self._coding_fetch = Some(cx.spawn(async move |this, cx| {
-            let error = action.await.err().map(|error| error.to_string());
+            let failure = action.await.err();
+            let refused = refused_worktrees(failure.as_ref());
+            let error = if refused.is_some() {
+                None
+            } else {
+                failure.map(|error| error.to_string())
+            };
             let view = match target {
                 Some(task_id) => match store.coding_run_for_task(task_id, cx).await {
                     Ok(view) => view,
@@ -3172,20 +3249,19 @@ impl TaskDetails {
                 .as_ref()
                 .map(|view| view.steps.iter().map(|step| step.task.id).collect())
                 .unwrap_or_default();
-            let step_subtasks = if step_ids.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                match store.subtasks_map(step_ids, cx).await {
-                    Ok(map) => map,
-                    Err(fetch_error) => {
-                        tracing::error!("Failed to fetch step sub-tasks: {fetch_error}");
-                        std::collections::HashMap::new()
-                    }
-                }
-            };
+            let (step_subtasks, run_worktrees, run_pull_requests) = load_run_extras(
+                &store,
+                view.as_ref().map(|view| view.run.id),
+                step_ids,
+                cx,
+            )
+            .await;
             this.update(cx, |this, cx| {
                 this.coding = view;
                 this.step_subtasks = step_subtasks;
+                this.run_worktrees = run_worktrees;
+                this.run_pull_requests = run_pull_requests;
+                this.coding_dirty = refused.unwrap_or_default();
                 this.coding_error = error;
                 this._coding_fetch = None;
                 this.close_coding_notes();
@@ -3223,6 +3299,35 @@ impl TaskDetails {
 
     fn merge_coding_run(&mut self, run_id: u64, cx: &mut Context<Self>) {
         let action = self.store.merge_coding_branch(run_id, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    /// Push the run's branches and open (or adopt) a draft pull request per
+    /// repo (§6.5). With `commit_dirty` set the worktrees' uncommitted work is
+    /// committed first, which is what the refusal's "Commit and continue"
+    /// button asks for (§6.7).
+    fn open_pull_request_step(&mut self, run_id: u64, commit_dirty: bool, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let action = cx.spawn(async move |_, cx| {
+            store
+                .open_pull_requests(run_id, commit_dirty, cx)
+                .await
+                .map(|_| ())
+        });
+        self.run_coding_action(action, cx);
+    }
+
+    /// Flip one draft pull request to ready for review.
+    fn mark_pull_request_ready(&mut self, pull_request_id: u64, cx: &mut Context<Self>) {
+        let action = self.store.mark_pull_request_ready(pull_request_id, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    /// Give up on the run's still-open pull requests so a multi-repo run can
+    /// complete (decision 25).
+    fn waive_remaining_pull_requests(&mut self, run_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let action = cx.spawn(async move |_, cx| store.waive_remaining_pull_requests(run_id, cx).await.map(|_| ()));
         self.run_coding_action(action, cx);
     }
 
@@ -3524,6 +3629,12 @@ impl TaskDetails {
             }
             rows.push(row.into_any_element());
 
+            // The PR step's sub-items: one row per pull request the run opened
+            // (decision 25).
+            if step.node.id == "merge" && !self.run_pull_requests.is_empty() {
+                rows.push(self.pull_request_rows(view.run.id, cx));
+            }
+
             // The model can split a step further: those sub-tasks hang off the
             // step, so they nest under its row.
             if let Some(children) = self.step_subtasks.get(&step_id).cloned() {
@@ -3538,10 +3649,18 @@ impl TaskDetails {
             .iter()
             .filter_map(|step| step.node.phase.as_deref())
             .collect();
+        let pull_request_step = acts_as_pull_request_step(&self.run_worktrees, view.run.id);
         for phase in CODING_PHASES {
             if present.contains(phase) {
                 continue;
             }
+            // The preview says what the step will actually do: a run with a
+            // GitHub remote opens a pull request instead of merging (§6.5).
+            let title = if phase == "merge" && pull_request_step {
+                "Open the pull request"
+            } else {
+                phase_roadmap_title(phase)
+            };
             rows.push(
                 div()
                     .h_flex()
@@ -3557,7 +3676,7 @@ impl TaskDetails {
                             .min_w_0()
                             .text_sm()
                             .text_color(rgb(0x7a7a7a))
-                            .child(phase_roadmap_title(phase)),
+                            .child(title),
                     )
                     .into_any_element(),
             );
@@ -3566,6 +3685,85 @@ impl TaskDetails {
             .v_flex()
             .gap_1()
             .ml_2()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// Whether the merge step acts as the PR step for this run: one of its
+    /// worktrees pushes to a github.com remote (§6.5). Remotes on other hosts
+    /// never count, so a project with only a GitLab remote keeps the local
+    /// merge (decisions 17 and 35).
+    fn pull_request_step(&self, run_id: u64) -> bool {
+        acts_as_pull_request_step(&self.run_worktrees, run_id)
+    }
+
+    /// The PR step's sub-items: one indented row per pull request the run
+    /// opened, with its state, a link, and the draft → ready action (§6.5).
+    fn pull_request_rows(&self, run_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let rows: Vec<AnyElement> = self
+            .run_pull_requests
+            .iter()
+            .filter(|pull_request| pull_request.run_id == run_id)
+            .map(|pull_request| {
+                let id = pull_request.id;
+                let merged = pull_request.state == "merged";
+                let draft = pull_request.draft && pull_request.state == "open";
+                let mut row = div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(2.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(if merged { 0x6b6b6b } else { 0xd4d4d4 }))
+                            .child(if merged { "☑" } else { "◐" }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(rgb(if merged { 0x666666 } else { 0xe5e5e5 }))
+                            .child(format!(
+                                "{}/{}#{}",
+                                pull_request.owner, pull_request.repo, pull_request.number
+                            )),
+                    )
+                    .child(chip(&pull_request.state));
+                if draft {
+                    row = row.child(chip("draft"));
+                }
+                let url = pull_request.url.clone();
+                row = row.child(
+                    Button::new(format!("coding-pr-open-{id}"))
+                        .ghost()
+                        .compact()
+                        .label("Open")
+                        .tooltip("Open this pull request on GitHub")
+                        .on_click(move |_, _, _| crate::todoist_auth::open_browser(&url)),
+                );
+                if draft {
+                    row = row.child(
+                        Button::new(format!("coding-pr-ready-{id}"))
+                            .ghost()
+                            .compact()
+                            .label("Mark ready")
+                            .tooltip("Take this draft pull request out of draft")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mark_pull_request_ready(id, cx);
+                            })),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect();
+        div()
+            .v_flex()
+            .gap_1()
+            .pl_4()
             .children(rows)
             .into_any_element()
     }
@@ -3646,11 +3844,16 @@ impl TaskDetails {
         let step_id = step.task.id;
         let run_id = view.run.id;
         let node_id = step.node.id.clone();
+        // A run whose repo has a github.com remote opens a pull request; the
+        // local merge survives only where no such remote exists (decisions 17
+        // and 35).
+        let pull_request = self.pull_request_step(run_id);
         let label = match node_id.as_str() {
             "interview" => "Start interview",
             "spec" => "Approve spec",
             "implement" => "Start implementation",
             "review" => "Approve review",
+            "merge" if pull_request => "Open pull request",
             "merge" => "Merge branch",
             _ => return None,
         };
@@ -3658,6 +3861,7 @@ impl TaskDetails {
             "interview" | "implement" => "Compose this phase's prompt in the agent pane",
             "spec" => "Cut the feature branch and start implementation",
             "review" => "Accept the implementation and queue the merge",
+            "merge" if pull_request => "Push each branch and open a draft pull request per repo",
             _ => "Merge the feature branch into its base branch",
         };
         let task_for_prompt = task.clone();
@@ -3680,6 +3884,9 @@ impl TaskDetails {
                         serde_json::json!({ "approved": true }),
                         cx,
                     ),
+                    "merge" if this.pull_request_step(run_id) => {
+                        this.open_pull_request_step(run_id, false, cx)
+                    }
                     "merge" => this.merge_coding_run(run_id, cx),
                     _ => {}
                 }))
@@ -3738,6 +3945,57 @@ impl TaskDetails {
                             this.complete_coding_step(step_id, serde_json::json!({}), cx);
                         })),
                 );
+            }
+            Some("merge") => {
+                let step_id = current.map(|step| step.task.id).unwrap_or_default();
+                let run_id = view.run.id;
+                // The PR step refused over uncommitted work: list it and offer
+                // to commit and continue (§6.7).
+                if !self.coding_dirty.is_empty() {
+                    let mut block = div().v_flex().gap_1().w_full().child(
+                        div().text_xs().text_color(rgb(0xfbbf24)).child(
+                            "Commit the work in the run's worktrees before opening a pull request:",
+                        ),
+                    );
+                    for (path, changed) in &self.coding_dirty {
+                        block = block.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x737373))
+                                .child(format!("{path} — {}", changed.join(", "))),
+                        );
+                    }
+                    actions = actions.child(block).child(
+                        Button::new(format!("coding-pr-commit-{step_id}"))
+                            .compact()
+                            .label("Commit and continue")
+                            .tooltip("Stage and commit everything, then open the pull requests")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_pull_request_step(run_id, true, cx);
+                            })),
+                    );
+                }
+                // A multi-repo run can give up on the repos still pending, so
+                // one unwanted repo does not hold the run open (decision 25).
+                let open = self
+                    .run_pull_requests
+                    .iter()
+                    .filter(|pull_request| {
+                        pull_request.run_id == run_id && pull_request.state == "open"
+                    })
+                    .count();
+                if open > 0 {
+                    actions = actions.child(
+                        Button::new(format!("coding-pr-waive-{step_id}"))
+                            .ghost()
+                            .compact()
+                            .label("Waive the rest")
+                            .tooltip("Give up on the pull requests still open and complete the run")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.waive_remaining_pull_requests(run_id, cx);
+                            })),
+                    );
+                }
             }
             Some("review") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
@@ -4852,6 +5110,60 @@ mod coding_tests {
         assert_eq!(round_number(&[]), 1);
         let notes = vec![note("reject", "a"), note("spec", "b"), note("reject", "c")];
         assert_eq!(round_number(&notes), 3);
+    }
+
+    fn run_worktree(run_id: u64, remote: &str) -> storage::RunWorktree {
+        storage::RunWorktree {
+            id: run_id,
+            run_id,
+            repo_dir: format!("/tmp/repo-{run_id}"),
+            worktree_path: format!("/tmp/repo-{run_id}/worktrees/branch"),
+            branch: "feature/1-add-login".to_string(),
+            base_branch: "main".to_string(),
+            remote: remote.to_string(),
+            created_at: jiff::Timestamp::now(),
+            removed_at: None,
+        }
+    }
+
+    /// A refusal reaches the panel as a typed error, so it is offered as
+    /// "Commit and continue" with the changed paths listed; every other
+    /// failure stays an inline reason (§6.7).
+    #[test]
+    fn a_dirty_refusal_is_a_state_and_other_failures_are_reasons() {
+        let dirty = storage::DirtyWorktrees {
+            worktrees: vec![(
+                "/repo/worktrees/123-add-login".to_string(),
+                vec!["src/main.rs".to_string()],
+            )],
+        };
+        let failure: anyhow::Error = dirty.into();
+        assert_eq!(
+            refused_worktrees(Some(&failure)).map(|worktrees| worktrees[0].1.clone()),
+            Some(vec!["src/main.rs".to_string()])
+        );
+        // A push failure (git's stderr) is not a refusal: it is shown inline.
+        let failure = anyhow::anyhow!("failed to push some refs to 'github'");
+        assert!(refused_worktrees(Some(&failure)).is_none());
+        assert!(refused_worktrees(None).is_none());
+    }
+
+    /// The step picks the pull request action exactly when one of the run's
+    /// worktrees resolved a github.com remote; a run with no worktree (or one
+    /// whose remotes all failed to resolve) keeps the local merge (§6.5).
+    #[test]
+    fn the_merge_step_is_the_pr_step_only_with_a_github_remote() {
+        assert!(acts_as_pull_request_step(&[run_worktree(4, "github")], 4));
+        // Multi-repo: one GitHub remote is enough to make it the PR step.
+        assert!(acts_as_pull_request_step(
+            &[run_worktree(4, ""), run_worktree(4, "github")],
+            4
+        ));
+        // No remote resolved (no remote at all, or only other hosts).
+        assert!(!acts_as_pull_request_step(&[run_worktree(4, "")], 4));
+        assert!(!acts_as_pull_request_step(&[], 4));
+        // Another run's worktree says nothing about this one.
+        assert!(!acts_as_pull_request_step(&[run_worktree(9, "github")], 4));
     }
 
     #[test]

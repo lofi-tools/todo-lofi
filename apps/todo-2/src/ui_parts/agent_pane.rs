@@ -17,10 +17,10 @@ use acp_client::schema::{
     SessionModeId, SessionModeState, ToolCallUpdate,
 };
 use acp_client::{
-    AcpConnection, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions, EntryKind,
+    AcpConnection, AcpError, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions, EntryKind,
     NoticeLevel, OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord,
-    PermissionReply, PermissionRule, SessionRoots, SessionSpec, SessionStore, StoredSession,
-    ToolPermissions, ToolStatus, Transcript, connect,
+    PermissionReply, PermissionRule, SessionRoots, SessionSpec, SessionStore, SpawnSpec,
+    StoredSession, ToolPermissions, ToolStatus, Transcript, connect,
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
@@ -75,6 +75,24 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// The checkout an active coding run works in, as the pane points at it: the
+/// run's worktree instead of the user's checkout (decision 11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunCheckout {
+    /// The project tag the run's directories belong to; the checkout only ever
+    /// applies to the pane entry for this tag.
+    pub tag_id: u64,
+    /// The worktree for the run's main repo directory; the session's primary
+    /// root while the run is active.
+    pub worktree: PathBuf,
+    /// The repo directory the worktree was cut from. It is dropped from the
+    /// session's secondary roots, so the agent cannot edit the user's own
+    /// checkout and leave the branch missing half the work.
+    pub repo_dir: PathBuf,
+    /// The build directory every worktree of the run shares (decision 12).
+    pub target_dir: PathBuf,
+}
+
 /// A directory-backed project the pane can run an agent for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
@@ -86,13 +104,70 @@ pub struct AgentProject {
     /// Candidate directories in resolution order: the path encoded in the tag
     /// name first, then `tag_settings.dirs`.
     pub candidates: Vec<PathBuf>,
+    /// The active run's worktree, when the selected task has one. `None`
+    /// keeps the session on the project directory.
+    pub checkout: Option<RunCheckout>,
 }
 
 impl AgentProject {
     /// Split the candidates into the session `cwd` and the additional roots,
     /// dropping candidates that do not exist. `None` when none exist.
+    ///
+    /// A checkout makes the worktree the `cwd` and the repo it replaces a
+    /// non-root (decisions 11 and 21).
     pub fn resolve(&self) -> Option<(PathBuf, Vec<PathBuf>)> {
-        SessionSpec::new(self.candidates.clone()).resolve()
+        let candidates: Vec<PathBuf> = match self
+            .checkout
+            .as_ref()
+            .filter(|checkout| checkout.worktree.is_dir())
+        {
+            Some(checkout) => std::iter::once(checkout.worktree.clone())
+                .chain(
+                    self.candidates
+                        .iter()
+                        .filter(|dir| **dir != checkout.repo_dir && **dir != checkout.worktree)
+                        .cloned(),
+                )
+                .collect(),
+            None => self.candidates.clone(),
+        };
+        // Through the same resolution as any other directory: the candidates
+        // are canonicalized, so one directory reached by two spellings still
+        // keys one session.
+        SessionSpec::new(candidates).resolve()
+    }
+}
+
+/// An agent launched with an extra environment variable. Used to give a
+/// worktree session the run's shared build cache (decision 12) without
+/// teaching the agent registry about individual projects.
+struct EnvAgent {
+    inner: Arc<dyn AgentServer>,
+    name: &'static str,
+    value: String,
+}
+
+impl AgentServer for EnvAgent {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    fn display_name(&self) -> &'static str {
+        self.inner.display_name()
+    }
+
+    fn program(&self) -> &'static str {
+        self.inner.program()
+    }
+
+    fn args(&self) -> &'static [&'static str] {
+        self.inner.args()
+    }
+
+    fn spawn_spec(&self, cwd: &std::path::Path) -> Result<SpawnSpec, AcpError> {
+        let mut spec = self.inner.spawn_spec(cwd)?;
+        spec.env.insert(self.name.to_string(), self.value.clone());
+        Ok(spec)
     }
 }
 
@@ -495,6 +570,19 @@ impl AgentPane {
             return;
         }
 
+        // A different cwd that still resolves is a checkpoint switch — the
+        // run's worktree becoming available, or its removal restoring the
+        // project directory. Restart there: the session key is the cwd, so
+        // this is a new agent session, and the interview session stays
+        // reachable as history once the run ends (§6.3).
+        if let Some((cwd, _)) = resolution {
+            if let Some(entry) = self.projects.get_mut(&tag_name) {
+                entry.project = project;
+            }
+            self.restart_in_place(&tag_name, false, cwd, cx);
+            return;
+        }
+
         // No directory resolves any more: tear the project down rather than
         // leaving an agent editing a directory that is gone.
         let candidates = existing.project.candidates.clone();
@@ -502,6 +590,32 @@ impl AgentPane {
         let mut entry = ProjectEntry::new(project, tool_permissions);
         entry.state = PaneState::NoDirectory { candidates };
         self.projects.insert(tag_name, entry);
+    }
+
+    /// Point the pane at the selected task's active run (decision 11), or back
+    /// at the project directory (`None`) when there is none. Only the
+    /// checkout's own project is repointed, so selecting a task in another
+    /// project cannot move the pane away from the project on screen.
+    pub fn set_checkout(&mut self, checkout: Option<RunCheckout>, cx: &mut Context<Self>) {
+        // Only the project on screen is repointed: a task selected in another
+        // project must not restart that project's session in the background.
+        let Some(tag_name) = self.active.clone() else {
+            return;
+        };
+        let Some(project) = self.projects.get(&tag_name).map(|entry| entry.project.clone()) else {
+            return;
+        };
+        // A checkout only ever applies to its own project; anything else means
+        // "this project's run is not the one selected" and puts the session
+        // back on the project directory.
+        let checkout = checkout.filter(|checkout| checkout.tag_id == project.tag_id);
+        if project.checkout == checkout {
+            return;
+        }
+        let mut project = project;
+        project.checkout = checkout;
+        let resumable = self.projects.contains_key(&tag_name);
+        self.refresh_entry(project, resumable, cx);
     }
 
     fn restart_in_place(
@@ -556,8 +670,18 @@ impl AgentPane {
         let project_path = entry.stored_path.clone().unwrap_or_default();
         let tag_id = entry.project.tag_id;
         let tool_permissions = entry.tool_permissions.clone();
-        let agent = self.agent.clone();
-        let agent_id = self.agent.id().to_string();
+        // A worktree session builds into the run's shared cache rather than
+        // a per-worktree `target/` (decision 12): a second worktree would
+        // otherwise be a full second build.
+        let agent: Arc<dyn AgentServer> = match &entry.project.checkout {
+            Some(checkout) => Arc::new(EnvAgent {
+                inner: self.agent.clone(),
+                name: "CARGO_TARGET_DIR",
+                value: checkout.target_dir.display().to_string(),
+            }),
+            None => self.agent.clone(),
+        };
+        let agent_id = agent.id().to_string();
         let store = self.session_store.clone();
 
         let launch = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -2178,6 +2302,11 @@ impl AgentPane {
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let project = self.active_project();
+        // The pane runs the agent in the run's checkout, not the project
+        // directory, while a coding run is active (§6.3).
+        let worktree = self
+            .active_entry()
+            .is_some_and(|entry| entry.project.checkout.is_some());
         let title = project
             .and_then(|_| self.active_entry())
             .and_then(|entry| entry.session_title())
@@ -2209,6 +2338,17 @@ impl AgentPane {
                     .truncate()
                     .child(title),
             )
+            .when(worktree, |this| {
+                this.child(
+                    div()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(rgb(PANEL_HOVER))
+                        .text_xs()
+                        .text_color(rgb(TEXT_MUTED))
+                        .child("worktree"),
+                )
+            })
             .when_some(model, |this, model| {
                 this.child(
                     div()
@@ -2279,9 +2419,19 @@ impl AgentPane {
         let text = self.prompt.read(cx).value().trim().to_string();
         let can_send = ready && !text.is_empty() && queue_len < QUEUE_CAP;
         let slash_open = self.slash_open(cx);
+        // The session's cwd is the run's worktree while one is active: label
+        // it, so where the agent's edits land is never a guess (§6.3).
         let cwd = self
             .active_entry()
             .and_then(|entry| entry.stored_path.clone());
+        let worktree = self
+            .active_entry()
+            .and_then(|entry| entry.project.checkout.as_ref())
+            .map(|checkout| checkout.worktree.display().to_string());
+        let cwd = match (cwd, worktree) {
+            (Some(cwd), Some(worktree)) if cwd == worktree => Some(format!("worktree · {cwd}")),
+            (cwd, _) => cwd,
+        };
         let usage = self
             .active_entry()
             .and_then(|entry| entry.transcript.latest_usage());
@@ -3390,5 +3540,142 @@ mod tests {
             .join("\n");
         let tail = tail_lines(&text, 2);
         assert_eq!(tail, "498\n499");
+    }
+
+    /// A scratch tree with a repo, a sibling directory, and a worktree inside
+    /// the repo, so `resolve()` runs against real directories.
+    fn checkout_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let scratch = std::env::temp_dir().join(format!(
+            "todo2-agent-pane-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let repo_dir = scratch.join("repo");
+        let sibling = scratch.join("docs");
+        for dir in [&repo_dir, &sibling] {
+            std::fs::create_dir_all(dir).expect("create dir");
+        }
+        // Resolution canonicalizes (`/var` is a symlink on macOS), so the
+        // expected paths are canonical from the start.
+        let root = scratch.canonicalize().unwrap_or(scratch);
+        let repo_dir = root.join("repo");
+        let sibling = root.join("docs");
+        let worktree = repo_dir.join("worktrees").join("123-add-login");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        (root, repo_dir, sibling, worktree)
+    }
+
+    fn project_with(
+        repo_dir: PathBuf,
+        sibling: PathBuf,
+        checkout: Option<RunCheckout>,
+    ) -> AgentProject {
+        AgentProject {
+            tag_id: 7,
+            tag_name: "project:repo".to_string(),
+            label: "repo".to_string(),
+            candidates: vec![repo_dir, sibling],
+            checkout,
+        }
+    }
+
+    /// A run's checkout makes the worktree the primary root, drops the repo it
+    /// replaced from the secondary roots so the agent cannot edit the user's
+    /// checkout, keeps the project's other directories, and keys the session
+    /// off the worktree — a different session from the interview at the
+    /// project directory (decisions 11 and 21, §6.3).
+    #[test]
+    fn a_checkout_makes_the_worktree_the_primary_root() {
+        let (root, repo_dir, sibling, worktree) = checkout_fixture("checkout");
+        let checkout = RunCheckout {
+            tag_id: 7,
+            worktree: worktree.clone(),
+            repo_dir: repo_dir.clone(),
+            target_dir: repo_dir.join("target"),
+        };
+        let (cwd, additional) = project_with(repo_dir.clone(), sibling.clone(), Some(checkout))
+            .resolve()
+            .expect("a directory resolves");
+        assert_eq!(cwd, worktree);
+        assert_eq!(additional, vec![sibling.clone()]);
+
+        // Without the run, the project directory is the session's cwd again.
+        let (cwd, additional) = project_with(repo_dir.clone(), sibling.clone(), None)
+            .resolve()
+            .expect("a directory resolves");
+        assert_eq!(cwd, repo_dir);
+        assert_eq!(additional, vec![sibling]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A worktree removed by hand must not keep the session pointed at a
+    /// directory that is gone: the project directory takes over again.
+    #[test]
+    fn a_vanished_worktree_falls_back_to_the_project_directory() {
+        let (root, repo_dir, sibling, worktree) = checkout_fixture("vanished");
+        let checkout = RunCheckout {
+            tag_id: 7,
+            worktree: worktree.clone(),
+            repo_dir: repo_dir.clone(),
+            target_dir: repo_dir.join("target"),
+        };
+        std::fs::remove_dir_all(&worktree).expect("remove the checkout");
+        let (cwd, _) = project_with(repo_dir.clone(), sibling, Some(checkout))
+            .resolve()
+            .expect("a directory resolves");
+        assert_eq!(cwd, repo_dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The launch wrapper adds `CARGO_TARGET_DIR` on top of the agent's own
+    /// spec, leaving everything else (cwd, args, identity) untouched
+    /// (decision 12).
+    #[test]
+    fn a_worktree_session_builds_into_the_runs_cache() {
+        struct FixedAgent;
+
+        impl AgentServer for FixedAgent {
+            fn id(&self) -> &'static str {
+                "fixed"
+            }
+
+            fn display_name(&self) -> &'static str {
+                "Fixed"
+            }
+
+            fn program(&self) -> &'static str {
+                "fixed"
+            }
+
+            fn args(&self) -> &'static [&'static str] {
+                &["acp"]
+            }
+
+            fn spawn_spec(&self, cwd: &std::path::Path) -> Result<SpawnSpec, AcpError> {
+                Ok(SpawnSpec {
+                    program: self.program().into(),
+                    args: self.args().iter().map(|arg| arg.to_string()).collect(),
+                    cwd: cwd.to_path_buf(),
+                    env: std::collections::BTreeMap::new(),
+                })
+            }
+        }
+
+        let agent = EnvAgent {
+            inner: Arc::new(FixedAgent),
+            name: "CARGO_TARGET_DIR",
+            value: "/tmp/run-target".to_string(),
+        };
+        let spec = agent
+            .spawn_spec(std::path::Path::new("/tmp/worktree"))
+            .expect("spawn spec");
+        assert_eq!(agent.id(), "fixed");
+        assert_eq!(spec.cwd, PathBuf::from("/tmp/worktree"));
+        assert_eq!(spec.command_line(), "fixed acp");
+        assert_eq!(
+            spec.env.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/run-target")
+        );
     }
 }

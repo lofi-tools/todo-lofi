@@ -860,6 +860,75 @@ fn phase_note_for(recipe: &Recipe, node_id: &str, result: &Value) -> Option<RunN
     ))
 }
 
+/// Filler words dropped from an issue-derived branch slug (decision 16).
+const BRANCH_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "at", "by",
+    "from", "is", "are", "be", "as", "it", "its", "this", "that", "into", "via", "when",
+    "add", "adds", "fix", "fixes", "fixed", "feat", "feature", "implement", "implements",
+    "support", "supports", "update", "updates", "improve", "improves", "make", "makes",
+    "allow", "allows", "use", "using", "should", "must",
+];
+
+/// The slug caps of decision 16: a few words, a short name.
+const BRANCH_SLUG_WORDS: usize = 5;
+const BRANCH_SLUG_CHARS: usize = 60;
+
+/// The slug for an issue-backed branch: the title's meaningful words, lower
+/// cased and hyphenated, with filler words dropped and the result truncated to
+/// [`BRANCH_SLUG_WORDS`] words / [`BRANCH_SLUG_CHARS`] characters, then run
+/// through [`normalize_branch_name`] so non-ASCII and emoji are dropped rather
+/// than passed through (decision 16).
+///
+/// A title made entirely of filler words falls back to its own words, so the
+/// slug is empty only for a title with no usable characters at all.
+pub fn issue_branch_slug(title: &str) -> String {
+    let words: Vec<String> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let meaningful: Vec<&String> = words
+        .iter()
+        .filter(|word| !BRANCH_STOPWORDS.contains(&word.as_str()))
+        .collect();
+    let chosen: Vec<&str> = if meaningful.is_empty() {
+        words.iter().map(String::as_str).collect()
+    } else {
+        meaningful.into_iter().map(String::as_str).collect()
+    };
+    let slug = chosen
+        .into_iter()
+        .take(BRANCH_SLUG_WORDS)
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = normalize_branch_name(&slug).to_lowercase();
+    truncate_branch_slug(&slug)
+}
+
+/// Cut a slug to the character cap on a word boundary, so the branch name is
+/// still readable rather than mid-word.
+fn truncate_branch_slug(slug: &str) -> String {
+    if slug.chars().count() <= BRANCH_SLUG_CHARS {
+        return slug.to_string();
+    }
+    let cut: String = slug.chars().take(BRANCH_SLUG_CHARS).collect();
+    match cut.rfind('-') {
+        Some(index) if index > 0 => cut[..index].to_string(),
+        _ => cut,
+    }
+}
+
+/// The branch name of an issue-backed run: `feature/<issue-number>-<slug>`
+/// (decision 13), with the number kept even when the title yields no slug.
+pub fn issue_branch_name(issue_number: u64, title: &str) -> String {
+    let slug = issue_branch_slug(title);
+    if slug.is_empty() {
+        format!("feature/{issue_number}")
+    } else {
+        format!("feature/{issue_number}-{slug}")
+    }
+}
+
 /// Sanitize a proposed branch name into something git accepts: whitespace
 /// becomes `-`, other characters outside `[A-Za-z0-9._/-]` are dropped, and
 /// leading/trailing separators are trimmed. Empty means "not usable".
@@ -2015,6 +2084,24 @@ impl TodoStore {
     /// app has already performed the git merge), record the merge in the run
     /// log, and let the run auto-complete.
     pub async fn complete_coding_merge(&mut self, run_id: u64) -> QueryResult<()> {
+        self.finish_coding_run(run_id, None).await
+    }
+
+    /// Complete the merge step after every pull request was merged (or
+    /// waived), recording the PRs instead of a local merge (decision 19).
+    pub async fn complete_coding_pull_requests(
+        &mut self,
+        run_id: u64,
+        note: &str,
+    ) -> QueryResult<()> {
+        self.finish_coding_run(run_id, Some(note.to_string())).await
+    }
+
+    async fn finish_coding_run(
+        &mut self,
+        run_id: u64,
+        note: Option<String>,
+    ) -> QueryResult<()> {
         let run = self.get_run(run_id).await?;
         let rows = toasty::sql::query(
             r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = 'merge'
@@ -2037,10 +2124,10 @@ impl TodoStore {
         if merged.is_some() {
             self.mark_branch_merged(run_id).await?;
         }
-        let body = match &merged {
+        let body = note.unwrap_or_else(|| match &merged {
             Some(branch) => format!("Merged {branch}"),
             None => "Merged".to_string(),
-        };
+        });
         self.append_run_note(run_id, "merge", "merge", "merge", &body)
             .await?;
         if let Some(root) = run.root_task_id {
@@ -2881,5 +2968,37 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_issue_branch_names_drop_filler_words_and_stay_short() {
+        assert_eq!(
+            issue_branch_name(123, "Add a login screen to the settings page"),
+            "feature/123-login-screen-settings-page"
+        );
+        // Filler words are dropped but a title made only of them still yields
+        // a usable slug.
+        assert_eq!(issue_branch_name(7, "Fix the bug"), "feature/7-bug");
+        assert_eq!(issue_branch_name(9, "Fix it"), "feature/9-fix-it");
+        // No usable characters at all: the number alone is still the branch.
+        assert_eq!(issue_branch_name(11, "!! ???"), "feature/11");
+        // Non-ASCII and emoji are dropped rather than passed through, and the
+        // result is lower case and git-safe.
+        let emoji = issue_branch_name(12, "Ajouter la connexion 🚀 au panneau");
+        assert!(emoji.starts_with("feature/12-"), "{emoji}");
+        assert!(
+            emoji
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')),
+            "{emoji}"
+        );
+        assert_eq!(emoji, emoji.to_lowercase());
+        // Long titles are capped at five words and 60 characters.
+        let long = issue_branch_slug(
+            "Refactor the synchronisation engine so that it can handle every remote transport",
+        );
+        assert!(long.split('-').count() <= 5, "{long}");
+        assert!(long.chars().count() <= 60, "{long}");
+        assert!(!long.ends_with('-'), "{long}");
     }
 }

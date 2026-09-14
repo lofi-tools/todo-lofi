@@ -18,10 +18,13 @@ use std::collections::BTreeMap;
 /// [`IssueFieldState::local_changed_at`].
 pub const ISSUE_FIELDS: [&str; 4] = ["title", "body", "state", "labels"];
 
-/// `open` / `merged` / `closed` for `run_pull_requests.state`.
+/// `open` / `merged` / `closed` / `waived` for `run_pull_requests.state`.
+/// `waived` is the user giving up on a repo's PR so a multi-repo run can
+/// still complete (decision 25); the other three mirror GitHub.
 pub const PULL_REQUEST_OPEN: &str = "open";
 pub const PULL_REQUEST_MERGED: &str = "merged";
 pub const PULL_REQUEST_CLOSED: &str = "closed";
+pub const PULL_REQUEST_WAIVED: &str = "waived";
 
 /// A parsed `owner/repo#number` identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +321,51 @@ fn parse_issue_link(row: toasty::stmt::Value) -> Option<IssueLink> {
         task_id: record_i64(&record, 2)? as u64,
         external_updated_at: record_timestamp(&record, 3),
         state: parse_field_state(record.get(4)),
+    })
+}
+
+const RUN_PULL_REQUEST_SELECT: &str = r#"SELECT id, run_id, repo_dir, integration_id, owner,
+        repo, number, url, head_branch, base_branch, draft, state, merged_at, last_polled_at
+        FROM run_pull_requests"#;
+
+fn run_pull_request_columns() -> [toasty::stmt::Type; 14] {
+    [
+        toasty::stmt::Type::I64,
+        toasty::stmt::Type::I64,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::I64,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::I64,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::I64,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::String,
+        toasty::stmt::Type::String,
+    ]
+}
+
+fn parse_run_pull_request(row: toasty::stmt::Value) -> Option<RunPullRequest> {
+    let toasty::stmt::Value::Record(record) = row else {
+        return None;
+    };
+    Some(RunPullRequest {
+        id: record_i64(&record, 0)? as u64,
+        run_id: record_i64(&record, 1)? as u64,
+        repo_dir: record_string(&record, 2).unwrap_or_default(),
+        integration_id: record_i64(&record, 3).unwrap_or(0) as u64,
+        owner: record_string(&record, 4).unwrap_or_default(),
+        repo: record_string(&record, 5).unwrap_or_default(),
+        number: record_i64(&record, 6)? as u64,
+        url: record_string(&record, 7).unwrap_or_default(),
+        head_branch: record_string(&record, 8).unwrap_or_default(),
+        base_branch: record_string(&record, 9).unwrap_or_default(),
+        draft: record_i64(&record, 10).unwrap_or(0) != 0,
+        state: record_string(&record, 11).unwrap_or_default(),
+        merged_at: record_timestamp(&record, 12),
+        last_polled_at: record_timestamp(&record, 13),
     })
 }
 
@@ -646,77 +694,52 @@ impl TodoStore {
         self.query_run_pull_requests("WHERE state = ?1", None).await
     }
 
-    /// Shared reader for the two PR queries. `filter` is a literal chosen by
-    /// the caller (never user input) and decides which value `bound` carries:
-    /// a run id, or the open state for the poller's work list.
+    /// Shared reader for the two filtered PR queries. `clause` is a literal
+    /// chosen by the caller (never user input) and decides which value the
+    /// statement binds: a run id, or the open state for the poller's list.
     async fn query_run_pull_requests(
         &mut self,
         clause: &str,
         run_id: Option<i64>,
     ) -> QueryResult<Vec<RunPullRequest>> {
-        let sql = format!(
-            r#"SELECT id, run_id, repo_dir, integration_id, owner, repo, number, url,
-                      head_branch, base_branch, draft, state, merged_at, last_polled_at
-               FROM run_pull_requests {clause} ORDER BY id"#
-        );
-        let mut statement = toasty::sql::query(sql).column_types([
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-        ]);
-        match run_id {
-            Some(run_id) => statement = statement.bind(run_id),
-            None => statement = statement.bind(PULL_REQUEST_OPEN),
-        }
+        let sql = format!("{RUN_PULL_REQUEST_SELECT} {clause} ORDER BY id");
+        let statement = match run_id {
+            Some(run_id) => toasty::sql::query(sql).bind(run_id),
+            None => toasty::sql::query(sql).bind(PULL_REQUEST_OPEN),
+        };
         let rows = statement
+            .column_types(run_pull_request_columns())
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
                 context: "list run pull requests",
             })?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let toasty::stmt::Value::Record(record) = row else {
-                continue;
-            };
-            let Some(id) = record_i64(&record, 0) else {
-                continue;
-            };
-            let Some(run_id) = record_i64(&record, 1) else {
-                continue;
-            };
-            let Some(number) = record_i64(&record, 6) else {
-                continue;
-            };
-            out.push(RunPullRequest {
-                id: id as u64,
-                run_id: run_id as u64,
-                repo_dir: record_string(&record, 2).unwrap_or_default(),
-                integration_id: record_i64(&record, 3).unwrap_or(0) as u64,
-                owner: record_string(&record, 4).unwrap_or_default(),
-                repo: record_string(&record, 5).unwrap_or_default(),
-                number: number as u64,
-                url: record_string(&record, 7).unwrap_or_default(),
-                head_branch: record_string(&record, 8).unwrap_or_default(),
-                base_branch: record_string(&record, 9).unwrap_or_default(),
-                draft: record_i64(&record, 10).unwrap_or(0) != 0,
-                state: record_string(&record, 11).unwrap_or_default(),
-                merged_at: record_timestamp(&record, 12),
-                last_polled_at: record_timestamp(&record, 13),
-            });
-        }
-        Ok(out)
+        Ok(rows.into_iter().filter_map(parse_run_pull_request).collect())
+    }
+
+    /// Every pull request row, whatever its state.
+    async fn query_run_pull_requests_all(&mut self) -> QueryResult<Vec<RunPullRequest>> {
+        let rows = toasty::sql::query(format!("{RUN_PULL_REQUEST_SELECT} ORDER BY id"))
+            .column_types(run_pull_request_columns())
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "list all run pull requests",
+            })?;
+        Ok(rows.into_iter().filter_map(parse_run_pull_request).collect())
+    }
+
+    /// One pull request row by id.
+    async fn query_run_pull_request(&mut self, id: u64) -> QueryResult<Option<RunPullRequest>> {
+        let rows = toasty::sql::query(format!("{RUN_PULL_REQUEST_SELECT} WHERE id = ?1"))
+            .column_types(run_pull_request_columns())
+            .bind(id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "load run pull request",
+            })?;
+        Ok(rows.into_iter().filter_map(parse_run_pull_request).next())
     }
 
     /// Record what a poll learned about one PR.
@@ -822,6 +845,23 @@ impl std::fmt::Display for SyncFailure {
 }
 
 impl std::error::Error for SyncFailure {}
+
+/// The PR step refused to run because worktrees hold uncommitted work. It is
+/// not a failure: the caller lists the changed paths and offers to commit them
+/// and continue (§6.7), which is why it is a distinct error type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirtyWorktrees {
+    /// One `(worktree path, changed paths)` per worktree with uncommitted work.
+    pub worktrees: Vec<(String, Vec<String>)>,
+}
+
+impl std::fmt::Display for DirtyWorktrees {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "uncommitted work in the run's worktrees")
+    }
+}
+
+impl std::error::Error for DirtyWorktrees {}
 
 /// 401, 404 and 422 need the user; 403/429 and 5xx are worth retrying. A 403
 /// without a rate-limit hint is a permanent permission problem.
@@ -950,6 +990,281 @@ pub fn remote_issue_from_json(value: &serde_json::Value) -> Option<RemoteIssue> 
     })
 }
 
+/// A pull request as GitHub returns it, narrowed to what the PR step needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePullRequest {
+    pub number: u64,
+    pub url: String,
+    /// GitHub's own `open`/`closed`; `merged` is reported separately.
+    pub state: String,
+    pub draft: bool,
+    pub merged: bool,
+    pub merged_at: Option<jiff::Timestamp>,
+    /// GraphQL id, needed to flip a draft to ready (the REST API cannot).
+    pub node_id: Option<String>,
+}
+
+impl RemotePullRequest {
+    /// The local `run_pull_requests.state` this PR maps to.
+    pub fn local_state(&self) -> &'static str {
+        if self.merged {
+            PULL_REQUEST_MERGED
+        } else if self.state == "closed" {
+            PULL_REQUEST_CLOSED
+        } else {
+            PULL_REQUEST_OPEN
+        }
+    }
+}
+
+/// The pull request to open for one worktree's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPullRequest {
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub body: String,
+    pub draft: bool,
+}
+
+/// Parse a pull request payload.
+pub fn remote_pull_request_from_json(value: &serde_json::Value) -> Option<RemotePullRequest> {
+    let number = value.get("number")?.as_u64()?;
+    Some(RemotePullRequest {
+        number,
+        url: value
+            .get("html_url")
+            .and_then(|url| url.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        state: value
+            .get("state")
+            .and_then(|state| state.as_str())
+            .unwrap_or("open")
+            .to_string(),
+        draft: value
+            .get("draft")
+            .and_then(|draft| draft.as_bool())
+            .unwrap_or(false),
+        merged: value
+            .get("merged")
+            .and_then(|merged| merged.as_bool())
+            .unwrap_or(false),
+        merged_at: value
+            .get("merged_at")
+            .and_then(|at| at.as_str())
+            .and_then(|at| at.parse().ok()),
+        node_id: value
+            .get("node_id")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned),
+    })
+}
+
+/// Conventional-commit types stripped from a generated PR title: they are
+/// exactly what the repo's PR convention forbids (decision 36).
+const CONVENTIONAL_TYPES: &[&str] = &[
+    "fix", "feat", "feature", "chore", "docs", "doc", "refactor", "test", "tests", "ci",
+    "build", "perf", "style", "revert", "wip",
+];
+
+/// Leading imperative verbs dropped before a release-notes bullet, so the
+/// bullet does not read "Added add …".
+const LEADING_VERBS: &[&str] = &[
+    "add", "adds", "fix", "fixes", "support", "supports", "implement", "implements", "update",
+    "updates", "improve", "improves", "enable", "enables", "create", "creates", "remove",
+    "removes", "refactor", "document", "documents", "rename", "renames", "make", "makes",
+    "allow", "allows", "handle", "handles",
+];
+
+/// Words that mean a change is not user-facing, so its release note is `N/A`.
+const NON_USER_FACING_WORDS: &[&str] = &[
+    "docs", "documentation", "readme", "test", "tests", "testing", "refactor", "refactoring",
+    "chore", "ci", "internal", "cleanup", "lint", "linting", "typo", "typos", "comment",
+    "comments", "formatting", "rename", "renames",
+];
+
+/// Words that mean a change fixes something, so its release note is `Fixed`.
+const FIX_WORDS: &[&str] = &[
+    "fix", "fixes", "fixed", "bug", "bugs", "broken", "crash", "crashes", "regression",
+    "regressions", "error", "errors", "incorrect", "wrong", "fails", "failing", "failure",
+];
+
+/// Shape a title the way the repo's PR convention asks (decision 36):
+/// imperative and capitalized, no conventional-commit prefix, no trailing
+/// punctuation, and short enough to read. A `scope:` prefix that is not a
+/// conventional type is kept, since that is the crate name.
+pub fn format_pull_request_title(raw: &str) -> String {
+    let collapsed = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut title = collapsed.trim().to_string();
+    if let Some((head, rest)) = title.split_once(':') {
+        let head = head.trim();
+        let (kind, scope) = match head.find('(') {
+            Some(index) => (
+                head[..index].trim(),
+                Some(head[index + 1..].trim_end_matches(')').trim()),
+            ),
+            None => (head, None),
+        };
+        if CONVENTIONAL_TYPES.contains(&kind.to_lowercase().as_str()) {
+            let subject = rest.trim();
+            title = match scope.filter(|scope| !scope.is_empty()) {
+                Some(scope) if !subject.is_empty() => format!("{scope}: {subject}"),
+                _ => subject.to_string(),
+            };
+        }
+    }
+    title = title.trim_end_matches(['.', ',', ';', ':']).trim().to_string();
+    // A kept `scope: subject` keeps the scope exactly as written (it is a crate
+    // name, so lower case matters) and capitalizes the imperative subject.
+    title = match title.split_once(": ") {
+        Some((scope, subject)) if !scope.contains(' ') && !subject.trim().is_empty() => {
+            format!("{}: {}", scope, capitalize_first(subject.trim()))
+        }
+        _ => capitalize_first(&title),
+    };
+    truncate_at_word(&title, 72)
+        .trim_end_matches(['.', ',', ';', ':'])
+        .to_string()
+}
+
+fn capitalize_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_lowercase() => first.to_uppercase().collect::<String>() + chars.as_str(),
+        _ => text.to_string(),
+    }
+}
+
+fn truncate_at_word(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(limit).collect();
+    match cut.rfind(' ') {
+        Some(index) if index > 0 => cut[..index].to_string(),
+        _ => cut,
+    }
+}
+
+/// The one release-notes bullet for a change, from its title: docs, tests and
+/// internal work are `- N/A`, anything that sounds like a fix is `- Fixed …`,
+/// and the rest is `- Added …` (decision 36).
+pub fn release_note_for(title: &str) -> String {
+    let subject = format_pull_request_title(title);
+    let tokens: Vec<String> = subject
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let mentions = |words: &[&str]| {
+        tokens
+            .iter()
+            .any(|token| words.iter().any(|word| token == word))
+    };
+    let bare = strip_leading_verb(&subject);
+    if mentions(NON_USER_FACING_WORDS) {
+        return "- N/A".to_string();
+    }
+    if mentions(FIX_WORDS) {
+        return format!("- Fixed {}", lower_first(&bare));
+    }
+    format!("- Added {}", lower_first(&bare))
+}
+
+/// Drop a leading imperative verb, so the bullet's own verb does not repeat
+/// the title's. An empty remainder falls back to the title itself.
+fn strip_leading_verb(subject: &str) -> String {
+    let (first, rest) = match subject.split_once(' ') {
+        Some((first, rest)) => (first, rest.trim()),
+        None => (subject, ""),
+    };
+    let is_verb = LEADING_VERBS
+        .iter()
+        .any(|verb| first.eq_ignore_ascii_case(verb));
+    if is_verb && !rest.is_empty() {
+        rest.to_string()
+    } else {
+        subject.to_string()
+    }
+}
+
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_uppercase() => first.to_lowercase().collect::<String>() + chars.as_str(),
+        _ => text.to_string(),
+    }
+}
+
+/// Remove a `Release Notes:` tail an agent may have written itself, since the
+/// app appends the canonical one.
+fn strip_release_notes_section(body: &str) -> String {
+    match body.find("Release Notes:") {
+        Some(index) => body[..index].trim_end().to_string(),
+        None => body.to_string(),
+    }
+}
+
+/// The body of a generated pull request (decision 36): the agent's summary,
+/// then `Closes #<n>` for the linked issue, then the `Release Notes:` section
+/// as the heading, a blank line, and exactly one bullet.
+pub fn format_pull_request_body(
+    summary: &str,
+    issue_number: Option<u64>,
+    release_note: Option<&str>,
+) -> String {
+    let mut body = strip_release_notes_section(summary).trim().to_string();
+    if let Some(number) = issue_number {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!("Closes #{number}"));
+    }
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str("Release Notes:\n\n");
+    body.push_str(
+        release_note
+            .map(str::to_string)
+            .unwrap_or_else(|| "- N/A".to_string())
+            .as_str(),
+    );
+    body
+}
+
+/// The agent's `propose_summary` for a run, as `(commit_message, pr_summary)`.
+/// `propose_summary` stores the commit message followed by the summary prose
+/// in one review annotation, so the first paragraph is the message.
+pub fn summary_from_notes(notes: &[crate::workflow::RunNote]) -> Option<(String, Option<String>)> {
+    let note = notes
+        .iter()
+        .rev()
+        .find(|note| note.kind == "annotation" && note.phase == "review")?;
+    let text = note.body.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match text.split_once("\n\n") {
+        Some((message, prose)) => {
+            let message = message.trim();
+            if message.is_empty() {
+                return None;
+            }
+            let prose = prose.trim();
+            Some((
+                message.to_string(),
+                (!prose.is_empty()).then(|| prose.to_string()),
+            ))
+        }
+        None => Some((text.to_string(), None)),
+    }
+}
+
 /// The GitHub API surface the sync engine needs. Generic over `impl`
 /// `GithubClient` rather than `dyn` so tests can pass a fake and never touch
 /// the network (spec decision 29). The returned futures are explicitly `Send`
@@ -985,6 +1300,62 @@ pub trait GithubClient {
         owner: &'a str,
         repo: &'a str,
         name: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
+    fn create_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        request: &'a NewPullRequest,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a;
+
+    /// The PR already open for this head branch, so a re-run adopts it instead
+    /// of failing (spec §8).
+    fn find_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        head_branch: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a;
+
+    fn get_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a;
+
+    /// Flip a draft to ready for review. REST cannot do this, so the client
+    /// looks the PR up for its GraphQL id and runs the mutation.
+    fn mark_pull_request_ready<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
+    fn add_issue_labels<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        labels: &'a [String],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
+    fn add_issue_assignees<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        assignees: &'a [String],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
+    fn request_reviewers<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        reviewers: &'a [String],
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
 }
 
@@ -1213,6 +1584,159 @@ impl GithubClient for GithubHttpClient {
         }
     }
 
+    fn create_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        request: &'a NewPullRequest,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/pulls");
+            let response = self
+                .send(
+                    self.request(reqwest::Method::POST, &path)
+                        .json(&serde_json::json!({
+                            "title": request.title,
+                            "body": request.body,
+                            "head": request.head,
+                            "base": request.base,
+                            "draft": request.draft,
+                        })),
+                )
+                .await?;
+            let body = self.json(response, "pull request").await?;
+            remote_pull_request_from_json(&body).ok_or_else(|| {
+                anyhow::anyhow!("GitHub did not describe the pull request it created: {body}")
+            })
+        }
+    }
+
+    fn find_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        head_branch: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a {
+        async move {
+            // `head` is `<owner>:<branch>`; the query is for any state so an
+            // already-merged branch is adopted rather than reopened.
+            let path = format!(
+                "/repos/{owner}/{repo}/pulls?state=all&per_page=1&head={owner}%3A{head_branch}"
+            );
+            let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
+            let body = self.json(response, "pull request list").await?;
+            Ok(body
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(remote_pull_request_from_json))
+        }
+    }
+
+    fn get_pull_request<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/pulls/{number}");
+            let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
+            let body = self.json(response, "pull request").await?;
+            remote_pull_request_from_json(&body).ok_or_else(|| {
+                anyhow::anyhow!("GitHub did not describe pull request #{number}: {body}")
+            })
+        }
+    }
+
+    fn mark_pull_request_ready<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            // REST has no draft→ready endpoint; the GraphQL mutation needs the
+            // PR's node id, which the REST read carries.
+            let pull = self.get_pull_request(owner, repo, number).await?;
+            if !pull.draft {
+                return Ok(());
+            }
+            let Some(node_id) = pull.node_id else {
+                anyhow::bail!(
+                    "GitHub did not report the node id needed to mark PR #{number} ready"
+                );
+            };
+            let response = self
+                .send(
+                    self.request(reqwest::Method::POST, "/graphql").json(
+                        &serde_json::json!({
+                            "query": "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
+                            "variables": { "id": node_id },
+                        }),
+                    ),
+                )
+                .await?;
+            let body = self.json(response, "graphql response").await?;
+            if let Some(errors) = body.get("errors").and_then(|errors| errors.as_array())
+                && !errors.is_empty()
+            {
+                anyhow::bail!("GitHub refused to mark PR #{number} ready: {errors:?}");
+            }
+            Ok(())
+        }
+    }
+
+    fn add_issue_labels<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        labels: &'a [String],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            if labels.is_empty() {
+                return Ok(());
+            }
+            let path = format!("/repos/{owner}/{repo}/issues/{number}/labels");
+            self.post_json(&path, serde_json::json!({ "labels": labels }))
+                .await
+        }
+    }
+
+    fn add_issue_assignees<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        assignees: &'a [String],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            if assignees.is_empty() {
+                return Ok(());
+            }
+            let path = format!("/repos/{owner}/{repo}/issues/{number}/assignees");
+            self.post_json(&path, serde_json::json!({ "assignees": assignees }))
+                .await
+        }
+    }
+
+    fn request_reviewers<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        reviewers: &'a [String],
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            if reviewers.is_empty() {
+                return Ok(());
+            }
+            let path = format!("/repos/{owner}/{repo}/pulls/{number}/requested_reviewers");
+            self.post_json(&path, serde_json::json!({ "reviewers": reviewers }))
+                .await
+        }
+    }
+
     fn ensure_label<'a>(
         &'a self,
         owner: &'a str,
@@ -1247,6 +1771,46 @@ impl GithubClient for GithubHttpClient {
                 None,
             )))
         }
+    }
+}
+
+impl GithubHttpClient {
+    /// Decode a response body, reporting a non-JSON one as transient (the
+    /// retry policy owns the decision, not this reader).
+    async fn json(
+        &self,
+        response: reqwest::Response,
+        what: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        response.json::<serde_json::Value>().await.map_err(|e| {
+            anyhow::Error::new(SyncFailure::Transient {
+                message: format!("GitHub {what} was not JSON: {e}"),
+                retry_after: None,
+            })
+        })
+    }
+
+    /// POST a JSON body where only success matters. The body is read so the
+    /// connection is released, and a read failure is reported rather than
+    /// swallowed.
+    async fn post_json(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let response = self
+            .send(self.request(reqwest::Method::POST, path).json(&body))
+            .await?;
+        response
+            .bytes()
+            .await
+            .map_err(|e| {
+                anyhow::Error::new(SyncFailure::Transient {
+                    message: format!("GitHub response could not be read: {e}"),
+                    retry_after: None,
+                })
+            })?;
+        Ok(())
     }
 }
 
@@ -1893,6 +2457,52 @@ impl TodoStore {
         }
         Ok(())
     }
+
+    /// Whether every pull request of a run is finished: merged, or waived by
+    /// the user. A PR closed without merging deliberately does *not* count,
+    /// or a run would complete on a rejected pull request; the waiver button
+    /// is how the user says "that repo is not landing" (decision 25). `false`
+    /// when the run has no PRs, so an unopened step cannot look complete.
+    pub async fn run_pull_requests_resolved(&mut self, run_id: u64) -> QueryResult<bool> {
+        let pull_requests = self.run_pull_requests(run_id).await?;
+        if pull_requests.is_empty() {
+            return Ok(false);
+        }
+        Ok(pull_requests
+            .iter()
+            .all(|pull_request| matches!(pull_request.state.as_str(), PULL_REQUEST_MERGED | PULL_REQUEST_WAIVED)))
+    }
+
+    /// Give up on the still-open pull requests of a run so a multi-repo run
+    /// can complete early (decision 25). Returns how many were waived.
+    pub async fn waive_run_pull_requests(&mut self, run_id: u64) -> QueryResult<usize> {
+        let open: Vec<RunPullRequest> = self
+            .run_pull_requests(run_id)
+            .await?
+            .into_iter()
+            .filter(|pull_request| pull_request.state == PULL_REQUEST_OPEN)
+            .collect();
+        for pull_request in &open {
+            self.update_run_pull_request(
+                pull_request.id,
+                PULL_REQUEST_WAIVED,
+                pull_request.draft,
+                pull_request.merged_at,
+            )
+            .await?;
+        }
+        Ok(open.len())
+    }
+
+    /// One pull request row by its id, for the step's per-PR actions.
+    pub async fn run_pull_request(&mut self, id: u64) -> QueryResult<Option<RunPullRequest>> {
+        self.query_run_pull_request(id).await
+    }
+
+    /// Every pull request row, any state, for the poller's full sweep.
+    pub async fn all_run_pull_requests(&mut self) -> QueryResult<Vec<RunPullRequest>> {
+        self.query_run_pull_requests_all().await
+    }
 }
 
 #[cfg(test)]
@@ -2218,6 +2828,16 @@ mod tests {
         comments: std::sync::Mutex<std::collections::HashMap<String, Vec<ExternalComment>>>,
         updates: std::sync::Mutex<Vec<(String, u64, IssuePatch)>>,
         labels: std::sync::Mutex<Vec<String>>,
+        /// `(repo, head_branch, pull request)`, so `find_pull_request` works
+        /// the way GitHub's `head=` filter does.
+        pull_requests:
+            std::sync::Mutex<Vec<(String, String, RemotePullRequest)>>,
+        created_pull_requests: std::sync::Mutex<Vec<(String, NewPullRequest)>>,
+        ready_pull_requests: std::sync::Mutex<Vec<u64>>,
+        pull_request_labels: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
+        pull_request_assignees: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
+        reviewers_requested: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
+        pull_request_counter: std::sync::Mutex<u64>,
     }
 
     impl FakeGithub {
@@ -2352,6 +2972,146 @@ mod tests {
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
             async move {
                 self.labels.lock().expect("labels lock").push(name.to_string());
+                Ok(())
+            }
+        }
+
+        fn create_pull_request<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            request: &'a NewPullRequest,
+        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+            async move {
+                let mut counter = self.pull_request_counter.lock().expect("pr counter");
+                *counter += 1;
+                let number = *counter;
+                drop(counter);
+                self.created_pull_requests
+                    .lock()
+                    .expect("created prs")
+                    .push((format!("{owner}/{repo}"), request.clone()));
+                let pull = RemotePullRequest {
+                    number,
+                    url: format!("https://github.com/{owner}/{repo}/pull/{number}"),
+                    state: "open".to_string(),
+                    draft: request.draft,
+                    merged: false,
+                    merged_at: None,
+                    node_id: Some(format!("PR_{number}")),
+                };
+                self.pull_requests.lock().expect("prs").push((
+                    format!("{owner}/{repo}"),
+                    request.head.clone(),
+                    pull.clone(),
+                ));
+                Ok(pull)
+            }
+        }
+
+        fn find_pull_request<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            head_branch: &'a str,
+        ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a {
+            async move {
+                Ok(self
+                    .pull_requests
+                    .lock()
+                    .expect("prs")
+                    .iter()
+                    .find(|(repo_slug, head, _)| {
+                        repo_slug == &format!("{owner}/{repo}") && head == head_branch
+                    })
+                    .map(|(_, _, pull)| pull.clone()))
+            }
+        }
+
+        fn get_pull_request<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+            async move {
+                self.pull_requests
+                    .lock()
+                    .expect("prs")
+                    .iter()
+                    .find(|(repo_slug, _, pull)| {
+                        repo_slug == &format!("{owner}/{repo}") && pull.number == number
+                    })
+                    .map(|(_, _, pull)| pull.clone())
+                    .ok_or_else(|| anyhow::anyhow!("the fake has no PR #{number}"))
+            }
+        }
+
+        fn mark_pull_request_ready<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.ready_pull_requests
+                    .lock()
+                    .expect("ready prs")
+                    .push(number);
+                let mut pull_requests = self.pull_requests.lock().expect("prs");
+                for (repo_slug, _, pull) in pull_requests.iter_mut() {
+                    if repo_slug == &format!("{owner}/{repo}") && pull.number == number {
+                        pull.draft = false;
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        fn add_issue_labels<'a>(
+            &'a self,
+            _owner: &'a str,
+            _repo: &'a str,
+            number: u64,
+            labels: &'a [String],
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.pull_request_labels
+                    .lock()
+                    .expect("pr labels")
+                    .push((number, labels.to_vec()));
+                Ok(())
+            }
+        }
+
+        fn add_issue_assignees<'a>(
+            &'a self,
+            _owner: &'a str,
+            _repo: &'a str,
+            number: u64,
+            assignees: &'a [String],
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.pull_request_assignees
+                    .lock()
+                    .expect("pr assignees")
+                    .push((number, assignees.to_vec()));
+                Ok(())
+            }
+        }
+
+        fn request_reviewers<'a>(
+            &'a self,
+            _owner: &'a str,
+            _repo: &'a str,
+            number: u64,
+            reviewers: &'a [String],
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.reviewers_requested
+                    .lock()
+                    .expect("reviewers")
+                    .push((number, reviewers.to_vec()));
                 Ok(())
             }
         }
@@ -2786,5 +3546,273 @@ mod tests {
         assert!(
             comment_from_json(&serde_json::json!({ "id": 10, "body": "   " })).is_none()
         );
+    }
+
+    #[test]
+    fn pull_request_titles_follow_the_pr_convention() {
+        // A conventional prefix is dropped, not passed through.
+        assert_eq!(
+            format_pull_request_title("feat: add the login flow"),
+            "Add the login flow"
+        );
+        assert_eq!(
+            format_pull_request_title("fix: crash on startup."),
+            "Crash on startup"
+        );
+        // A scope is the crate name, so it is kept.
+        assert_eq!(
+            format_pull_request_title("fix(git_ui): stop the flicker"),
+            "git_ui: Stop the flicker"
+        );
+        assert_eq!(
+            format_pull_request_title("git_ui: Add history view"),
+            "git_ui: Add history view"
+        );
+        // Trailing punctuation goes, and the title stays imperative.
+        assert_eq!(format_pull_request_title("Handle empty repos;"), "Handle empty repos");
+        assert_eq!(format_pull_request_title("  fix conflict  "), "Fix conflict");
+        // Long titles are cut at a word boundary, not mid-word.
+        let long = format_pull_request_title(
+            "Refactor the synchronisation engine so that it can handle every remote transport",
+        );
+        assert!(long.chars().count() <= 72, "{long}");
+        assert!(!long.ends_with(' '), "{long}");
+    }
+
+    #[test]
+    fn release_notes_are_one_bullet_of_the_right_kind() {
+        assert_eq!(release_note_for("Add login flow"), "- Added login flow");
+        assert_eq!(release_note_for("Fix crash on startup"), "- Fixed crash on startup");
+        assert_eq!(release_note_for("Fix the broken sync"), "- Fixed the broken sync");
+        // Docs, tests and internal work are not user-facing.
+        assert_eq!(release_note_for("docs: update the readme"), "- N/A");
+        assert_eq!(release_note_for("Add tests for the parser"), "- N/A");
+        assert_eq!(release_note_for("Refactor the sync loop"), "- N/A");
+    }
+
+    #[test]
+    fn pull_request_bodies_end_with_exactly_one_release_note() {
+        let body = format_pull_request_body(
+            "This adds a login form and wires it to the API.",
+            Some(42),
+            Some("- Added login form"),
+        );
+        assert_eq!(
+            body,
+            "This adds a login form and wires it to the API.\n\nCloses #42\n\nRelease Notes:\n\n- Added login form"
+        );
+        let tail = body.split("Release Notes:\n\n").nth(1).expect("the section");
+        assert_eq!(tail.lines().count(), 1, "exactly one bullet: {tail}");
+
+        // Without an issue there is no `Closes`, and an agent-written section
+        // is replaced rather than duplicated.
+        let body = format_pull_request_body(
+            "Some prose.\n\nRelease Notes:\n\n- Added a thing the agent made up",
+            None,
+            None,
+        );
+        assert_eq!(body, "Some prose.\n\nRelease Notes:\n\n- N/A");
+        assert_eq!(body.matches("Release Notes:").count(), 1);
+    }
+
+    #[test]
+    fn the_agents_summary_is_read_from_the_review_notes() {
+        let notes = vec![
+            crate::workflow::RunNote::new("annotation", "implement", "implement", "unrelated"),
+            crate::workflow::RunNote::new(
+                "annotation",
+                "review",
+                "review",
+                "Add the login flow\n\nAdds a form and wires it up.",
+            ),
+        ];
+        let (message, prose) = summary_from_notes(&notes).expect("a summary");
+        assert_eq!(message, "Add the login flow");
+        assert_eq!(prose.as_deref(), Some("Adds a form and wires it up."));
+        // A bare message has no prose, and no note means no summary.
+        let bare = vec![crate::workflow::RunNote::new(
+            "annotation",
+            "review",
+            "review",
+            "Just a message",
+        )];
+        assert_eq!(summary_from_notes(&bare).unwrap().1, None);
+        assert!(summary_from_notes(&[]).is_none());
+    }
+
+    #[test]
+    fn pull_request_payloads_map_to_local_states() {
+        let open = remote_pull_request_from_json(&serde_json::json!({
+            "number": 7,
+            "html_url": "https://github.com/o/r/pull/7",
+            "state": "open",
+            "draft": true,
+            "node_id": "PR_kwDO",
+        }))
+        .expect("a pull request");
+        assert_eq!(open.number, 7);
+        assert!(open.draft);
+        assert_eq!(open.local_state(), PULL_REQUEST_OPEN);
+        assert_eq!(open.node_id.as_deref(), Some("PR_kwDO"));
+
+        let merged = remote_pull_request_from_json(&serde_json::json!({
+            "number": 7,
+            "state": "closed",
+            "merged": true,
+            "merged_at": "2026-09-14T10:00:00Z",
+            "draft": false,
+        }))
+        .expect("a merged pull request");
+        assert_eq!(merged.local_state(), PULL_REQUEST_MERGED);
+        assert!(merged.merged_at.is_some());
+
+        let closed = remote_pull_request_from_json(&serde_json::json!({
+            "number": 8,
+            "state": "closed",
+            "merged": false,
+        }))
+        .expect("a closed pull request");
+        assert_eq!(closed.local_state(), PULL_REQUEST_CLOSED);
+        assert!(remote_pull_request_from_json(&serde_json::json!({ "state": "open" })).is_none());
+    }
+
+    #[tokio::test]
+    async fn pull_requests_are_adopted_by_branch_and_flip_to_ready() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("github", None).await?;
+        let fake = FakeGithub::default();
+        let request = NewPullRequest {
+            head: "feature/42-add-login".to_string(),
+            base: "main".to_string(),
+            title: "Add login".to_string(),
+            body: "body".to_string(),
+            draft: true,
+        };
+        let opened = fake
+            .create_pull_request("lofi-tools", "todo-lofi", &request)
+            .await?;
+        assert!(opened.draft);
+
+        // A re-run finds the branch's existing PR instead of opening another.
+        let found = fake
+            .find_pull_request("lofi-tools", "todo-lofi", "feature/42-add-login")
+            .await?
+            .expect("the adopted pull request");
+        assert_eq!(found.number, opened.number);
+        assert!(
+            fake.find_pull_request("lofi-tools", "todo-lofi", "feature/other")
+                .await?
+                .is_none()
+        );
+
+        // Marking ready goes through the PR's node id.
+        fake.mark_pull_request_ready("lofi-tools", "todo-lofi", opened.number)
+            .await?;
+        let updated = fake
+            .get_pull_request("lofi-tools", "todo-lofi", opened.number)
+            .await?;
+        assert!(!updated.draft);
+
+        let id = storage
+            .upsert_run_pull_request(&NewRunPullRequest {
+                run_id: 4,
+                repo_dir: "/repos/api".to_string(),
+                integration_id: integration.id,
+                owner: "lofi-tools".to_string(),
+                repo: "todo-lofi".to_string(),
+                number: opened.number,
+                url: opened.url.clone(),
+                head_branch: request.head.clone(),
+                base_branch: request.base.clone(),
+                draft: opened.draft,
+                state: PULL_REQUEST_OPEN.to_string(),
+            })
+            .await?;
+        let row = storage
+            .run_pull_request(id)
+            .await?
+            .expect("the row by id");
+        assert_eq!(row.number, opened.number);
+        assert!(storage.run_pull_request(id + 99).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_run_completes_when_every_pull_request_is_resolved() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("github", None).await?;
+        // No PRs yet: the step is not finished.
+        assert!(!storage.run_pull_requests_resolved(11).await?);
+
+        let mut ids = Vec::new();
+        for (run_id, repo_dir, number) in [(11, "/repos/api", 1u64), (11, "/repos/web", 2u64)] {
+            ids.push(
+                storage
+                    .upsert_run_pull_request(&NewRunPullRequest {
+                        run_id,
+                        repo_dir: repo_dir.to_string(),
+                        integration_id: integration.id,
+                        owner: "lofi-tools".to_string(),
+                        repo: "todo-lofi".to_string(),
+                        number,
+                        url: format!("https://github.com/lofi-tools/todo-lofi/pull/{number}"),
+                        head_branch: "feature/42-add-login".to_string(),
+                        base_branch: "main".to_string(),
+                        draft: true,
+                        state: PULL_REQUEST_OPEN.to_string(),
+                    })
+                    .await?,
+            );
+        }
+        assert!(!storage.run_pull_requests_resolved(11).await?);
+
+        storage
+            .update_run_pull_request(ids[0], PULL_REQUEST_MERGED, false, jiff::Timestamp::from_second(9).ok())
+            .await?;
+        assert!(!storage.run_pull_requests_resolved(11).await?);
+
+        // Waiving the rest lets a multi-repo run finish early (decision 25).
+        assert_eq!(storage.waive_run_pull_requests(11).await?, 1);
+        assert!(storage.run_pull_requests_resolved(11).await?);
+        assert!(
+            storage.all_run_pull_requests().await?
+                .iter()
+                .any(|pull_request| pull_request.state == PULL_REQUEST_WAIVED)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pull_request_metadata_is_copied_from_the_issue() -> anyhow::Result<()> {
+        // The client surface the step uses for the metadata copy: labels,
+        // assignees, and reviewers, each recorded on the PR's issue number.
+        let fake = FakeGithub::default();
+        fake.add_issue_labels(
+            "o",
+            "r",
+            12,
+            &["bug".to_string(), "needs-review".to_string()],
+        )
+        .await?;
+        fake.add_issue_assignees("o", "r", 12, &["me".to_string()])
+            .await?;
+        fake.request_reviewers("o", "r", 12, &["me".to_string()])
+            .await?;
+        assert_eq!(
+            *fake.pull_request_labels.lock().expect("labels"),
+            vec![(
+                12,
+                vec!["bug".to_string(), "needs-review".to_string()]
+            )]
+        );
+        assert_eq!(
+            *fake.pull_request_assignees.lock().expect("assignees"),
+            vec![(12, vec!["me".to_string()])]
+        );
+        assert_eq!(
+            *fake.reviewers_requested.lock().expect("reviewers"),
+            vec![(12, vec!["me".to_string()])]
+        );
+        Ok(())
     }
 }

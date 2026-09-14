@@ -398,6 +398,12 @@ impl Layout {
             |this, _view, event, _window, cx| match event {
                 IntegrationsEvent::Changed => {
                     this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                    // A sync or a merged pull request changes both the task list
+                    // and the selected run: a merge completes the run and
+                    // removes its worktrees, which moves the agent pane too.
+                    this.task_list.update(cx, |list, cx| list.refresh(cx));
+                    this.details.update(cx, |details, cx| details.refresh_coding(cx));
+                    this.sync_agent_checkout_for_selection(cx);
                 }
             },
         )
@@ -407,8 +413,11 @@ impl Layout {
         let travel_for_empty_action = travel_panel.clone();
         cx.subscribe(&task_list, move |this, _list, event, cx| match event {
             TaskListEvent::Selected(task) => {
+                let task_id = task.id;
                 let deferred = details_for_list
                     .update(cx, |details, cx| details.request_select(task.clone(), cx));
+                // The pane follows the selected task's run checkout (§6.3).
+                this.sync_agent_checkout(task_id, cx);
                 if !deferred {
                     cx.notify();
                 }
@@ -483,6 +492,7 @@ impl Layout {
                 }
                 TaskDetailsEvent::TaskRefreshed(task) => {
                     list_for_pending.update(cx, |list, cx| list.refresh_task_data(task, cx));
+                    this.sync_agent_checkout(task.id, cx);
                 }
                 TaskDetailsEvent::SubtaskCreated | TaskDetailsEvent::FollowUpCreated => {
                     list_for_pending.update(cx, |list, cx| list.refresh(cx));
@@ -492,6 +502,9 @@ impl Layout {
                 TaskDetailsEvent::CodingChanged => {
                     list_for_pending.update(cx, |list, cx| list.refresh(cx));
                     automations_for_toggle.update(cx, |panel, cx| panel.refresh(cx));
+                    // Spec approval creates the worktrees and completion removes
+                    // them, so the pane's checkout follows the run's state.
+                    this.sync_agent_checkout_for_selection(cx);
                 }
                 // A phase prompt is ready: drop it into the agent pane and
                 // show the pane. Sending stays manual so it can be edited.
@@ -866,8 +879,15 @@ async fn lookup_managed_tag(
                 tag_name: tag.name.clone(),
                 label: tag.label(),
                 candidates,
+                checkout: None,
             });
             agent_pane.update(cx, |pane, cx| pane.set_project(project, cx));
+            // The project description carries no checkout, so re-apply the
+            // selected task's run: re-selecting a tag must not drop the pane
+            // back onto the project directory mid-run (§6.3).
+            layout
+                .update(cx, |layout, cx| layout.sync_agent_checkout_for_selection(cx))
+                .ok();
             // Clicking a busy project's row opens it with the agent focused.
             if busy {
                 layout
@@ -889,6 +909,34 @@ async fn lookup_managed_tag(
             }
         })
         .detach();
+    }
+
+    /// Point the agent pane at the selected task's coding-run worktree, or back
+    /// at the project directory when the task has no active run (§6.3). The
+    /// session key is the cwd, so a worktree-backed run is a new agent session
+    /// rather than a resumed interview.
+    fn sync_agent_checkout(&self, task_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let agent_pane = self.agent_pane.clone();
+        let checkout = store.coding_checkout_for_task(task_id, cx);
+        cx.spawn(async move |_this, cx| {
+            let checkout = match checkout.await {
+                Ok(checkout) => checkout,
+                Err(error) => {
+                    tracing::warn!("could not resolve the run's checkout: {error}");
+                    return;
+                }
+            };
+            agent_pane.update(cx, |pane, cx| pane.set_checkout(checkout, cx));
+        })
+        .detach();
+    }
+
+    /// Re-resolve the checkout for whatever the details panel is showing.
+    fn sync_agent_checkout_for_selection(&self, cx: &mut Context<Self>) {
+        if let Some(task) = self.details.read(cx).selected_task() {
+            self.sync_agent_checkout(task.id, cx);
+        }
     }
 
     /// The selected task as prompt text, or `None` when nothing is selected.

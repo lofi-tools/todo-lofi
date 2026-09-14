@@ -4,6 +4,7 @@ use storage::prelude::*;
 use storage::task::TaskCreate;
 
 use crate::coding_git;
+use crate::ui_parts::agent_pane::RunCheckout;
 
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
@@ -1294,8 +1295,24 @@ impl Store {
             else {
                 anyhow::bail!("the spec is not waiting for approval");
             };
+            // The collision fallback is always the run-id form, so a name that
+            // is already taken still lands somewhere predictable (§6.1).
             let fallback = Self::default_branch_name(&view, task_id, &mut s).await?;
-            let desired = Self::proposed_branch(&view).unwrap_or_else(|| fallback.clone());
+            // An issue-backed run is named after its issue (decision 13): the
+            // app derives that name, so the agent's `propose_branch` proposal
+            // does not win here. A purely local run keeps today's behaviour.
+            let desired = match s.issue_link_for_task(task_id).await? {
+                Some(issue) => {
+                    let issue_title = issue.state.remote.title.trim();
+                    let title = if issue_title.is_empty() {
+                        s.get_task(task_id).await?.title
+                    } else {
+                        issue_title.to_string()
+                    };
+                    storage::issue_branch_name(issue.issue.number, &title)
+                }
+                None => Self::proposed_branch(&view).unwrap_or_else(|| fallback.clone()),
+            };
             // A rejection sends the run back to the interview, but the branch
             // survives it: only the first approval creates the branch, later
             // cycles keep working on it.
@@ -1617,11 +1634,24 @@ impl Store {
         store: &mut TodoStore,
         task_id: u64,
     ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        Ok(Self::project_tag_dirs(store, task_id)
+            .await?
+            .map(|(_, dirs)| dirs)
+            .unwrap_or_default())
+    }
+
+    /// [`Self::project_dirs`], keeping the tag the directories came from: the
+    /// pane needs it to tell whether a run's checkout belongs to the project
+    /// it is showing.
+    async fn project_tag_dirs(
+        store: &mut TodoStore,
+        task_id: u64,
+    ) -> anyhow::Result<Option<(u64, Vec<std::path::PathBuf>)>> {
         let mut current = Some(task_id);
         // Bounded so a corrupt parent chain cannot loop forever.
         for _ in 0..32 {
             let Some(id) = current else {
-                return Ok(Vec::new());
+                return Ok(None);
             };
             let task = store.get_task(id).await?;
             let direct_tags = store.get_direct_task_tags(id).await?;
@@ -1633,7 +1663,7 @@ impl Store {
                     if let Some(path) = tag.name.strip_prefix("project:") {
                         let path = std::path::PathBuf::from(path);
                         if path.is_dir() {
-                            return Ok(vec![path]);
+                            return Ok(Some((tag.id, vec![path])));
                         }
                     }
                     continue;
@@ -1646,12 +1676,12 @@ impl Store {
                     .filter(|dir| dir.is_dir())
                     .collect();
                 if !existing.is_empty() {
-                    return Ok(existing);
+                    return Ok(Some((tag.id, existing)));
                 }
             }
             current = task.parent_id;
         }
-        Ok(Vec::new())
+        Ok(None)
     }
 
     /// The directory the run's git commands run in: the first usable one.
@@ -1854,5 +1884,570 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// ——— Pull requests ——————————————————————————————————
+    /// The run's worktrees, for the PR step and the pane's checkout
+    /// indicator.
+    pub fn coding_run_worktrees(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RunWorktree>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.run_worktrees(run_id).await?)
+        })
+    }
+
+    /// The pull requests the PR step opened for a run, one per repo.
+    pub fn coding_run_pull_requests(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RunPullRequest>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.run_pull_requests(run_id).await?)
+        })
+    }
+
+    /// Worktrees holding uncommitted work, with their changed paths. Non-empty
+    /// is what makes the PR step refuse with "Commit and continue" (§6.7).
+    async fn dirty_worktrees_of(
+        worktrees: Vec<RunWorktree>,
+    ) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        let pending: Vec<std::path::PathBuf> = worktrees
+            .iter()
+            .filter(|worktree| worktree.removed_at.is_none())
+            .map(|worktree| std::path::PathBuf::from(&worktree.worktree_path))
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            let mut dirty = Vec::new();
+            for path in pending {
+                if !path.is_dir() {
+                    continue;
+                }
+                let changed = coding_git::changed_paths(&path)?;
+                if !changed.is_empty() {
+                    dirty.push((path.display().to_string(), changed));
+                }
+            }
+            Ok::<_, anyhow::Error>(dirty)
+        })
+        .await?
+    }
+
+    /// Where the pane points while the run working on `task_id` is active: the
+    /// run's primary worktree, the repo directory it replaces, and the build
+    /// directory every worktree of the run shares (decisions 11 and 12).
+    /// `None` keeps the pane on the project directory.
+    pub fn coding_checkout_for_task(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<RunCheckout>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            // A run is rooted at the feature task, but the details panel also
+            // selects the run's phase steps and their subtasks. Those are
+            // members of the run, so walk up to the task that owns it instead
+            // of putting the pane back on the project directory whenever the
+            // user browses the steps.
+            let mut current = Some(task_id);
+            let mut found = None;
+            // Bounded so a corrupt parent chain cannot loop forever.
+            for _ in 0..32 {
+                let Some(id) = current else { break };
+                if let Some(view) = s.coding_run_for_task(id).await?
+                    && view.run.status == "active"
+                {
+                    found = Some(view);
+                    break;
+                }
+                current = s.get_task(id).await?.parent_id;
+            }
+            let Some(view) = found else {
+                return Ok(None);
+            };
+            let Some(root) = view.run.root_task_id else {
+                return Ok(None);
+            };
+            let Some((tag_id, _dirs)) = Self::project_tag_dirs(&mut s, root).await? else {
+                return Ok(None);
+            };
+            // The run's main directory is the first worktree that still has a
+            // checkout on disk; a worktree removed by hand must not keep the
+            // pane pointed at a directory that is gone.
+            let Some(worktree) = s
+                .run_worktrees(view.run.id)
+                .await?
+                .into_iter()
+                .filter(|worktree| worktree.removed_at.is_none())
+                .find(|worktree| std::path::Path::new(&worktree.worktree_path).is_dir())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(RunCheckout {
+                tag_id,
+                target_dir: std::path::PathBuf::from(&worktree.repo_dir).join("target"),
+                worktree: std::path::PathBuf::from(&worktree.worktree_path),
+                repo_dir: std::path::PathBuf::from(&worktree.repo_dir),
+            }))
+        })
+    }
+
+    /// Open the PR step: push each worktree's branch to its GitHub remote and
+    /// open (or adopt) a draft PR per repo, generated per the repo's PR
+    /// convention and carrying the issue's labels and assignees (§6.5). With
+    /// `commit_dirty` set, worktrees holding uncommitted work are committed
+    /// first — the "Commit and continue" path (§6.7) — using the summary's
+    /// commit message, or a message generated from the task title.
+    pub fn open_pull_requests(
+        &self,
+        run_id: u64,
+        commit_dirty: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RunPullRequest>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let credentials = crate::github_auth::stored_credentials()
+                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
+            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let mut s = store.lock().await;
+            let run = s.get_run(run_id).await?;
+            let worktrees: Vec<RunWorktree> = s
+                .run_worktrees(run_id)
+                .await?
+                .into_iter()
+                .filter(|worktree| worktree.removed_at.is_none())
+                .collect();
+            if worktrees.is_empty() {
+                anyhow::bail!("this run has no worktree to open a pull request from");
+            }
+            if !commit_dirty {
+                // Refuse before pushing anything: the app will not commit work
+                // the user has not seen, and a push of a half-finished
+                // worktree would be worse than a refusal (§6.7).
+                let dirty = Self::dirty_worktrees_of(worktrees.clone()).await?;
+                if !dirty.is_empty() {
+                    return Err(storage::DirtyWorktrees { worktrees: dirty }.into());
+                }
+            }
+            let integration_id = s
+                .list_integrations()
+                .await?
+                .into_iter()
+                .find(|integration| integration.provider == "github")
+                .map(|integration| integration.id)
+                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
+            let root = run
+                .root_task_id
+                .ok_or_else(|| anyhow::anyhow!("this run has no feature task"))?;
+            let issue = s.issue_link_for_task(root).await?;
+            let notes = run_notes(&run.step_results.0);
+            let summary = storage::summary_from_notes(&notes);
+            let task_title = s.get_task(root).await?.title;
+
+            let message = summary
+                .as_ref()
+                .map(|(message, _)| message.clone())
+                .unwrap_or_else(|| task_title.clone());
+            let title = storage::format_pull_request_title(&message);
+            let prose = summary
+                .as_ref()
+                .and_then(|(_, prose)| prose.clone())
+                .unwrap_or_else(|| message.clone());
+            let body = storage::format_pull_request_body(
+                &prose,
+                issue.as_ref().map(|issue| issue.issue.number),
+                Some(&storage::release_note_for(&message)),
+            );
+
+            let mut opened = Vec::new();
+            for worktree in &worktrees {
+                let repo_dir = std::path::PathBuf::from(&worktree.repo_dir);
+                let worktree_path = std::path::PathBuf::from(&worktree.worktree_path);
+                // Push and commit from the worktree that has the branch
+                // checked out, falling back to the repo when it is gone.
+                let dir = if worktree_path.is_dir() {
+                    worktree_path.clone()
+                } else {
+                    repo_dir.clone()
+                };
+                if commit_dirty && worktree_path.is_dir() {
+                    let path = worktree_path.clone();
+                    let message = message.clone();
+                    tokio::task::spawn_blocking(move || {
+                        // A worktree that turned out to be clean (or was
+                        // committed by hand) is left alone: `git commit` with
+                        // nothing staged fails.
+                        if coding_git::changed_paths(&path)?.is_empty() {
+                            return Ok(());
+                        }
+                        coding_git::stage_and_commit(&path, &message)
+                    })
+                    .await??;
+                }
+                // The remote is re-resolved rather than trusted from the row:
+                // the row stores the name, and the owner/repo pair is what the
+                // API needs (decision 33).
+                let repo_dir_for_git = repo_dir.clone();
+                let resolved = tokio::task::spawn_blocking(move || {
+                    coding_git::resolve_remote(&repo_dir_for_git)
+                })
+                .await?;
+                let Some(remote) = resolved else {
+                    s.append_run_note(
+                        run_id,
+                        "annotation",
+                        "merge",
+                        "merge",
+                        &format!(
+                            "{} has no github.com remote, so it was not pushed",
+                            repo_dir.display()
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+
+                let base = worktree.base_branch.clone();
+                let branch = worktree.branch.clone();
+                let push_dir = dir.clone();
+                let push_remote = remote.name.clone();
+                let push_branch = branch.clone();
+                tokio::task::spawn_blocking(move || {
+                    coding_git::push_branch(&push_dir, &push_remote, &push_branch)
+                })
+                .await??;
+
+                // A branch that already has a PR is adopted, never duplicated
+                // (spec §8).
+                let existing = client
+                    .find_pull_request(&remote.owner, &remote.repo, &branch)
+                    .await?;
+                let pull_request = match existing {
+                    Some(existing) => existing,
+                    None => {
+                        client
+                            .create_pull_request(
+                                &remote.owner,
+                                &remote.repo,
+                                &storage::NewPullRequest {
+                                    head: branch.clone(),
+                                    base: base.clone(),
+                                    title: title.clone(),
+                                    body: body.clone(),
+                                    draft: true,
+                                },
+                            )
+                            .await?
+                    }
+                };
+
+                // The issue's metadata follows the PR. Reviewers are the
+                // issue's assignees, because an issue has no reviewer field;
+                // a rejected reviewer request is a note, never a block (§8).
+                if let Some(issue) = &issue {
+                    for label in &issue.state.remote.labels {
+                        if let Err(error) = client
+                            .ensure_label(&remote.owner, &remote.repo, label)
+                            .await
+                        {
+                            s.append_run_note(
+                                run_id,
+                                "annotation",
+                                "merge",
+                                "merge",
+                                &format!("Could not create the label {label}: {error}"),
+                            )
+                            .await?;
+                        }
+                    }
+                    if let Err(error) = client
+                        .add_issue_labels(
+                            &remote.owner,
+                            &remote.repo,
+                            pull_request.number,
+                            &issue.state.remote.labels,
+                        )
+                        .await
+                    {
+                        s.append_run_note(
+                            run_id,
+                            "annotation",
+                            "merge",
+                            "merge",
+                            &format!("Could not copy the issue's labels: {error}"),
+                        )
+                        .await?;
+                    }
+                    if let Err(error) = client
+                        .add_issue_assignees(
+                            &remote.owner,
+                            &remote.repo,
+                            pull_request.number,
+                            &issue.state.assignees,
+                        )
+                        .await
+                    {
+                        s.append_run_note(
+                            run_id,
+                            "annotation",
+                            "merge",
+                            "merge",
+                            &format!("Could not copy the issue's assignees: {error}"),
+                        )
+                        .await?;
+                    }
+                    if let Err(error) = client
+                        .request_reviewers(
+                            &remote.owner,
+                            &remote.repo,
+                            pull_request.number,
+                            &issue.state.assignees,
+                        )
+                        .await
+                    {
+                        s.append_run_note(
+                            run_id,
+                            "annotation",
+                            "merge",
+                            "merge",
+                            &format!(
+                                "Could not request reviewers for #{}: {error}",
+                                pull_request.number
+                            ),
+                        )
+                        .await?;
+                    }
+                }
+
+                let id = s
+                    .upsert_run_pull_request(&NewRunPullRequest {
+                        run_id,
+                        repo_dir: worktree.repo_dir.clone(),
+                        integration_id,
+                        owner: remote.owner.clone(),
+                        repo: remote.repo.clone(),
+                        number: pull_request.number,
+                        url: pull_request.url.clone(),
+                        head_branch: branch.clone(),
+                        base_branch: base.clone(),
+                        draft: pull_request.draft,
+                        state: pull_request.local_state().to_string(),
+                    })
+                    .await?;
+                s.append_run_note(
+                    run_id,
+                    "pull-request",
+                    "merge",
+                    "merge",
+                    &format!(
+                        "{} {}/{}#{}",
+                        if pull_request.draft {
+                            "Draft pull request"
+                        } else {
+                            "Pull request"
+                        },
+                        remote.owner,
+                        remote.repo,
+                        pull_request.number
+                    ),
+                )
+                .await?;
+                if let Some(row) = s.run_pull_request(id).await? {
+                    opened.push(row);
+                }
+            }
+            if opened.is_empty() {
+                anyhow::bail!("no repo of this run pushes to github.com");
+            }
+            Ok(opened)
+        })
+    }
+
+    /// Flip one draft pull request to ready for review.
+    pub fn mark_pull_request_ready(
+        &self,
+        pull_request_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let credentials = crate::github_auth::stored_credentials()
+                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
+            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let mut s = store.lock().await;
+            let pull_request = s
+                .run_pull_request(pull_request_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("that pull request is not tracked"))?;
+            client
+                .mark_pull_request_ready(
+                    &pull_request.owner,
+                    &pull_request.repo,
+                    pull_request.number,
+                )
+                .await?;
+            s.update_run_pull_request(
+                pull_request.id,
+                &pull_request.state,
+                false,
+                pull_request.merged_at,
+            )
+            .await?;
+            s.append_run_note(
+                pull_request.run_id,
+                "annotation",
+                "merge",
+                "merge",
+                &format!("Pull request #{} is ready for review", pull_request.number),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    /// Give up on the run's still-open pull requests so a multi-repo run can
+    /// complete (decision 25), finishing it when nothing is left pending.
+    pub fn waive_remaining_pull_requests(
+        &self,
+        run_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<usize>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let waived = s.waive_run_pull_requests(run_id).await?;
+            if waived > 0 {
+                s.append_run_note(
+                    run_id,
+                    "annotation",
+                    "merge",
+                    "merge",
+                    &format!("Waived {waived} remaining pull request(s)"),
+                )
+                .await?;
+            }
+            if s.run_pull_requests_resolved(run_id).await? {
+                Self::finish_pull_request_run(&mut s, run_id).await?;
+            }
+            Ok(waived)
+        })
+    }
+
+    /// Poll the open pull requests of every run and finish the runs whose PRs
+    /// are all merged (decision 19). Called on the demand-driven interval.
+    pub fn poll_pull_requests(&self, cx: &impl AppContext) -> Task<anyhow::Result<usize>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let Some(credentials) = crate::github_auth::stored_credentials() else {
+                return Ok(0);
+            };
+            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let mut s = store.lock().await;
+            let open = s.open_run_pull_requests().await?;
+            let mut resolved_runs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut changed = 0;
+            for pull_request in open {
+                match client
+                    .get_pull_request(&pull_request.owner, &pull_request.repo, pull_request.number)
+                    .await
+                {
+                    Ok(remote) => {
+                        let state = remote.local_state();
+                        if state != pull_request.state || remote.draft != pull_request.draft {
+                            changed += 1;
+                        }
+                        s.update_run_pull_request(
+                            pull_request.id,
+                            state,
+                            remote.draft,
+                            remote.merged_at,
+                        )
+                        .await?;
+                        if state == PULL_REQUEST_MERGED {
+                            resolved_runs.insert(pull_request.run_id);
+                        }
+                    }
+                    Err(error) => {
+                        // Transient failures retry on the next tick; permanent
+                        // ones are recorded so the step can explain itself.
+                        if let Some(failure) = error.downcast_ref::<storage::SyncFailure>()
+                            && !failure.is_transient()
+                        {
+                            s.append_run_note(
+                                pull_request.run_id,
+                                "annotation",
+                                "merge",
+                                "merge",
+                                &format!(
+                                    "Pull request #{} could not be checked: {}",
+                                    pull_request.number,
+                                    failure.message()
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+            for run_id in resolved_runs {
+                if s.run_pull_requests_resolved(run_id).await? {
+                    Self::finish_pull_request_run(&mut s, run_id).await?;
+                }
+            }
+            Ok(changed)
+        })
+    }
+
+    /// Finish a run whose pull requests are all merged or waived: remove the
+    /// worktrees (keeping the branches for the cleanup list), complete the
+    /// merge step and the feature task, and record what merged (§6.6).
+    async fn finish_pull_request_run(store: &mut TodoStore, run_id: u64) -> anyhow::Result<()> {
+        let worktrees: Vec<RunWorktree> = store
+            .run_worktrees(run_id)
+            .await?
+            .into_iter()
+            .filter(|worktree| worktree.removed_at.is_none())
+            .collect();
+        let removals: Vec<(std::path::PathBuf, std::path::PathBuf)> = worktrees
+            .iter()
+            .map(|worktree| {
+                (
+                    std::path::PathBuf::from(&worktree.repo_dir),
+                    std::path::PathBuf::from(&worktree.worktree_path),
+                )
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || {
+            for (repo_dir, worktree_path) in &removals {
+                if worktree_path.is_dir() {
+                    coding_git::worktree_remove(repo_dir, worktree_path)?;
+                } else {
+                    coding_git::worktree_prune(repo_dir)?;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        for worktree in &worktrees {
+            store.mark_run_worktree_removed(worktree.id).await?;
+        }
+
+        let pull_requests = store.run_pull_requests(run_id).await?;
+        let merged = pull_requests
+            .iter()
+            .filter(|pull_request| pull_request.state == PULL_REQUEST_MERGED)
+            .count();
+        let waived = pull_requests.len() - merged;
+        let note = format!("Merged {merged} pull request(s); {waived} waived");
+        store.complete_coding_pull_requests(run_id, &note).await?;
+        Ok(())
     }
 }

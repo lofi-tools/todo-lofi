@@ -268,6 +268,21 @@ pub fn worktree_remove(repo_dir: &Path, path: &Path) -> anyhow::Result<()> {
     run_git(repo_dir, &["worktree", "remove", &path]).map(|_| ())
 }
 
+/// Push `branch` to `remote` and set its upstream. Auth is the user's own git
+/// credentials (decision 30): the API token never reaches git, a remote URL,
+/// or a credential helper. A failure carries git's own stderr, which is what
+/// the step blocks with.
+pub fn push_branch(dir: &Path, remote: &str, branch: &str) -> anyhow::Result<()> {
+    run_git(dir, &["push", "-u", remote, branch]).map(|_| ())
+}
+
+/// Stage everything in `dir` and commit it, for the PR step's "Commit and
+/// continue" (§6.7).
+pub fn stage_and_commit(dir: &Path, message: &str) -> anyhow::Result<()> {
+    run_git(dir, &["add", "-A"])?;
+    run_git(dir, &["commit", "-q", "-m", message]).map(|_| ())
+}
+
 /// Forget admin entries whose checkout was deleted by hand (`rm -rf`), after
 /// which `git worktree list` reports them as prunable.
 pub fn worktree_prune(repo_dir: &Path) -> anyhow::Result<()> {
@@ -500,6 +515,48 @@ mod tests {
         std::fs::remove_file(worktree.join("uncommitted.txt")).unwrap();
         worktree_remove(&repo.dir, &worktree).unwrap();
         assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn stages_and_commits_a_dirty_worktree() {
+        let repo = TempRepo::new("worktree-commit");
+        // Worktrees share the repo's config, so one identity covers both.
+        repo.git(&["config", "user.email", "t@t"]);
+        repo.git(&["config", "user.name", "t"]);
+        let worktree = repo.dir.join("worktrees").join("commit");
+        worktree_add(&repo.dir, &worktree, "feature/commit", "main").unwrap();
+        std::fs::write(worktree.join("work.txt"), "wip").unwrap();
+        assert!(!changed_paths(&worktree).unwrap().is_empty());
+
+        stage_and_commit(&worktree, "Add the change").expect("commit");
+        assert!(changed_paths(&worktree).unwrap().is_empty());
+        // The commit landed on the worktree's own branch.
+        let subject = run_git(&worktree, &["log", "-1", "--pretty=%s"]).unwrap();
+        assert_eq!(subject, "Add the change");
+    }
+
+    #[test]
+    fn pushes_a_branch_to_the_remote_it_was_resolved_from() {
+        let repo = TempRepo::new("push");
+        let bare = std::env::temp_dir().join(format!(
+            "todo2-coding-git-bare-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&bare).ok();
+        std::fs::create_dir_all(&bare).expect("create bare repo");
+        run_git(&bare, &["init", "-q", "--bare"]).expect("init bare");
+        repo.git(&["remote", "add", "github", &bare.to_string_lossy()]);
+        let worktree = repo.dir.join("worktrees").join("push");
+        worktree_add(&repo.dir, &worktree, "feature/push", "main").unwrap();
+
+        push_branch(&worktree, "github", "feature/push").expect("push");
+        let refs = run_git(&bare, &["branch", "--list"]).unwrap();
+        assert!(refs.contains("feature/push"), "{refs}");
+        // The remote is a local path, so it is not a github.com remote and
+        // must never be used for a pull request (decision 33).
+        assert!(resolve_remote(&repo.dir).is_none());
+
+        std::fs::remove_dir_all(&bare).ok();
     }
 
     #[test]

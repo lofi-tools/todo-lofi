@@ -21,13 +21,15 @@ pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
     pub use crate::github::{
-        BoundRepo, FieldDecision, FieldMerge, GithubClient, GithubHttpClient, GithubSyncSummary,
+        BoundRepo, DirtyWorktrees, FieldDecision, FieldMerge, GithubClient, GithubHttpClient,
+        GithubSyncSummary,
         ISSUE_FIELDS, IssueFieldState, IssueLink, IssuePage, IssuePatch, IssueRef,
-        NewRunPullRequest, NewRunWorktree, PULL_REQUEST_CLOSED, PULL_REQUEST_MERGED,
-        PULL_REQUEST_OPEN, RemoteIssue, RemoteIssueFields, RunPullRequest, RunWorktree,
-        SyncCursor, SyncFailure, TaskIssue, classify_status, comment_from_json,
-        issue_external_id, parse_issue_external_id, plan_issue_merge, remote_issue_from_json,
-        resolve_field,
+        NewPullRequest, NewRunPullRequest, NewRunWorktree, PULL_REQUEST_CLOSED,
+        PULL_REQUEST_MERGED, PULL_REQUEST_OPEN, PULL_REQUEST_WAIVED, RemoteIssue, RemoteIssueFields,
+        RemotePullRequest, RunPullRequest, RunWorktree, SyncCursor, SyncFailure, TaskIssue,
+        classify_status, comment_from_json, format_pull_request_body, format_pull_request_title,
+        issue_external_id, parse_issue_external_id, plan_issue_merge, release_note_for,
+        remote_issue_from_json, remote_pull_request_from_json, resolve_field, summary_from_notes,
     };
     pub use crate::link::LinkKind;
     pub use crate::managed::{
@@ -42,8 +44,8 @@ pub mod prelude {
     pub use crate::task::{Task, TaskWithMeta, factors_between};
     pub use crate::workflow::{
         CODING_PHASES, Recipe, RecipeEdge, RecipeMeta, RecipeNode, RUN_NOTES_KEY, RunNote,
-        RunStepView, RunView, WorkflowRecipe, WorkflowRun, coding_recipes, normalize_branch_name,
-        run_notes,
+        RunStepView, RunView, WorkflowRecipe, WorkflowRun, coding_recipes, issue_branch_name,
+        issue_branch_slug, normalize_branch_name, run_notes,
     };
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;
