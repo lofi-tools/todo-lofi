@@ -23,16 +23,16 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 
 ## Quickstart
 
-```bash
-# Enter the Nix dev shell (requires Nix with flakes)
-nix develop
-
-# Run the desktop app
-cargo run -p todo-2
-
-# (or use the watch script for auto-rebuilds)
-t2
-```
+1. Install Nix and direnv (see [`docs/installing-nix-and-direnv.md`](docs/installing-nix-and-direnv.md)).
+2. Allow the environment from the repository root:
+   ```bash
+   direnv allow
+   ```
+3. Run the app:
+   ```bash
+   cargo run -p todo-2    # run the desktop app
+   t2                     # or use the watch script for auto-rebuilds
+   ```
 
 ## Project Structure
 
