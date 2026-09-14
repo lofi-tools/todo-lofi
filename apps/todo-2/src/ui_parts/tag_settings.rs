@@ -12,11 +12,11 @@
 
 use gpui::{
     AnyElement, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px,
-    rgb,
+    ParentElement, StatefulInteractiveElement, Styled, Subscription, Task, Window, deferred, div,
+    prelude::FluentBuilder, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable, IconName, Size, Sizable, StyledExt, WindowExt};
@@ -24,8 +24,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use storage::prelude::*;
 
+use super::apps::rank_tag;
+use super::task_details::{TAG_EDITOR_CONTEXT, TagConfirmText, TagSuggestNext, TagSuggestPrev};
 use crate::store::Store;
-use crate::theme::{CARD_BG, HAIRLINE, TEXT_MUTED};
+use crate::theme::{APP_BG, CARD_BG, HAIRLINE, TEXT_MUTED};
 
 /// How many picker rows render at once; the lists scroll past this.
 const PICKER_ROWS: usize = 40;
@@ -41,14 +43,26 @@ pub struct TagSettingsPanel {
     store: Store,
     open: bool,
     tag: Option<Tag>,
-    /// Tags this tag is placed under (one chip each).
+    /// Tags this tag is placed under (the editor's committed value).
     parents: Vec<Tag>,
     dirs: Vec<String>,
     sections: Vec<TagSection>,
     bindings: Vec<(App, AppTagBinding)>,
-    /// Every tag with the first path it is reachable through: the placement
-    /// picker's list and its secondary path text.
-    catalogue: Vec<(Tag, String)>,
+    /// The staged parent-tag editor: desired parent labels as chips, edited
+    /// with the same inline chip+input+recommendation UI as a task's tags.
+    /// Nothing writes until the draft is committed on Enter (empty text) or
+    /// blur.
+    placements_draft: Vec<String>,
+    placements_input: Entity<InputState>,
+    _placements_input_sub: Subscription,
+    /// Every tag (id, label) for the parent suggestions.
+    all_tags: Vec<(u64, String)>,
+    placement_suggest_cursor: usize,
+    placement_suggest_active: bool,
+    /// The editor's draft reflects the freshly-fetched parents rather than an
+    /// in-flight staged edit.
+    placements_reload: bool,
+    pending_placement_input_clear: bool,
     /// Tags that may not be chosen as a parent: this tag and its descendants
     /// (the store would reject a cycle).
     blocked: HashSet<u64>,
@@ -64,6 +78,17 @@ impl EventEmitter<TagSettingsEvent> for TagSettingsPanel {}
 
 impl TagSettingsPanel {
     pub fn new(store: Store, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let placements_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Add parent tag…", window, cx);
+            state
+        });
+        let _placements_input_sub = cx.subscribe(&placements_input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.flush_placement_pending(cx),
+            InputEvent::Change => cx.notify(),
+            InputEvent::Blur => this.commit_placements(cx),
+            _ => {}
+        });
         Self {
             store,
             open: false,
@@ -72,7 +97,14 @@ impl TagSettingsPanel {
             dirs: Vec::new(),
             sections: Vec::new(),
             bindings: Vec::new(),
-            catalogue: Vec::new(),
+            placements_draft: Vec::new(),
+            placements_input,
+            _placements_input_sub,
+            all_tags: Vec::new(),
+            placement_suggest_cursor: 0,
+            placement_suggest_active: false,
+            placements_reload: true,
+            pending_placement_input_clear: false,
             blocked: HashSet::new(),
             dir_candidates: Vec::new(),
             section_name: cx.new(|cx| {
@@ -97,6 +129,10 @@ impl TagSettingsPanel {
         self.open = true;
         self.dir_candidates = dir_candidates;
         self.notice = None;
+        // Staged parent edits never outlive the popover: re-opening rebuilds
+        // the draft from the store's current parents instead.
+        self.placements_reload = true;
+        self.pending_placement_input_clear = true;
         let lookup = self.store.get_tag_by_name(tag_name, cx);
         self._fetch = Some(cx.spawn(async move |this, cx| {
             let tag = match lookup.await {
@@ -133,48 +169,43 @@ impl TagSettingsPanel {
         };
         let store = self.store.clone();
         let tag_id = tag.id;
-        let tree = store.tag_tree_rows(cx);
         let parents = store.tag_parents(tag_id, cx);
         let dirs = store.tag_dirs(tag_id, cx);
         let sections = store.tag_sections(tag_id, cx);
         let bindings = store.bindings_for_tag(tag_id, cx);
         let descendants = store.tag_descendant_ids(tag_id, cx);
+        let tags = store.list_tags(cx);
         self._fetch = Some(cx.spawn(async move |this, cx| {
-            // One tree call gives both the picker's tag list and each tag's
-            // path label; a tag placed under several parents keeps the first
-            // path it is reached through.
-            let mut catalogue: Vec<(Tag, String)> = Vec::new();
-            let mut seen: HashSet<u64> = HashSet::new();
-            for row in tree.await.unwrap_or_default() {
-                if seen.insert(row.tag.id) {
-                    catalogue.push((row.tag, row.path.join(" › ")));
-                }
-            }
             let parents = parents.await.unwrap_or_default();
             let dirs = dirs.await.unwrap_or_default();
             let sections = sections.await.unwrap_or_default();
             let bindings = bindings.await.unwrap_or_default();
             let blocked = descendants.await.unwrap_or_default();
+            let mut all_tags: Vec<(u64, String)> = tags
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tag| (tag.id, tag.label()))
+                .collect();
+            all_tags.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
             this.update(cx, |this, cx| {
-                this.catalogue = catalogue;
                 this.parents = parents;
                 this.dirs = dirs;
                 this.sections = sections;
                 this.bindings = bindings;
                 this.blocked = blocked.into_iter().collect();
+                this.all_tags = all_tags;
+                if this.placements_reload {
+                    this.placements_reload = false;
+                    this.placements_draft = this.parents.iter().map(|parent| parent.label()).collect();
+                    this.placement_suggest_cursor = 0;
+                    this.placement_suggest_active = false;
+                }
                 this._fetch = None;
                 cx.notify();
             })
             .ok();
         }));
-    }
-
-    /// The first path a tag is reachable through, for a chip's secondary text.
-    fn path_of(&self, tag_id: u64) -> Option<String> {
-        self.catalogue
-            .iter()
-            .find(|(tag, _)| tag.id == tag_id)
-            .map(|(_, path)| path.clone())
     }
 
     /// Run a write, then re-read the panel and tell the world the tree moved.
@@ -198,51 +229,218 @@ impl TagSettingsPanel {
         .detach();
     }
 
-    fn place_under(&mut self, parent_id: u64, cx: &mut Context<Self>) {
+    /// Apply the staged parent list: resolve each label to its tag in the same
+    /// way a task's tags are stored, then diff against the current parents.
+    fn commit_placements(&mut self, cx: &mut Context<Self>) {
         let Some(tag) = self.tag.clone() else {
             return;
         };
-        let action = self.store.place_tag_under(tag.id, parent_id, cx);
-        self.run(action, "Placed under the tag.", cx);
+        let draft: Vec<String> = self.placements_draft.clone();
+        let parents: Vec<String> = self.parents.iter().map(|parent| parent.label()).collect();
+        let differs = draft.len() != parents.len()
+            || draft
+                .iter()
+                .zip(parents.iter())
+                .any(|(a, b)| a.to_lowercase() != b.to_lowercase());
+        if !differs {
+            return;
+        }
+        // Rebuild the draft from the store's canonical labels once the write
+        // lands, and restart with an empty field while we are at it.
+        self.placements_reload = true;
+        self.pending_placement_input_clear = true;
+        let action = self.store.set_tag_parents(tag.id, draft, cx);
+        self.run(action, "Placed under the updated tags.", cx);
     }
 
-    fn unplace(&mut self, parent_id: u64, cx: &mut Context<Self>) {
+    /// Enter in the parent-tag field: with a keyboard-highlighted suggestion it
+    /// adds that tag; otherwise the typed text becomes a chip, unless it is
+    /// empty — which commits the staged list.
+    fn on_placement_input_enter(&mut self, cx: &mut Context<Self>) {
+        if self.placement_suggest_active {
+            self.complete_suggestion(cx);
+            return;
+        }
+        let text = self.placements_input.read(cx).text().to_string();
+        if text.trim().is_empty() {
+            self.commit_placements(cx);
+        } else {
+            self.flush_placement_pending(cx);
+        }
+    }
+
+    fn flush_placement_pending(&mut self, cx: &mut Context<Self>) {
         let Some(tag) = self.tag.clone() else {
             return;
         };
-        let action = self.store.unplace_tag_from(tag.id, parent_id, cx);
-        self.run(action, "Removed from that tag.", cx);
+        let text = self.placements_input.read(cx).text().to_string();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            self.commit_placements(cx);
+            return;
+        }
+        self.pending_placement_input_clear = true;
+        if !self
+            .placements_draft
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(&text))
+        {
+            let blocked = self.all_tags.iter().any(|(id, label)| {
+                (*id == tag.id || self.blocked.contains(id))
+                    && label.eq_ignore_ascii_case(&text)
+            });
+            if blocked {
+                self.notice =
+                    Some("A tag can't be placed under itself or its own child.".to_string());
+            } else {
+                self.placements_draft.push(text);
+            }
+        }
+        self.placement_suggest_cursor = 0;
+        self.placement_suggest_active = false;
+        cx.notify();
     }
 
-    /// Removing a placement is the one action that asks first: it moves the
-    /// whole subtree out of the nav, which is not obvious from one chip.
-    fn confirm_unplace(&mut self, parent_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn complete_suggestion(&mut self, cx: &mut Context<Self>) {
+        let query = self.placements_input.read(cx).text().to_string();
+        let suggestions = self.placement_suggestions(&query);
+        if let Some(label) = suggestions
+            .get(self.placement_suggest_cursor)
+            .map(|(_, label)| label.clone())
+        {
+            self.push_placement_label(label);
+            self.pending_placement_input_clear = true;
+        }
+        self.placement_suggest_active = false;
+        cx.notify();
+    }
+
+    fn move_placement_suggestion(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let query = self.placements_input.read(cx).text().to_string();
+        let count = self.placement_suggestions(&query).len();
+        if count == 0 {
+            return;
+        }
+        self.placement_suggest_cursor =
+            (self.placement_suggest_cursor as isize + delta).rem_euclid(count as isize) as usize;
+        self.placement_suggest_active = true;
+        cx.notify();
+    }
+
+    /// Existing tags first: exclude this tag and anything under it (the store
+    /// forbids cycles) and labels already staged.
+    fn placement_suggestions(&self, query: &str) -> Vec<(u64, String)> {
+        let Some(tag) = self.tag.clone() else {
+            return Vec::new();
+        };
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut ranked: Vec<(usize, u64, String)> = self
+            .all_tags
+            .iter()
+            .filter(|(id, _)| *id != tag.id && !self.blocked.contains(id))
+            .filter(|(_, label)| {
+                !self
+                    .placements_draft
+                    .iter()
+                    .any(|draft| draft.eq_ignore_ascii_case(label))
+            })
+            .filter_map(|(id, label)| {
+                let lower = label.to_lowercase();
+                if lower.starts_with(&query) {
+                    return Some((0, *id, label.clone()));
+                }
+                rank_tag(&query, &lower).map(|score| (score, *id, label.clone()))
+            })
+            .collect();
+        ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+        ranked.into_iter().map(|(_, id, label)| (id, label)).collect()
+    }
+
+    /// Add `label` to the draft unless it is already there or blocked.
+    fn push_placement_label(&mut self, label: String) {
+        let Some(tag) = self.tag.clone() else {
+            return;
+        };
+        let lower = label.to_lowercase();
+        if self
+            .placements_draft
+            .iter()
+            .any(|existing| existing.to_lowercase() == lower)
+        {
+            return;
+        }
+        let blocked = self
+            .all_tags
+            .iter()
+            .any(|(id, candidate)| (*id == tag.id || self.blocked.contains(id))
+                && candidate.to_lowercase() == lower);
+        if blocked {
+            self.notice = Some("A tag can't be placed under itself or its own child.".to_string());
+            return;
+        }
+        self.placements_draft.push(label);
+    }
+
+    /// Swap in a fresh, empty field, restarting the draft editor's typing.
+    fn reset_placement_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_placement_input_clear = false;
+        self.placement_suggest_cursor = 0;
+        self.placement_suggest_active = false;
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Add parent tag…", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.on_placement_input_enter(cx),
+            InputEvent::Change => cx.notify(),
+            InputEvent::Blur => this.commit_placements(cx),
+            _ => {}
+        });
+        self.placements_input = input.clone();
+        self._placements_input_sub = subscription;
+        window.on_next_frame(move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
+    /// Removing an already-saved parent chip asks first (it un-nests the whole
+    /// subtree); removing a staged-only chip just drops the draft entry.
+    fn remove_placement_chip(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(label) = self.placements_draft.get(index).cloned() else {
+            return;
+        };
+        let is_saved = self
+            .parents
+            .iter()
+            .any(|parent| parent.label().eq_ignore_ascii_case(&label));
+        if !is_saved {
+            self.placements_draft.remove(index);
+            cx.notify();
+            return;
+        }
         let Some(tag) = self.tag.clone() else {
             return;
         };
         let child = tag.label();
-        let parent = self
-            .parents
-            .iter()
-            .find(|parent| parent.id == parent_id)
-            .map(|parent| parent.label())
-            .unwrap_or_else(|| "that tag".to_string());
         let panel = cx.weak_entity();
         window.open_dialog(cx, move |dialog, _window, _cx| {
             let panel = panel.clone();
-            let (child, parent) = (child.clone(), parent.clone());
+            let (child, label) = (child.clone(), label.clone());
             dialog
-                .title(format!("Remove {child} from {parent}?"))
+                .title(format!("Remove {child} from {label}?"))
                 .content(move |content, _window, _cx| {
                     let panel = panel.clone();
-                    let (child, parent) = (child.clone(), parent.clone());
+                    let (child, label) = (child.clone(), label.clone());
                     content.child(
                         div()
                             .v_flex()
                             .gap_3()
                             .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child(format!(
-                                "{parent} stays where it is; {child} just stops appearing under it. \
-                                 Any other tag it is placed under is untouched."
+                                "{label} stays where it is; {child} just stops appearing under it."
                             )))
                             .child(
                                 div()
@@ -263,9 +461,20 @@ impl TagSettingsPanel {
                                             .label("Remove")
                                             .on_click(move |_, window, cx| {
                                                 window.close_dialog(cx);
-                                                if let Err(error) = panel.update(cx, |panel, cx| {
-                                                    panel.unplace(parent_id, cx)
-                                                }) {
+                                                if let Err(error) =
+                                                    panel.update(cx, |panel, cx| {
+                                                        if let Some(pos) = panel
+                                                            .placements_draft
+                                                            .iter()
+                                                            .position(|draft| {
+                                                                draft.eq_ignore_ascii_case(&label)
+                                                            })
+                                                        {
+                                                            panel.placements_draft.remove(pos);
+                                                            cx.notify();
+                                                        }
+                                                    })
+                                                {
                                                     tracing::error!(
                                                         %error,
                                                         "could not remove the placement"
@@ -352,8 +561,117 @@ impl TagSettingsPanel {
         self.run(action, "App detached.", cx);
     }
 
+    /// The parent-tag editor: chips inside a bordered field with the live
+    /// input, plus a deferred suggestion dropdown under the field when the
+    /// typed text matches anything.
+    fn placements_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.pending_placement_input_clear {
+            self.reset_placement_input(window, cx);
+        }
+        let input = self.placements_input.clone();
+        let query = input.read(cx).text().to_string();
+        let suggestions = self.placement_suggestions(&query);
+        if suggestions.is_empty() {
+            self.placement_suggest_cursor = 0;
+        } else if self.placement_suggest_cursor >= suggestions.len() {
+            self.placement_suggest_cursor = suggestions.len() - 1;
+        }
+        let suggest_cursor = self.placement_suggest_cursor;
+
+        let chips: Vec<AnyElement> = self
+            .placements_draft
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let chip_id = format!("placement-{}", label.trim_start_matches('#'));
+                chip(
+                    chip_id,
+                    label.clone(),
+                    None,
+                    cx.listener(move |this, _, window, cx| {
+                        this.remove_placement_chip(index, window, cx)
+                    }),
+                )
+            })
+            .collect();
+
+        let field = div()
+            .id("tag-settings-placements-editor")
+            .key_context(TAG_EDITOR_CONTEXT)
+            .on_action(cx.listener(|this, _: &TagConfirmText, _, cx| {
+                this.on_placement_input_enter(cx);
+            }))
+            .on_action(cx.listener(|this, _: &TagSuggestPrev, _, cx| {
+                this.move_placement_suggestion(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TagSuggestNext, _, cx| {
+                this.move_placement_suggestion(1, cx);
+            }))
+            .flex_1()
+            .min_w_0()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(HAIRLINE))
+            .bg(rgb(APP_BG))
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .flex_wrap()
+            .children(chips)
+            .child(div().flex_1().min_w_0().child(Input::new(&input).appearance(false)));
+
+        let mut root = div().relative().child(field);
+        if !suggestions.is_empty() {
+            let rows: Vec<AnyElement> = suggestions
+                .iter()
+                .enumerate()
+                .map(|(index, (_, label))| {
+                    let label = label.clone();
+                    div()
+                        .id(("tag-settings-placement-suggest", index))
+                        .h_flex()
+                        .items_center()
+                        .w_full()
+                        .px(px(4.))
+                        .py(px(1.))
+                        .rounded(px(2.))
+                        .text_size(px(10.))
+                        .text_color(rgb(0xa3a3a3))
+                        .cursor_pointer()
+                        .when(index == suggest_cursor, |this| this.bg(rgb(0x333333)))
+                        .child(format!("#{label}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.push_placement_label(label.clone());
+                            this.placement_suggest_active = false;
+                            this.pending_placement_input_clear = true;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                })
+                .collect();
+            root = root.child(deferred(
+                div()
+                    .absolute()
+                    .top(relative(1.))
+                    .left(px(0.))
+                    .mt(px(4.))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(CARD_BG))
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .children(rows),
+            ));
+        }
+        root.into_any_element()
+    }
+
     /// The popover card, positioned under the task list header's gear.
-    pub fn popover(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn popover(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.open {
             return div().into_any_element();
         }
@@ -378,7 +696,6 @@ impl TagSettingsPanel {
         let Some(tag) = self.tag.clone() else {
             return card.child(section_label("Loading…")).into_any_element();
         };
-        let tag_id = tag.id;
         let directory_backed = tag.is_project() || !self.dirs.is_empty();
 
         let heading = div()
@@ -408,39 +725,6 @@ impl TagSettingsPanel {
                     .tooltip("Close")
                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
             );
-
-        // -- placed under --------------------------------------------------
-        let placements: Vec<AnyElement> = self
-            .parents
-            .iter()
-            .map(|parent| {
-                let parent_id = parent.id;
-                let path = self.path_of(parent_id);
-                chip(
-                    format!("placement-{parent_id}"),
-                    parent.label(),
-                    path,
-                    cx.listener(move |this, _, window, cx| {
-                        this.confirm_unplace(parent_id, window, cx)
-                    }),
-                )
-            })
-            .collect();
-
-        let eligible = eligible_parents(&self.catalogue, tag_id, &self.blocked, &self.parents);
-        let placement_candidates: Vec<AnyElement> = eligible
-            .iter()
-            .take(PICKER_ROWS)
-            .map(|(id, label, path)| {
-                let parent_id = *id;
-                picker_row(
-                    format!("place-under-{parent_id}"),
-                    label.clone(),
-                    Some(path.clone()),
-                    cx.listener(move |this, _, _, cx| this.place_under(parent_id, cx)),
-                )
-            })
-            .collect();
 
         // -- directories ---------------------------------------------------
         let dir_rows: Vec<AnyElement> = self
@@ -584,6 +868,8 @@ impl TagSettingsPanel {
             })
             .collect();
 
+        let placements_empty = self.placements_draft.is_empty()
+            && self.placements_input.read(cx).text().to_string().trim().is_empty();
         let body = div()
             .id("tag-settings-body")
             .v_flex()
@@ -594,20 +880,10 @@ impl TagSettingsPanel {
                     .v_flex()
                     .gap_1()
                     .child(section_label("Placed under"))
-                    .when(self.parents.is_empty(), |this| {
+                    .when(placements_empty, |this| {
                         this.child(hint("Not placed under any tag, so it stays at the top level."))
                     })
-                    .child(div().h_flex().flex_wrap().gap_1().children(placements)),
-            )
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(section_label("Add to a tag"))
-                    .when(placement_candidates.is_empty(), |this| {
-                        this.child(hint("No tag can take it: the rest are its own descendants."))
-                    })
-                    .child(div().v_flex().children(placement_candidates)),
+                    .child(self.placements_editor(window, cx)),
             )
             .child(div().border_t_1().border_color(rgb(HAIRLINE)))
             .child(
@@ -807,109 +1083,4 @@ fn hint(text: &str) -> AnyElement {
         .text_color(rgb(TEXT_MUTED))
         .child(text.to_string())
         .into_any_element()
-}
-
-/// The tags that may become `tag_id`'s parent: not the tag itself, not one of
-/// its descendants (the store refuses a cycle), and not one it is already
-/// placed under — the picker only ever adds, and removal is the chip's cross.
-/// Sorted by label so the list reads predictably.
-fn eligible_parents(
-    catalogue: &[(Tag, String)],
-    tag_id: u64,
-    blocked: &HashSet<u64>,
-    parents: &[Tag],
-) -> Vec<(u64, String, String)> {
-    let mut eligible: Vec<(u64, String, String)> = catalogue
-        .iter()
-        .filter(|(candidate, _)| {
-            candidate.id != tag_id
-                && !blocked.contains(&candidate.id)
-                && !parents.iter().any(|parent| parent.id == candidate.id)
-        })
-        .map(|(candidate, path)| {
-            (
-                candidate.id,
-                candidate.label(),
-                path.clone(),
-            )
-        })
-        .collect();
-    eligible.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-    eligible
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tag(id: u64, name: &str, display: Option<&str>) -> Tag {
-        Tag {
-            id,
-            name: name.to_string(),
-            display_name: display.map(|display| display.to_string()),
-        }
-    }
-
-    fn catalogue(entries: &[(Tag, &str)]) -> Vec<(Tag, String)> {
-        entries
-            .iter()
-            .map(|(tag, path)| (tag.clone(), path.to_string()))
-            .collect()
-    }
-
-    /// The picker leaves out exactly what the store would reject, so an
-    /// invalid choice is unreachable rather than an error after the click.
-    #[test]
-    fn eligible_parents_excludes_self_descendants_and_existing_placements() {
-        let work = tag(1, "Work", None);
-        let home = tag(2, "Home", None);
-        let child = tag(3, "Child", None);
-        let project = tag(4, "project:/tmp/x", Some("x"));
-        let entries = catalogue(&[
-            (work.clone(), "Work"),
-            (home.clone(), "Home"),
-            (child.clone(), "Work › Child"),
-            (project.clone(), "x"),
-        ]);
-        let blocked: HashSet<u64> = [child.id].into_iter().collect();
-        let parents = vec![home];
-
-        let eligible = eligible_parents(&entries, project.id, &blocked, &parents);
-        assert_eq!(
-            eligible
-                .iter()
-                .map(|(id, _, _)| *id)
-                .collect::<Vec<_>>(),
-            vec![work.id]
-        );
-        assert_eq!(eligible[0].1, "Work");
-        assert_eq!(eligible[0].2, "Work");
-    }
-
-    #[test]
-    fn eligible_parents_sorts_by_label_case_insensitively() {
-        let beta = tag(1, "beta", None);
-        let alpha = tag(2, "Alpha", None);
-        let entries = catalogue(&[(beta, "beta"), (alpha, "Alpha")]);
-
-        let eligible = eligible_parents(&entries, 99, &HashSet::new(), &[]);
-        assert_eq!(
-            eligible
-                .iter()
-                .map(|(_, label, _)| label.clone())
-                .collect::<Vec<_>>(),
-            vec!["Alpha".to_string(), "beta".to_string()]
-        );
-    }
-
-    /// A project's row shows the directory name, not the opaque
-    /// `project:{path}` tag name.
-    #[test]
-    fn eligible_parents_prefers_the_display_label() {
-        let project = tag(4, "project:/tmp/x", Some("x"));
-        let entries = catalogue(&[(project, "x")]);
-
-        let eligible = eligible_parents(&entries, 99, &HashSet::new(), &[]);
-        assert_eq!(eligible[0].1, "x");
-    }
 }

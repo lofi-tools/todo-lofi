@@ -527,6 +527,7 @@ impl TodoStore {
             FROM tags t
             JOIN tag_implications ti ON ti.implied_id = t.id
             WHERE ti.implier_id = ?1
+            ORDER BY t.name
             "#,
         )
         .column_types([
@@ -548,6 +549,57 @@ impl TodoStore {
             }
         }
         Ok(tags)
+    }
+
+    /// Replace the tags `child_id` is placed under. Each desired label is
+    /// resolved against existing tags by name or display label
+    /// (case-insensitive) — so an unchanged label keeps its tag, including
+    /// `project:` tags whose editable text is the directory name — and an
+    /// unknown label is created as a brand-new tag. Placement edges left out
+    /// of the new list are removed; cycles are still refused as usual.
+    pub async fn set_tag_placements(
+        &mut self,
+        child_id: u64,
+        parent_names: &[String],
+    ) -> QueryResult<()> {
+        let desired: Vec<String> = parent_names
+            .iter()
+            .map(|name| name.trim().trim_start_matches('#').to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+
+        let all = self.list_tags().await?;
+        let mut kept_ids: Vec<u64> = Vec::new();
+        for name in &desired {
+            let lower = name.to_lowercase();
+            let matches = all.iter().find(|candidate| {
+                candidate.name.to_lowercase() == lower
+                    || candidate.label().to_lowercase() == lower
+            });
+            match matches {
+                Some(existing) if !kept_ids.contains(&existing.id) => {
+                    kept_ids.push(existing.id);
+                }
+                Some(_) => {}
+                None => {
+                    let created = self.create_tag(lower).await?;
+                    kept_ids.push(created.id);
+                }
+            }
+        }
+
+        let current = self.get_parents(child_id).await?;
+        for kept in &kept_ids {
+            if !current.iter().any(|parent| parent.id == *kept) {
+                self.add_tag_implication(child_id, *kept).await?;
+            }
+        }
+        for parent in &current {
+            if !kept_ids.contains(&parent.id) {
+                self.remove_tag_implication(child_id, parent.id).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Ids of every tag that backs a local directory: a `project:{path}` name
@@ -1247,6 +1299,71 @@ mod tests {
 
         let result = storage.add_tag_implication(c.id, a.id).await;
         assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_tag_placements_replaces_and_creates() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let home = storage.create_tag("Home").await?;
+        let work = storage.create_tag("Work").await?;
+        let chores = storage.create_tag("Chores").await?;
+        storage.add_tag_implication(chores.id, home.id).await?;
+        storage.add_tag_implication(chores.id, work.id).await?;
+
+        // Swap "Work" for a brand-new tag, keep "Home", drop nothing else.
+        storage
+            .set_tag_placements(chores.id, &["Home".to_string(), "Errands".to_string()])
+            .await?;
+        let parents = storage.get_parents(chores.id).await?;
+        let mut labels: Vec<String> = parents.iter().map(|tag| tag.label()).collect();
+        labels.sort();
+        assert_eq!(labels, vec!["Home".to_string(), "errands".to_string()]);
+
+        // Clearing the list un-nests the tag from everything.
+        storage.set_tag_placements(chores.id, &[]).await?;
+        assert!(storage.get_parents(chores.id).await?.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_tag_placements_keeps_tags_by_display_label() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let project = storage
+            .get_or_create_project_tag(std::path::Path::new("/Users/me/dev/api"))
+            .await?;
+        let child = storage.create_tag("Client").await?;
+        storage.set_tag_placements(child.id, &["api".to_string()]).await?;
+
+        // The display label "api" resolves to the existing project tag, so a
+        // re-save with the same label keeps the same id (no duplicate "api").
+        storage.set_tag_placements(child.id, &["api".to_string()]).await?;
+        let parents = storage.get_parents(child.id).await?;
+        assert_eq!(parents.len(), 1);
+        assert_eq!(parents[0].id, project.id);
+        assert_eq!(storage.list_tags().await?.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_tag_placements_refuses_a_cycle() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let a = storage.create_tag("A").await?;
+        let b = storage.create_tag("B").await?;
+        storage.set_tag_placements(b.id, &["A".to_string()]).await?;
+
+        assert!(
+            storage
+                .set_tag_placements(a.id, &["B".to_string()])
+                .await
+                .is_err()
+        );
 
         Ok(())
     }

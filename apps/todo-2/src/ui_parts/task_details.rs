@@ -273,23 +273,24 @@ impl EditedField {
 }
 
 /// Key context for the inline tag editor, so Tab/Up/Down act on the
-/// suggestion list instead of the bare input bindings.
-const TAG_EDITOR_CONTEXT: &str = "TagEditor";
+/// suggestion list instead of the bare input bindings. Shared with the tag
+/// settings card's parent-tag editor, so both react to the same keys.
+pub(crate) const TAG_EDITOR_CONTEXT: &str = "TagEditor";
 
 /// Tab while typing a tag: flush the pending text as a chip.
 #[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tag_editor, no_json)]
-struct TagConfirmText;
+pub(crate) struct TagConfirmText;
 
 /// Move the tag suggestion highlight.
 #[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tag_editor, no_json)]
-struct TagSuggestPrev;
+pub(crate) struct TagSuggestPrev;
 
 /// Move the tag suggestion highlight.
 #[derive(gpui::Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tag_editor, no_json)]
-struct TagSuggestNext;
+pub(crate) struct TagSuggestNext;
 
 /// Register the tag editor's key bindings. Called once at startup, after
 /// `gpui_component::init`, so these win over the bare input bindings.

@@ -713,32 +713,19 @@ impl Store {
         })
     }
 
-    /// Place `child_id` under `parent_id`. One edge: a tag can sit under
-    /// several parents and appears once under each.
-    pub fn place_tag_under(
+    /// Replace the tags `child_id` is placed under: each label in
+    /// `parent_names` is resolved to an existing tag or created, then the
+    /// placement edges are diffed against the current parents.
+    pub fn set_tag_parents(
         &self,
         child_id: u64,
-        parent_id: u64,
+        parent_names: Vec<String>,
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.add_tag_implication(child_id, parent_id).await?)
-        })
-    }
-
-    /// Remove one placement (other parents, if any, are untouched).
-    pub fn unplace_tag_from(
-        &self,
-        child_id: u64,
-        parent_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<()>> {
-        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            Ok(s.remove_tag_implication(child_id, parent_id).await?)
+            Ok(s.set_tag_placements(child_id, &parent_names).await?)
         })
     }
 
