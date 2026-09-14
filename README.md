@@ -18,13 +18,13 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
   - Github issues & projects
 - **Integrated mini-apps (extensions)** — 
   - Travel checklist templates
-  - Message follow-ups & birthday wishes — `$\color{#8b949e}\textsf{coming soon}$`
-  - Job application tracking — $\color{#8b949e}\textsf{coming soon}$
-- **Let outside apps manage part of your task lists** — $\color{#8b949e}\textsf{coming soon}$
+  - Message follow-ups & birthday wishes — ![coming soon](https://img.shields.io/badge/coming%20soon-6e7681)
+  - Job application tracking — ![coming soon](https://img.shields.io/badge/coming%20soon-6e7681)
+- **Let outside apps manage part of your task lists** — ![coming soon](https://img.shields.io/badge/coming%20soon-6e7681)
 
 ## Quickstart
 
-1. Install Nix and direnv (see [`docs/installing-nix-and-direnv.md`](docs/installing-nix-and-direnv.md)).
+1. Install Nix and direnv (see [`how`](docs/installing-nix-and-direnv.md)).
 2. Allow the environment from the repository root:
    ```bash
    direnv allow
@@ -35,12 +35,18 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
    t2                     # or use the watch script for auto-rebuilds
    ```
 
+### Useful commands
+
+- `cargo run -p todo-2` — run the desktop app
+- `t2` — run the desktop app with auto-rebuilds
+
 ## Project Structure
 
 ```
 todo-lofi/
 ├── apps/
 │   └── todo-2/        # Desktop GPUI application
+
 ├── libs/
 │   ├── storage/       # SQLite-backed persistence layer
 │   ├── gpui-tokio/    # GPUI ↔ Tokio bridge
