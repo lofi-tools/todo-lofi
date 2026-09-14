@@ -65,6 +65,10 @@ pub struct TaskRow {
     subtasks: Vec<TaskWithMeta>,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
+    /// The GitHub issue this task is synced from, when it is issue-backed:
+    /// the row shows its number as the source badge (spec §5.8).
+    issue: Option<storage::TaskIssue>,
+    _issue_load: Option<gpui::Task<()>>,
 }
 
 impl TaskRow {
@@ -77,9 +81,12 @@ impl TaskRow {
         selected_labels: Vec<String>,
         selected: bool,
         subtasks_expanded: bool,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
-        Self {
+        let task_id = task.id;
+        let store = store.clone();
+        let load_store = store.clone();
+        let mut this = Self {
             task,
             blocking,
             store,
@@ -93,7 +100,24 @@ impl TaskRow {
             subtasks,
             edit_input: None,
             _edit_subscription: None,
-        }
+            issue: None,
+            _issue_load: None,
+        };
+        // The issue lives in a link table rather than on the task, so the
+        // badge arrives a tick later instead of blocking the row's render.
+        let fetch = load_store.github_issue_for_task(task_id, cx);
+        this._issue_load = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(issue) => {
+                this.update(cx, |this, cx| {
+                    this.issue = issue;
+                    this._issue_load = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => tracing::error!("Failed to fetch the GitHub issue: {e}"),
+        }));
+        this
     }
 
     pub fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
@@ -401,6 +425,48 @@ impl Render for TaskRow {
                                 }
                             })),
                     )
+                    // Source badge: the issue number an imported task came
+                    // from, so a synced task is identifiable at a glance.
+                    .when_some(self.issue.clone(), |this, issue| {
+                        this.child(
+                            div()
+                                .id(("task-issue", task_id))
+                                .h_flex()
+                                .items_center()
+                                .px(px(4.))
+                                .py(px(1.))
+                                .rounded(px(2.))
+                                .bg(rgb(0x2a2a2a))
+                                .text_size(px(10.))
+                                .text_color(if issue.state.tombstoned {
+                                    rgb(0x737373)
+                                } else {
+                                    rgb(0xa3a3a3)
+                                })
+                                .child(
+                                    match issue
+                                        .state
+                                        .url
+                                        .clone()
+                                        .filter(|_| !issue.state.tombstoned)
+                                    {
+                                        Some(url) => div()
+                                            .id(("task-issue-open", task_id))
+                                            .cursor_pointer()
+                                            .hover(|this| this.text_color(rgb(0xe5e5e5)))
+                                            .child(format!("#{}", issue.issue.number))
+                                            .on_click(move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                crate::todoist_auth::open_browser(&url);
+                                            })
+                                            .into_any_element(),
+                                        None => div()
+                                            .child(format!("#{}", issue.issue.number))
+                                            .into_any_element(),
+                                    },
+                                ),
+                        )
+                    })
                     // Ownership marker: appears only on hover so the list
                     // stays uncluttered, and names the owning app.
                     .when(self.task.is_managed_read_only(), |this| {

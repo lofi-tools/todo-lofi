@@ -17,6 +17,11 @@ use crate::todoist_auth;
 use crate::ui_parts::apps::AppSettings;
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
+/// Demand-driven polling (decision 23): short while a PR or a run is live,
+/// idle otherwise, so a quiet app barely talks to GitHub.
+const GITHUB_POLL_ACTIVE: std::time::Duration = std::time::Duration::from_secs(15);
+const GITHUB_POLL_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub enum IntegrationsEvent {
     Changed,
 }
@@ -36,10 +41,13 @@ pub struct IntegrationsView {
     /// token; `None` when no connect is in flight.
     github_code: Option<github_auth::DeviceLogin>,
     github_connecting: bool,
+    github_syncing: bool,
     _load: Option<gpui::Task<()>>,
     _connect: Option<gpui::Task<()>>,
     _sync: Option<gpui::Task<()>>,
     _github_poll: Option<gpui::Task<()>>,
+    _github_sync: Option<gpui::Task<()>>,
+    _github_poller: Option<gpui::Task<()>>,
 }
 
 impl IntegrationsView {
@@ -55,13 +63,49 @@ impl IntegrationsView {
             status: None,
             github_code: None,
             github_connecting: false,
+            github_syncing: false,
             _load: None,
             _connect: None,
             _sync: None,
             _github_poll: None,
+            _github_sync: None,
+            _github_poller: None,
         };
         this.reload(cx);
+        this.start_github_poller(cx);
         this
+    }
+
+    /// Sync in the background for the life of the window: frequent while
+    /// something is pending, backing off to idle otherwise.
+    fn start_github_poller(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        self._github_poller = Some(cx.spawn(async move |this, cx| loop {
+            let pending = store.github_work_pending(cx).await.ok().unwrap_or(false);
+            cx.background_executor()
+                .timer(if pending {
+                    GITHUB_POLL_ACTIVE
+                } else {
+                    GITHUB_POLL_IDLE
+                })
+                .await;
+            let ready = this
+                .read_with(cx, |this, _| this.github_connected() && !this.github_syncing)
+                .unwrap_or(false);
+            if !ready {
+                continue;
+            }
+            this.update(cx, |this, cx| {
+                this.start_github_sync(false, cx);
+            })
+            .ok();
+        }));
+    }
+
+    fn github_connected(&self) -> bool {
+        self.connected
+            .iter()
+            .any(|integration| integration.provider == "github")
     }
 
     /// Re-read the connections and the app behind them (used when ownership
@@ -168,6 +212,12 @@ impl IntegrationsView {
                     let created = store
                         .create_integration("github".to_string(), account, cx)
                         .await;
+                    // Bind the project directories that already point at a
+                    // github.com remote, so the first pass imports into them
+                    // instead of waiting for a manual sync.
+                    if let Err(e) = store.bind_detected_github_repos(cx).await {
+                        tracing::warn!("GitHub repo detection failed: {e}");
+                    }
                     this.update(cx, |this, cx| {
                         this.github_connecting = false;
                         this.github_code = None;
@@ -175,6 +225,9 @@ impl IntegrationsView {
                             Ok(_) => {
                                 this.status = Some("GitHub connected.".to_string());
                                 cx.emit(IntegrationsEvent::Changed);
+                                // The first import is quiet and starts now
+                                // rather than after the poller's first tick.
+                                this.start_github_sync(false, cx);
                             }
                             Err(e) => {
                                 this.status = Some(format!("GitHub connect failed: {e}"))
@@ -188,6 +241,40 @@ impl IntegrationsView {
                 cx.notify();
             })
             .ok();
+        }));
+    }
+
+    /// One sync pass. A manual press is a full pass so deletions and label
+    /// changes converge; the poller stays incremental.
+    fn start_github_sync(&mut self, full: bool, cx: &mut Context<Self>) {
+        if self.github_syncing {
+            return;
+        }
+        self.github_syncing = true;
+        self.status = Some("Syncing GitHub…".to_string());
+        cx.notify();
+        let sync = self.store.sync_github(full, cx);
+        self._github_sync = Some(cx.spawn(async move |this, cx| match sync.await {
+            Ok(summary) => {
+                let message = summary.describe();
+                this.update(cx, |this, cx| {
+                    this.github_syncing = false;
+                    this.status = Some(format!("GitHub synced — {message}"));
+                    cx.emit(IntegrationsEvent::Changed);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                // A permanent failure blocks with its reason; the retry
+                // policy has already exhausted the transient ones (decision 22).
+                this.update(cx, |this, cx| {
+                    this.github_syncing = false;
+                    this.status = Some(format!("GitHub sync failed: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
         }));
     }
 
@@ -508,7 +595,7 @@ impl IntegrationsView {
             .iter()
             .find(|i| i.provider == "github")
             .and_then(|i| i.account_label.clone());
-        let connected = account.is_some();
+        let connected = self.github_connected();
 
         let controls = if connected {
             div()
@@ -520,6 +607,19 @@ impl IntegrationsView {
                         .text_sm()
                         .text_color(rgb(0x4ade80))
                         .child("Connected"),
+                )
+                .child(
+                    Button::new("github-sync")
+                        .ghost()
+                        .compact()
+                        .label(if self.github_syncing {
+                            "Syncing…"
+                        } else {
+                            "Sync now"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_github_sync(true, cx);
+                        })),
                 )
                 .child(
                     Button::new("github-disconnect")

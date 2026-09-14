@@ -43,6 +43,9 @@ pub struct TagSettingsPanel {
     /// Tags this tag is placed under (the editor's committed value).
     parents: Vec<Tag>,
     dirs: Vec<String>,
+    /// The remote object this tag is bound to, when it is synced (a GitHub
+    /// `owner/repo` today). Shown read-only next to the directories.
+    sync_target: Option<storage::SyncTarget>,
     sections: Vec<TagSection>,
     bindings: Vec<(App, AppTagBinding)>,
     /// The staged parent-tag editor: desired parent labels as chips, edited
@@ -110,6 +113,7 @@ let dir_picker_input = cx.new(|cx| {
             tag: None,
             parents: Vec::new(),
             dirs: Vec::new(),
+            sync_target: None,
             sections: Vec::new(),
             bindings: Vec::new(),
             placements_draft: Vec::new(),
@@ -190,6 +194,7 @@ let dir_picker_input = cx.new(|cx| {
         let tag_id = tag.id;
         let parents = store.tag_parents(tag_id, cx);
         let dirs = store.tag_dirs(tag_id, cx);
+        let sync_target = store.tag_sync_target(tag_id, cx);
         let sections = store.tag_sections(tag_id, cx);
         let bindings = store.bindings_for_tag(tag_id, cx);
         let descendants = store.tag_descendant_ids(tag_id, cx);
@@ -197,6 +202,7 @@ let dir_picker_input = cx.new(|cx| {
         self._fetch = Some(cx.spawn(async move |this, cx| {
             let parents = parents.await.unwrap_or_default();
             let dirs = dirs.await.unwrap_or_default();
+            let sync_target = sync_target.await.ok().flatten();
             let sections = sections.await.unwrap_or_default();
             let bindings = bindings.await.unwrap_or_default();
             let blocked = descendants.await.unwrap_or_default();
@@ -210,6 +216,7 @@ let dir_picker_input = cx.new(|cx| {
             this.update(cx, |this, cx| {
                 this.parents = parents;
                 this.dirs = dirs;
+                this.sync_target = sync_target;
                 this.sections = sections;
                 this.bindings = bindings;
                 this.blocked = blocked.into_iter().collect();
@@ -814,10 +821,19 @@ let dir_picker_input = cx.new(|cx| {
                         div()
                             .text_xs()
                             .text_color(rgb(TEXT_MUTED))
-                            .child(if directory_backed {
-                                "Tag settings · project directory"
-                            } else {
-                                "Tag settings"
+                            .child(match (&self.sync_target, directory_backed) {
+                                // A bound tag says which repo it syncs with, so
+                                // the detected binding is visible instead of a
+                                // hidden side effect (spec §5.3).
+                                (Some(target), true) => format!(
+                                    "Tag settings · project directory · synced with {}",
+                                    target.external_id
+                                ),
+                                (Some(target), false) => {
+                                    format!("Tag settings · synced with {}", target.external_id)
+                                }
+                                (None, true) => "Tag settings · project directory".to_string(),
+                                (None, false) => "Tag settings".to_string(),
                             }),
                     ),
             )

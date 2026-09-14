@@ -463,6 +463,11 @@ pub struct TaskDetails {
     _coding_spec_subscription: Option<Subscription>,
     /// The spec artifact is expanded.
     coding_spec_expanded: bool,
+    /// The GitHub issue the selected task is synced from, when it is
+    /// issue-backed. Read-only: the source, the metadata chips and the
+    /// one-way comment list (spec §5.2).
+    issue: Option<storage::TaskIssue>,
+    _issue_fetch: Option<gpui::Task<()>>,
 }
 
 struct TimeEditInputs {
@@ -553,6 +558,8 @@ impl TaskDetails {
             coding_spec_input: None,
             _coding_spec_subscription: None,
             coding_spec_expanded: false,
+            issue: None,
+            _issue_fetch: None,
         }
     }
 
@@ -582,6 +589,19 @@ impl TaskDetails {
         self.coding_auto_started = false;
         self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
+        self.issue = None;
+        let issue_fetch = self.store.github_issue_for_task(task_id, cx);
+        self._issue_fetch = Some(cx.spawn(async move |this, cx| match issue_fetch.await {
+            Ok(issue) => {
+                this.update(cx, |this, cx| {
+                    this.issue = issue;
+                    this._issue_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => tracing::error!("Failed to fetch the GitHub issue: {e}"),
+        }));
         self.close_coding_notes();
         self.close_coding_spec();
         self.close_blocker_picker();
@@ -1065,6 +1085,7 @@ impl TaskDetails {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        self.issue = None;
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
         self.subtasks = Vec::new();
@@ -3944,6 +3965,119 @@ impl TaskDetails {
     fn spec_path_hint(&self, task: &TaskWithMeta) -> Option<String> {
         task.spec_path.clone().filter(|path| !path.is_empty())
     }
+
+    /// The GitHub source of an issue-backed task: where it came from, the
+    /// metadata GitHub owns (read-only here), and the one-way imported
+    /// comments (spec §5.8). `None` for purely local tasks, so a task with no
+    /// issue pays nothing for the section.
+    fn github_section(&self, task: &TaskWithMeta) -> Option<AnyElement> {
+        let issue = self.issue.as_ref()?;
+        let mut card = div().v_flex().gap_2();
+
+        let mut heading = div()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(0x737373))
+                    .child("GitHub"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xe5e5e5))
+                    .child(format!(
+                        "{}/{}#{}",
+                        issue.issue.owner, issue.issue.repo, issue.issue.number
+                    )),
+            );
+        if let Some(url) = issue.state.url.clone() {
+            heading = heading.child(
+                Button::new("github-open")
+                    .ghost()
+                    .compact()
+                    .label("Open on GitHub")
+                    .on_click(move |_, _, _| {
+                        crate::todoist_auth::open_browser(&url);
+                    }),
+            );
+        }
+        card = card.child(heading);
+
+        let mut meta = div().h_flex().flex_wrap().items_center().gap_1();
+        if issue.state.tombstoned {
+            meta = meta.child(metadata_chip(
+                issue
+                    .state
+                    .tombstone_reason
+                    .clone()
+                    .unwrap_or_else(|| "Unavailable on GitHub".to_string()),
+                0x737373,
+            ));
+        } else {
+            meta = meta.child(metadata_chip(
+                if issue.state.remote.state == "closed" {
+                    "closed".to_string()
+                } else {
+                    "open".to_string()
+                },
+                0x737373,
+            ));
+        }
+        if let Some(author) = &issue.state.author {
+            meta = meta.child(metadata_chip(format!("by {author}"), 0x737373));
+        }
+        for assignee in &issue.state.assignees {
+            meta = meta.child(metadata_chip(format!("@{assignee}"), 0xa3a3a3));
+        }
+        if let Some(milestone) = &issue.state.milestone {
+            meta = meta.child(metadata_chip(format!("milestone {milestone}"), 0xa3a3a3));
+        }
+        card = card.child(meta);
+
+        // One-way: comments are imported, never written back (§5.2).
+        let comments = task
+            .comments
+            .as_ref()
+            .map(|comments| comments.0.clone())
+            .unwrap_or_default();
+        if !comments.is_empty() {
+            let mut list = div().v_flex().gap_1();
+            for comment in comments.iter().take(20) {
+                list = list.child(
+                    div()
+                        .v_flex()
+                        .gap_0p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(HAIRLINE))
+                        .px_2()
+                        .py_1()
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(0x737373))
+                                .child(
+                                    comment
+                                        .author
+                                        .clone()
+                                        .unwrap_or_else(|| "someone".to_string()),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xa3a3a3))
+                                .child(comment.text.clone()),
+                        ),
+                );
+            }
+            card = card.child(list);
+        }
+        Some(card.into_any_element())
+    }
 }
 
 /// A tag chip, used both in the read-only tag list and inside the tag editor.
@@ -3956,6 +4090,19 @@ fn tag_chip(label: &str) -> Div {
         .bg(rgb(0x2a2a2a))
         .text_color(rgb(0xa3a3a3))
         .child(format!("#{label}"))
+}
+
+/// Small read-only pill for the metadata GitHub owns (state, author,
+/// assignee, milestone).
+fn metadata_chip(label: String, text: u32) -> Div {
+    div()
+        .px(px(4.))
+        .py(px(1.))
+        .rounded(px(2.))
+        .bg(rgb(0x2a2a2a))
+        .text_size(px(10.))
+        .text_color(rgb(text))
+        .child(label)
 }
 
 impl Render for TaskDetails {
@@ -4345,6 +4492,9 @@ impl Render for TaskDetails {
                     && !branch.is_empty()
                 {
                     details = details.child(field("Branch", branch.clone()));
+                }
+                if let Some(section) = self.github_section(&task) {
+                    details = details.child(section);
                 }
                 details = details.child(self.relationships_section(window, cx));
                 // The coding steps are subtasks of the feature task, so they

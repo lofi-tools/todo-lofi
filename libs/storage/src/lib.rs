@@ -21,10 +21,13 @@ pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
     pub use crate::github::{
-        FieldDecision, FieldMerge, ISSUE_FIELDS, IssueFieldState, IssueLink, IssueRef,
+        BoundRepo, FieldDecision, FieldMerge, GithubClient, GithubHttpClient, GithubSyncSummary,
+        ISSUE_FIELDS, IssueFieldState, IssueLink, IssuePage, IssuePatch, IssueRef,
         NewRunPullRequest, NewRunWorktree, PULL_REQUEST_CLOSED, PULL_REQUEST_MERGED,
         PULL_REQUEST_OPEN, RemoteIssue, RemoteIssueFields, RunPullRequest, RunWorktree,
-        SyncCursor, issue_external_id, parse_issue_external_id, plan_issue_merge, resolve_field,
+        SyncCursor, SyncFailure, TaskIssue, classify_status, comment_from_json,
+        issue_external_id, parse_issue_external_id, plan_issue_merge, remote_issue_from_json,
+        resolve_field,
     };
     pub use crate::link::LinkKind;
     pub use crate::managed::{

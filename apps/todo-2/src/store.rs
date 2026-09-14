@@ -8,6 +8,22 @@ use crate::coding_git;
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
 
+/// One try plus three retries for a transient GitHub failure (decision 22).
+const GITHUB_SYNC_ATTEMPTS: u32 = 4;
+/// Ceiling on the retry backoff, so a long rate-limit reset still surfaces.
+const GITHUB_SYNC_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One worktree a run will use in one repo. Multi-repo projects get several,
+/// each with its own base branch and remote (decision 21).
+#[derive(Debug, Clone)]
+struct WorktreePlan {
+    repo_dir: std::path::PathBuf,
+    worktree_path: std::path::PathBuf,
+    branch: String,
+    base_branch: String,
+    remote: String,
+}
+
 /// Tell the apps that captured a freshly created task about it. Todoist
 /// turns that into a remote item, so adding a task to a linked tag also
 /// adds it to the user's Todoist project. Failures are logged rather than
@@ -141,6 +157,9 @@ impl Store {
             let mut s = store.lock().await;
             s.update_task_done(task_id, done).await?;
             tracing::info!(task_id, done, "toggle_task_done: after update, ok");
+            // A synced task keeps its local completion on the next pull and
+            // pushes it as `state` (spec §5.5).
+            s.stamp_local_issue_field(task_id, "state").await?;
             push_patch(&mut s, task_id, storage::todoist::TaskPatch {
                 done: Some(done),
                 ..Default::default()
@@ -160,6 +179,7 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             s.update_task_title(task_id, &title).await?;
+            s.stamp_local_issue_field(task_id, "title").await?;
             push_patch(&mut s, task_id, storage::todoist::TaskPatch {
                 content: Some(title),
                 ..Default::default()
@@ -180,6 +200,7 @@ impl Store {
             let mut s = store.lock().await;
             s.update_task_description(task_id, description.clone())
                 .await?;
+            s.stamp_local_issue_field(task_id, "body").await?;
             push_patch(&mut s, task_id, storage::todoist::TaskPatch {
                 description: Some(description),
                 ..Default::default()
@@ -1291,23 +1312,50 @@ impl Store {
                 .await?;
                 desired
             } else {
-                let dir = Self::project_dir(&mut s, task_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("set this project's directory first"))?;
-                let (base, branch) = tokio::task::spawn_blocking(move || {
-                    Self::create_feature_branch(&dir, &desired, &fallback)
+                let repos = Self::project_repo_dirs(&mut s, task_id).await?;
+                if repos.is_empty() {
+                    anyhow::bail!("set this project's directory first");
+                }
+                let run_id = view.run.id;
+                let plans = tokio::task::spawn_blocking(move || {
+                    Self::create_run_worktrees(&repos, &desired, &fallback, run_id)
                 })
                 .await??;
-                s.set_run_branch(view.run.id, &branch, Some(&base)).await?;
+                let primary = plans
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("this project has no git repository to work in"))?;
+                for plan in &plans {
+                    s.insert_run_worktree(&NewRunWorktree {
+                        run_id,
+                        repo_dir: plan.repo_dir.display().to_string(),
+                        worktree_path: plan.worktree_path.display().to_string(),
+                        branch: plan.branch.clone(),
+                        base_branch: plan.base_branch.clone(),
+                        remote: plan.remote.clone(),
+                    })
+                    .await?;
+                }
+                s.set_run_branch(run_id, &primary.branch, Some(&primary.base_branch))
+                    .await?;
+                let extra = match plans.len() {
+                    0 | 1 => String::new(),
+                    more => format!(" (+{} more repo(s))", more - 1),
+                };
                 s.append_run_note(
-                    view.run.id,
+                    run_id,
                     "branch",
                     "spec",
                     "spec",
-                    &format!("Created {branch} from {base}"),
+                    &format!(
+                        "Working in {} on {} from {}{extra}",
+                        primary.worktree_path.display(),
+                        primary.branch,
+                        primary.base_branch,
+                    ),
                 )
                 .await?;
-                branch
+                primary.branch.clone()
             };
             s.complete_workflow_step(step.task.id, serde_json::json!({ "approved": true }))
                 .await?;
@@ -1316,7 +1364,9 @@ impl Store {
     }
 
     /// Merge the run's feature branch into its base branch and complete the
-    /// run. On conflict the merge is aborted so the tree stays usable.
+    /// run, removing the run's worktrees while keeping its branches for the
+    /// cleanup list (decision 28). On conflict the merge is aborted so the
+    /// tree stays usable.
     pub fn merge_coding_branch(
         &self,
         run_id: u64,
@@ -1337,11 +1387,59 @@ impl Store {
             let root = run
                 .root_task_id
                 .ok_or_else(|| anyhow::anyhow!("this run has no feature task"))?;
-            let dir = Self::project_dir(&mut s, root)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("set this project's directory first"))?;
-            tokio::task::spawn_blocking(move || Self::merge_into_base(&dir, &base, &branch))
+            let worktrees = s.run_worktrees(run_id).await?;
+            if worktrees.is_empty() {
+                // A run that predates worktrees still merges in the user's
+                // checkout, guard and all.
+                let dir = Self::project_dir(&mut s, root)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("set this project's directory first"))?;
+                tokio::task::spawn_blocking(move || Self::merge_into_base(&dir, &base, &branch))
+                    .await??;
+            } else {
+                let pending: Vec<&RunWorktree> = worktrees
+                    .iter()
+                    .filter(|worktree| worktree.removed_at.is_none())
+                    .collect();
+                let merges: Vec<(std::path::PathBuf, String, String)> = pending
+                    .iter()
+                    .map(|worktree| {
+                        (
+                            std::path::PathBuf::from(&worktree.repo_dir),
+                            worktree.base_branch.clone(),
+                            worktree.branch.clone(),
+                        )
+                    })
+                    .collect();
+                let removals: Vec<(std::path::PathBuf, std::path::PathBuf)> = pending
+                    .iter()
+                    .map(|worktree| {
+                        (
+                            std::path::PathBuf::from(&worktree.repo_dir),
+                            std::path::PathBuf::from(&worktree.worktree_path),
+                        )
+                    })
+                    .collect();
+                tokio::task::spawn_blocking(move || {
+                    for (dir, base, branch) in &merges {
+                        Self::merge_into_base(dir, base, branch)?;
+                    }
+                    for (repo_dir, worktree_path) in &removals {
+                        if worktree_path.is_dir() {
+                            coding_git::worktree_remove(repo_dir, worktree_path)?;
+                        } else {
+                            // Deleted by hand: prune clears the stale admin
+                            // entry instead of failing the merge.
+                            coding_git::worktree_prune(repo_dir)?;
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
                 .await??;
+                for worktree in pending {
+                    s.mark_run_worktree_removed(worktree.id).await?;
+                }
+            }
             s.complete_coding_merge(run_id).await?;
             Ok(())
         })
@@ -1409,33 +1507,59 @@ impl Store {
         })
     }
 
-    /// Cut the feature branch: refuse a dirty tree, prefer `desired`, and fall
-    /// back to `fallback` when that name is already taken (`git switch -c` per
-    /// the spec, never an existing branch). Returns the base branch and the
-    /// branch that was actually created.
-    fn create_feature_branch(
-        dir: &std::path::Path,
+    /// Create one worktree per repo at spec approval (§6.2):
+    /// `<repo>/worktrees/<branch-slug>`, excluded from git's view and cut from
+    /// that repo's own base branch. The user's checkout is never switched,
+    /// which is what retires the old dirty-tree refusal at this call site.
+    fn create_run_worktrees(
+        repos: &[std::path::PathBuf],
         desired: &str,
         fallback: &str,
-    ) -> anyhow::Result<(String, String)> {
-        if !coding_git::is_repo(dir) {
-            anyhow::bail!("{} is not a git repository", dir.display());
+        run_id: u64,
+    ) -> anyhow::Result<Vec<WorktreePlan>> {
+        let mut plans = Vec::new();
+        for repo_dir in repos {
+            if !coding_git::is_repo(repo_dir) {
+                continue;
+            }
+            // Each repo can sit on a different branch, so each worktree
+            // records its own base.
+            let base_branch = coding_git::current_branch(repo_dir)?;
+            let branch = if !coding_git::branch_exists(repo_dir, desired) {
+                desired.to_string()
+            } else if desired != fallback && !coding_git::branch_exists(repo_dir, fallback) {
+                fallback.to_string()
+            } else {
+                anyhow::bail!(
+                    "both {desired} and {fallback} already exist in {}; delete one first",
+                    repo_dir.display()
+                );
+            };
+            let slug = branch.replace('/', "-");
+            let mut worktree_path = repo_dir.join("worktrees").join(&slug);
+            if worktree_path.exists() {
+                // Never reuse another run's checkout (spec §8).
+                worktree_path = repo_dir.join("worktrees").join(format!("{slug}-{run_id}"));
+            }
+            if worktree_path.exists() {
+                anyhow::bail!("{} already exists; remove it first", worktree_path.display());
+            }
+            coding_git::worktree_add(repo_dir, &worktree_path, &branch, &base_branch)?;
+            let remote = coding_git::resolve_remote(repo_dir)
+                .map(|remote| remote.name)
+                .unwrap_or_default();
+            plans.push(WorktreePlan {
+                repo_dir: repo_dir.clone(),
+                worktree_path,
+                branch,
+                base_branch,
+                remote,
+            });
         }
-        let changed = coding_git::changed_paths(dir)?;
-        if !changed.is_empty() {
-            let listed: Vec<&str> = changed.iter().take(5).map(String::as_str).collect();
-            anyhow::bail!("commit or stash these changes first: {}", listed.join(", "));
+        if plans.is_empty() {
+            anyhow::bail!("this project has no git repository to work in");
         }
-        let base = coding_git::current_branch(dir)?;
-        let branch = if !coding_git::branch_exists(dir, desired) {
-            desired.to_string()
-        } else if desired != fallback && !coding_git::branch_exists(dir, fallback) {
-            fallback.to_string()
-        } else {
-            anyhow::bail!("both {desired} and {fallback} already exist; delete one first");
-        };
-        coding_git::create_branch(dir, &branch)?;
-        Ok((base, branch))
+        Ok(plans)
     }
 
     /// Switch to the base branch and merge the feature branch into it.
@@ -1485,18 +1609,19 @@ impl Store {
         Ok(format!("feature/{}-{slug}", view.run.id))
     }
 
-    /// The directory the run's git commands run in: the first ancestor of
-    /// `task_id` (itself included) that carries a project tag with a usable
-    /// directory. `None` means the user has to configure one.
-    async fn project_dir(
+    /// The directories the run may work in: the first ancestor of `task_id`
+    /// (itself included) that carries a project tag with usable directories.
+    /// A multi-directory project yields all of them, in settings order
+    /// (decision 21: one worktree per repo involved in the run).
+    async fn project_dirs(
         store: &mut TodoStore,
         task_id: u64,
-    ) -> anyhow::Result<Option<std::path::PathBuf>> {
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
         let mut current = Some(task_id);
         // Bounded so a corrupt parent chain cannot loop forever.
         for _ in 0..32 {
             let Some(id) = current else {
-                return Ok(None);
+                return Ok(Vec::new());
             };
             let task = store.get_task(id).await?;
             let direct_tags = store.get_direct_task_tags(id).await?;
@@ -1508,23 +1633,48 @@ impl Store {
                     if let Some(path) = tag.name.strip_prefix("project:") {
                         let path = std::path::PathBuf::from(path);
                         if path.is_dir() {
-                            return Ok(Some(path));
+                            return Ok(vec![path]);
                         }
                     }
                     continue;
                 }
                 // Directory settings win over the name: they are the tag's
                 // real (and editable) list of working directories.
-                for dir in dirs {
-                    let path = std::path::PathBuf::from(dir);
-                    if path.is_dir() {
-                        return Ok(Some(path));
-                    }
+                let existing: Vec<std::path::PathBuf> = dirs
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+                    .collect();
+                if !existing.is_empty() {
+                    return Ok(existing);
                 }
             }
             current = task.parent_id;
         }
-        Ok(None)
+        Ok(Vec::new())
+    }
+
+    /// The directory the run's git commands run in: the first usable one.
+    /// `None` means the user has to configure one.
+    async fn project_dir(
+        store: &mut TodoStore,
+        task_id: u64,
+    ) -> anyhow::Result<Option<std::path::PathBuf>> {
+        Ok(Self::project_dirs(store, task_id).await?.into_iter().next())
+    }
+
+    /// The directories of the project that are git repositories, which is what
+    /// a run gets worktrees in.
+    async fn project_repo_dirs(
+        store: &mut TodoStore,
+        task_id: u64,
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        let dirs = Self::project_dirs(store, task_id).await?;
+        tokio::task::spawn_blocking(move || {
+            dirs.into_iter().filter(|dir| coding_git::is_repo(dir)).collect()
+        })
+        .await
+        .map_err(Into::into)
     }
 
     /// Section display order plus task-id → section map for a tag view.
@@ -1542,5 +1692,167 @@ impl Store {
             };
             Ok(s.section_groups_for_tasks(tag.id, &task_ids).await?)
         })
+    }
+
+    /// ——— GitHub sync —————————————————————————————————————
+    /// Bind every project tag whose directory resolves a github.com remote
+    /// and has no target yet, persisting the detection so it is stable and
+    /// overridable (spec decision 5). Returns how many tags were bound.
+    pub fn bind_detected_github_repos(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<usize>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let ids: Vec<u64> = s
+                .list_integrations()
+                .await?
+                .into_iter()
+                .filter(|integration| integration.provider == "github")
+                .map(|integration| integration.id)
+                .collect();
+            let mut bound = 0;
+            for id in ids {
+                bound += Self::bind_detected_repos(&mut s, id).await?;
+            }
+            Ok(bound)
+        })
+    }
+
+    /// One sync pass over every bound repo. `full` ignores the incremental
+    /// cursor, which is how the manual "Sync now" also notices deletions; the
+    /// poller stays incremental.
+    pub fn sync_github(
+        &self,
+        full: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<storage::GithubSyncSummary>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let credentials = crate::github_auth::stored_credentials()
+                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
+            let mut s = store.lock().await;
+            let ids: Vec<u64> = s
+                .list_integrations()
+                .await?
+                .into_iter()
+                .filter(|integration| integration.provider == "github")
+                .map(|integration| integration.id)
+                .collect();
+            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let mut total = storage::GithubSyncSummary::default();
+            for id in ids {
+                Self::bind_detected_repos(&mut s, id).await?;
+                let summary = Self::sync_github_with_retry(&mut s, &client, id, full).await?;
+                total.absorb(&summary);
+            }
+            Ok(total)
+        })
+    }
+
+    /// The remote object a tag syncs with, shown by the tag settings panel
+    /// beside the directory picker (spec §5.3).
+    pub fn tag_sync_target(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::SyncTarget>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_settings(tag_id).await?.sync_target)
+        })
+    }
+
+    /// The GitHub issue a task came from, for the source badge and the
+    /// read-only metadata chips. `None` for purely local tasks.
+    pub fn github_issue_for_task(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<storage::TaskIssue>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.issue_link_for_task(task_id).await?)
+        })
+    }
+
+    /// Whether anything is waiting on GitHub, which is what makes the poller
+    /// demand-driven: an open pull request or a live coding run keeps it on
+    /// the short interval, and an idle app backs off (decision 23).
+    pub fn github_work_pending(&self, cx: &impl AppContext) -> Task<anyhow::Result<bool>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            if !s.open_run_pull_requests().await?.is_empty() {
+                return Ok(true);
+            }
+            Ok(!s.list_active_run_views().await?.is_empty())
+        })
+    }
+
+    /// Bind tags whose directories resolve a GitHub remote but carry no sync
+    /// target yet. Remote resolution shells out to git, so it stays off the
+    /// async runtime.
+    async fn bind_detected_repos(
+        store: &mut TodoStore,
+        integration_id: u64,
+    ) -> anyhow::Result<usize> {
+        let mut bound = 0;
+        for tag in store.list_tags().await? {
+            let settings = store.tag_settings(tag.id).await?;
+            if settings.sync_target.is_some() || settings.dirs.is_empty() {
+                continue;
+            }
+            let dirs = settings.dirs.clone();
+            let detected = tokio::task::spawn_blocking(move || {
+                dirs.iter()
+                    .map(std::path::PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+                    .find_map(|dir| coding_git::resolve_remote(&dir))
+            })
+            .await?;
+            let Some(remote) = detected else {
+                continue;
+            };
+            store
+                .bind_repo_tag(tag.id, integration_id, &remote.owner, &remote.repo)
+                .await?;
+            bound += 1;
+        }
+        Ok(bound)
+    }
+
+    /// Auto-retry transient failures (network, 5xx, rate limit) with backoff
+    /// and surface permanent ones straight away (decision 22).
+    async fn sync_github_with_retry(
+        store: &mut TodoStore,
+        client: &storage::GithubHttpClient,
+        integration_id: u64,
+        full: bool,
+    ) -> anyhow::Result<storage::GithubSyncSummary> {
+        let mut attempt = 0;
+        loop {
+            match store
+                .sync_github_integration(client, integration_id, full)
+                .await
+            {
+                Ok(summary) => return Ok(summary),
+                Err(error) => {
+                    let failure = error.downcast_ref::<storage::SyncFailure>();
+                    let transient = failure.is_some_and(storage::SyncFailure::is_transient);
+                    attempt += 1;
+                    if !transient || attempt >= GITHUB_SYNC_ATTEMPTS {
+                        return Err(error);
+                    }
+                    let wait = failure
+                        .and_then(storage::SyncFailure::retry_after)
+                        .unwrap_or_else(|| std::time::Duration::from_secs(1 << attempt));
+                    tokio::time::sleep(wait.min(GITHUB_SYNC_MAX_BACKOFF)).await;
+                }
+            }
+        }
     }
 }
