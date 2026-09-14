@@ -673,8 +673,8 @@ impl Store {
 
     /// The whole tag hierarchy, fully expanded and already in render order:
     /// projects first, then plain tags, then sections, each alphabetically.
-    /// The nav shows every level at once, so this replaces the old
-    /// top-level-tags-plus-lazy-children pair.
+    /// The nav folds it to the selected path, while the tag settings pane
+    /// shows the full tree.
     pub fn tag_tree_rows(
         &self,
         cx: &impl AppContext,

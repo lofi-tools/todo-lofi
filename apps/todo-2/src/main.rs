@@ -1409,6 +1409,17 @@ impl Render for Layout {
                             .when(details_open, |this| {
                                 this.child(self.render_details_overlay(window, cx))
                             })
+                            // The popover is the LAST child so GPUI paints it
+                            // above the task list (paint order follows tree
+                            // order).
+                            .child(
+                                self.travel_panel
+                                    .update(cx, |panel, cx| panel.popover(window, cx)),
+                            )
+                            .child(
+                                self.tag_settings
+                                    .update(cx, |panel, cx| panel.popover(window, cx)),
+                            )
                             .into_any_element(),
                         NavPanel::Integrations => div()
                             .flex_1()

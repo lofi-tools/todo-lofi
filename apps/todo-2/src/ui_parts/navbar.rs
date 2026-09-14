@@ -44,9 +44,10 @@ pub enum NavPanel {
 
 pub struct NavBar {
     store: Store,
-    /// Every tag row, already ordered and indented by the store: the tree is
-    /// rendered fully expanded, so there is no per-tag expand state and no
-    /// lazy child fetch.
+    /// Every tag row, already ordered and indented by the store. Rendering
+    /// folds it to the selected path — top-level rows plus the one branch the
+    /// selected tag sits in — so the nav stays collapsed until a tag is
+    /// picked, and no per-tag expand state is kept.
     rows: Vec<TagTreeRow>,
     selected_path: Vec<String>,
     active_panel: NavPanel,
@@ -150,7 +151,8 @@ impl NavBar {
     }
 
     /// Select a tag by the path it was reached through. The path is what
-    /// disambiguates a project that is placed under several parents.
+    /// disambiguates a project that is placed under several parents. The
+    /// selection also decides which branch of the tree render shows expanded.
     fn navigate_to_tag(&mut self, path: &[String], cx: &mut Context<Self>) {
         if self.selected_path == path {
             return;
@@ -159,6 +161,16 @@ impl NavBar {
         cx.emit(NavBarEvent::TagSelected(path.to_vec()));
         cx.notify();
     }
+}
+
+/// Whether `row` should render under the current selection. Top-level rows
+/// are always visible; a nested row is shown only when every ancestor along
+/// its path is on the selected path, so exactly the branch of the selected
+/// tag is expanded and everything else stays collapsed.
+fn row_visible(path: &[String], selected_path: &[String]) -> bool {
+    path.iter()
+        .take(path.len().saturating_sub(1))
+        .all(|ancestor| selected_path.contains(ancestor))
 }
 
 /// A small pulsing dot shown on a project row while its agent turn streams.
@@ -202,8 +214,8 @@ impl Render for NavBar {
             .child(
                 div()
                     .flex_1()
-                    // The tree is fully expanded, so it can easily exceed the
-                    // viewport height; scroll it while the footer stays pinned.
+                    // The expanded branch can still exceed the viewport
+                    // height; scroll it while the footer stays pinned.
                     .overflow_y_scrollbar()
                     .v_flex()
                     .gap_0p5()
@@ -251,7 +263,9 @@ impl Render for NavBar {
                                 cx.notify();
                             })),
                     )
-                    .children(rows.into_iter().map(|row| {
+                    .children(rows.into_iter().filter_map(|row| {
+                        row_visible(&row.path, &selected_path).then_some(row)
+                    }).map(|row| {
                         let TagTreeRow {
                             tag,
                             depth,
