@@ -108,7 +108,7 @@ impl TodoStore {
         })
     }
 
-    async fn last_insert_id(&mut self) -> QueryResult<u64> {
+    pub(crate) async fn last_insert_id(&mut self) -> QueryResult<u64> {
         let rows = toasty::sql::query("SELECT last_insert_rowid()")
             .column_types([toasty::stmt::Type::I64])
             .exec(&mut self.db)

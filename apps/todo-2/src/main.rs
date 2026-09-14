@@ -33,6 +33,7 @@ use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 mod coding_git;
 mod coding_mcp;
 mod components;
+mod github_auth;
 mod projects;
 mod store;
 mod theme;
@@ -1509,6 +1510,18 @@ fn main() {
                     .any(|i| i.provider == "todoist")
             {
                 store.create_integration("todoist", None).await?;
+            }
+            // Same for GitHub, whose account label comes from the token file.
+            if let Some(credentials) = github_auth::stored_credentials()
+                && !store
+                    .list_integrations()
+                    .await?
+                    .into_iter()
+                    .any(|i| i.provider == "github")
+            {
+                store
+                    .create_integration("github", credentials.login)
+                    .await?;
             }
             let tasks = store.list_tasks_by_priority().await.unwrap_or_default();
             // Occurrences startable or due in the next 2 days exist from

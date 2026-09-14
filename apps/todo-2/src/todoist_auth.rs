@@ -299,7 +299,9 @@ pub async fn connect() -> anyhow::Result<String> {
     Ok(tokens.access_token)
 }
 
-fn url_encode(raw: &str) -> String {
+/// Percent-encode one form value. Shared with the GitHub device flow, which
+/// posts the same `application/x-www-form-urlencoded` bodies.
+pub(crate) fn url_encode(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         match byte {
@@ -312,7 +314,8 @@ fn url_encode(raw: &str) -> String {
     out
 }
 
-fn open_browser(url: &str) {
+/// Open a URL in the user's browser. Shared with the GitHub device flow.
+pub(crate) fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "linux")]

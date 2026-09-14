@@ -10,6 +10,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Sizable, Size, StyledExt};
 
+use crate::github_auth;
 use crate::store::Store;
 use crate::theme::APP_BG;
 use crate::todoist_auth;
@@ -31,9 +32,14 @@ pub struct IntegrationsView {
     connecting: bool,
     syncing: bool,
     status: Option<String>,
+    /// The device code the user is typing into GitHub while we poll for the
+    /// token; `None` when no connect is in flight.
+    github_code: Option<github_auth::DeviceLogin>,
+    github_connecting: bool,
     _load: Option<gpui::Task<()>>,
     _connect: Option<gpui::Task<()>>,
     _sync: Option<gpui::Task<()>>,
+    _github_poll: Option<gpui::Task<()>>,
 }
 
 impl IntegrationsView {
@@ -47,9 +53,12 @@ impl IntegrationsView {
             connecting: false,
             syncing: false,
             status: None,
+            github_code: None,
+            github_connecting: false,
             _load: None,
             _connect: None,
             _sync: None,
+            _github_poll: None,
         };
         this.reload(cx);
         this
@@ -103,6 +112,122 @@ impl IntegrationsView {
 
     fn todoist_connected(&self) -> bool {
         self.connected.iter().any(|i| i.provider == "todoist")
+    }
+
+    /// Start the device flow: ask GitHub for a code, show it, then poll until
+    /// the user approves. Two hops rather than one so the code is on screen
+    /// while the poll is still running.
+    fn start_github_connect(&mut self, cx: &mut Context<Self>) {
+        if self.github_connecting {
+            return;
+        }
+        self.github_connecting = true;
+        self.github_code = None;
+        self.status = Some("Requesting a GitHub device code…".to_string());
+        cx.notify();
+
+        let begin = gpui_tokio::Tokio::spawn_result(cx, async move { github_auth::begin().await });
+        self._connect = Some(cx.spawn(async move |this, cx| {
+            let login = match begin.await {
+                Ok(login) => login,
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.github_connecting = false;
+                        this.status = Some(format!("GitHub connect failed: {e}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let polled = login.clone();
+            this.update(cx, |this, cx| {
+                let store = this.store.clone();
+                // Polling and the account lookup are network work: both stay on
+                // the Tokio runtime, only the result comes back to GPUI.
+                let poll = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    let token = github_auth::complete(polled).await?;
+                    Ok::<_, anyhow::Error>(github_auth::account_login(&token).await.ok())
+                });
+                this.github_code = Some(login);
+                this.status = Some("Waiting for GitHub approval…".to_string());
+                this._github_poll = Some(cx.spawn(async move |this, cx| {
+                    let account = match poll.await {
+                        Ok(account) => account,
+                        Err(e) => {
+                            this.update(cx, |this, cx| {
+                                this.github_connecting = false;
+                                this.github_code = None;
+                                this.status = Some(format!("GitHub connect failed: {e}"));
+                                cx.notify();
+                            })
+                            .ok();
+                            return;
+                        }
+                    };
+                    let created = store
+                        .create_integration("github".to_string(), account, cx)
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.github_connecting = false;
+                        this.github_code = None;
+                        match created {
+                            Ok(_) => {
+                                this.status = Some("GitHub connected.".to_string());
+                                cx.emit(IntegrationsEvent::Changed);
+                            }
+                            Err(e) => {
+                                this.status = Some(format!("GitHub connect failed: {e}"))
+                            }
+                        }
+                        this.reload(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn disconnect_github(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self
+            .connected
+            .iter()
+            .find(|i| i.provider == "github")
+            .map(|i| i.id)
+        else {
+            return;
+        };
+        let remove = self.store.delete_integration(id, cx);
+        self._load = Some(cx.spawn(async move |this, cx| match remove.await {
+            Ok(()) => {
+                // The row is gone even if the token file is not: leaving a live
+                // token behind silently would be worse than the extra line.
+                let forgotten = github_auth::disconnect()
+                    .err()
+                    .map(|e| format!(" The stored token could not be removed: {e}"));
+                this.update(cx, |this, cx| {
+                    this.github_code = None;
+                    this.status = Some(match forgotten {
+                        Some(note) => format!("GitHub disconnected.{note}"),
+                        None => "GitHub disconnected.".to_string(),
+                    });
+                    cx.emit(IntegrationsEvent::Changed);
+                    this.reload(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                this.update(cx, |this, cx| {
+                    this.status = Some(format!("Disconnect failed: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
     }
 
     fn start_todoist_connect(&mut self, cx: &mut Context<Self>) {
@@ -373,6 +498,142 @@ impl IntegrationsView {
     }
 }
 
+impl IntegrationsView {
+    /// The GitHub card: device-flow connect (the code, then the poll) and
+    /// disconnect once connected. The token lives only in
+    /// `~/.config/my-todo/github.json`; the database holds the connection row.
+    fn github_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let account = self
+            .connected
+            .iter()
+            .find(|i| i.provider == "github")
+            .and_then(|i| i.account_label.clone());
+        let connected = account.is_some();
+
+        let controls = if connected {
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x4ade80))
+                        .child("Connected"),
+                )
+                .child(
+                    Button::new("github-disconnect")
+                        .ghost()
+                        .compact()
+                        .label("Disconnect")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.disconnect_github(cx);
+                        })),
+                )
+        } else {
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x737373))
+                        .child("Not connected"),
+                )
+                .child(
+                    Button::new("github-connect")
+                        .ghost()
+                        .compact()
+                        .label(if self.github_connecting {
+                            "Waiting…"
+                        } else {
+                            "Connect"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_github_connect(cx);
+                        })),
+                )
+        };
+
+        let code = self.github_code.clone();
+        div()
+            .v_flex()
+            .gap_2()
+            .child(
+                integration_card(false)
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(provider_icon(gpui_component_assets::IconName::Github))
+                    .child(
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().font_semibold().child("GitHub"))
+                                    .when_some(account, |this, account| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x737373))
+                                                .child(account),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(0xa3a3a3))
+                                    .child("Issue-backed tasks get branches, worktrees and pull requests."),
+                            ),
+                    )
+                    .child(controls),
+            )
+            .when_some(code, |this, code| {
+                let url = code.verification_uri.clone();
+                this.child(
+                    div()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x2e2e2e))
+                        .bg(rgb(0x1e1e1e))
+                        .px_3()
+                        .py_2()
+                        .v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x737373))
+                                .child("Enter this code on GitHub to finish connecting"),
+                        )
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_semibold()
+                                .child(code.user_code.clone()),
+                        )
+                        .child(
+                            Button::new("github-open")
+                                .ghost()
+                                .compact()
+                                .label("Open the GitHub device page")
+                                .on_click(move |_, _, _| {
+                                    todoist_auth::open_browser(&url);
+                                }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
 /// Brand logo for Todoist (vendored SVG): the shared asset bundle only
 /// ships the kit's default icon list, so brand art renders from bytes,
 /// like the navbar's integrations icon.
@@ -392,20 +653,6 @@ fn integration_card(dimmed: bool) -> gpui::Div {
         .bg(rgb(0x232323))
         .p_4()
         .when(dimmed, |this| this.opacity(0.55))
-}
-
-/// Small pill badge, e.g. "Coming soon".
-fn badge(label: &'static str) -> gpui::Div {
-    div()
-        .rounded_full()
-        .bg(rgb(0x2a2a2a))
-        .border_1()
-        .border_color(rgb(0x3a3a3a))
-        .px_2()
-        .py_0p5()
-        .text_xs()
-        .text_color(rgb(0xa3a3a3))
-        .child(label)
 }
 
 fn provider_icon(icon: impl IntoElement) -> gpui::Div {
@@ -436,30 +683,7 @@ impl Render for IntegrationsView {
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Integrations"))
                     .child(self.todoist_card(window, cx))
-                    .child(
-                        integration_card(true)
-                            .h_flex()
-                            .items_center()
-                            .gap_3()
-                            .child(provider_icon(
-                                gpui_component_assets::IconName::Github,
-                            ))
-                            .child(
-                                div().v_flex().flex_1().gap_0p5().child(
-                                    div()
-                                        .h_flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(div().font_semibold().child("GitHub"))
-                                        .child(badge("Coming soon")),
-                                ).child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xa3a3a3))
-                                        .child("Turn issues and PRs into tasks."),
-                                ),
-                            ),
-                    )
+                    .child(self.github_card(cx))
                     .when_some(self.status.clone(), |this, status| {
                         this.child(
                             div().text_sm().text_color(rgb(0xa3a3a3)).child(status),

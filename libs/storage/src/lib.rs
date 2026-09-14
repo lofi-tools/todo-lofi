@@ -3,6 +3,7 @@ use toasty_driver_turso::Turso;
 
 pub mod error;
 pub mod external;
+pub mod github;
 pub mod link;
 pub mod managed;
 pub mod migrations;
@@ -19,6 +20,12 @@ pub mod workflow;
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::external::{ExternalComment, Integration, TagLink, TaskLink};
+    pub use crate::github::{
+        FieldDecision, FieldMerge, ISSUE_FIELDS, IssueFieldState, IssueLink, IssueRef,
+        NewRunPullRequest, NewRunWorktree, PULL_REQUEST_CLOSED, PULL_REQUEST_MERGED,
+        PULL_REQUEST_OPEN, RemoteIssue, RemoteIssueFields, RunPullRequest, RunWorktree,
+        SyncCursor, issue_external_id, parse_issue_external_id, plan_issue_merge, resolve_field,
+    };
     pub use crate::link::LinkKind;
     pub use crate::managed::{
         App, AppTagBinding, BindingRole, DEMO_APP_SLUG, ManagedIntegrityReport, ManagedMode,
