@@ -22,9 +22,8 @@ const SCOPE: &str = "repo read:user";
 
 /// Client id of the app registered under the `lofi-tools` org with device flow
 /// enabled (spec decision 34). Public by design — device flow needs no secret.
-/// Empty until that app exists, in which case `GITHUB_CLIENT_ID` must supply
-/// one (forks and self-builds use their own app).
-const DEFAULT_CLIENT_ID: &str = "";
+/// Forks and self-builds override it with their own app via `GITHUB_CLIENT_ID`.
+const DEFAULT_CLIENT_ID: &str = "Ov23liq9LUbDfFPGJ0dC";
 
 /// How much GitHub asks us to add to the interval on `slow_down`.
 const SLOW_DOWN_STEP: u64 = 5;
