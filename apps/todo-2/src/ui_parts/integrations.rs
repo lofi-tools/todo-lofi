@@ -24,6 +24,9 @@ const GITHUB_POLL_IDLE: std::time::Duration = std::time::Duration::from_secs(300
 
 pub enum IntegrationsEvent {
     Changed,
+    /// A failure the user should see wherever they are: the layout shows it
+    /// as a persistent notice until dismissed.
+    Notice(String),
 }
 
 pub struct IntegrationsView {
@@ -215,9 +218,12 @@ impl IntegrationsView {
             let login = match begin.await {
                 Ok(login) => login,
                 Err(e) => {
+                    let message = format!("GitHub connect failed: {e}");
+                    tracing::error!("{message}");
                     this.update(cx, |this, cx| {
                         this.github_connecting = false;
-                        this.status = Some(format!("GitHub connect failed: {e}"));
+                        this.status = Some(message.clone());
+                        cx.emit(IntegrationsEvent::Notice(message));
                         cx.notify();
                     })
                     .ok();
@@ -244,11 +250,14 @@ impl IntegrationsView {
                     let account = match poll.await {
                         Ok(account) => account,
                         Err(e) => {
+                            let message = format!("GitHub connect failed: {e}");
+                            tracing::error!("{message}");
                             this.update(cx, |this, cx| {
                                 this.github_connecting = false;
                                 this.github_code = None;
                                 this.github_code_expires = None;
-                                this.status = Some(format!("GitHub connect failed: {e}"));
+                                this.status = Some(message.clone());
+                                cx.emit(IntegrationsEvent::Notice(message));
                                 cx.notify();
                             })
                             .ok();
@@ -277,7 +286,10 @@ impl IntegrationsView {
                                 this.start_github_sync(false, cx);
                             }
                             Err(e) => {
-                                this.status = Some(format!("GitHub connect failed: {e}"))
+                                let message = format!("GitHub connect failed: {e}");
+                                tracing::error!("{message}");
+                                this.status = Some(message.clone());
+                                cx.emit(IntegrationsEvent::Notice(message));
                             }
                         }
                         this.reload(cx);
@@ -357,9 +369,12 @@ impl IntegrationsView {
             Err(e) => {
                 // A permanent failure blocks with its reason; the retry
                 // policy has already exhausted the transient ones (decision 22).
+                let message = format!("GitHub sync failed: {e}");
+                tracing::error!("{message}");
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
-                    this.status = Some(format!("GitHub sync failed: {e}"));
+                    this.status = Some(message.clone());
+                    cx.emit(IntegrationsEvent::Notice(message));
                     cx.notify();
                 })
                 .ok();

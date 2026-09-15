@@ -139,9 +139,13 @@
               # it. Kill it by process name instead - launchd resolves the
               # Contents/MacOS symlink, so "-f Contents/MacOS/todo-2" would only
               # ever match cargo-watch's own command line (killing the watcher).
+              # The app is also launched directly (not via `open`, which swallows
+              # stdout/stderr into launchd) so tracing logs stream to this terminal.
               watcher=""
+              app_pid=""
               stop_app() {
                 [ -z "$watcher" ] || kill "$watcher" 2>/dev/null || true
+                [ -z "$app_pid" ] || kill "$app_pid" 2>/dev/null || true
                 pkill -x todo-2 2>/dev/null || true
               }
               trap stop_app EXIT INT TERM HUP
@@ -165,13 +169,16 @@
                 codesign --force --deep --sign "todo-lofi-dev" "$APP_DIR" 2>/dev/null || true
               fi
               xattr -dr com.apple.quarantine "$APP_DIR" "$BIN_DIR/todo-2" 2>/dev/null || true
-              open "$APP_DIR"
+              # Direct launch keeps the app's stdout/stderr on this terminal;
+              # `open` would detach it under launchd and hide the logs.
+              "$APP_DIR/Contents/MacOS/todo-2" &
+              app_pid=$!
 
               # Run the watcher in the background and wait: bash defers traps while
               # a foreground command runs, so killing the script would leave both
               # the watcher and the app alive. wait is interrupted by the signal,
               # letting the trap take them down.
-              cargo watch -x "build -p todo-2" -s 'codesign --force --sign "todo-lofi-dev" "target/debug/todo-2" 2>/dev/null || true; xattr -dr com.apple.quarantine "target/debug/todo-lofi.app" 2>/dev/null || true; pkill -x todo-2 2>/dev/null || true; sleep 0.3; open "target/debug/todo-lofi.app"' &
+              cargo watch -x "build -p todo-2" -s 'codesign --force --sign "todo-lofi-dev" "target/debug/todo-2" 2>/dev/null || true; xattr -dr com.apple.quarantine "target/debug/todo-lofi.app" 2>/dev/null || true; pkill -x todo-2 2>/dev/null || true; sleep 0.3; "target/debug/todo-lofi.app/Contents/MacOS/todo-2" &' &
               watcher=$!
               wait "$watcher"
             '';

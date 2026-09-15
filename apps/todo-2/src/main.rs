@@ -116,6 +116,9 @@ struct Layout {
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
     panel: NavPanel,
+    /// Persistent failure notice, visible on every panel until dismissed
+    /// (integration errors otherwise only show inside their own card).
+    notice: Option<String>,
     store: Store,
     /// Repos found by the home-directory scan, shown in the project picker
     /// modal opened by the + button.
@@ -405,6 +408,10 @@ impl Layout {
                     this.details.update(cx, |details, cx| details.refresh_coding(cx));
                     this.sync_agent_checkout_for_selection(cx);
                 }
+                IntegrationsEvent::Notice(message) => {
+                    this.notice = Some(message.clone());
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -633,6 +640,7 @@ impl Layout {
             _apps: apps,
             settings,
             panel: NavPanel::Tasks,
+            notice: None,
             store: store.clone(),
             _projects: Vec::new(),
             _project_subscription: project_subscription,
@@ -960,6 +968,7 @@ async fn lookup_managed_tag(
 
     /// Window-wide footer: the two right-pane switchers and nothing else.
     fn render_pane_footer(&self, cx: &mut Context<Self>) -> AnyElement {
+
         let agent_enabled = self.agent_available;
         div()
             .flex_none()
@@ -1496,6 +1505,37 @@ impl Render for Layout {
             // The footer is window-wide chrome: it stays pinned to the
             // bottom on every panel, including Integrations, Automations
             // and Settings.
+            .when_some(self.notice.clone(), |this, notice| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .border_t_1()
+                        .border_color(rgb(0x7f1d1d))
+                        .bg(rgb(0x2a1215))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(rgb(0xfca5a5))
+                                .child(notice),
+                        )
+                        .child(
+                            Button::new("notice-dismiss")
+                                .ghost()
+                                .compact()
+                                .label("Dismiss")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.notice = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .child(self.render_pane_footer(cx))
             // Keep the dialog layer last so dialogs paint above everything.
             .children(dialog_layer)
