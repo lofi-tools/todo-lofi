@@ -1035,14 +1035,22 @@ async fn lookup_managed_tag(
     ) {
         window.close_dialog(cx);
         self._picker_subscription = None;
+        let store = self.store.clone();
         let create = project.tag(&self.store, cx);
         cx.spawn(async move |this, cx| {
             if let Err(e) = create.await {
                 tracing::error!("Failed to create project tag: {e}");
                 return;
             }
+            // The tag now carries its directory, so bind its GitHub remote
+            // right away when connected instead of waiting for the next
+            // sync pass; the integrations card then names the repo.
+            if let Err(e) = store.bind_detected_github_repos(cx).await {
+                tracing::warn!("GitHub repo detection failed: {e}");
+            }
             this.update(cx, |this, cx| {
                 this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                this.integrations.update(cx, |view, cx| view.refresh(cx));
             })
             .ok();
         })

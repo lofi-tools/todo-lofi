@@ -46,6 +46,10 @@ pub struct TagSettingsPanel {
     /// The remote object this tag is bound to, when it is synced (a GitHub
     /// `owner/repo` today), shown beside the directories and changeable there.
     sync_target: Option<storage::SyncTarget>,
+    /// The `owner/repo` the tag's directories currently resolve to, shown
+    /// when nothing is bound yet: what the next sync would detect (§5.3).
+    detected_repo: Option<String>,
+    _detect: Option<Task<()>>,
     /// Whether each worktree of a run builds into its own `target/` instead of
     /// sharing the repo's build cache (spec §6.4).
     isolated_build_cache: bool,
@@ -143,6 +147,8 @@ let dir_picker_input = cx.new(|cx| {
             parents: Vec::new(),
             dirs: Vec::new(),
             sync_target: None,
+            detected_repo: None,
+            _detect: None,
             isolated_build_cache: false,
             sections: Vec::new(),
             bindings: Vec::new(),
@@ -278,6 +284,7 @@ let dir_picker_input = cx.new(|cx| {
                     this.placement_suggest_active = false;
                 }
                 this._fetch = None;
+                this.detect_repo(cx);
                 cx.notify();
             })
             .ok();
@@ -634,6 +641,28 @@ let dir_picker_input = cx.new(|cx| {
         cx.notify();
     }
 
+    /// Resolve what the next sync would bind for these directories, so the
+    /// section names the detected remote instead of a generic placeholder.
+    /// Only runs while GitHub is connected; a previous detection is dropped.
+    fn detect_repo(&mut self, cx: &mut Context<Self>) {
+        if self.github_integration_id.is_none() || self.dirs.is_empty() {
+            self.detected_repo = None;
+            self._detect = None;
+            return;
+        }
+        self.detected_repo = None;
+        let detect = self.store.detect_github_repo(self.dirs.clone(), cx);
+        self._detect = Some(cx.spawn(async move |this, cx| {
+            let detected = detect.await.ok().flatten();
+            this.update(cx, |this, cx| {
+                this.detected_repo = detected;
+                this._detect = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     fn fetch_repo_candidates(&mut self, cx: &mut Context<Self>) {
         if !self.repo_candidates.is_empty() || self.repo_candidates_loading {
             return;
@@ -704,6 +733,12 @@ let dir_picker_input = cx.new(|cx| {
             .sync_target
             .as_ref()
             .map(|target| target.external_id.clone());
+        // What the next sync would bind, so an unbound tag with a GitHub
+        // remote names it instead of a generic placeholder.
+        let detected = match &bound {
+            Some(_) => None,
+            None => self.detected_repo.clone(),
+        };
         let bound_row = div()
             .h_flex()
             .items_center()
@@ -712,17 +747,38 @@ let dir_picker_input = cx.new(|cx| {
             .py_0p5()
             .rounded_md()
             .hover(|style| style.bg(rgb(0x2a2a2a)))
-            .child(
-                div()
+            .child(match (&bound, &detected) {
+                (Some(repo), _) => div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_sm()
-                    .child(match &bound {
-                        Some(repo) => repo.clone(),
-                        None => "Detected from the project directory".to_string(),
-                    }),
-            )
+                    .child(repo.clone()),
+                (None, Some(repo)) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        gpui_component::Icon::new(gpui_component_assets::IconName::Github)
+                            .with_size(Size::Small),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(repo.clone()),
+                    ),
+                (None, None) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .child("Detected from the project directory"),
+            })
             .child(
                 Button::new("tag-settings-choose-repo")
                     .ghost()

@@ -1904,6 +1904,28 @@ impl Store {
         })
     }
 
+    /// The `owner/repo` these directories resolve to on github.com, if any:
+    /// what the next sync would bind for the tag. Git runs on a blocking
+    /// thread, so the panel can show the detected remote before anything is
+    /// persisted (§5.3).
+    pub fn detect_github_repo(
+        &self,
+        dirs: Vec<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<String>>> {
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                dirs.iter()
+                    .map(std::path::PathBuf::from)
+                    .filter(|dir| dir.is_dir())
+                    .find_map(|dir| crate::coding_git::resolve_remote(&dir))
+                    .map(|remote| format!("{}/{}", remote.owner, remote.repo))
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("repo detection failed: {error}"))
+        })
+    }
+
     /// Delete a task, closing its GitHub issue first when it has one (§5.6).
     /// The link is tombstoned either way so a later pull cannot resurrect the
     /// row. A close that fails blocks the delete with its own reason rather

@@ -248,27 +248,33 @@ impl TodoStore {
     /// Get or create the tag backing a local project folder. The tag name is
     /// derived from the absolute folder path so it is unique per directory
     /// (two different repos both named `api` never collide), while the
-    /// display name stays the plain directory name.
+    /// display name stays the plain directory name. The folder is also stored
+    /// in the tag's directory settings, which is what tag settings lists and
+    /// what sync detection reads; the `project:` name is only the legacy
+    /// fallback. Tags created before this also get the directory backfilled.
     pub async fn get_or_create_project_tag(
         &mut self,
         path: &std::path::Path,
     ) -> QueryResult<Tag> {
-        let name = format!(
-            "project:{}",
-            path.canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .display()
-        );
+        let canonical = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
+        let name = format!("project:{}", canonical.display());
         let display_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
 
-        if let Some(tag) = self.get_tag_by_name(&name).await? {
-            return Ok(tag);
-        }
-        self.create_tag_with_display_name(name, Some(display_name))
-            .await
+        let tag = match self.get_tag_by_name(&name).await? {
+            Some(tag) => tag,
+            None => {
+                self.create_tag_with_display_name(name, Some(display_name))
+                    .await?
+            }
+        };
+        self.add_tag_dir(tag.id, canonical.to_string_lossy().into_owned())
+            .await?;
+        Ok(tag)
     }
 
     pub async fn get_tag(&mut self, id: u64) -> QueryResult<Tag> {
@@ -1139,6 +1145,14 @@ mod tests {
         let again = storage.get_or_create_project_tag(path).await?;
         assert_eq!(again.id, tag.id);
         assert_eq!(storage.list_tags().await?.len(), 1);
+
+        // The folder is stored in the tag's directory settings, which is
+        // what tag settings lists and what sync detection reads — and
+        // re-adding never duplicates it.
+        assert_eq!(
+            storage.tag_settings(tag.id).await?.dirs,
+            vec!["/tmp/somewhere/api".to_string()]
+        );
 
         // A different path with the same dir name does not collide.
         let other = storage.get_or_create_project_tag(std::path::Path::new("/tmp/elsewhere/api")).await?;
