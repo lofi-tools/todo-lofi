@@ -158,18 +158,42 @@
               # Build, link binary, launch
               cargo build -p todo-2
               ln -sf "$(pwd)/$BIN_DIR/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
+              # Sign with the self-signed todo-lofi-dev identity so Gatekeeper
+              # doesn't throttle every launch; strip any quarantine flag.
+              if security find-identity -v -p codesigning 2>/dev/null | grep -q "todo-lofi-dev"; then
+                codesign --force --sign "todo-lofi-dev" "$BIN_DIR/todo-2" 2>/dev/null || true
+                codesign --force --deep --sign "todo-lofi-dev" "$APP_DIR" 2>/dev/null || true
+              fi
+              xattr -dr com.apple.quarantine "$APP_DIR" "$BIN_DIR/todo-2" 2>/dev/null || true
               open "$APP_DIR"
 
               # Run the watcher in the background and wait: bash defers traps while
               # a foreground command runs, so killing the script would leave both
               # the watcher and the app alive. wait is interrupted by the signal,
               # letting the trap take them down.
-              cargo watch -x "build -p todo-2" -s 'pkill -x todo-2 2>/dev/null || true; sleep 0.3; open "target/debug/todo-lofi.app"' &
+              cargo watch -x "build -p todo-2" -s 'codesign --force --sign "todo-lofi-dev" "target/debug/todo-2" 2>/dev/null || true; xattr -dr com.apple.quarantine "target/debug/todo-lofi.app" 2>/dev/null || true; pkill -x todo-2 2>/dev/null || true; sleep 0.3; open "target/debug/todo-lofi.app"' &
               watcher=$!
               wait "$watcher"
             '';
 
             # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
+
+            # Build test binaries, strip quarantine + sign them with the
+            # self-signed todo-lofi-dev identity so Gatekeeper doesn't slow
+            # down test launches, then run cargo test.
+            tt = with bash; ''
+              set -e
+              TEST_BINS=$(cargo test "$@" --no-run --message-format=json 2>/dev/null | jq -r 'select(.reason == "compiler-artifact" and (.target.test // false)) | .filenames[]')
+              if security find-identity -v -p codesigning 2>/dev/null | grep -q "todo-lofi-dev"; then
+                for bin in $TEST_BINS; do
+                  codesign --force --sign "todo-lofi-dev" "$bin" 2>/dev/null || true
+                done
+              fi
+              for bin in $TEST_BINS; do
+                xattr -d com.apple.quarantine "$bin" 2>/dev/null || true
+              done
+              cargo test "$@"
+            '';
 
             skills = with bash; ''set -ex;
               for f in "${wd}"/docs/agent_skills/*.md; do
