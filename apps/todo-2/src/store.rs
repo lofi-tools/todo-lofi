@@ -563,18 +563,6 @@ impl Store {
         })
     }
 
-    pub fn delete_integration(
-        &self,
-        integration_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<()>> {
-        let store = self.0.clone();
-        gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            Ok(s.delete_integration(integration_id).await?)
-        })
-    }
-
     /// Enable or re-enable an integration's app. Disabling goes through the
     /// app settings' disable flow, which also clears the pairings.
     pub fn set_app_enabled(

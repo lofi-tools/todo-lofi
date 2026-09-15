@@ -428,7 +428,7 @@ impl TodoistSyncPicker {
         self.add_flow(id_prefix, cx)
     }
 
-    /// Settings composition: the pair list, one "+ sync project(s)" button,
+    /// Settings composition: the pair list, one "+ sync project" button,
     /// and the two-step add flow in a popover over the list. Shared by the
     /// integrations card and the settings page.
     pub fn render_settings_block(
@@ -454,7 +454,7 @@ impl TodoistSyncPicker {
                             .border_color(rgb(HAIRLINE))
                             .text_color(rgb(0xa3a3a3))
                             .cursor_pointer()
-                            .label("+ sync project(s)")
+                            .label("+ sync project")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.start_adding(cx);
                             })),

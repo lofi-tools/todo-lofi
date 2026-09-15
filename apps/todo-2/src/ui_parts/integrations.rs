@@ -4,9 +4,9 @@
 //! integration.
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, InteractiveElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window, div, px, rgb,
-    prelude::FluentBuilder,
+    AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder,
+    px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -20,9 +20,18 @@ use crate::ui_parts::apps::AppSettings;
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 /// Demand-driven polling (decision 23): short while a PR or a run is live,
-/// idle otherwise, so a quiet app barely talks to GitHub.
+/// idle otherwise, so a quiet app barely talks to GitHub. The idle cadence
+/// is the card's sync frequency; the active one stays fixed.
 const GITHUB_POLL_ACTIVE: std::time::Duration = std::time::Duration::from_secs(15);
-const GITHUB_POLL_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Sync frequency presets for the GitHub card: `(seconds, label)`.
+/// `0` means manual syncing only.
+const GITHUB_POLL_PRESETS: [(u64, &str); 4] = [
+    (0, "Manual"),
+    (60, "1 min"),
+    (300, "5 min"),
+    (900, "15 min"),
+];
 
 pub enum IntegrationsEvent {
     Changed,
@@ -51,6 +60,10 @@ pub struct IntegrationsView {
     connecting: bool,
     syncing: bool,
     status: Option<String>,
+    /// GitHub's own status line ("GitHub synced — …", errors, token notes),
+    /// rendered inside the expanded GitHub card rather than at the page
+    /// bottom, so each integration owns its feedback.
+    github_status: Option<String>,
     /// The device code the user is typing into GitHub while we poll for the
     /// token; `None` when no connect is in flight.
     github_code: Option<github_auth::DeviceLogin>,
@@ -62,6 +75,10 @@ pub struct IntegrationsView {
     github_last_sync: Option<jiff::Timestamp>,
     github_connecting: bool,
     github_syncing: bool,
+    /// Background sync cadence in seconds (`0` means manual only), mirrored
+    /// from the connection file so the card can render it without file I/O
+    /// on every frame.
+    github_poll_interval: u64,
     /// Whether the GitHub card's settings (the personal token) are expanded.
     github_settings_expanded: bool,
     /// Whether the connection file holds a personal access token, which
@@ -95,11 +112,13 @@ impl IntegrationsView {
             connecting: false,
             syncing: false,
             status: None,
+            github_status: None,
             github_code: None,
             github_code_expires: None,
             github_last_sync: None,
             github_connecting: false,
             github_syncing: false,
+            github_poll_interval: github_auth::poll_interval_secs(),
             github_settings_expanded: false,
             github_pat_saved: github_auth::has_personal_token(),
             github_pat_input: None,
@@ -119,31 +138,43 @@ impl IntegrationsView {
     }
 
     /// Sync in the background for the life of the window: frequent while
-    /// something is pending, backing off to idle otherwise.
+    /// something is pending, backing off to the card's sync frequency
+    /// otherwise. Manual frequency means no automatic syncing at all.
     fn start_github_poller(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        self._github_poller = Some(cx.spawn(async move |this, cx| loop {
-            let pending = store.github_work_pending(cx).await.ok().unwrap_or(false);
-            cx.background_executor()
-                .timer(if pending {
-                    GITHUB_POLL_ACTIVE
-                } else {
-                    GITHUB_POLL_IDLE
+        self._github_poller = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let cadence = this
+                    .read_with(cx, |this, _| this.github_poll_interval)
+                    .unwrap_or(github_auth::DEFAULT_POLL_INTERVAL_SECS);
+                if cadence == 0 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                    continue;
+                }
+                let pending = store.github_work_pending(cx).await.ok().unwrap_or(false);
+                cx.background_executor()
+                    .timer(if pending {
+                        GITHUB_POLL_ACTIVE
+                    } else {
+                        std::time::Duration::from_secs(cadence)
+                    })
+                    .await;
+                let ready = this
+                    .read_with(cx, |this, _| {
+                        this.github_connected() && !this.github_disabled() && !this.github_syncing
+                    })
+                    .unwrap_or(false);
+                if !ready {
+                    continue;
+                }
+                this.update(cx, |this, cx| {
+                    this.start_github_sync(false, cx);
+                    this.poll_pull_requests(cx);
                 })
-                .await;
-            let ready = this
-                .read_with(cx, |this, _| {
-                    this.github_connected() && !this.github_disabled() && !this.github_syncing
-                })
-                .unwrap_or(false);
-            if !ready {
-                continue;
+                .ok();
             }
-            this.update(cx, |this, cx| {
-                this.start_github_sync(false, cx);
-                this.poll_pull_requests(cx);
-            })
-            .ok();
         }));
     }
 
@@ -196,9 +227,8 @@ impl IntegrationsView {
                 .settings
                 .read_with(cx, |settings, _| settings.is_expanded(app_id))
         {
-            self.settings.update(cx, |settings, cx| {
-                settings.toggle_expanded(app_id, cx)
-            });
+            self.settings
+                .update(cx, |settings, cx| settings.toggle_expanded(app_id, cx));
             collapsed = true;
         }
         if collapsed {
@@ -245,6 +275,7 @@ impl IntegrationsView {
                     this.connected = list;
                     this.github_last_sync = last_sync;
                     this.github_pat_saved = github_auth::has_personal_token();
+                    this.github_poll_interval = github_auth::poll_interval_secs();
                     let todoist_app_id = todoist_app.map(|(id, _)| id);
                     if this.todoist_app_id != todoist_app_id {
                         // New (or removed) provider app: drop the cached tag
@@ -252,9 +283,11 @@ impl IntegrationsView {
                         this.todoist_sync = None;
                     }
                     this.todoist_app_id = todoist_app_id;
-                    this.todoist_app_enabled = todoist_app.map(|(_, enabled)| enabled).unwrap_or(true);
+                    this.todoist_app_enabled =
+                        todoist_app.map(|(_, enabled)| enabled).unwrap_or(true);
                     this.github_app_id = github_app.map(|(id, _)| id);
-                    this.github_app_enabled = github_app.map(|(_, enabled)| enabled).unwrap_or(true);
+                    this.github_app_enabled =
+                        github_app.map(|(_, enabled)| enabled).unwrap_or(true);
                     this._load = None;
                     cx.notify();
                 })
@@ -408,7 +441,8 @@ impl IntegrationsView {
         }
         self.github_connecting = true;
         self.github_code = None;
-        self.status = Some("Requesting a GitHub device code…".to_string());
+        self.github_status = Some("Requesting a GitHub device code…".to_string());
+        self.github_settings_expanded = true;
         cx.notify();
 
         let begin = gpui_tokio::Tokio::spawn_result(cx, async move { github_auth::begin().await });
@@ -420,7 +454,7 @@ impl IntegrationsView {
                     tracing::error!("{message}");
                     this.update(cx, |this, cx| {
                         this.github_connecting = false;
-                        this.status = Some(message.clone());
+                        this.github_status = Some(message.clone());
                         cx.emit(IntegrationsEvent::Notice(message));
                         cx.notify();
                     })
@@ -443,11 +477,10 @@ impl IntegrationsView {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(login.user_code.clone()));
                 todoist_auth::open_browser(&login.verification_uri);
                 this.github_code = Some(login);
-                this.github_code_expires = Some(
-                    std::time::Instant::now() + std::time::Duration::from_secs(expires_in),
-                );
+                this.github_code_expires =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(expires_in));
                 this.start_github_code_tick(cx);
-                this.status = Some("Waiting for GitHub approval…".to_string());
+                this.github_status = Some("Waiting for GitHub approval…".to_string());
                 this._github_poll = Some(cx.spawn(async move |this, cx| {
                     let account = match poll.await {
                         Ok(account) => account,
@@ -458,7 +491,7 @@ impl IntegrationsView {
                                 this.github_connecting = false;
                                 this.github_code = None;
                                 this.github_code_expires = None;
-                                this.status = Some(message.clone());
+                                this.github_status = Some(message.clone());
                                 cx.emit(IntegrationsEvent::Notice(message));
                                 cx.notify();
                             })
@@ -481,7 +514,7 @@ impl IntegrationsView {
                         this.github_code_expires = None;
                         match created {
                             Ok(_) => {
-                                this.status = Some("GitHub connected.".to_string());
+                                this.github_status = Some("GitHub connected.".to_string());
                                 cx.emit(IntegrationsEvent::Changed);
                                 // The first import is quiet and starts now
                                 // rather than after the poller's first tick.
@@ -490,7 +523,7 @@ impl IntegrationsView {
                             Err(e) => {
                                 let message = format!("GitHub connect failed: {e}");
                                 tracing::error!("{message}");
-                                this.status = Some(message.clone());
+                                this.github_status = Some(message.clone());
                                 cx.emit(IntegrationsEvent::Notice(message));
                             }
                         }
@@ -509,31 +542,33 @@ impl IntegrationsView {
     /// retire the code when GitHub stops accepting it. Each tick notifies so
     /// the remaining time repaints; the task ends as soon as the code does.
     fn start_github_code_tick(&mut self, cx: &mut Context<Self>) {
-        self._github_tick = Some(cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(1))
-                .await;
-            let tick = this.update(cx, |this, cx| match this.github_code_expires {
-                Some(deadline) if std::time::Instant::now() >= deadline => {
-                    this.github_code = None;
-                    this.github_code_expires = None;
-                    this.github_connecting = false;
-                    this.status = Some(
-                        "The GitHub device code expired. Connect again to finish.".to_string(),
-                    );
-                    cx.notify();
-                    false
+        self._github_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let tick = this.update(cx, |this, cx| match this.github_code_expires {
+                    Some(deadline) if std::time::Instant::now() >= deadline => {
+                        this.github_code = None;
+                        this.github_code_expires = None;
+                        this.github_connecting = false;
+                        this.github_status = Some(
+                            "The GitHub device code expired. Connect again to finish.".to_string(),
+                        );
+                        cx.notify();
+                        false
+                    }
+                    Some(_) => {
+                        cx.notify();
+                        true
+                    }
+                    // The connect finished, so there is nothing left to count.
+                    None => false,
+                });
+                match tick {
+                    Ok(true) => {}
+                    _ => return,
                 }
-                Some(_) => {
-                    cx.notify();
-                    true
-                }
-                // The connect finished, so there is nothing left to count.
-                None => false,
-            });
-            match tick {
-                Ok(true) => {}
-                _ => return,
             }
         }));
     }
@@ -553,7 +588,8 @@ impl IntegrationsView {
             return;
         }
         self.github_syncing = true;
-        self.status = Some("Syncing GitHub…".to_string());
+        self.github_status = Some("Syncing GitHub…".to_string());
+        self.github_settings_expanded = true;
         cx.notify();
         let sync = self.store.sync_github(full, cx);
         self._github_sync = Some(cx.spawn(async move |this, cx| match sync.await {
@@ -562,7 +598,7 @@ impl IntegrationsView {
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
                     this.github_last_sync = Some(jiff::Timestamp::now());
-                    this.status = Some(format!("GitHub synced — {message}"));
+                    this.github_status = Some(format!("GitHub synced — {message}"));
                     cx.emit(IntegrationsEvent::Changed);
                     cx.notify();
                 })
@@ -575,7 +611,7 @@ impl IntegrationsView {
                 tracing::error!("{message}");
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
-                    this.status = Some(message.clone());
+                    this.github_status = Some(message.clone());
                     cx.emit(IntegrationsEvent::Notice(message));
                     cx.notify();
                 })
@@ -584,7 +620,7 @@ impl IntegrationsView {
         }));
     }
 
-        /// The token field, created on first render like the pickers below.
+    /// The token field, created on first render like the pickers below.
     fn pat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
         if let Some(input) = self.github_pat_input.clone() {
             return input;
@@ -606,9 +642,8 @@ impl IntegrationsView {
     /// token. The field is cleared after reading when a window is at hand.
     fn save_github_pat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token = self.pat_input(window, cx).read(cx).text().to_string();
-        self.pat_input(window, cx).update(cx, |input, cx| {
-            input.set_value("", window, cx)
-        });
+        self.pat_input(window, cx)
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.store_github_pat(Some(token), cx);
     }
 
@@ -621,13 +656,14 @@ impl IntegrationsView {
         let save = gpui_tokio::Tokio::spawn_result(cx, async move {
             github_auth::save_personal_token(token).await
         });
-        self.status = Some("Saving the personal token…".to_string());
+        self.github_status = Some("Saving the personal token…".to_string());
+        self.github_settings_expanded = true;
         cx.notify();
         self._github_sync = Some(cx.spawn(async move |this, cx| match save.await {
             Ok(login) => {
                 this.update(cx, |this, cx| {
                     this.github_pat_saved = login.is_some();
-                    this.status = Some(match &login {
+                    this.github_status = Some(match &login {
                         Some(login) => format!("Personal token saved for @{login}."),
                         None => "Personal token removed.".to_string(),
                     });
@@ -635,10 +671,9 @@ impl IntegrationsView {
                     // first-time token also connects the integration.
                     if login.is_some() && !this.github_connected() {
                         let store = this.store.clone();
-                        let created =
-                            store.create_integration("github".to_string(), login, cx);
-                        this._github_sync = Some(cx.spawn(async move |this, cx| {
-                            match created.await {
+                        let created = store.create_integration("github".to_string(), login, cx);
+                        this._github_sync =
+                            Some(cx.spawn(async move |this, cx| match created.await {
                                 Ok(_) => {
                                     this.update(cx, |this, cx| {
                                         cx.emit(IntegrationsEvent::Changed);
@@ -649,14 +684,13 @@ impl IntegrationsView {
                                 }
                                 Err(e) => {
                                     this.update(cx, |this, cx| {
-                                        this.status =
+                                        this.github_status =
                                             Some(format!("GitHub connect failed: {e}"));
                                         cx.notify();
                                     })
                                     .ok();
                                 }
-                            }
-                        }));
+                            }));
                     } else {
                         this.reload(cx);
                     }
@@ -669,7 +703,7 @@ impl IntegrationsView {
                 tracing::error!("{message}");
                 this.update(cx, |this, cx| {
                     this.github_pat_saved = github_auth::has_personal_token();
-                    this.status = Some(message.clone());
+                    this.github_status = Some(message.clone());
                     cx.emit(IntegrationsEvent::Notice(message));
                     cx.notify();
                 })
@@ -678,45 +712,32 @@ impl IntegrationsView {
         }));
     }
 
-    fn disconnect_github(&mut self, cx: &mut Context<Self>) {
-
-        let Some(id) = self
-            .connected
-            .iter()
-            .find(|i| i.provider == "github")
-            .map(|i| i.id)
-        else {
-            return;
-        };
-        let remove = self.store.delete_integration(id, cx);
-        self._load = Some(cx.spawn(async move |this, cx| match remove.await {
+    /// Persist the card's sync frequency: the poller picks it up on its next
+    /// tick, so nothing restarts.
+    fn set_github_poll_interval(&mut self, secs: u64, cx: &mut Context<Self>) {
+        match github_auth::set_poll_interval(secs) {
             Ok(()) => {
-                // The row is gone even if the token file is not: leaving a live
-                // token behind silently would be worse than the extra line.
-                let forgotten = github_auth::disconnect()
-                    .err()
-                    .map(|e| format!(" The stored token could not be removed: {e}"));
-                this.update(cx, |this, cx| {
-                    this.github_code = None;
-                    this.github_pat_saved = false;
-                    this.status = Some(match forgotten {
-                        Some(note) => format!("GitHub disconnected.{note}"),
-                        None => "GitHub disconnected.".to_string(),
-                    });
-                    cx.emit(IntegrationsEvent::Changed);
-                    this.reload(cx);
-                    cx.notify();
-                })
-                .ok();
+                self.github_poll_interval = secs;
+                self.github_status = Some(if secs == 0 {
+                    "Automatic syncing off. Use Sync now for on-demand passes.".to_string()
+                } else {
+                    format!("Background sync {}.", Self::poll_preset_label(secs))
+                });
+                cx.notify();
             }
             Err(e) => {
-                this.update(cx, |this, cx| {
-                    this.status = Some(format!("Disconnect failed: {e}"));
-                    cx.notify();
-                })
-                .ok();
+                self.github_status = Some(format!("Sync frequency failed: {e}"));
+                cx.notify();
             }
-        }));
+        }
+    }
+
+    fn poll_preset_label(secs: u64) -> String {
+        GITHUB_POLL_PRESETS
+            .iter()
+            .find(|(preset, _)| *preset == secs)
+            .map(|(_, label)| format!("every {label}"))
+            .unwrap_or_else(|| format!("every {secs}s"))
     }
 
     fn start_todoist_connect(&mut self, cx: &mut Context<Self>) {
@@ -732,9 +753,8 @@ impl IntegrationsView {
         // GPUI's own executor, where reqwest/tokio panic with "there is no
         // reactor running". `Tokio::spawn_result` hops to Tokio and hands
         // the result back as a GPUI task.
-        let network = gpui_tokio::Tokio::spawn_result(cx, async move {
-            todoist_auth::connect().await
-        });
+        let network =
+            gpui_tokio::Tokio::spawn_result(cx, async move { todoist_auth::connect().await });
         self._connect = Some(cx.spawn(async move |this, cx| {
             let token = match network.await {
                 Ok(token) => token,
@@ -783,7 +803,7 @@ impl IntegrationsView {
                 this.update(cx, |this, cx| {
                     this.syncing = false;
                     this.status = Some(format!(
-                        "Synced {} project(s): {} task(s), {} section(s), {} removed.",
+                        "Synced {} project: {} task(s), {} section(s), {} removed.",
                         summary.projects,
                         summary.tasks_upserted,
                         summary.sections,
@@ -798,35 +818,6 @@ impl IntegrationsView {
                 this.update(cx, |this, cx| {
                     this.syncing = false;
                     this.status = Some(format!("Sync failed: {e}"));
-                    cx.notify();
-                })
-                .ok();
-            }
-        }));
-    }
-
-    fn disconnect_todoist(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self
-            .connected
-            .iter()
-            .find(|i| i.provider == "todoist")
-            .map(|i| i.id)
-        else {
-            return;
-        };
-        let remove = self.store.delete_integration(id, cx);
-        self._load = Some(cx.spawn(async move |this, cx| match remove.await {
-            Ok(()) => {
-                this.update(cx, |this, cx| {
-                    this.status = Some("Todoist disconnected.".to_string());
-                    cx.emit(IntegrationsEvent::Changed);
-                    this.reload(cx);
-                })
-                .ok();
-            }
-            Err(e) => {
-                this.update(cx, |this, cx| {
-                    this.status = Some(format!("Disconnect failed: {e}"));
                     cx.notify();
                 })
                 .ok();
@@ -851,8 +842,9 @@ impl IntegrationsView {
                 .read_with(cx, |settings, _| settings.is_expanded(app_id))
         });
         let gear = app_id.filter(|_| connected).map(|app_id| {
-            self.settings
-                .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
+            self.settings.update(cx, |settings, cx| {
+                settings.gear_button(app_id, "Todoist", cx)
+            })
         });
         let settings_block = app_id.map(|app_id| {
             self.settings.update(cx, |settings, cx| {
@@ -860,20 +852,19 @@ impl IntegrationsView {
             })
         });
 
+        // The collapsed header carries no actions besides Connect: syncing
+        // lives in the expanded settings, and disabling in its bottom
+        // section. Only the status text shows here.
         let actions: gpui::AnyElement = if connected {
-            Button::new("todoist-disconnect")
-                .ghost()
-                .compact()
-                .label("Disconnect")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.disconnect_todoist(cx);
-                }))
-                .into_any_element()
+            div().into_any_element()
         } else {
             Button::new("todoist-connect")
                 .compact()
-                .label(if self.connecting { "Waiting…" } else { "Connect" })
+                .label(if self.connecting {
+                    "Waiting…"
+                } else {
+                    "Connect"
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.start_todoist_connect(cx);
@@ -916,18 +907,17 @@ impl IntegrationsView {
                     .items_center()
                     .gap_3()
                     .when(connected && app_id.is_some(), |this| {
-                        this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(app_id) = this.todoist_app_id {
-                                this.settings.update(cx, |settings, cx| {
-                                    settings.toggle_expanded(app_id, cx)
-                                });
-                                cx.notify();
-                            }
-                        }))
+                        this.cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(app_id) = this.todoist_app_id {
+                                    this.settings.update(cx, |settings, cx| {
+                                        settings.toggle_expanded(app_id, cx)
+                                    });
+                                    cx.notify();
+                                }
+                            }))
                     })
-                    .child(provider_icon(todoist_icon()).when(dimmed, |this| {
-                        this.opacity(0.45)
-                    }))
+                    .child(provider_icon(todoist_icon()).when(dimmed, |this| this.opacity(0.45)))
                     .child(
                         div()
                             .v_flex()
@@ -941,9 +931,7 @@ impl IntegrationsView {
                                     .child(
                                         div()
                                             .font_semibold()
-                                            .when(dimmed, |this| {
-                                                this.text_color(rgb(0x6b6b6b))
-                                            })
+                                            .when(dimmed, |this| this.text_color(rgb(0x6b6b6b)))
                                             .child("Todoist"),
                                     )
                                     .when_some(gear, |this, gear| {
@@ -958,11 +946,7 @@ impl IntegrationsView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(if dimmed {
-                                        rgb(0x5f5f5f)
-                                    } else {
-                                        rgb(0xa3a3a3)
-                                    })
+                                    .text_color(if dimmed { rgb(0x5f5f5f) } else { rgb(0xa3a3a3) })
                                     .child(description),
                             ),
                     )
@@ -981,7 +965,11 @@ impl IntegrationsView {
                                     .border_color(rgb(HAIRLINE))
                                     .text_color(rgb(0xa3a3a3))
                                     .cursor_pointer()
-                                    .label(if self.syncing { "Syncing…" } else { "Sync now" })
+                                    .label(if self.syncing {
+                                        "Syncing…"
+                                    } else {
+                                        "Sync now"
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.sync_now(cx);
                                     })),
@@ -989,19 +977,17 @@ impl IntegrationsView {
                         )
                         .child(self.todoist_sync_block(window, cx))
                     })
-                    .child(self.integration_disable_section(
-                        app_id,
-                        disabled,
-                        "Todoist",
-                        "todoist",
-                        cx,
-                    ))
+                    .child(
+                        self.integration_disable_section(
+                            app_id, disabled, "Todoist", "todoist", cx,
+                        ),
+                    )
             })
             .into_any_element()
     }
 
     /// Project ↔ tag pairings for Todoist: the pair list with one
-    /// "+ sync project(s)" button. The two-step mapping picker opens in a
+    /// "+ sync project" button. The two-step mapping picker opens in a
     /// popover over the list and lands back here once paired.
     fn todoist_sync_block(
         &mut self,
@@ -1081,48 +1067,21 @@ impl IntegrationsView {
                 .into_any_element()
         });
 
+        // The collapsed header carries no actions besides Connect: Sync now
+        // lives in the expanded settings next to the sync stats, and
+        // disabling in the bottom section. Only the status text shows here.
         let controls = if disabled {
-            div().h_flex().items_center().gap_2().child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x737373))
-                    .child("Disabled"),
-            )
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .child(div().text_sm().text_color(rgb(0x737373)).child("Disabled"))
         } else if connected {
             div()
                 .h_flex()
                 .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0x4ade80))
-                        .child("Connected"),
-                )
-                .child(
-                    Button::new("github-sync")
-                        .ghost()
-                        .compact()
-                        .label(if self.github_syncing {
-                            "Syncing…"
-                        } else {
-                            "Sync now"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.start_github_sync(true, cx);
-                        })),
-                )
-                .child(
-                    Button::new("github-disconnect")
-                        .ghost()
-                        .compact()
-                        .label("Disconnect")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.disconnect_github(cx);
-                        })),
-                )
+                .child(div().text_sm().text_color(rgb(0x4ade80)).child("Connected"))
         } else {
             div()
                 .h_flex()
@@ -1151,12 +1110,6 @@ impl IntegrationsView {
 
         let code = self.github_code.clone();
         let remaining = self.github_code_remaining();
-        let last_synced = self.github_last_sync.map(|at| {
-            format!(
-                "Last synced {}",
-                since_label(at, jiff::Timestamp::now())
-            )
-        });
         div()
             .v_flex()
             .gap_2()
@@ -1226,28 +1179,21 @@ impl IntegrationsView {
                                                 "Issue-backed tasks get branches, worktrees and pull requests."
                                             }),
                                     )
-                                    .when_some(last_synced, |this, last_synced| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(0x737373))
-                                                .child(last_synced),
-                                        )
-                                    }),
                             )
                             .child(controls),
                     )
                     .when(expanded, |this| {
-                        this.when(!disabled, |this| {
-                            this.child(self.github_pat_block(window, cx))
-                        })
-                        .child(self.integration_disable_section(
-                            github_app_id,
-                            disabled,
-                            "GitHub",
-                            "github",
-                            cx,
-                        ))
+                        this.child(self.github_sync_block(cx))
+                            .when(!disabled, |this| {
+                                this.child(self.github_pat_block(window, cx))
+                            })
+                            .child(self.integration_disable_section(
+                                github_app_id,
+                                disabled,
+                                "GitHub",
+                                "github",
+                                cx,
+                            ))
                     }),
             )
             .when_some(code, |this, code| {
@@ -1286,7 +1232,7 @@ impl IntegrationsView {
                                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                                 code.user_code,
                                             ));
-                                            this.status = Some("Code copied.".to_string());
+                                            this.github_status = Some("Code copied.".to_string());
                                             cx.notify();
                                         })),
                                 ),
@@ -1313,6 +1259,104 @@ impl IntegrationsView {
             .into_any_element()
     }
 
+    /// Sync settings at the top of the expanded GitHub card: the background
+    /// frequency, then one row with the last pass, the synced quantities and
+    /// the Sync now button.
+    fn github_sync_block(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let interval = self.github_poll_interval;
+        let disabled = self.github_disabled();
+        let last_synced = self
+            .github_last_sync
+            .map(|at| format!("Last synced {}", since_label(at, jiff::Timestamp::now())));
+        let status = self.github_status.clone();
+        let syncing = self.github_syncing;
+        let mut presets = div().h_flex().items_center().gap_1();
+        for (secs, label) in GITHUB_POLL_PRESETS {
+            let selected = interval == secs;
+            presets = presets.child(
+                Button::new(format!("github-frequency-{secs}"))
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
+                    .when(selected, |this| {
+                        this.border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .text_color(rgb(0xa3a3a3))
+                    })
+                    .when(!selected, |this| this.text_color(rgb(0x737373)))
+                    .cursor_pointer()
+                    .label(label)
+                    .tooltip(if secs == 0 {
+                        "No automatic syncing; sync on demand".to_string()
+                    } else {
+                        format!("Sync automatically every {label}")
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_github_poll_interval(secs, cx);
+                    })),
+            );
+        }
+        div()
+            .v_flex()
+            .gap_2()
+            .px_4()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child("Sync frequency"),
+                    )
+                    .child(presets),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .when_some(last_synced, |this, last_synced| {
+                                this.child(
+                                    div().text_xs().text_color(rgb(0x737373)).child(last_synced),
+                                )
+                            })
+                            .when_some(status, |this, status| {
+                                this.child(div().text_sm().text_color(rgb(0xa3a3a3)).child(status))
+                            }),
+                    )
+                    .when(!disabled, |this| {
+                        this.child(
+                            Button::new("github-sync")
+                                .ghost()
+                                .compact()
+                                .with_size(Size::Small)
+                                .border_1()
+                                .border_color(rgb(HAIRLINE))
+                                .text_color(rgb(0xa3a3a3))
+                                .cursor_pointer()
+                                .label(if syncing { "Syncing…" } else { "Sync now" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.start_github_sync(true, cx);
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// Optional personal access token: authenticates every request instead
     /// of the device-flow token, for orgs that never approved the OAuth app.
     /// The token is write-only on screen — the field never echoes it back.
@@ -1332,22 +1376,22 @@ impl IntegrationsView {
             .py_2()
             .v_flex()
             .gap_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x737373))
-                    .child(if using {
-                        "Syncing with a personal token. Save an empty field to remove it."
-                    } else {
-                        "Optional: a personal token, for orgs that never approved the app."
-                    }),
-            )
+            .child(div().text_xs().text_color(rgb(0x737373)).child(if using {
+                "Syncing with a personal token. Save an empty field to remove it."
+            } else {
+                "Optional: a personal token, for orgs that never approved the app."
+            }))
             .child(
                 div()
                     .h_flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1().min_w_0().child(Input::new(&input).appearance(false)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&input).appearance(false)),
+                    )
                     .child(
                         Button::new("github-pat-save")
                             .ghost()
@@ -1433,10 +1477,8 @@ impl Render for IntegrationsView {
                     .child(self.todoist_card(window, cx))
                     .child(self.github_card(window, cx))
                     .when_some(self.status.clone(), |this, status| {
-                        this.child(
-                            div().text_sm().text_color(rgb(0xa3a3a3)).child(status),
-                        )
-                    })
+                        this.child(div().text_sm().text_color(rgb(0xa3a3a3)).child(status))
+                    }),
             )
     }
 }

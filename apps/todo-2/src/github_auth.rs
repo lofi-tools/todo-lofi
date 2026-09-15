@@ -45,6 +45,11 @@ struct GithubFile {
     /// The account the token belongs to, for the integration card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login: Option<String>,
+    /// Background sync cadence in seconds (`None` means the default).
+    /// `0` disables automatic syncing; syncing still happens on demand
+    /// through the card's Sync now button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    poll_interval_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<i64>,
 }
@@ -296,8 +301,12 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
                 // app, so its token is kept in memory rather than overwriting
                 // a real connection in the config file.
                 if !from_env {
-                    let personal_token =
-                        load_at(&client_file_path()?).ok().flatten().and_then(|file| file.personal_token);
+                    let existing = load_at(&client_file_path()?).ok().flatten();
+                    let personal_token = existing
+                        .as_ref()
+                        .and_then(|file| file.personal_token.clone());
+                    let poll_interval_secs =
+                        existing.and_then(|file| file.poll_interval_secs);
                     save_at(
                         &client_file_path()?,
                         &GithubFile {
@@ -306,6 +315,7 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
                             personal_token,
                             scope,
                             login,
+                            poll_interval_secs,
                             created_at: Some(jiff::Timestamp::now().as_second()),
                         },
                     )?;
@@ -354,6 +364,42 @@ fn stored_credentials_at(path: &std::path::Path) -> Option<StoredCredentials> {
     })
 }
 
+/// The background sync cadence in seconds: `0` means manual syncing only.
+/// Defaults to 5 minutes when nothing was ever chosen.
+pub fn poll_interval_secs() -> u64 {
+    client_file_path()
+        .ok()
+        .and_then(|path| poll_interval_at(&path))
+        .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
+}
+
+/// Default background sync cadence: every 5 minutes when idle.
+pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 300;
+
+fn poll_interval_at(path: &std::path::Path) -> Option<u64> {
+    load_at(path).ok().flatten()?.poll_interval_secs
+}
+
+/// Persist the background sync cadence (`0` for manual syncing only),
+/// keeping the rest of the connection file.
+pub fn set_poll_interval(secs: u64) -> anyhow::Result<()> {
+    set_poll_interval_at(&client_file_path()?, secs)
+}
+
+fn set_poll_interval_at(path: &std::path::Path, secs: u64) -> anyhow::Result<()> {
+    let mut file = load_at(path)?.unwrap_or(GithubFile {
+        client_id: String::new(),
+        access_token: None,
+        personal_token: None,
+        scope: None,
+        login: None,
+        poll_interval_secs: None,
+        created_at: None,
+    });
+    file.poll_interval_secs = Some(secs);
+    save_at(path, &file)
+}
+
 /// Whether a personal access token is stored, for the integration card.
 pub fn has_personal_token() -> bool {
     client_file_path()
@@ -375,6 +421,7 @@ pub async fn save_personal_token(token: Option<String>) -> anyhow::Result<Option
         personal_token: None,
         scope: None,
         login: None,
+        poll_interval_secs: None,
         created_at: None,
     });
     file.personal_token = token.clone();
@@ -401,16 +448,6 @@ pub fn stored_credentials() -> Option<StoredCredentials> {
 pub struct StoredCredentials {
     pub token: String,
     pub login: Option<String>,
-}
-
-/// Forget the connection (the integration row is removed by the caller).
-pub fn disconnect() -> anyhow::Result<()> {
-    let path = client_file_path()?;
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .map_err(|e| anyhow::anyhow!("Could not remove {}: {e}", path.display()))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -541,6 +578,7 @@ mod tests {
                 personal_token: None,
                 scope: None,
                 login: None,
+                poll_interval_secs: None,
                 created_at: None,
             },
         )
@@ -555,6 +593,7 @@ mod tests {
                 personal_token: None,
                 scope: Some(SCOPE.to_string()),
                 login: Some("me".to_string()),
+                poll_interval_secs: None,
                 created_at: Some(7),
             },
         )
@@ -572,6 +611,7 @@ mod tests {
                 personal_token: Some("github_pat_token".to_string()),
                 scope: Some(SCOPE.to_string()),
                 login: Some("me".to_string()),
+                poll_interval_secs: None,
                 created_at: Some(7),
             },
         )
@@ -617,6 +657,7 @@ mod tests {
                     personal_token: None,
                     scope: None,
                     login: None,
+                    poll_interval_secs: None,
                     created_at: None,
                 },
             )
@@ -642,7 +683,6 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
-
     #[test]
     fn a_device_login_is_serializable_for_the_card() {
         // The UI holds this across awaits, so it stays plain data with no
@@ -650,5 +690,25 @@ mod tests {
         let login = login();
         let copy = login.clone();
         assert_eq!(copy.device_code, "device-code");
+    }
+
+    #[test]
+    fn the_sync_cadence_defaults_and_round_trips() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-interval-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+
+        assert_eq!(
+            poll_interval_at(&path),
+            None,
+            "nothing chosen yet: the card shows the default"
+        );
+        set_poll_interval_at(&path, 60).unwrap();
+        assert_eq!(poll_interval_at(&path), Some(60));
+        set_poll_interval_at(&path, 0).unwrap();
+        assert_eq!(poll_interval_at(&path), Some(0), "manual syncing is kept");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
