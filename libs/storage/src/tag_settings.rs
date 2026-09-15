@@ -31,6 +31,9 @@ pub struct TagSettings {
     pub tag_id: u64,
     pub sync_target: Option<SyncTarget>,
     pub dirs: Vec<String>,
+    /// Build each of the project's worktrees into its own `target/` instead of
+    /// sharing the repo's (spec §6.4, decision 12's opt-out).
+    pub isolated_build_cache: bool,
 }
 
 /// A named section inside a tag, ordered by `position`.
@@ -59,7 +62,7 @@ fn parse_dirs(value: &toasty::stmt::Value) -> Vec<String> {
 impl TodoStore {
     async fn read_settings(&mut self, tag_id: u64) -> QueryResult<TagSettings> {
         let rows = toasty::sql::query(
-            r#"SELECT tag_id, sync_integration_id, sync_external_id, dirs
+            r#"SELECT tag_id, sync_integration_id, sync_external_id, dirs, isolated_build_cache
                FROM tag_settings WHERE tag_id = ?1"#,
         )
         .column_types([
@@ -67,6 +70,7 @@ impl TodoStore {
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
         ])
         .bind(tag_id as i64)
         .exec(&mut self.db)
@@ -96,6 +100,7 @@ impl TodoStore {
             tag_id,
             sync_target,
             dirs: record.get(3).map(parse_dirs).unwrap_or_default(),
+            isolated_build_cache: record.get(4).and_then(|value| value.to_i64()).unwrap_or(0) != 0,
         })
     }
 
@@ -111,17 +116,20 @@ impl TodoStore {
         };
         let dirs = serde_json::to_string(&settings.dirs).unwrap_or_else(|_| "[]".to_string());
         toasty::sql::statement(
-            r#"INSERT INTO tag_settings (tag_id, sync_integration_id, sync_external_id, dirs)
-               VALUES (?1, ?2, ?3, ?4)
+            r#"INSERT INTO tag_settings
+               (tag_id, sync_integration_id, sync_external_id, dirs, isolated_build_cache)
+               VALUES (?1, ?2, ?3, ?4, ?5)
                ON CONFLICT (tag_id) DO UPDATE
                SET sync_integration_id = excluded.sync_integration_id,
                    sync_external_id = excluded.sync_external_id,
-                   dirs = excluded.dirs"#,
+                   dirs = excluded.dirs,
+                   isolated_build_cache = excluded.isolated_build_cache"#,
         )
         .bind(settings.tag_id as i64)
         .bind(sync_integration_id)
         .bind(sync_external_id)
         .bind(dirs)
+        .bind(i64::from(settings.isolated_build_cache))
         .exec(&mut self.db)
         .await
         .context(crate::error::QueryTagsSnafu {
@@ -138,6 +146,17 @@ impl TodoStore {
     ) -> QueryResult<()> {
         let mut settings = self.read_settings(tag_id).await?;
         settings.sync_target = target;
+        self.write_settings(&settings).await
+    }
+
+    /// Turn the per-worktree build cache on or off for this project (§6.4).
+    pub async fn set_tag_isolated_build_cache(
+        &mut self,
+        tag_id: u64,
+        isolated: bool,
+    ) -> QueryResult<()> {
+        let mut settings = self.read_settings(tag_id).await?;
+        settings.isolated_build_cache = isolated;
         self.write_settings(&settings).await
     }
 
@@ -478,6 +497,24 @@ mod tests {
         assert_eq!(settings.tag_id, tag.id);
         assert!(settings.sync_target.is_none());
         assert!(settings.dirs.is_empty());
+        assert!(!settings.isolated_build_cache);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_isolated_build_cache_roundtrip() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let tag = storage.create_tag("Work").await?;
+
+        storage.set_tag_isolated_build_cache(tag.id, true).await?;
+        assert!(storage.tag_settings(tag.id).await?.isolated_build_cache);
+
+        // Unrelated writes must not clear it.
+        storage.set_tag_dirs(tag.id, vec!["/a/work".to_string()]).await?;
+        assert!(storage.tag_settings(tag.id).await?.isolated_build_cache);
+
+        storage.set_tag_isolated_build_cache(tag.id, false).await?;
+        assert!(!storage.tag_settings(tag.id).await?.isolated_build_cache);
         Ok(())
     }
 

@@ -533,6 +533,32 @@ impl TodoStore {
         Ok(())
     }
 
+    /// When any repo of this integration last synced successfully, for the
+    /// card's "last synced" line (§5.8). `None` until the first pass lands.
+    pub async fn github_last_synced_at(
+        &mut self,
+        integration_id: u64,
+    ) -> QueryResult<Option<jiff::Timestamp>> {
+        let rows = toasty::sql::query(
+            r#"SELECT MAX(last_synced_at) FROM integration_sync_state
+               WHERE integration_id = ?1"#,
+        )
+        .column_types([toasty::stmt::Type::String])
+        .bind(integration_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "load last sync",
+        })?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| match row {
+                toasty::stmt::Value::Record(record) => record_timestamp(&record, 0),
+                _ => None,
+            }))
+    }
+
     pub async fn insert_run_worktree(
         &mut self,
         worktree: &NewRunWorktree,
@@ -778,6 +804,38 @@ pub struct IssuePage {
     pub issues: Vec<RemoteIssue>,
     pub complete: bool,
     pub etag: Option<String>,
+}
+
+/// One repository the connected account can see, as the tag settings binding
+/// picker lists it (§5.3). Only the identity and visibility are shown; the
+/// sync itself always talks about `owner/repo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRepo {
+    pub full_name: String,
+    pub private: bool,
+}
+
+/// Narrow the `/user/repos` payload to the fields the picker shows.
+pub fn repos_from_json(value: &serde_json::Value) -> Vec<RemoteRepo> {
+    value
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|repo| {
+            let full_name = repo.get("full_name")?.as_str()?.trim().to_string();
+            if full_name.is_empty() {
+                return None;
+            }
+            Some(RemoteRepo {
+                full_name,
+                private: repo
+                    .get("private")
+                    .and_then(|private| private.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 /// The fields the sync may push for one issue. Only the set fields go on the
@@ -1293,6 +1351,10 @@ pub trait GithubClient {
         patch: &'a IssuePatch,
     ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a;
 
+    /// Every repository the account can reach, most recently pushed first:
+    /// what the tag settings binding picker offers (§5.3).
+    fn list_repos(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_;
+
     /// Create the label unless it already exists. The app never deletes or
     /// renames label objects (decision 27).
     fn ensure_label<'a>(
@@ -1363,6 +1425,9 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// Pages of 100 followed per listing. 20 pages is 2000 issues, past which a
 /// repo is out of scope for a quiet first import.
 const MAX_ISSUE_PAGES: usize = 20;
+/// Pages of 100 followed when listing the account's repos: 10 pages is 1000
+/// repos, past which a picker is no longer a picker.
+const MAX_REPO_PAGES: usize = 10;
 
 /// The real GitHub client. Tokens are API-only (decision 30): pushing uses
 /// the user's own git credentials and never this token.
@@ -1521,6 +1586,26 @@ impl GithubClient for GithubHttpClient {
                 complete: since.is_none(),
                 etag: response_etag,
             })
+        }
+    }
+
+    fn list_repos(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_ {
+        async move {
+            // Most recently pushed first, so the repos the user actually works
+            // in are the first rows of the picker.
+            let path = "/user/repos?per_page=100&sort=pushed\
+                        &affiliation=owner,collaborator,organization_member";
+            let response = self.send(self.request(reqwest::Method::GET, path)).await?;
+            let mut next = next_link(&response);
+            let mut repos = repos_from_json(&repo_list_body(response).await?);
+            let mut pages = 1;
+            while let Some(url) = next.clone().filter(|_| pages < MAX_REPO_PAGES) {
+                let response = self.send(self.agent.get(url)).await?;
+                next = next_link(&response);
+                pages += 1;
+                repos.extend(repos_from_json(&repo_list_body(response).await?));
+            }
+            Ok(repos)
         }
     }
 
@@ -1823,6 +1908,17 @@ fn next_link(response: &reqwest::Response) -> Option<String> {
     })
 }
 
+/// A repo listing payload. A malformed body is transient: the gateway answered
+/// something, so the next tick can try again.
+async fn repo_list_body(response: reqwest::Response) -> anyhow::Result<serde_json::Value> {
+    response.json::<serde_json::Value>().await.map_err(|e| {
+        anyhow::Error::new(SyncFailure::Transient {
+            message: format!("GitHub repo list was not JSON: {e}"),
+            retry_after: None,
+        })
+    })
+}
+
 /// One repo bound to one project tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundRepo {
@@ -2059,6 +2155,78 @@ impl TodoStore {
         Ok(())
     }
 
+    /// §5.6: deleting a synced task closes its issue (GitHub has no delete)
+    /// and tombstones the link, so a later pull cannot resurrect the row.
+    /// Returns whether the task was issue-backed at all. The caller decides
+    /// what a failed close means; this reports it rather than swallowing it.
+    pub async fn close_issue_for_task<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<bool> {
+        let Some(task_issue) = self.issue_link_for_task(task_id).await? else {
+            return Ok(false);
+        };
+        client
+            .update_issue(
+                &task_issue.issue.owner,
+                &task_issue.issue.repo,
+                task_issue.issue.number,
+                &IssuePatch {
+                    state: Some("closed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let external_id = issue_external_id(
+            &task_issue.issue.owner,
+            &task_issue.issue.repo,
+            task_issue.issue.number,
+        );
+        self.tombstone_issue_link(task_issue.integration_id, &external_id, "deleted locally")
+            .await?;
+        Ok(true)
+    }
+
+    /// Tombstone a task's link without touching GitHub: the path taken when no
+    /// connection is available, so the issue stays open but the pull that
+    /// follows still cannot resurrect the deleted row.
+    pub async fn tombstone_issue_link_for_task(&mut self, task_id: u64) -> QueryResult<bool> {
+        let Some(task_issue) = self.issue_link_for_task(task_id).await? else {
+            return Ok(false);
+        };
+        let external_id = issue_external_id(
+            &task_issue.issue.owner,
+            &task_issue.issue.repo,
+            task_issue.issue.number,
+        );
+        self.tombstone_issue_link(task_issue.integration_id, &external_id, "deleted locally")
+            .await?;
+        Ok(true)
+    }
+
+    async fn tombstone_issue_link(
+        &mut self,
+        integration_id: u64,
+        external_id: &str,
+        reason: &str,
+    ) -> QueryResult<()> {
+        let Some(link) = self.issue_link(integration_id, external_id).await? else {
+            return Ok(());
+        };
+        let mut state = link.state.clone();
+        state.tombstoned = true;
+        state.tombstone_reason = Some(reason.to_string());
+        self.link_issue(
+            integration_id,
+            external_id,
+            link.task_id,
+            &state,
+            link.external_updated_at,
+        )
+        .await
+    }
+
     /// Sync every repo bound to a GitHub integration (§5.4–5.7): pull, merge
     /// per field, push local wins, import comments, and record each repo's
     /// cursor only after it succeeded. `full` ignores the stored `since` so a
@@ -2188,8 +2356,13 @@ impl TodoStore {
                 .await;
         };
         // A tombstoned link is never resurrected, and neither is a task the
-        // user deleted locally.
-        if link.state.tombstoned || self.get_task(link.task_id).await?.deleted_at.is_some() {
+        // user deleted locally. A workflow-step task never syncs at all — the
+        // same rule the Todoist engine applies (§5.5).
+        if link.state.tombstoned {
+            return Ok(());
+        }
+        let task = self.get_task(link.task_id).await?;
+        if task.deleted_at.is_some() || task.workflow_run_id.is_some() {
             return Ok(());
         }
         self.merge_github_issue(client, bound, &external_id, &link, issue, summary)
@@ -2838,6 +3011,7 @@ mod tests {
         pull_request_assignees: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
         reviewers_requested: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
         pull_request_counter: std::sync::Mutex<u64>,
+        repos: std::sync::Mutex<Vec<RemoteRepo>>,
     }
 
     impl FakeGithub {
@@ -2858,6 +3032,14 @@ mod tests {
                 .entry(format!("{repo}#{number}"))
                 .or_default()
                 .push(comment);
+            self
+        }
+
+        fn with_repo(self, full_name: &str, private: bool) -> Self {
+            self.repos.lock().expect("repos lock").push(RemoteRepo {
+                full_name: full_name.to_string(),
+                private,
+            });
             self
         }
 
@@ -2904,6 +3086,12 @@ mod tests {
                     etag: Some("etag-1".to_string()),
                 })
             }
+        }
+
+        fn list_repos(
+            &self,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_ {
+            async move { Ok(self.repos.lock().expect("repos lock").clone()) }
         }
 
         fn issue_comments<'a>(
@@ -3216,6 +3404,111 @@ mod tests {
             .sync_github_integration(&fake, integration.id, true)
             .await?;
         assert!(storage.get_task(task.id).await?.done);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_locally_deleted_task_closes_its_issue_and_never_comes_back() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Fix login", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert!(storage.github_last_synced_at(integration.id).await?.is_some());
+        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+
+        assert!(storage.close_issue_for_task(&fake, task_id).await?);
+        assert_eq!(fake.last_patch().state.as_deref(), Some("closed"));
+        let link = storage.issue_link(integration.id, "o/r#1").await?.unwrap();
+        assert!(link.state.tombstoned);
+        assert_eq!(link.state.tombstone_reason.as_deref(), Some("deleted locally"));
+
+        // The link outlives the row it points at, so the next pass must skip
+        // it instead of looking up a task that is gone (§5.6).
+        storage.delete_task(task_id).await?;
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.imported, 0);
+        assert_eq!(fake.push_count(), 1, "only the close was pushed");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_deleted_task_tombstones_its_link_without_a_connection() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Fix login", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+
+        assert!(storage.tombstone_issue_link_for_task(task_id).await?);
+        assert_eq!(fake.push_count(), 0, "nothing is pushed without a connection");
+        storage.delete_task(task_id).await?;
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        assert_eq!(summary.imported, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workflow_step_tasks_never_sync() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Fix login", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+
+        // A run step's task is the run's, not the issue's: a local rename
+        // stays local instead of being pushed as an issue edit (§5.5).
+        Task::update_by_id(task_id)
+            .workflow_run_id(Some(4))
+            .exec(&mut storage.db)
+            .await?;
+        storage.update_task_title(task_id, "Step title").await?;
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        assert_eq!(summary.updated, 0);
+        assert_eq!(fake.push_count(), 0);
+        assert_eq!(storage.get_task(task_id).await?.title, "Step title");
+        Ok(())
+    }
+
+    #[test]
+    fn repo_listings_are_narrowed_to_what_the_picker_shows() {
+        let payload = serde_json::json!([
+            { "full_name": "o/private", "private": true },
+            { "full_name": "o/public", "private": false },
+            { "full_name": "  ", "private": false },
+            { "name": "no-owner" }
+        ]);
+        assert_eq!(
+            repos_from_json(&payload),
+            vec![
+                RemoteRepo {
+                    full_name: "o/private".to_string(),
+                    private: true,
+                },
+                RemoteRepo {
+                    full_name: "o/public".to_string(),
+                    private: false,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_binding_picker_reads_the_clients_repo_list() -> anyhow::Result<()> {
+        let fake = FakeGithub::default()
+            .with_repo("o/private", true)
+            .with_repo("o/public", false);
+        let repos = fake.list_repos().await?;
+        assert_eq!(repos.len(), 2);
+        assert!(repos[0].private);
         Ok(())
     }
 

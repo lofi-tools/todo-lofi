@@ -151,7 +151,9 @@
               # symlink must point at the artifact cargo actually produces,
               # otherwise `open` keeps launching a stale binary.
               BIN_DIR="target/debug"
-              [ -n "''${CARGO_BUILD_TARGET:-}" ] && BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
+              if [ -n "''${CARGO_BUILD_TARGET:-}" ]; then
+                BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
+              fi
 
               # Build, link binary, launch
               cargo build -p todo-2

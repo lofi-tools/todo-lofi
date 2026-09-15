@@ -4,8 +4,8 @@
 //! integration.
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window, div, px, rgb,
-    prelude::FluentBuilder,
+    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window,
+    div, px, rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Sizable, Size, StyledExt};
@@ -40,6 +40,12 @@ pub struct IntegrationsView {
     /// The device code the user is typing into GitHub while we poll for the
     /// token; `None` when no connect is in flight.
     github_code: Option<github_auth::DeviceLogin>,
+    /// When the shown code stops working. GitHub's own expiry decides when the
+    /// flow is over, so the card counts down instead of waiting on a poll
+    /// result that may never come (§5.8).
+    github_code_expires: Option<std::time::Instant>,
+    /// When the integration last synced successfully, shown on the card.
+    github_last_sync: Option<jiff::Timestamp>,
     github_connecting: bool,
     github_syncing: bool,
     _load: Option<gpui::Task<()>>,
@@ -49,6 +55,7 @@ pub struct IntegrationsView {
     _github_sync: Option<gpui::Task<()>>,
     _github_pr_poll: Option<gpui::Task<()>>,
     _github_poller: Option<gpui::Task<()>>,
+    _github_tick: Option<gpui::Task<()>>,
 }
 
 impl IntegrationsView {
@@ -63,6 +70,8 @@ impl IntegrationsView {
             syncing: false,
             status: None,
             github_code: None,
+            github_code_expires: None,
+            github_last_sync: None,
             github_connecting: false,
             github_syncing: false,
             _load: None,
@@ -72,6 +81,7 @@ impl IntegrationsView {
             _github_sync: None,
             _github_pr_poll: None,
             _github_poller: None,
+            _github_tick: None,
         };
         this.reload(cx);
         this.start_github_poller(cx);
@@ -150,8 +160,18 @@ impl IntegrationsView {
                         .map(|app| app.id),
                     None => None,
                 };
+                // The card's status line reads the last successful pass (§5.8).
+                let last_sync = match list.iter().find(|i| i.provider == "github") {
+                    Some(integration) => store
+                        .github_last_synced(integration.id, cx)
+                        .await
+                        .ok()
+                        .flatten(),
+                    None => None,
+                };
                 this.update(cx, |this, cx| {
                     this.connected = list;
+                    this.github_last_sync = last_sync;
                     if this.todoist_app_id != todoist_app_id {
                         // New (or removed) provider app: drop the cached tag
                         // picker so it rebuilds for the right app.
@@ -205,6 +225,7 @@ impl IntegrationsView {
                 }
             };
             let polled = login.clone();
+            let expires_in = login.expires_in;
             this.update(cx, |this, cx| {
                 let store = this.store.clone();
                 // Polling and the account lookup are network work: both stay on
@@ -214,6 +235,10 @@ impl IntegrationsView {
                     Ok::<_, anyhow::Error>(github_auth::account_login(&token).await.ok())
                 });
                 this.github_code = Some(login);
+                this.github_code_expires = Some(
+                    std::time::Instant::now() + std::time::Duration::from_secs(expires_in),
+                );
+                this.start_github_code_tick(cx);
                 this.status = Some("Waiting for GitHub approval…".to_string());
                 this._github_poll = Some(cx.spawn(async move |this, cx| {
                     let account = match poll.await {
@@ -222,6 +247,7 @@ impl IntegrationsView {
                             this.update(cx, |this, cx| {
                                 this.github_connecting = false;
                                 this.github_code = None;
+                                this.github_code_expires = None;
                                 this.status = Some(format!("GitHub connect failed: {e}"));
                                 cx.notify();
                             })
@@ -241,6 +267,7 @@ impl IntegrationsView {
                     this.update(cx, |this, cx| {
                         this.github_connecting = false;
                         this.github_code = None;
+                        this.github_code_expires = None;
                         match created {
                             Ok(_) => {
                                 this.status = Some("GitHub connected.".to_string());
@@ -264,6 +291,47 @@ impl IntegrationsView {
         }));
     }
 
+    /// Keep the card's countdown moving while a device code is on screen, and
+    /// retire the code when GitHub stops accepting it. Each tick notifies so
+    /// the remaining time repaints; the task ends as soon as the code does.
+    fn start_github_code_tick(&mut self, cx: &mut Context<Self>) {
+        self._github_tick = Some(cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let tick = this.update(cx, |this, cx| match this.github_code_expires {
+                Some(deadline) if std::time::Instant::now() >= deadline => {
+                    this.github_code = None;
+                    this.github_code_expires = None;
+                    this.github_connecting = false;
+                    this.status = Some(
+                        "The GitHub device code expired. Connect again to finish.".to_string(),
+                    );
+                    cx.notify();
+                    false
+                }
+                Some(_) => {
+                    cx.notify();
+                    true
+                }
+                // The connect finished, so there is nothing left to count.
+                None => false,
+            });
+            match tick {
+                Ok(true) => {}
+                _ => return,
+            }
+        }));
+    }
+
+    /// The device code's remaining lifetime, as `m:ss`.
+    fn github_code_remaining(&self) -> Option<String> {
+        let deadline = self.github_code_expires?;
+        Some(format_countdown(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        ))
+    }
+
     /// One sync pass. A manual press is a full pass so deletions and label
     /// changes converge; the poller stays incremental.
     fn start_github_sync(&mut self, full: bool, cx: &mut Context<Self>) {
@@ -279,6 +347,7 @@ impl IntegrationsView {
                 let message = summary.describe();
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
+                    this.github_last_sync = Some(jiff::Timestamp::now());
                     this.status = Some(format!("GitHub synced — {message}"));
                     cx.emit(IntegrationsEvent::Changed);
                     cx.notify();
@@ -677,6 +746,13 @@ impl IntegrationsView {
         };
 
         let code = self.github_code.clone();
+        let remaining = self.github_code_remaining();
+        let last_synced = self.github_last_sync.map(|at| {
+            format!(
+                "Last synced {}",
+                since_label(at, jiff::Timestamp::now())
+            )
+        });
         div()
             .v_flex()
             .gap_2()
@@ -711,7 +787,15 @@ impl IntegrationsView {
                                     .text_sm()
                                     .text_color(rgb(0xa3a3a3))
                                     .child("Issue-backed tasks get branches, worktrees and pull requests."),
-                            ),
+                            )
+                            .when_some(last_synced, |this, last_synced| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x737373))
+                                        .child(last_synced),
+                                )
+                            }),
                     )
                     .child(controls),
             )
@@ -735,10 +819,35 @@ impl IntegrationsView {
                         )
                         .child(
                             div()
-                                .text_lg()
-                                .font_semibold()
-                                .child(code.user_code.clone()),
+                                .h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_lg().font_semibold().child(code.user_code.clone()))
+                                .child(
+                                    Button::new("github-copy")
+                                        .ghost()
+                                        .compact()
+                                        .label("Copy code")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let Some(code) = this.github_code.clone() else {
+                                                return;
+                                            };
+                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                                code.user_code,
+                                            ));
+                                            this.status = Some("Code copied.".to_string());
+                                            cx.notify();
+                                        })),
+                                ),
                         )
+                        .when_some(remaining, |this, remaining| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(0x737373))
+                                    .child(format!("The code expires in {remaining}")),
+                            )
+                        })
                         .child(
                             Button::new("github-open")
                                 .ghost()
@@ -761,6 +870,26 @@ fn todoist_icon() -> gpui_component::Icon {
     gpui_component::Icon::default()
         .data(include_bytes!("../../assets/icons/todoist.svg"))
         .with_size(Size::Large)
+}
+
+/// A countdown in the `m:ss` shape the device code block shows.
+fn format_countdown(remaining: std::time::Duration) -> String {
+    format!(
+        "{}:{:02}",
+        remaining.as_secs() / 60,
+        remaining.as_secs() % 60
+    )
+}
+
+/// How long ago something happened, in the coarse units a status line wants.
+fn since_label(then: jiff::Timestamp, now: jiff::Timestamp) -> String {
+    let seconds = (now.as_second() - then.as_second()).max(0);
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{} min ago", seconds / 60),
+        3_600..=86_399 => format!("{} h ago", seconds / 3_600),
+        _ => format!("{} d ago", seconds / 86_400),
+    }
 }
 
 /// Subtle card shell for one integration row. `dimmed` grays the whole
@@ -810,5 +939,35 @@ impl Render for IntegrationsView {
                         )
                     })
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card's last-sync line, which coarsens as it ages instead of
+    /// reprinting a timestamp.
+    #[test]
+    fn the_last_sync_line_coarsens_with_age() {
+        let at = |seconds: i64| jiff::Timestamp::from_second(seconds).expect("timestamp");
+        let now = at(1_000_000);
+        assert_eq!(since_label(at(1_000_000), now), "just now");
+        assert_eq!(since_label(at(999_941), now), "just now");
+        assert_eq!(since_label(at(999_940), now), "1 min ago");
+        assert_eq!(since_label(at(996_400), now), "1 h ago");
+        assert_eq!(since_label(at(910_000), now), "1 d ago");
+        // A clock that moved backwards cannot claim to be in the future.
+        assert_eq!(since_label(at(1_000_060), now), "just now");
+    }
+
+    #[test]
+    fn the_device_countdown_reads_as_minutes_and_seconds() {
+        assert_eq!(
+            format_countdown(std::time::Duration::from_secs(900)),
+            "15:00"
+        );
+        assert_eq!(format_countdown(std::time::Duration::from_secs(65)), "1:05");
+        assert_eq!(format_countdown(std::time::Duration::ZERO), "0:00");
     }
 }

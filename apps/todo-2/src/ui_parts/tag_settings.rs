@@ -44,8 +44,11 @@ pub struct TagSettingsPanel {
     parents: Vec<Tag>,
     dirs: Vec<String>,
     /// The remote object this tag is bound to, when it is synced (a GitHub
-    /// `owner/repo` today). Shown read-only next to the directories.
+    /// `owner/repo` today), shown beside the directories and changeable there.
     sync_target: Option<storage::SyncTarget>,
+    /// Whether each worktree of a run builds into its own `target/` instead of
+    /// sharing the repo's build cache (spec §6.4).
+    isolated_build_cache: bool,
     sections: Vec<TagSection>,
     bindings: Vec<(App, AppTagBinding)>,
     /// The staged parent-tag editor: desired parent labels as chips, edited
@@ -73,6 +76,19 @@ pub struct TagSettingsPanel {
     dir_picker_input: Entity<InputState>,
     _dir_picker_sub: Subscription,
     dir_picker_cursor: usize,
+    /// The connected GitHub integration, when there is one: without it there is
+    /// nothing to bind to, so the section is not rendered.
+    github_integration_id: Option<u64>,
+    /// The repo picker: its open state, its query, and the account's
+    /// repositories, fetched the first time it opens.
+    repo_picker_open: bool,
+    repo_picker_input: Entity<InputState>,
+    _repo_picker_sub: Subscription,
+    _repo_fetch: Option<Task<()>>,
+    repo_picker_cursor: usize,
+    repo_candidates: Vec<(String, bool)>,
+    repo_candidates_loading: bool,
+    repo_candidates_error: Option<String>,
     section_name: Entity<InputState>,
     /// One-line result of the last action, so writes are visible.
     notice: Option<String>,
@@ -107,6 +123,19 @@ let dir_picker_input = cx.new(|cx| {
             }
             _ => {}
         });
+        let repo_picker_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Search repositories…", window, cx);
+            state
+        });
+        let _repo_picker_sub = cx.subscribe(&repo_picker_input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.on_repo_picker_enter(cx),
+            InputEvent::Change => {
+                this.repo_picker_cursor = 0;
+                cx.notify();
+            }
+            _ => {}
+        });
         Self {
             store,
             open: false,
@@ -114,6 +143,7 @@ let dir_picker_input = cx.new(|cx| {
             parents: Vec::new(),
             dirs: Vec::new(),
             sync_target: None,
+            isolated_build_cache: false,
             sections: Vec::new(),
             bindings: Vec::new(),
             placements_draft: Vec::new(),
@@ -130,6 +160,15 @@ let dir_picker_input = cx.new(|cx| {
             dir_picker_input,
             _dir_picker_sub,
             dir_picker_cursor: 0,
+            github_integration_id: None,
+            repo_picker_open: false,
+            repo_picker_input,
+            _repo_picker_sub,
+            _repo_fetch: None,
+            repo_picker_cursor: 0,
+            repo_candidates: Vec::new(),
+            repo_candidates_loading: false,
+            repo_candidates_error: None,
             section_name: cx.new(|cx| {
                 let mut input = InputState::new(window, cx);
                 input.set_placeholder("New section", window, cx);
@@ -195,6 +234,8 @@ let dir_picker_input = cx.new(|cx| {
         let parents = store.tag_parents(tag_id, cx);
         let dirs = store.tag_dirs(tag_id, cx);
         let sync_target = store.tag_sync_target(tag_id, cx);
+        let isolated_build_cache = store.tag_isolated_build_cache(tag_id, cx);
+        let integrations = store.list_integrations(cx);
         let sections = store.tag_sections(tag_id, cx);
         let bindings = store.bindings_for_tag(tag_id, cx);
         let descendants = store.tag_descendant_ids(tag_id, cx);
@@ -203,6 +244,13 @@ let dir_picker_input = cx.new(|cx| {
             let parents = parents.await.unwrap_or_default();
             let dirs = dirs.await.unwrap_or_default();
             let sync_target = sync_target.await.ok().flatten();
+            let isolated_build_cache = isolated_build_cache.await.unwrap_or(false);
+            let github_integration_id = integrations
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|integration| integration.provider == "github")
+                .map(|integration| integration.id);
             let sections = sections.await.unwrap_or_default();
             let bindings = bindings.await.unwrap_or_default();
             let blocked = descendants.await.unwrap_or_default();
@@ -217,6 +265,8 @@ let dir_picker_input = cx.new(|cx| {
                 this.parents = parents;
                 this.dirs = dirs;
                 this.sync_target = sync_target;
+                this.isolated_build_cache = isolated_build_cache;
+                this.github_integration_id = github_integration_id;
                 this.sections = sections;
                 this.bindings = bindings;
                 this.blocked = blocked.into_iter().collect();
@@ -538,6 +588,275 @@ let dir_picker_input = cx.new(|cx| {
             .collect();
         let action = self.store.set_tag_dirs(tag.id, dirs, cx);
         self.run(action, "Directory removed.", cx);
+    }
+
+    /// Point this tag at a repo, or clear the binding so the next sync detects
+    /// it from the project directory's remotes again (§5.3).
+    fn set_repo_binding(&mut self, repo: Option<String>, cx: &mut Context<Self>) {
+        let Some(tag) = self.tag.clone() else {
+            return;
+        };
+        let Some(integration_id) = self.github_integration_id else {
+            return;
+        };
+        let action = self.store.set_tag_github_repo(tag.id, integration_id, repo.clone(), cx);
+        let note = match &repo {
+            Some(repo) => format!("Syncing with {repo}."),
+            None => "Binding cleared; the repo is detected from the directory again.".to_string(),
+        };
+        self.run(action, &note, cx);
+    }
+
+    fn set_isolated_build_cache(&mut self, isolated: bool, cx: &mut Context<Self>) {
+        let Some(tag) = self.tag.clone() else {
+            return;
+        };
+        let action = self.store.set_tag_isolated_build_cache(tag.id, isolated, cx);
+        let note = if isolated {
+            "Each worktree builds into its own target directory."
+        } else {
+            "Worktrees share the repository's build cache."
+        };
+        self.run(action, note, cx);
+    }
+
+    /// Open or close the repo picker, fetching the account's repositories the
+    /// first time it opens.
+    fn toggle_repo_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.repo_picker_open = !self.repo_picker_open;
+        if self.repo_picker_open {
+            self.repo_picker_cursor = 0;
+            self.repo_picker_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+            self.fetch_repo_candidates(cx);
+        }
+        cx.notify();
+    }
+
+    fn fetch_repo_candidates(&mut self, cx: &mut Context<Self>) {
+        if !self.repo_candidates.is_empty() || self.repo_candidates_loading {
+            return;
+        }
+        self.repo_candidates_loading = true;
+        self.repo_candidates_error = None;
+        let fetch = self.store.github_repos(cx);
+        self._repo_fetch = Some(cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            this.update(cx, |this, cx| {
+                this.repo_candidates_loading = false;
+                match result {
+                    Ok(repos) => {
+                        this.repo_candidates = repos
+                            .into_iter()
+                            .map(|repo| (repo.full_name, repo.private))
+                            .collect();
+                    }
+                    Err(error) => {
+                        this.repo_candidates_error =
+                            Some(format!("Could not list repositories: {error}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The account's repositories matching `query`; an empty query lists them
+    /// all, because opening the picker is already the intent.
+    fn repo_picker_results(&self, query: &str) -> Vec<(String, bool)> {
+        let query = query.trim().to_lowercase();
+        let mut matching: Vec<(String, bool)> = self
+            .repo_candidates
+            .iter()
+            .filter(|(full_name, _)| query.is_empty() || full_name.to_lowercase().contains(&query))
+            .cloned()
+            .collect();
+        // Bound repos first, so the current choice is visible in a long list.
+        let bound = self
+            .sync_target
+            .as_ref()
+            .map(|target| target.external_id.clone());
+        matching.sort_by(|a, b| {
+            (Some(&a.0) != bound.as_ref())
+                .cmp(&(Some(&b.0) != bound.as_ref()))
+                .then(a.0.cmp(&b.0))
+        });
+        matching
+    }
+
+    fn on_repo_picker_enter(&mut self, cx: &mut Context<Self>) {
+        let query = self.repo_picker_input.read(cx).text().to_string();
+        let results = self.repo_picker_results(&query);
+        if let Some((full_name, _)) = results.get(self.repo_picker_cursor).cloned() {
+            self.repo_picker_open = false;
+            self.set_repo_binding(Some(full_name), cx);
+        }
+    }
+
+    /// The GitHub section: the bound repo with its change affordance, plus the
+    /// build-cache choice. Rendered only when GitHub is connected, since
+    /// otherwise there is nothing to bind the tag to (§5.3, §5.8, §6.4).
+    fn github_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.github_integration_id?;
+        let bound = self
+            .sync_target
+            .as_ref()
+            .map(|target| target.external_id.clone());
+        let bound_row = div()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .hover(|style| style.bg(rgb(0x2a2a2a)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .child(match &bound {
+                        Some(repo) => repo.clone(),
+                        None => "Detected from the project directory".to_string(),
+                    }),
+            )
+            .child(
+                Button::new("tag-settings-choose-repo")
+                    .ghost()
+                    .compact()
+                    .label(if self.repo_picker_open {
+                        "Close"
+                    } else {
+                        "Choose…"
+                    })
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_repo_picker(window, cx)),
+                    ),
+            )
+            .when(bound.is_some(), |this| {
+                this.child(
+                    Button::new("tag-settings-clear-repo")
+                        .ghost()
+                        .compact()
+                        .label("Clear")
+                        .tooltip("Unbind, so the repository is detected from the directory again")
+                        .on_click(cx.listener(|this, _, _, cx| this.set_repo_binding(None, cx))),
+                )
+            });
+
+        Some(
+            div()
+                .v_flex()
+                .gap_1()
+                .child(section_label("GitHub repository"))
+                .child(hint(
+                    "Tasks in this tag sync with the bound repository's issues.",
+                ))
+                .child(bound_row)
+                .when_some(self.repo_picker(cx), |this, picker| this.child(picker))
+                .into_any_element(),
+        )
+    }
+
+    /// The build-cache choice: a property of the project rather than of
+    /// GitHub, so it shows for any directory-backed tag (§6.4).
+    fn isolated_cache_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_0p5()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .child(div().text_sm().child("Isolated build cache"))
+                    .child(hint(
+                        "Each worktree of a run builds into its own target directory instead of \
+                         sharing the repository's.",
+                    )),
+            )
+            .child(
+                Switch::new("tag-settings-isolated-cache")
+                    .checked(self.isolated_build_cache)
+                    .tooltip("Build every worktree separately")
+                    .on_change(cx.listener(|this, isolated: &bool, _, cx| {
+                        this.set_isolated_build_cache(*isolated, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The repository list the `Choose…` button opens.
+    fn repo_picker(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.repo_picker_open {
+            return None;
+        }
+        let input = self.repo_picker_input.clone();
+        let query = input.read(cx).text().to_string();
+        let results = self.repo_picker_results(&query);
+        let cursor = self.repo_picker_cursor;
+        let rows: Vec<AnyElement> = results
+            .iter()
+            .take(10)
+            .enumerate()
+            .map(|(index, (full_name, private))| {
+                let value = full_name.clone();
+                div()
+                    .id(("repo-picker-row", index))
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_sm()
+                    .hover(|style| style.bg(rgb(0x2a2a2a)))
+                    .when(index == cursor, |style| style.bg(rgb(0x333333)))
+                    .child(div().flex_1().min_w_0().truncate().child(value.clone()))
+                    .when(*private, |this| {
+                        this.child(div().text_xs().text_color(rgb(TEXT_MUTED)).child("private"))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.repo_picker_open = false;
+                        this.set_repo_binding(Some(value.clone()), cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .v_flex()
+                .gap_1()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(HAIRLINE))
+                .p_1()
+                .child(Input::new(&input).appearance(false))
+                .when(self.repo_candidates_loading, |this| {
+                    this.child(hint("Loading repositories…"))
+                })
+                .when_some(self.repo_candidates_error.clone(), |this, error| {
+                    this.child(hint(&error))
+                })
+                .when(rows.is_empty() && !self.repo_candidates_loading, |this| {
+                    this.child(hint("No repository matches."))
+                })
+                .child(
+                    div()
+                        .v_flex()
+                        .max_h(px(180.))
+                        .overflow_y_scrollbar()
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
     }
 
     fn toggle_dir_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -969,6 +1288,7 @@ let dir_picker_input = cx.new(|cx| {
             })
             .collect();
 
+        let isolated_row = self.isolated_cache_row(cx);
         let placements_empty = self.placements_draft.is_empty()
             && self.placements_input.read(cx).text().to_string().trim().is_empty();
         let body = div()
@@ -1088,6 +1408,11 @@ let dir_picker_input = cx.new(|cx| {
                             }),
                     ),
             )
+            .when(directory_backed, |this| this.child(isolated_row))
+            .when_some(self.github_section(cx), |this, section| {
+                this.child(div().border_t_1().border_color(rgb(HAIRLINE)))
+                    .child(section)
+            })
             .child(div().border_t_1().border_color(rgb(HAIRLINE)))
             .child(
                 div()

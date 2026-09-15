@@ -89,8 +89,16 @@ pub struct RunCheckout {
     /// session's secondary roots, so the agent cannot edit the user's own
     /// checkout and leave the branch missing half the work.
     pub repo_dir: PathBuf,
-    /// The build directory every worktree of the run shares (decision 12).
-    pub target_dir: PathBuf,
+    /// The build directory every worktree of the run shares (decision 12), or
+    /// `None` when the project opted out of the shared cache (spec §6.4) and
+    /// each worktree builds into its own `target/`.
+    pub target_dir: Option<PathBuf>,
+}
+
+/// The build directory to point a worktree session at, if any: the run's
+/// shared cache normally, nothing when the project isolated its builds.
+fn checkout_target_dir(checkout: Option<&RunCheckout>) -> Option<PathBuf> {
+    checkout?.target_dir.clone()
 }
 
 /// A directory-backed project the pane can run an agent for.
@@ -672,12 +680,14 @@ impl AgentPane {
         let tool_permissions = entry.tool_permissions.clone();
         // A worktree session builds into the run's shared cache rather than
         // a per-worktree `target/` (decision 12): a second worktree would
-        // otherwise be a full second build.
-        let agent: Arc<dyn AgentServer> = match &entry.project.checkout {
-            Some(checkout) => Arc::new(EnvAgent {
+        // otherwise be a full second build. A project with the isolated build
+        // cache leaves the variable off, so cargo uses the worktree's own.
+        let agent: Arc<dyn AgentServer> = match checkout_target_dir(entry.project.checkout.as_ref())
+        {
+            Some(target_dir) => Arc::new(EnvAgent {
                 inner: self.agent.clone(),
                 name: "CARGO_TARGET_DIR",
-                value: checkout.target_dir.display().to_string(),
+                value: target_dir.display().to_string(),
             }),
             None => self.agent.clone(),
         };
@@ -3591,7 +3601,7 @@ mod tests {
             tag_id: 7,
             worktree: worktree.clone(),
             repo_dir: repo_dir.clone(),
-            target_dir: repo_dir.join("target"),
+            target_dir: Some(repo_dir.join("target")),
         };
         let (cwd, additional) = project_with(repo_dir.clone(), sibling.clone(), Some(checkout))
             .resolve()
@@ -3618,7 +3628,7 @@ mod tests {
             tag_id: 7,
             worktree: worktree.clone(),
             repo_dir: repo_dir.clone(),
-            target_dir: repo_dir.join("target"),
+            target_dir: Some(repo_dir.join("target")),
         };
         std::fs::remove_dir_all(&worktree).expect("remove the checkout");
         let (cwd, _) = project_with(repo_dir.clone(), sibling, Some(checkout))
@@ -3626,6 +3636,29 @@ mod tests {
             .expect("a directory resolves");
         assert_eq!(cwd, repo_dir);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The isolated build cache is the absence of `CARGO_TARGET_DIR`, so the
+    /// session builds where cargo would anyway (spec §6.4).
+    #[test]
+    fn an_isolated_project_points_a_session_at_no_build_directory() {
+        let checkout = RunCheckout {
+            tag_id: 7,
+            worktree: PathBuf::from("/tmp/worktrees/123-add-login"),
+            repo_dir: PathBuf::from("/tmp/repo"),
+            target_dir: None,
+        };
+        assert_eq!(checkout_target_dir(Some(&checkout)), None);
+        assert_eq!(checkout_target_dir(None), None);
+
+        let shared = RunCheckout {
+            target_dir: Some(PathBuf::from("/tmp/repo/target")),
+            ..checkout
+        };
+        assert_eq!(
+            checkout_target_dir(Some(&shared)),
+            Some(PathBuf::from("/tmp/repo/target"))
+        );
     }
 
     /// The launch wrapper adds `CARGO_TARGET_DIR` on top of the agent's own

@@ -767,6 +767,35 @@ impl Store {
         })
     }
 
+    /// Whether a project gives every worktree its own build directory instead
+    /// of sharing the repo's `target/` (spec §6.4).
+    pub fn tag_isolated_build_cache(
+        &self,
+        tag_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<bool>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.tag_settings(tag_id).await?.isolated_build_cache)
+        })
+    }
+
+    /// Turn the isolated build cache on or off for a project. It only affects
+    /// worktrees created after the change.
+    pub fn set_tag_isolated_build_cache(
+        &self,
+        tag_id: u64,
+        isolated: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.set_tag_isolated_build_cache(tag_id, isolated).await?)
+        })
+    }
+
     /// The sections of a tag, in display order.
     pub fn tag_sections(
         &self,
@@ -1795,6 +1824,81 @@ impl Store {
         })
     }
 
+    /// Point a tag at a GitHub repo, or clear the target so the next sync
+    /// detects it from the project directory again (§5.3).
+    pub fn set_tag_github_repo(
+        &self,
+        tag_id: u64,
+        integration_id: u64,
+        repo: Option<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let target = repo.map(|external_id| storage::SyncTarget {
+                integration_id,
+                external_id,
+            });
+            Ok(s.set_tag_sync_target(tag_id, target).await?)
+        })
+    }
+
+    /// The repositories the connected account can bind a tag to, for the tag
+    /// settings picker (§5.3). Needs the network, so it runs on Tokio with the
+    /// stored token rather than on the GPUI executor.
+    pub fn github_repos(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::RemoteRepo>>> {
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let credentials = crate::github_auth::stored_credentials().ok_or_else(|| {
+                anyhow::anyhow!("Connect GitHub before choosing a repository")
+            })?;
+            let client = storage::GithubHttpClient::new(credentials.token);
+            client.list_repos().await
+        })
+    }
+
+    /// When the integration last synced successfully, for the card (§5.8).
+    pub fn github_last_synced(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Option<jiff::Timestamp>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.github_last_synced_at(integration_id).await?)
+        })
+    }
+
+    /// Delete a task, closing its GitHub issue first when it has one (§5.6).
+    /// The link is tombstoned either way so a later pull cannot resurrect the
+    /// row. A close that fails blocks the delete with its own reason rather
+    /// than leaving the issue open while the task disappears.
+    ///
+    /// Nothing calls this yet: the app has no delete affordance, so this is the
+    /// engine half of §5.6 waiting for one.
+    #[allow(dead_code)]
+    pub fn delete_task(&self, task_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            match crate::github_auth::stored_credentials() {
+                Some(credentials) => {
+                    let client = storage::GithubHttpClient::new(credentials.token);
+                    s.close_issue_for_task(&client, task_id).await?;
+                }
+                None => {
+                    s.tombstone_issue_link_for_task(task_id).await?;
+                }
+            }
+            s.delete_task(task_id).await?;
+            Ok(())
+        })
+    }
+
     /// The GitHub issue a task came from, for the source badge and the
     /// read-only metadata chips. `None` for purely local tasks.
     pub fn github_issue_for_task(
@@ -1991,9 +2095,14 @@ impl Store {
             else {
                 return Ok(None);
             };
+            // The shared build cache is the default (decision 12); a project
+            // that opted out gets each worktree on its own `target/` instead
+            // (spec §6.4), which is the absence of the variable.
+            let isolated = s.tag_settings(tag_id).await?.isolated_build_cache;
             Ok(Some(RunCheckout {
                 tag_id,
-                target_dir: std::path::PathBuf::from(&worktree.repo_dir).join("target"),
+                target_dir: (!isolated)
+                    .then(|| std::path::PathBuf::from(&worktree.repo_dir).join("target")),
                 worktree: std::path::PathBuf::from(&worktree.worktree_path),
                 repo_dir: std::path::PathBuf::from(&worktree.repo_dir),
             }))

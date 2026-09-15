@@ -81,13 +81,23 @@ fn save_at(path: &std::path::Path, client: &GithubFile) -> anyhow::Result<()> {
 /// The client id to authenticate with: `GITHUB_CLIENT_ID` when set, otherwise
 /// the compiled-in app.
 fn configured_client_id() -> anyhow::Result<(String, bool)> {
+    client_id_at(&client_file_path()?)
+}
+
+/// The same, against an explicit connection file. A connection already
+/// records the `client_id` it was made with (§5.1), so a fork or a self-build
+/// configures the app once and reconnects without the environment variable.
+fn client_id_at(path: &std::path::Path) -> anyhow::Result<(String, bool)> {
     match std::env::var("GITHUB_CLIENT_ID") {
         Ok(id) if !id.is_empty() => Ok((id, true)),
         _ if !DEFAULT_CLIENT_ID.is_empty() => Ok((DEFAULT_CLIENT_ID.to_string(), false)),
-        _ => Err(anyhow::anyhow!(
-            "No GitHub OAuth app is configured: register one with device flow enabled \
-             (spec decision 34) or set GITHUB_CLIENT_ID"
-        )),
+        _ => match load_at(path)?.map(|file| file.client_id) {
+            Some(id) if !id.is_empty() => Ok((id, false)),
+            _ => Err(anyhow::anyhow!(
+                "No GitHub OAuth app is configured: register one with device flow enabled \
+                 (spec decision 34) or set GITHUB_CLIENT_ID"
+            )),
+        },
     }
 }
 
@@ -521,26 +531,50 @@ mod tests {
     }
 
     #[test]
-    fn the_compiled_app_is_preferred_unless_the_env_overrides_it() {
+    fn the_client_id_comes_from_the_env_then_the_app_then_the_connection_file() {
         unsafe { std::env::remove_var("GITHUB_CLIENT_ID") };
-        let env_override = configured_client_id();
+        let dir = std::env::temp_dir().join(format!("todo2-github-client-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+
         if DEFAULT_CLIENT_ID.is_empty() {
             // Until the `lofi-tools` app exists, an env client id is the only
-            // way to connect, and the error must say so.
-            let error = env_override.unwrap_err().to_string();
+            // way to start a connection, and the error must say so.
+            let error = client_id_at(&path).unwrap_err().to_string();
             assert!(error.contains("GITHUB_CLIENT_ID"), "{error}");
+
+            // A stored one keeps a self-build reconnecting without it.
+            save_at(
+                &path,
+                &GithubFile {
+                    client_id: "from-file".to_string(),
+                    access_token: Some("gho_token".to_string()),
+                    scope: None,
+                    login: None,
+                    created_at: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                client_id_at(&path).unwrap(),
+                ("from-file".to_string(), false)
+            );
+
+            // The environment still wins over the file.
             unsafe { std::env::set_var("GITHUB_CLIENT_ID", "from-env") };
             assert_eq!(
-                configured_client_id().unwrap(),
+                client_id_at(&path).unwrap(),
                 ("from-env".to_string(), true)
             );
             unsafe { std::env::remove_var("GITHUB_CLIENT_ID") };
         } else {
             assert_eq!(
-                env_override.unwrap(),
+                client_id_at(&path).unwrap(),
                 (DEFAULT_CLIENT_ID.to_string(), false)
             );
         }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
