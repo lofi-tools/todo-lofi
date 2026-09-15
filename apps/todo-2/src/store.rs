@@ -1824,6 +1824,13 @@ impl Store {
             let client = storage::GithubHttpClient::new(credentials.token.clone());
             let mut total = storage::GithubSyncSummary::default();
             for id in ids {
+                let disabled = s
+                    .app_for_integration(id)
+                    .await?
+                    .is_some_and(|app| !app.enabled);
+                if disabled {
+                    continue;
+                }
                 Self::bind_detected_repos(&mut s, id).await?;
                 let summary = Self::sync_github_with_retry(&mut s, &client, id, full).await?;
                 total.absorb(&summary);

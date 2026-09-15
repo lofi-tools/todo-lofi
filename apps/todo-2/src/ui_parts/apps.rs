@@ -466,6 +466,28 @@ impl AppSettings {
         active_runs: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.settings_block_inner(app_id, active_runs, true, cx)
+    }
+
+    /// Same as [`Self::settings_block`] but without the red disable row, for
+    /// embeddings (like the integrations cards) that render their own
+    /// disable section at the bottom of the expanded card.
+    pub fn settings_block_without_disable(
+        &mut self,
+        app_id: u64,
+        active_runs: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.settings_block_inner(app_id, active_runs, false, cx)
+    }
+
+    fn settings_block_inner(
+        &mut self,
+        app_id: u64,
+        active_runs: usize,
+        show_disable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if !self.is_expanded(app_id) {
             return div().into_any_element();
         }
@@ -536,7 +558,7 @@ impl AppSettings {
             }
         }
 
-        if manages_tags {
+        if manages_tags && show_disable {
             let bound: Vec<String> = self
                 .apps
                 .iter()

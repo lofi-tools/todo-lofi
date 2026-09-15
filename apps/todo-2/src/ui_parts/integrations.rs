@@ -14,7 +14,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 
 use crate::github_auth;
 use crate::store::Store;
-use crate::theme::{APP_BG, HAIRLINE};
+use crate::theme::{APP_BG, DANGER, HAIRLINE};
 use crate::todoist_auth;
 use crate::ui_parts::apps::AppSettings;
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
@@ -41,6 +41,11 @@ pub struct IntegrationsView {
     /// disabled keeps its row for the history but stops syncing, and its
     /// card offers only re-enabling.
     todoist_app_enabled: bool,
+    /// The app behind the GitHub integration, so the card can offer the
+    /// same disable/re-enable section as Todoist. Disabling stops syncing
+    /// while the integration row and synced data stay for re-enabling.
+    github_app_id: Option<u64>,
+    github_app_enabled: bool,
     settings: Entity<AppSettings>,
     todoist_sync: Option<Entity<TodoistSyncPicker>>,
     connecting: bool,
@@ -83,6 +88,8 @@ impl IntegrationsView {
             connected: Vec::new(),
             todoist_app_id: None,
             todoist_app_enabled: true,
+            github_app_id: None,
+            github_app_enabled: true,
             settings,
             todoist_sync: None,
             connecting: false,
@@ -125,7 +132,9 @@ impl IntegrationsView {
                 })
                 .await;
             let ready = this
-                .read_with(cx, |this, _| this.github_connected() && !this.github_syncing)
+                .read_with(cx, |this, _| {
+                    this.github_connected() && !this.github_disabled() && !this.github_syncing
+                })
                 .unwrap_or(false);
             if !ready {
                 continue;
@@ -214,6 +223,15 @@ impl IntegrationsView {
                         .map(|app| (app.id, app.enabled)),
                     None => None,
                 };
+                let github_app = match list.iter().find(|i| i.provider == "github") {
+                    Some(integration) => store
+                        .app_for_integration(integration.id, cx)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|app| (app.id, app.enabled)),
+                    None => None,
+                };
                 // The card's status line reads the last successful pass (§5.8).
                 let last_sync = match list.iter().find(|i| i.provider == "github") {
                     Some(integration) => store
@@ -235,6 +253,8 @@ impl IntegrationsView {
                     }
                     this.todoist_app_id = todoist_app_id;
                     this.todoist_app_enabled = todoist_app.map(|(_, enabled)| enabled).unwrap_or(true);
+                    this.github_app_id = github_app.map(|(id, _)| id);
+                    this.github_app_enabled = github_app.map(|(_, enabled)| enabled).unwrap_or(true);
                     this._load = None;
                     cx.notify();
                 })
@@ -261,15 +281,42 @@ impl IntegrationsView {
         self.todoist_connected() && self.todoist_app_id.is_some() && !self.todoist_app_enabled
     }
 
-    fn re_enable_todoist(&mut self, cx: &mut Context<Self>) {
-        let Some(app_id) = self.todoist_app_id else {
-            return;
-        };
+    fn github_disabled(&self) -> bool {
+        self.github_connected() && self.github_app_id.is_some() && !self.github_app_enabled
+    }
+
+    /// Disable stops syncing but keeps the integration row and synced data,
+    /// so it can be re-enabled later. Items are always kept.
+    fn disable_integration_app(&mut self, app_id: u64, label: &str, cx: &mut Context<Self>) {
+        let remove = self.store.remove_app(app_id, false, cx);
+        let label = label.to_string();
+        self._load = Some(cx.spawn(async move |this, cx| match remove.await {
+            Ok(()) => {
+                this.update(cx, |this, cx| {
+                    this.status = Some(format!("{label} disabled. Synced data kept."));
+                    cx.emit(IntegrationsEvent::Changed);
+                    this.reload(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                this.update(cx, |this, cx| {
+                    this.status = Some(format!("Disable failed: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
+    fn re_enable_integration_app(&mut self, app_id: u64, label: &str, cx: &mut Context<Self>) {
         let enable = self.store.set_app_enabled(app_id, true, cx);
+        let label = label.to_string();
         self._load = Some(cx.spawn(async move |this, cx| match enable.await {
             Ok(()) => {
                 this.update(cx, |this, cx| {
-                    this.status = Some("Todoist re-enabled.".to_string());
+                    this.status = Some(format!("{label} re-enabled."));
                     cx.emit(IntegrationsEvent::Changed);
                     this.reload(cx);
                     cx.notify();
@@ -284,6 +331,72 @@ impl IntegrationsView {
                 .ok();
             }
         }));
+    }
+
+    /// Bottom settings section for an expanded card: the red disable button,
+    /// or re-enable once disabled. Rendered by both integration cards.
+    fn integration_disable_section(
+        &self,
+        app_id: Option<u64>,
+        disabled: bool,
+        label: &str,
+        id_prefix: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(app_id) = app_id else {
+            return div().into_any_element();
+        };
+        let label = label.to_string();
+        let button_id = format!("{id_prefix}-disable-toggle");
+        let button_label = if disabled {
+            format!("Re-enable {label}")
+        } else {
+            format!("Disable {label}")
+        };
+        div()
+            .px_4()
+            .pb_3()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .min_h(px(28.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(0x737373))
+                            .child(if disabled {
+                                "Disabled. Synced data is kept; re-enable to resume syncing."
+                            } else {
+                                "Disable stops syncing but keeps synced data."
+                            }),
+                    )
+                    .child(
+                        Button::new(button_id)
+                            .ghost()
+                            .compact()
+                            .with_size(Size::Small)
+                            .when(!disabled, |this| this.text_color(rgb(DANGER)))
+                            .label(button_label)
+                            .tooltip(if disabled {
+                                "Resume syncing this integration".to_string()
+                            } else {
+                                "Stop syncing but keep synced data".to_string()
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if disabled {
+                                    this.re_enable_integration_app(app_id, &label, cx);
+                                } else {
+                                    this.disable_integration_app(app_id, &label, cx);
+                                }
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// Start the device flow: ask GitHub for a code, show it, then poll until
@@ -436,7 +549,7 @@ impl IntegrationsView {
     /// One sync pass. A manual press is a full pass so deletions and label
     /// changes converge; the poller stays incremental.
     fn start_github_sync(&mut self, full: bool, cx: &mut Context<Self>) {
-        if self.github_syncing {
+        if self.github_syncing || self.github_disabled() {
             return;
         }
         self.github_syncing = true;
@@ -658,7 +771,7 @@ impl IntegrationsView {
     }
 
     fn sync_now(&mut self, cx: &mut Context<Self>) {
-        if self.syncing || !self.todoist_connected() {
+        if self.syncing || !self.todoist_connected() || self.todoist_disabled() {
             return;
         }
         self.syncing = true;
@@ -733,30 +846,21 @@ impl IntegrationsView {
         let disabled = self.todoist_disabled();
         let dimmed = !connected || disabled;
         let app_id = self.todoist_app_id;
-        let expanded = !disabled
-            && app_id.is_some_and(|app_id| {
-                self.settings
-                    .read_with(cx, |settings, _| settings.is_expanded(app_id))
-            });
-        let gear = app_id.filter(|_| connected && !disabled).map(|app_id| {
+        let expanded = app_id.is_some_and(|app_id| {
+            self.settings
+                .read_with(cx, |settings, _| settings.is_expanded(app_id))
+        });
+        let gear = app_id.filter(|_| connected).map(|app_id| {
             self.settings
                 .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
         });
         let settings_block = app_id.map(|app_id| {
-            self.settings
-                .update(cx, |settings, cx| settings.settings_block(app_id, 0, cx))
+            self.settings.update(cx, |settings, cx| {
+                settings.settings_block_without_disable(app_id, 0, cx)
+            })
         });
 
-        let actions: gpui::AnyElement = if disabled {
-            Button::new("todoist-re-enable")
-                .compact()
-                .label("Re-enable")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.re_enable_todoist(cx);
-                }))
-                .into_any_element()
-        } else if connected {
+        let actions: gpui::AnyElement = if connected {
             Button::new("todoist-disconnect")
                 .ghost()
                 .compact()
@@ -796,7 +900,7 @@ impl IntegrationsView {
         controls = controls.child(actions);
 
         let description = if disabled {
-            "Todoist is disabled. Re-enable to resume syncing."
+            "Todoist is disabled. Expand to re-enable; synced data is kept."
         } else if connected {
             "Sync projects both ways with Todoist."
         } else {
@@ -811,7 +915,7 @@ impl IntegrationsView {
                     .h_flex()
                     .items_center()
                     .gap_3()
-                    .when(connected && !disabled && app_id.is_some(), |this| {
+                    .when(connected && app_id.is_some(), |this| {
                         this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                             if let Some(app_id) = this.todoist_app_id {
                                 this.settings.update(cx, |settings, cx| {
@@ -866,23 +970,32 @@ impl IntegrationsView {
             )
             .when(expanded, |this| {
                 this.when_some(settings_block, |this, block| this.child(block))
-                    .child(
-                        div().px_4().pb_1().h_flex().child(
-                            Button::new("todoist-sync")
-                                .ghost()
-                                .compact()
-                                .with_size(Size::Small)
-                                .border_1()
-                                .border_color(rgb(HAIRLINE))
-                                .text_color(rgb(0xa3a3a3))
-                                .cursor_pointer()
-                                .label(if self.syncing { "Syncing…" } else { "Sync now" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sync_now(cx);
-                                })),
-                        ),
-                    )
-                    .child(self.todoist_sync_block(window, cx))
+                    .when(!disabled, |this| {
+                        this.child(
+                            div().px_4().pb_1().h_flex().child(
+                                Button::new("todoist-sync")
+                                    .ghost()
+                                    .compact()
+                                    .with_size(Size::Small)
+                                    .border_1()
+                                    .border_color(rgb(HAIRLINE))
+                                    .text_color(rgb(0xa3a3a3))
+                                    .cursor_pointer()
+                                    .label(if self.syncing { "Syncing…" } else { "Sync now" })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sync_now(cx);
+                                    })),
+                            ),
+                        )
+                        .child(self.todoist_sync_block(window, cx))
+                    })
+                    .child(self.integration_disable_section(
+                        app_id,
+                        disabled,
+                        "Todoist",
+                        "todoist",
+                        cx,
+                    ))
             })
             .into_any_element()
     }
@@ -946,6 +1059,9 @@ impl IntegrationsView {
             .find(|i| i.provider == "github")
             .and_then(|i| i.account_label.clone());
         let connected = self.github_connected();
+        let disabled = self.github_disabled();
+        let dimmed = !connected || disabled;
+        let github_app_id = self.github_app_id;
         let expanded = self.github_settings_expanded;
         let gear = connected.then(|| {
             Button::new("github-settings")
@@ -965,7 +1081,14 @@ impl IntegrationsView {
                 .into_any_element()
         });
 
-        let controls = if connected {
+        let controls = if disabled {
+            div().h_flex().items_center().gap_2().child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x737373))
+                    .child("Disabled"),
+            )
+        } else if connected {
             div()
                 .h_flex()
                 .items_center()
@@ -986,6 +1109,7 @@ impl IntegrationsView {
                             "Sync now"
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.start_github_sync(true, cx);
                         })),
                 )
@@ -995,6 +1119,7 @@ impl IntegrationsView {
                         .compact()
                         .label("Disconnect")
                         .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.disconnect_github(cx);
                         })),
                 )
@@ -1018,6 +1143,7 @@ impl IntegrationsView {
                             "Connect"
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.start_github_connect(cx);
                         })),
                 )
@@ -1035,16 +1161,24 @@ impl IntegrationsView {
             .v_flex()
             .gap_2()
             .child(
-                integration_card(!connected)
+                integration_card(dimmed)
                     .v_flex()
                     .gap_3()
                     .child(
                         div()
+                            .id("github-card-header")
                             .h_flex()
                             .items_center()
                             .gap_3()
+                            .when(connected, |this| {
+                                this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                    this.github_settings_expanded =
+                                        !this.github_settings_expanded;
+                                    cx.notify();
+                                }))
+                            })
                             .child(provider_icon(gpui_component_assets::IconName::Github).when(
-                                !connected,
+                                dimmed,
                                 |this| this.opacity(0.45),
                             ))
                             .child(
@@ -1058,10 +1192,17 @@ impl IntegrationsView {
                                             .items_center()
                                             .gap_2()
                                             .child(div().font_semibold().child("GitHub"))
-                                            .when(!connected, |this| {
+                                            .when(dimmed, |this| {
                                                 this.text_color(rgb(0x6b6b6b))
                                             })
-                                            .when_some(gear, |this, gear| this.child(gear))
+                                            .when_some(gear, |this, gear| {
+                                                this.child(
+                                                    div()
+                                                        .id("github-gear-guard")
+                                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                                        .child(gear),
+                                                )
+                                            })
                                             .when_some(account, |this, account| {
                                                 this.child(
                                                     div()
@@ -1074,12 +1215,16 @@ impl IntegrationsView {
                                     .child(
                                         div()
                                             .text_sm()
-                                            .text_color(if connected {
-                                                rgb(0xa3a3a3)
-                                            } else {
+                                            .text_color(if dimmed {
                                                 rgb(0x5f5f5f)
+                                            } else {
+                                                rgb(0xa3a3a3)
                                             })
-                                            .child("Issue-backed tasks get branches, worktrees and pull requests."),
+                                            .child(if disabled {
+                                                "GitHub is disabled. Expand to re-enable; synced data is kept."
+                                            } else {
+                                                "Issue-backed tasks get branches, worktrees and pull requests."
+                                            }),
                                     )
                                     .when_some(last_synced, |this, last_synced| {
                                         this.child(
@@ -1093,7 +1238,16 @@ impl IntegrationsView {
                             .child(controls),
                     )
                     .when(expanded, |this| {
-                        this.child(self.github_pat_block(window, cx))
+                        this.when(!disabled, |this| {
+                            this.child(self.github_pat_block(window, cx))
+                        })
+                        .child(self.integration_disable_section(
+                            github_app_id,
+                            disabled,
+                            "GitHub",
+                            "github",
+                            cx,
+                        ))
                     }),
             )
             .when_some(code, |this, code| {
