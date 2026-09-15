@@ -58,18 +58,33 @@ impl Project {
     }
 }
 
-/// Scan the home directory for git repos on the tokio runtime. Returns repos
-/// sorted by name; the scan is best-effort and never fails the startup path.
+/// Scan for git repos on the tokio runtime. Returns repos sorted by name; the
+/// scan is best-effort and never fails the startup path.
+///
+/// `TODO_LOFI_SCAN_ROOT` scans that directory instead of the default
+/// `~/src`. The scan stays out of the home root itself so a bundled macOS
+/// app never walks TCC-protected folders (Documents, Music, Photos).
 pub fn scan(cx: &impl AppContext) -> Task<anyhow::Result<Vec<Project>>> {
     gpui_tokio::Tokio::spawn_result(cx, async move {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Ok(Vec::new());
-        };
+        let root = scan_root();
         let mut repos = Vec::new();
-        walk(&home, 0, &mut repos);
+        walk(&root, 0, &mut repos);
         repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(repos)
     })
+}
+
+/// Where the repo scan starts: `TODO_LOFI_SCAN_ROOT`, defaulting to `~/src`.
+fn scan_root() -> PathBuf {
+    if let Ok(root) = std::env::var("TODO_LOFI_SCAN_ROOT")
+        && !root.is_empty()
+    {
+        return PathBuf::from(root);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("src"))
+        .unwrap_or_else(|| PathBuf::from("src"))
 }
 
 /// Recursive depth-first walk collecting the first repo found per subtree.
@@ -113,5 +128,36 @@ fn walk(dir: &Path, depth: usize, repos: &mut Vec<Project>) {
     }
     for subdir in subdirs {
         walk(&subdir, depth + 1, repos);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static SCAN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_scan_root_follows_the_env() {
+        let Ok(_guard) = SCAN_ENV_LOCK.lock() else {
+            unreachable!("scan env lock poisoned");
+        };
+        unsafe {
+            std::env::remove_var("TODO_LOFI_SCAN_ROOT");
+        }
+        assert_eq!(
+            scan_root(),
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("src"))
+                .unwrap_or_else(|| PathBuf::from("src"))
+        );
+        unsafe {
+            std::env::set_var("TODO_LOFI_SCAN_ROOT", "/tmp/somewhere");
+        }
+        assert_eq!(scan_root(), PathBuf::from("/tmp/somewhere"));
+        unsafe {
+            std::env::remove_var("TODO_LOFI_SCAN_ROOT");
+        }
     }
 }

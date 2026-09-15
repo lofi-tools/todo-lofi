@@ -88,7 +88,15 @@
             mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
             testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
 
-            t2 = with bash; ''
+            # Dev loop: run the raw binary under cargo-watch so logs stream to
+            # this terminal and file access keeps the shell's TCC identity
+            # (a bundled launch prompts for Documents/Music/Photos instead).
+            t2 = ''cargo watch -x "run -p todo-2"'';
+
+            # Assemble the macOS bundle (icon, Info.plist, signing,
+            # de-quarantine) without launching it. Kept for CI release builds;
+            # local dev uses `t2` above.
+            t2-bundle = with bash; ''
               set -e
               APP_DIR="target/debug/todo-lofi.app"
               ICON="$APP_DIR/Contents/Resources/todo-lofi.icns"
@@ -134,32 +142,15 @@
                 fi
               fi
 
-              # open hands the bundle to launchd, so the app is neither a child of
-              # this script nor in its process group: signals sent here never reach
-              # it. Kill it by process name instead - launchd resolves the
-              # Contents/MacOS symlink, so "-f Contents/MacOS/todo-2" would only
-              # ever match cargo-watch's own command line (killing the watcher).
-              # The app is also launched directly (not via `open`, which swallows
-              # stdout/stderr into launchd) so tracing logs stream to this terminal.
-              watcher=""
-              app_pid=""
-              stop_app() {
-                [ -z "$watcher" ] || kill "$watcher" 2>/dev/null || true
-                [ -z "$app_pid" ] || kill "$app_pid" 2>/dev/null || true
-                pkill -x todo-2 2>/dev/null || true
-              }
-              trap stop_app EXIT INT TERM HUP
-
               # The devshell exports CARGO_BUILD_TARGET, so cargo writes to
               # target/<triple>/debug; without it, to target/debug. The bundle
-              # symlink must point at the artifact cargo actually produces,
-              # otherwise `open` keeps launching a stale binary.
+              # symlink must point at the artifact cargo actually produces.
               BIN_DIR="target/debug"
               if [ -n "''${CARGO_BUILD_TARGET:-}" ]; then
                 BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
               fi
 
-              # Build, link binary, launch
+              # Build and link the binary into the bundle, then sign.
               cargo build -p todo-2
               ln -sf "$(pwd)/$BIN_DIR/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
               # Sign with the self-signed todo-lofi-dev identity so Gatekeeper
@@ -169,18 +160,6 @@
                 codesign --force --deep --sign "todo-lofi-dev" "$APP_DIR" 2>/dev/null || true
               fi
               xattr -dr com.apple.quarantine "$APP_DIR" "$BIN_DIR/todo-2" 2>/dev/null || true
-              # Direct launch keeps the app's stdout/stderr on this terminal;
-              # `open` would detach it under launchd and hide the logs.
-              "$APP_DIR/Contents/MacOS/todo-2" &
-              app_pid=$!
-
-              # Run the watcher in the background and wait: bash defers traps while
-              # a foreground command runs, so killing the script would leave both
-              # the watcher and the app alive. wait is interrupted by the signal,
-              # letting the trap take them down.
-              cargo watch -x "build -p todo-2" -s 'codesign --force --sign "todo-lofi-dev" "target/debug/todo-2" 2>/dev/null || true; xattr -dr com.apple.quarantine "target/debug/todo-lofi.app" 2>/dev/null || true; pkill -x todo-2 2>/dev/null || true; sleep 0.3; "target/debug/todo-lofi.app/Contents/MacOS/todo-2" &' &
-              watcher=$!
-              wait "$watcher"
             '';
 
             # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
