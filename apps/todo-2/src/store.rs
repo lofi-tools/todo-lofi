@@ -1890,6 +1890,20 @@ impl Store {
         })
     }
 
+    /// Every repo this GitHub integration syncs with, for the card: detected
+    /// remotes and explicit tag bindings alike (§5.3).
+    pub fn github_bound_repos(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::BoundRepo>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.bound_repos(integration_id).await?)
+        })
+    }
+
     /// Delete a task, closing its GitHub issue first when it has one (§5.6).
     /// The link is tombstoned either way so a later pull cannot resurrect the
     /// row. A close that fails blocks the delete with its own reason rather

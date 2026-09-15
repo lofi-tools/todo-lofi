@@ -73,6 +73,9 @@ pub struct IntegrationsView {
     github_code_expires: Option<std::time::Instant>,
     /// When the integration last synced successfully, shown on the card.
     github_last_sync: Option<jiff::Timestamp>,
+    /// `owner/repo` of every repo this integration syncs with (detected
+    /// remotes and explicit bindings alike), shown on the card.
+    github_repos: Vec<String>,
     github_connecting: bool,
     github_syncing: bool,
     /// Background sync cadence in seconds (`0` means manual only), mirrored
@@ -116,6 +119,7 @@ impl IntegrationsView {
             github_code: None,
             github_code_expires: None,
             github_last_sync: None,
+            github_repos: Vec::new(),
             github_connecting: false,
             github_syncing: false,
             github_poll_interval: github_auth::poll_interval_secs(),
@@ -299,18 +303,30 @@ impl IntegrationsView {
                         .map(|app| (app.id, app.enabled)),
                     None => None,
                 };
-                // The card's status line reads the last successful pass (§5.8).
-                let last_sync = match list.iter().find(|i| i.provider == "github") {
-                    Some(integration) => store
-                        .github_last_synced(integration.id, cx)
-                        .await
-                        .ok()
-                        .flatten(),
-                    None => None,
+                // The card's status line reads the last successful pass (§5.8),
+                // and its repo line the bound repos (detected or explicit).
+                let (last_sync, bound_repos) = match list.iter().find(|i| i.provider == "github") {
+                    Some(integration) => {
+                        let last_sync = store
+                            .github_last_synced(integration.id, cx)
+                            .await
+                            .ok()
+                            .flatten();
+                        let repos = store
+                            .github_bound_repos(integration.id, cx)
+                            .await
+                            .map(|repos| {
+                                repos.into_iter().map(|repo| repo.external_id()).collect()
+                            })
+                            .unwrap_or_default();
+                        (last_sync, repos)
+                    }
+                    None => (None, Vec::new()),
                 };
                 this.update(cx, |this, cx| {
                     this.connected = list;
                     this.github_last_sync = last_sync;
+                    this.github_repos = bound_repos;
                     this.github_pat_saved = github_auth::has_personal_token();
                     this.github_poll_interval = github_auth::poll_interval_secs();
                     let todoist_app_id = todoist_app.map(|(id, _)| id);
@@ -936,7 +952,10 @@ impl IntegrationsView {
                     "Not connected"
                 }),
         );
-        controls = controls.child(actions);
+        if !connected {
+            controls = controls.child(actions);
+        }
+        controls = controls.flex_none();
 
         let description = if disabled {
             "Todoist is disabled. Expand to re-enable; synced data is kept."
@@ -1143,15 +1162,29 @@ impl IntegrationsView {
                         } else {
                             "Connect"
                         })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.start_github_connect(cx);
-                        })),
-                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.start_github_connect(cx);
+                })),
+            )
         };
+        let controls = controls.flex_none();
 
         let code = self.github_code.clone();
         let remaining = self.github_code_remaining();
+        // The connected repo, when the integration syncs with exactly one.
+        // Auto-detected remotes and explicit bindings both land here through
+        // `bound_repos`, so a single-repo setup names it on the card.
+        let bound_repos = self.github_repos.clone();
+        let repo_line: Option<String> = if !connected || disabled {
+            None
+        } else if bound_repos.len() == 1 {
+            bound_repos.first().cloned()
+        } else if bound_repos.is_empty() {
+            None
+        } else {
+            Some(format!("{} repos", bound_repos.len()))
+        };
         div()
             .v_flex()
             .gap_2()
@@ -1219,6 +1252,14 @@ impl IntegrationsView {
                                                 "Sync github issues & projects, auto-create branches & pull requests"
                                             }),
                                     )
+                                    .when_some(repo_line, |this, repo_line| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(0x737373))
+                                                .child(repo_line),
+                                        )
+                                    })
                             )
                             .child(controls),
                     )
