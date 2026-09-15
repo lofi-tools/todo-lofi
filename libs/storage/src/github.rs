@@ -2038,6 +2038,38 @@ impl TodoStore {
         .await
     }
 
+    /// Unbind one repo from a tag: the link row goes, and when the tag's sync
+    /// target pointed at it, the target moves to another of the tag's repos
+    /// or clears. Synced tasks keep their local copies; they just stop
+    /// syncing. A repo the directory still resolves to is re-bound by the
+    /// next detection pass.
+    pub async fn unbind_repo_tag(
+        &mut self,
+        tag_id: u64,
+        integration_id: u64,
+        repo: &str,
+    ) -> QueryResult<()> {
+        self.unlink_tag(integration_id, repo).await?;
+        let pointed_here = self.tag_settings(tag_id).await?.sync_target.is_some_and(
+            |target| target.integration_id == integration_id && target.external_id == repo,
+        );
+        if !pointed_here {
+            return Ok(());
+        }
+        let fallback = self
+            .bound_repos(integration_id)
+            .await?
+            .into_iter()
+            .filter(|bound| bound.tag_id == tag_id)
+            .map(|bound| bound.external_id())
+            .find(|external_id| external_id != repo)
+            .map(|external_id| crate::SyncTarget {
+                integration_id,
+                external_id,
+            });
+        self.set_tag_sync_target(tag_id, fallback).await
+    }
+
     /// The namespaced project tag for a repo, `github/<owner>/<repo>`, bound
     /// and carrying its sync target. Used when a repo has no local tag to
     /// bind, so its issues still have somewhere to land.
@@ -3708,6 +3740,63 @@ mod tests {
         let mut ids: Vec<String> = bound.iter().map(BoundRepo::external_id).collect();
         ids.sort();
         assert_eq!(ids, vec!["lofi-tools/api", "lofi-tools/todo-lofi"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unbinding_a_repo_moves_the_target_or_clears_it() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("github", None).await?;
+        let tag = storage.create_tag("project").await?;
+        storage
+            .bind_repo_tag(tag.id, integration.id, "lofi-tools", "todo-lofi")
+            .await?;
+        storage
+            .bind_repo_tag(tag.id, integration.id, "lofi-tools", "api")
+            .await?;
+        // Two repos bound; the target follows the last binding.
+        assert_eq!(
+            storage
+                .tag_settings(tag.id)
+                .await?
+                .sync_target
+                .unwrap()
+                .external_id,
+            "lofi-tools/api"
+        );
+        // Removing the targeted repo retargets to the remaining one.
+        storage
+            .unbind_repo_tag(tag.id, integration.id, "lofi-tools/api")
+            .await?;
+        let bound: Vec<String> = storage
+            .bound_repos(integration.id)
+            .await?
+            .into_iter()
+            .filter(|bound| bound.tag_id == tag.id)
+            .map(|bound| bound.external_id())
+            .collect();
+        assert_eq!(bound, vec!["lofi-tools/todo-lofi"]);
+        assert_eq!(
+            storage
+                .tag_settings(tag.id)
+                .await?
+                .sync_target
+                .unwrap()
+                .external_id,
+            "lofi-tools/todo-lofi"
+        );
+        // Removing the last one clears the target entirely.
+        storage
+            .unbind_repo_tag(tag.id, integration.id, "lofi-tools/todo-lofi")
+            .await?;
+        assert!(
+            storage
+                .tag_settings(tag.id)
+                .await?
+                .sync_target
+                .is_none()
+        );
+        assert!(storage.bound_repos(integration.id).await?.is_empty());
         Ok(())
     }
 

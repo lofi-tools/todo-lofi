@@ -1841,23 +1841,58 @@ impl Store {
         })
     }
 
-    /// Point a tag at a GitHub repo, or clear the target so the next sync
-    /// detects it from the project directory again (§5.3).
-    pub fn set_tag_github_repo(
+    /// Every repo this tag syncs with (links plus sync target), for the tag
+    /// panel's repository list (§5.3).
+    pub fn tag_bound_repos(
         &self,
         tag_id: u64,
         integration_id: u64,
-        repo: Option<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<String>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s
+                .bound_repos(integration_id)
+                .await?
+                .into_iter()
+                .filter(|bound| bound.tag_id == tag_id)
+                .map(|bound| bound.external_id())
+                .collect())
+        })
+    }
+
+    /// Bind one more repo to a tag: its issues land here too (§5.3).
+    pub fn bind_tag_repo(
+        &self,
+        tag_id: u64,
+        integration_id: u64,
+        repo: String,
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            let target = repo.map(|external_id| storage::SyncTarget {
-                integration_id,
-                external_id,
-            });
-            Ok(s.set_tag_sync_target(tag_id, target).await?)
+            let (owner, name) = repo
+                .split_once('/')
+                .ok_or_else(|| anyhow::anyhow!("expected owner/repo, got {repo}"))?;
+            Ok(s.bind_repo_tag(tag_id, integration_id, owner, name).await?)
+        })
+    }
+
+    /// Unbind one repo from a tag, retargeting the sync target when it
+    /// pointed at the removed repo (§5.3).
+    pub fn unbind_tag_repo(
+        &self,
+        tag_id: u64,
+        integration_id: u64,
+        repo: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.unbind_repo_tag(tag_id, integration_id, &repo).await?)
         })
     }
 

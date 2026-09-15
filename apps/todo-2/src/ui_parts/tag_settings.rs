@@ -27,7 +27,7 @@ use storage::prelude::*;
 use super::apps::rank_tag;
 use super::task_details::{TAG_EDITOR_CONTEXT, TagConfirmText, TagSuggestNext, TagSuggestPrev};
 use crate::store::Store;
-use crate::theme::{APP_BG, CARD_BG, HAIRLINE, TEXT_MUTED};
+use crate::theme::{APP_BG, CARD_BG, HAIRLINE, PANEL_BG, TEXT_MUTED};
 
 #[derive(Clone)]
 pub enum TagSettingsEvent {
@@ -46,6 +46,8 @@ pub struct TagSettingsPanel {
     /// The remote object this tag is bound to, when it is synced (a GitHub
     /// `owner/repo` today), shown beside the directories and changeable there.
     sync_target: Option<storage::SyncTarget>,
+    /// Every `owner/repo` this tag syncs with: the repository list.
+    bound_repos: Vec<String>,
     /// The `owner/repo` the tag's directories currently resolve to, shown
     /// when nothing is bound yet: what the next sync would detect (§5.3).
     detected_repo: Option<String>,
@@ -147,6 +149,7 @@ let dir_picker_input = cx.new(|cx| {
             parents: Vec::new(),
             dirs: Vec::new(),
             sync_target: None,
+            bound_repos: Vec::new(),
             detected_repo: None,
             _detect: None,
             isolated_build_cache: false,
@@ -257,6 +260,13 @@ let dir_picker_input = cx.new(|cx| {
                 .into_iter()
                 .find(|integration| integration.provider == "github")
                 .map(|integration| integration.id);
+            let bound_repos = match github_integration_id {
+                Some(integration_id) => store
+                    .tag_bound_repos(tag_id, integration_id, cx)
+                    .await
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
             let sections = sections.await.unwrap_or_default();
             let bindings = bindings.await.unwrap_or_default();
             let blocked = descendants.await.unwrap_or_default();
@@ -271,6 +281,7 @@ let dir_picker_input = cx.new(|cx| {
                 this.parents = parents;
                 this.dirs = dirs;
                 this.sync_target = sync_target;
+                this.bound_repos = bound_repos;
                 this.isolated_build_cache = isolated_build_cache;
                 this.github_integration_id = github_integration_id;
                 this.sections = sections;
@@ -305,6 +316,29 @@ let dir_picker_input = cx.new(|cx| {
                     }
                     Err(error) => format!("{error}"),
                 });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Run a write and re-read without the one-line notice: for controls
+    /// whose state is visible on the control itself, an echo at the card
+    /// bottom restating it is just noise. Failures still surface.
+    fn run_quiet(&mut self, action: Task<anyhow::Result<()>>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let outcome = action.await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(()) => {
+                        this.refresh(cx);
+                        cx.emit(TagSettingsEvent::Changed);
+                    }
+                    Err(error) => {
+                        this.notice = Some(format!("{error}"));
+                    }
+                }
                 cx.notify();
             })
             .ok();
@@ -597,34 +631,39 @@ let dir_picker_input = cx.new(|cx| {
         self.run(action, "Directory removed.", cx);
     }
 
-    /// Point this tag at a repo, or clear the binding so the next sync detects
-    /// it from the project directory's remotes again (§5.3).
-    fn set_repo_binding(&mut self, repo: Option<String>, cx: &mut Context<Self>) {
-        let Some(tag) = self.tag.clone() else {
+    /// Bind one more repository: its issues land in this tag too (§5.3).
+    fn add_repo_binding(&mut self, repo: String, cx: &mut Context<Self>) {
+        let (Some(tag), Some(integration_id)) = (self.tag.clone(), self.github_integration_id)
+        else {
             return;
         };
-        let Some(integration_id) = self.github_integration_id else {
+        let action = self
+            .store
+            .bind_tag_repo(tag.id, integration_id, repo.clone(), cx);
+        self.run(action, &format!("Syncing with {repo}."), cx);
+    }
+
+    /// Unbind one repository: its link goes and the sync target moves to a
+    /// remaining repo or clears. Synced tasks keep their local copies.
+    fn remove_repo_binding(&mut self, repo: String, cx: &mut Context<Self>) {
+        let (Some(tag), Some(integration_id)) = (self.tag.clone(), self.github_integration_id)
+        else {
             return;
         };
-        let action = self.store.set_tag_github_repo(tag.id, integration_id, repo.clone(), cx);
-        let note = match &repo {
-            Some(repo) => format!("Syncing with {repo}."),
-            None => "Binding cleared; the repo is detected from the directory again.".to_string(),
-        };
-        self.run(action, &note, cx);
+        let action = self
+            .store
+            .unbind_tag_repo(tag.id, integration_id, repo.clone(), cx);
+        self.run(action, &format!("Unbound {repo}."), cx);
     }
 
     fn set_isolated_build_cache(&mut self, isolated: bool, cx: &mut Context<Self>) {
         let Some(tag) = self.tag.clone() else {
             return;
         };
+        // Quiet: the switch position plus its label says the state, so no
+        // echo at the card bottom.
         let action = self.store.set_tag_isolated_build_cache(tag.id, isolated, cx);
-        let note = if isolated {
-            "Each worktree builds into its own target directory."
-        } else {
-            "Worktrees share the repository's build cache."
-        };
-        self.run(action, note, cx);
+        self.run_quiet(action, cx);
     }
 
     /// Open or close the repo picker, fetching the account's repositories the
@@ -702,14 +741,12 @@ let dir_picker_input = cx.new(|cx| {
             .filter(|(full_name, _)| query.is_empty() || full_name.to_lowercase().contains(&query))
             .cloned()
             .collect();
-        // Bound repos first, so the current choice is visible in a long list.
-        let bound = self
-            .sync_target
-            .as_ref()
-            .map(|target| target.external_id.clone());
+        // Bound repos first, so the current choices stay visible in a long list.
+        let bound = self.bound_repos.clone();
         matching.sort_by(|a, b| {
-            (Some(&a.0) != bound.as_ref())
-                .cmp(&(Some(&b.0) != bound.as_ref()))
+            bound
+                .contains(&b.0)
+                .cmp(&bound.contains(&a.0))
                 .then(a.0.cmp(&b.0))
         });
         matching
@@ -720,46 +757,43 @@ let dir_picker_input = cx.new(|cx| {
         let results = self.repo_picker_results(&query);
         if let Some((full_name, _)) = results.get(self.repo_picker_cursor).cloned() {
             self.repo_picker_open = false;
-            self.set_repo_binding(Some(full_name), cx);
+            self.add_repo_binding(full_name, cx);
         }
     }
 
-    /// The GitHub section: the bound repo with its change affordance, plus the
-    /// build-cache choice. Rendered only when GitHub is connected, since
-    /// otherwise there is nothing to bind the tag to (§5.3, §5.8, §6.4).
+    /// The GitHub section: the bound repositories as a list — one row per
+    /// repo with a hover cross, then a `+` row to bind another — plus what
+    /// the next sync would detect when nothing is bound yet. Rendered only
+    /// for directory-backed tags while GitHub is connected: without a local
+    /// directory there is nothing to detect from (§5.3, §5.8, §6.4).
     fn github_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.github_integration_id?;
-        let bound = self
-            .sync_target
-            .as_ref()
-            .map(|target| target.external_id.clone());
-        // What the next sync would bind, so an unbound tag with a GitHub
-        // remote names it instead of a generic placeholder.
-        let detected = match &bound {
-            Some(_) => None,
-            None => self.detected_repo.clone(),
+        if self.dirs.is_empty() {
+            return None;
+        }
+        let bound = self.bound_repos.clone();
+        // What the next sync would bind, shown while the list is empty so an
+        // unbound tag with a GitHub remote still names it.
+        let detected = match bound.is_empty() {
+            true => self.detected_repo.clone(),
+            false => None,
         };
-        let bound_row = div()
-            .h_flex()
-            .items_center()
-            .gap_2()
-            .px_2()
-            .py_0p5()
-            .rounded_md()
-            .hover(|style| style.bg(rgb(0x2a2a2a)))
-            .child(match (&bound, &detected) {
-                (Some(repo), _) => div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .child(repo.clone()),
-                (None, Some(repo)) => div()
-                    .flex_1()
-                    .min_w_0()
+        let mut rows: Vec<AnyElement> = bound
+            .iter()
+            .map(|repo| {
+                let value = repo.clone();
+                let group = format!("repo-{repo}-group");
+                let cross_group = group.clone();
+                div()
+                    .id(format!("repo-{repo}"))
+                    .group(group)
                     .h_flex()
                     .items_center()
                     .gap_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .hover(|style| style.bg(rgb(0x2a2a2a)))
                     .child(
                         gpui_component::Icon::new(gpui_component_assets::IconName::Github)
                             .with_size(Size::Small),
@@ -771,47 +805,73 @@ let dir_picker_input = cx.new(|cx| {
                             .truncate()
                             .text_sm()
                             .child(repo.clone()),
-                    ),
-                (None, None) => div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .child("Detected from the project directory"),
+                    )
+                    .child(
+                        div()
+                            .id(format!("repo-{repo}-remove"))
+                            .text_size(px(10.))
+                            .text_color(rgb(0x737373))
+                            .opacity(0.0)
+                            .group_hover(cross_group, |style| style.opacity(1.0))
+                            .hover(|style| style.text_color(rgb(0xe5e5e5)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_repo_binding(value.clone(), cx)
+                            })),
+                    )
+                    .into_any_element()
             })
-            .child(
-                Button::new("tag-settings-choose-repo")
-                    .ghost()
-                    .compact()
-                    .label(if self.repo_picker_open {
-                        "Close"
-                    } else {
-                        "Choose…"
-                    })
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle_repo_picker(window, cx)),
-                    ),
-            )
-            .when(bound.is_some(), |this| {
-                this.child(
-                    Button::new("tag-settings-clear-repo")
-                        .ghost()
-                        .compact()
-                        .label("Clear")
-                        .tooltip("Unbind, so the repository is detected from the directory again")
-                        .on_click(cx.listener(|this, _, _, cx| this.set_repo_binding(None, cx))),
-                )
-            });
+            .collect();
+        if let Some(repo) = detected {
+            rows.push(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .hover(|style| style.bg(rgb(0x2a2a2a)))
+                    .child(
+                        gpui_component::Icon::new(gpui_component_assets::IconName::Github)
+                            .with_size(Size::Small),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(repo),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT_MUTED))
+                            .child("detected"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        rows.push(
+            Button::new("tag-settings-add-repo")
+                .ghost()
+                .compact()
+                .icon(IconName::Plus)
+                .tooltip("Bind another repository")
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_repo_picker(window, cx)))
+                .into_any_element(),
+        );
 
         Some(
             div()
                 .v_flex()
                 .gap_1()
-                .child(section_label("GitHub repository"))
+                .child(section_label("GitHub repositories"))
                 .child(hint(
-                    "Tasks in this tag sync with the bound repository's issues.",
+                    "Tasks in this tag sync with these repositories' issues.",
                 ))
-                .child(bound_row)
+                .child(list_box(rows))
                 .when_some(self.repo_picker(cx), |this, picker| this.child(picker))
                 .into_any_element(),
         )
@@ -881,7 +941,7 @@ let dir_picker_input = cx.new(|cx| {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.repo_picker_open = false;
-                        this.set_repo_binding(Some(value.clone()), cx);
+                        this.add_repo_binding(value.clone(), cx);
                     }))
                     .into_any_element()
             })
@@ -1167,7 +1227,8 @@ let dir_picker_input = cx.new(|cx| {
             .absolute()
             .top(px(72.))
             .right(px(32.))
-            .w(px(360.))
+            .min_w(px(360.))
+            .max_w(px(560.))
             .max_h(px(560.))
             .bg(rgb(CARD_BG))
             .border_1()
@@ -1191,10 +1252,19 @@ let dir_picker_input = cx.new(|cx| {
             .child(
                 div()
                     .v_flex()
-                    .child(div().text_sm().font_semibold().child(tag.label()))
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .truncate()
+                            .child(tag.label()),
+                    )
                     .child(
                         div()
                             .text_xs()
+                            .truncate()
                             .text_color(rgb(TEXT_MUTED))
                             .child(match (&self.sync_target, directory_backed) {
                                 // A bound tag says which repo it syncs with, so
@@ -1372,7 +1442,7 @@ let dir_picker_input = cx.new(|cx| {
                         "A tag with directories is a project: folder icon, agent pane, and no app \
                          bindings. The first one that exists is the agent's working directory.",
                     ))
-                    .child(div().v_flex().children(dir_rows))
+                    .child(list_box(dir_rows))
                     .child(
                         div()
                             .relative()
@@ -1606,8 +1676,21 @@ fn removable_row(
         .into_any_element()
 }
 
-fn section_label(text: &str) -> AnyElement {
+/// Framed container for the settings lists (directories, repositories):
+/// hairline border on a surface slightly darker than the card.
+fn list_box(children: Vec<AnyElement>) -> AnyElement {
     div()
+        .v_flex()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(HAIRLINE))
+        .bg(rgb(PANEL_BG))
+        .p_1()
+        .children(children)
+        .into_any_element()
+}
+
+fn section_label(text: &str) -> AnyElement {    div()
         .text_xs()
         .font_semibold()
         .text_color(rgb(TEXT_MUTED))
