@@ -214,6 +214,8 @@ impl TodoStore {
     /// Seed project tag: a `project:{path}` tag with a human-friendly display
     /// name. Directory-backed tags stay user-owned (an app may not manage
     /// them); the demo tasks inside carry the builtin app's ownership instead.
+    /// The folder is stored in the tag's directory settings like any other
+    /// project tag, so tag settings lists it and sync detection reads it.
     pub async fn create_seed_project_tag(
         &mut self,
         path: &std::path::Path,
@@ -227,6 +229,8 @@ impl TodoStore {
             .exec(&mut self.db)
             .await
             .context(crate::error::CreateTagSnafu { name })?;
+        self.add_tag_dir(tag.id, path.display().to_string())
+            .await?;
         Ok(tag)
     }
 

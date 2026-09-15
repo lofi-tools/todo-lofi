@@ -504,6 +504,10 @@ impl TodoStore {
                 std::path::Path::new("/Users/me/src/me/about-me"),
                 "about-me",
             ),
+            (
+                std::path::Path::new("/Users/me/src/me/todo-lofi"),
+                "todo-lofi",
+            ),
         ] {
             self.create_seed_project_tag(path, label).await?;
         }
@@ -890,9 +894,9 @@ mod tests {
         assert_eq!(tasks.len(), 24);
 
         let tags = store.list_tags().await?;
-        // 9 seed tags, 2 project tags, plus the travel managed tag and
+        // 9 seed tags, 3 project tags, plus the travel managed tag and
         // its 8 checklist sections, enabled by default.
-        assert_eq!(tags.len(), 20);
+        assert_eq!(tags.len(), 21);
 
         // The builtin demo app owns the shipped rows so sync never touches
         // them; workflow steps are covered by the workflow_run_id guard
@@ -920,6 +924,33 @@ mod tests {
             }
         }
         assert_eq!(demo_tags, 9, "the nine seeded tags belong to the demo app");
+
+        // The seeded project tags are directory-backed: their folders are
+        // stored in the directory settings, not just the `project:` name.
+        for (name, dir) in [
+            (
+                "project:/Users/me/src/me/accounting",
+                "/Users/me/src/me/accounting",
+            ),
+            (
+                "project:/Users/me/src/me/about-me",
+                "/Users/me/src/me/about-me",
+            ),
+            (
+                "project:/Users/me/src/me/todo-lofi",
+                "/Users/me/src/me/todo-lofi",
+            ),
+        ] {
+            let tag = store
+                .get_tag_by_name(name)
+                .await?
+                .expect("seeded project tag should exist");
+            assert_eq!(
+                store.tag_settings(tag.id).await?.dirs,
+                vec![dir.to_string()],
+                "{name} should list its directory"
+            );
+        }
 
         // Automations start disabled: no runs exist until enabled — except
         // travel checklists, which is enabled by default: its managed tag
