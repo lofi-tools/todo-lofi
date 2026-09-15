@@ -52,6 +52,8 @@ pub struct IntegrationsView {
     github_last_sync: Option<jiff::Timestamp>,
     github_connecting: bool,
     github_syncing: bool,
+    /// Whether the GitHub card's settings (the personal token) are expanded.
+    github_settings_expanded: bool,
     /// Whether the connection file holds a personal access token, which
     /// authenticates every request instead of the device-flow token.
     github_pat_saved: bool,
@@ -85,6 +87,7 @@ impl IntegrationsView {
             github_last_sync: None,
             github_connecting: false,
             github_syncing: false,
+            github_settings_expanded: false,
             github_pat_saved: github_auth::has_personal_token(),
             github_pat_input: None,
             _github_pat_sub: None,
@@ -156,6 +159,31 @@ impl IntegrationsView {
     /// changed elsewhere).
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reload(cx);
+    }
+
+    /// Collapse any expanded integration settings. Returns whether anything
+    /// was open, so the window-wide Escape observer knows if it consumed
+    /// the keypress.
+    pub fn collapse_settings(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut collapsed = false;
+        if self.github_settings_expanded {
+            self.github_settings_expanded = false;
+            collapsed = true;
+        }
+        if let Some(app_id) = self.todoist_app_id
+            && self
+                .settings
+                .read_with(cx, |settings, _| settings.is_expanded(app_id))
+        {
+            self.settings.update(cx, |settings, cx| {
+                settings.toggle_expanded(app_id, cx)
+            });
+            collapsed = true;
+        }
+        if collapsed {
+            cx.notify();
+        }
+        collapsed
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -441,11 +469,39 @@ impl IntegrationsView {
             Ok(login) => {
                 this.update(cx, |this, cx| {
                     this.github_pat_saved = login.is_some();
-                    this.status = Some(match login {
+                    this.status = Some(match &login {
                         Some(login) => format!("Personal token saved for @{login}."),
                         None => "Personal token removed.".to_string(),
                     });
-                    this.reload(cx);
+                    // A token without a connection row syncs nothing, so a
+                    // first-time token also connects the integration.
+                    if login.is_some() && !this.github_connected() {
+                        let store = this.store.clone();
+                        let created =
+                            store.create_integration("github".to_string(), login, cx);
+                        this._github_sync = Some(cx.spawn(async move |this, cx| {
+                            match created.await {
+                                Ok(_) => {
+                                    this.update(cx, |this, cx| {
+                                        cx.emit(IntegrationsEvent::Changed);
+                                        this.reload(cx);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }
+                                Err(e) => {
+                                    this.update(cx, |this, cx| {
+                                        this.status =
+                                            Some(format!("GitHub connect failed: {e}"));
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }
+                            }
+                        }));
+                    } else {
+                        this.reload(cx);
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -634,11 +690,10 @@ impl IntegrationsView {
             self.settings
                 .read_with(cx, |settings, _| settings.is_expanded(app_id))
         });
-        let gear = app_id
-            .map(|app_id| {
-                self.settings
-                    .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
-            });
+        let gear = app_id.filter(|_| connected).map(|app_id| {
+            self.settings
+                .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
+        });
         let settings_block = app_id.map(|app_id| {
             self.settings
                 .update(cx, |settings, cx| settings.settings_block(app_id, 0, cx))
@@ -670,7 +725,6 @@ impl IntegrationsView {
                 .into_any_element()
         } else {
             Button::new("todoist-connect")
-                .ghost()
                 .compact()
                 .label(if self.connecting { "Waiting…" } else { "Connect" })
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -690,30 +744,52 @@ impl IntegrationsView {
                 .child(if connected { "Connected" } else { "Not connected" }),
         );
         controls = controls.child(actions);
-        if let Some(gear) = gear {
-            controls = controls.child(gear);
-        }
 
-        div()
+        let description = if connected {
+            "Sync projects both ways with Todoist."
+        } else {
+            "Sync projects both ways with Todoist. Connect to get started."
+        };
+        integration_card(!connected)
             .v_flex()
-            .gap_2()
+            .gap_3()
             .child(
-                integration_card(false)
+                div()
                     .h_flex()
                     .items_center()
                     .gap_3()
-                    .child(provider_icon(todoist_icon()))
+                    .child(provider_icon(todoist_icon()).when(!connected, |this| {
+                        this.opacity(0.45)
+                    }))
                     .child(
                         div()
                             .v_flex()
                             .flex_1()
                             .gap_0p5()
-                            .child(div().font_semibold().child("Todoist"))
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .font_semibold()
+                                            .when(!connected, |this| {
+                                                this.text_color(rgb(0x6b6b6b))
+                                            })
+                                            .child("Todoist"),
+                                    )
+                                    .when_some(gear, |this, gear| this.child(gear)),
+                            )
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
-                                    .child("Sync projects both ways with Todoist."),
+                                    .text_color(if connected {
+                                        rgb(0xa3a3a3)
+                                    } else {
+                                        rgb(0x5f5f5f)
+                                    })
+                                    .child(description),
                             ),
                     )
                     .child(controls),
@@ -785,6 +861,24 @@ impl IntegrationsView {
             .find(|i| i.provider == "github")
             .and_then(|i| i.account_label.clone());
         let connected = self.github_connected();
+        let expanded = self.github_settings_expanded;
+        let gear = connected.then(|| {
+            Button::new("github-settings")
+                .ghost()
+                .compact()
+                .with_size(Size::Small)
+                .icon(gpui_component_assets::IconName::Settings)
+                .tooltip(if expanded {
+                    "Hide settings".to_string()
+                } else {
+                    "Settings for GitHub".to_string()
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.github_settings_expanded = !this.github_settings_expanded;
+                    cx.notify();
+                }))
+                .into_any_element()
+        });
 
         let controls = if connected {
             div()
@@ -832,7 +926,6 @@ impl IntegrationsView {
                 )
                 .child(
                     Button::new("github-connect")
-                        .ghost()
                         .compact()
                         .label(if self.github_connecting {
                             "Waiting…"
@@ -857,47 +950,66 @@ impl IntegrationsView {
             .v_flex()
             .gap_2()
             .child(
-                integration_card(false)
-                    .h_flex()
-                    .items_center()
+                integration_card(!connected)
+                    .v_flex()
                     .gap_3()
-                    .child(provider_icon(gpui_component_assets::IconName::Github))
                     .child(
                         div()
-                            .v_flex()
-                            .flex_1()
-                            .gap_0p5()
+                            .h_flex()
+                            .items_center()
+                            .gap_3()
+                            .child(provider_icon(gpui_component_assets::IconName::Github).when(
+                                !connected,
+                                |this| this.opacity(0.45),
+                            ))
                             .child(
                                 div()
-                                    .h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().font_semibold().child("GitHub"))
-                                    .when_some(account, |this, account| {
+                                    .v_flex()
+                                    .flex_1()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(div().font_semibold().child("GitHub"))
+                                            .when(!connected, |this| {
+                                                this.text_color(rgb(0x6b6b6b))
+                                            })
+                                            .when_some(gear, |this, gear| this.child(gear))
+                                            .when_some(account, |this, account| {
+                                                this.child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x737373))
+                                                        .child(account),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(if connected {
+                                                rgb(0xa3a3a3)
+                                            } else {
+                                                rgb(0x5f5f5f)
+                                            })
+                                            .child("Issue-backed tasks get branches, worktrees and pull requests."),
+                                    )
+                                    .when_some(last_synced, |this, last_synced| {
                                         this.child(
                                             div()
                                                 .text_xs()
                                                 .text_color(rgb(0x737373))
-                                                .child(account),
+                                                .child(last_synced),
                                         )
                                     }),
                             )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
-                                    .child("Issue-backed tasks get branches, worktrees and pull requests."),
-                            )
-                            .when_some(last_synced, |this, last_synced| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(0x737373))
-                                        .child(last_synced),
-                                )
-                            }),
+                            .child(controls),
                     )
-                    .child(controls),
+                    .when(expanded, |this| {
+                        this.child(self.github_pat_block(window, cx))
+                    }),
             )
             .when_some(code, |this, code| {
                 let url = code.verification_uri.clone();
@@ -959,7 +1071,6 @@ impl IntegrationsView {
                         ),
                 )
             })
-            .child(self.github_pat_block(window, cx))
             .into_any_element()
     }
 
@@ -1041,16 +1152,16 @@ fn since_label(then: jiff::Timestamp, now: jiff::Timestamp) -> String {
     }
 }
 
-/// Subtle card shell for one integration row. `dimmed` grays the whole
-/// card out for integrations that are not available yet.
+/// Subtle card shell for one integration row. A dimmed card uses darker
+/// colors rather than opacity, so its Connect button stays full-strength
+/// as the one wanted interaction.
 fn integration_card(dimmed: bool) -> gpui::Div {
     div()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(0x2e2e2e))
-        .bg(rgb(0x232323))
+        .border_color(if dimmed { rgb(0x232323) } else { rgb(0x2e2e2e) })
+        .bg(if dimmed { rgb(0x1a1a1a) } else { rgb(0x232323) })
         .p_4()
-        .when(dimmed, |this| this.opacity(0.55))
 }
 
 fn provider_icon(icon: impl IntoElement) -> gpui::Div {

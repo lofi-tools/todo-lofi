@@ -557,6 +557,15 @@ impl Layout {
                             .update(cx, |panel, cx| panel.close_add(cx));
                         return;
                     }
+                    // An expanded integration's settings collapse first; the
+                    // next Escape leaves the panel as usual.
+                    if layout.panel == NavPanel::Integrations
+                        && layout
+                            .integrations
+                            .update(cx, |view, cx| view.collapse_settings(cx))
+                    {
+                        return;
+                    }
                     if layout.panel != NavPanel::Tasks {
                         layout.show_panel(NavPanel::Tasks, cx);
                         return;
