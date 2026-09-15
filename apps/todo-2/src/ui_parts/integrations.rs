@@ -240,6 +240,10 @@ impl IntegrationsView {
                     let token = github_auth::complete(polled).await?;
                     Ok::<_, anyhow::Error>(github_auth::account_login(&token).await.ok())
                 });
+                // The code is already on the clipboard and the GitHub device
+                // page already open by the time the user looks at the card.
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(login.user_code.clone()));
+                todoist_auth::open_browser(&login.verification_uri);
                 this.github_code = Some(login);
                 this.github_code_expires = Some(
                     std::time::Instant::now() + std::time::Duration::from_secs(expires_in),
