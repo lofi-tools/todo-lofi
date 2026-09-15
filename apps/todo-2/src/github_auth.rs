@@ -35,6 +35,11 @@ struct GithubFile {
     client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     access_token: Option<String>,
+    /// Optional personal access token. When present, every API call
+    /// authenticates with it instead of the device-flow token, so work repos
+    /// stay reachable without an org admin approving the OAuth app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
     /// The account the token belongs to, for the integration card.
@@ -291,11 +296,14 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
                 // app, so its token is kept in memory rather than overwriting
                 // a real connection in the config file.
                 if !from_env {
+                    let personal_token =
+                        load_at(&client_file_path()?).ok().flatten().and_then(|file| file.personal_token);
                     save_at(
                         &client_file_path()?,
                         &GithubFile {
                             client_id,
                             access_token: Some(access_token.clone()),
+                            personal_token,
                             scope,
                             login,
                             created_at: Some(jiff::Timestamp::now().as_second()),
@@ -338,9 +346,49 @@ pub async fn account_login(token: &str) -> anyhow::Result<String> {
 fn stored_credentials_at(path: &std::path::Path) -> Option<StoredCredentials> {
     let file = load_at(path).ok().flatten()?;
     Some(StoredCredentials {
-        token: file.access_token.clone()?,
+        token: file
+            .personal_token
+            .clone()
+            .or(file.access_token.clone())?,
         login: file.login.clone(),
     })
+}
+
+/// Whether a personal access token is stored, for the integration card.
+pub fn has_personal_token() -> bool {
+    client_file_path()
+        .ok()
+        .and_then(|path| load_at(&path).ok().flatten())
+        .and_then(|file| file.personal_token)
+        .is_some_and(|token| !token.is_empty())
+}
+
+/// Store (or clear, when `None` or blank) the personal access token, keeping
+/// the rest of the connection file. Resolves the account the token belongs
+/// to so the card can label it. Runs on the Tokio runtime.
+pub async fn save_personal_token(token: Option<String>) -> anyhow::Result<Option<String>> {
+    let token = token.map(|token| token.trim().to_string()).filter(|token| !token.is_empty());
+    let path = client_file_path()?;
+    let mut file = load_at(&path)?.unwrap_or(GithubFile {
+        client_id: String::new(),
+        access_token: None,
+        personal_token: None,
+        scope: None,
+        login: None,
+        created_at: None,
+    });
+    file.personal_token = token.clone();
+    file.login = None;
+    save_at(&path, &file)?;
+    let Some(token) = token else {
+        return Ok(None);
+    };
+    let login = account_login(&token).await.map_err(|e| {
+        anyhow::anyhow!("The token was saved but GitHub would not accept it: {e}")
+    })?;
+    file.login = Some(login.clone());
+    save_at(&path, &file)?;
+    Ok(Some(login))
 }
 
 /// The stored token, when a connection exists. Pure file read, so the app can
@@ -490,6 +538,7 @@ mod tests {
             &GithubFile {
                 client_id: "client".to_string(),
                 access_token: None,
+                personal_token: None,
                 scope: None,
                 login: None,
                 created_at: None,
@@ -503,6 +552,7 @@ mod tests {
             &GithubFile {
                 client_id: "client".to_string(),
                 access_token: Some("gho_token".to_string()),
+                personal_token: None,
                 scope: Some(SCOPE.to_string()),
                 login: Some("me".to_string()),
                 created_at: Some(7),
@@ -512,6 +562,22 @@ mod tests {
         let credentials = stored_credentials_at(&path).expect("token round-trips through the file");
         assert_eq!(credentials.token, "gho_token");
         assert_eq!(credentials.login.as_deref(), Some("me"));
+
+        // A personal token wins over the device-flow token everywhere.
+        save_at(
+            &path,
+            &GithubFile {
+                client_id: "client".to_string(),
+                access_token: Some("gho_token".to_string()),
+                personal_token: Some("github_pat_token".to_string()),
+                scope: Some(SCOPE.to_string()),
+                login: Some("me".to_string()),
+                created_at: Some(7),
+            },
+        )
+        .unwrap();
+        let credentials = stored_credentials_at(&path).expect("token round-trips through the file");
+        assert_eq!(credentials.token, "github_pat_token");
 
         #[cfg(unix)]
         {
@@ -548,6 +614,7 @@ mod tests {
                 &GithubFile {
                     client_id: "from-file".to_string(),
                     access_token: Some("gho_token".to_string()),
+                    personal_token: None,
                     scope: None,
                     login: None,
                     created_at: None,

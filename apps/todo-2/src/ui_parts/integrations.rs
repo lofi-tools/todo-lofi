@@ -4,10 +4,11 @@
 //! integration.
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Window,
-    div, px, rgb, prelude::FluentBuilder,
+    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window, div, px, rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Sizable, Size, StyledExt};
 
 use crate::github_auth;
@@ -51,6 +52,13 @@ pub struct IntegrationsView {
     github_last_sync: Option<jiff::Timestamp>,
     github_connecting: bool,
     github_syncing: bool,
+    /// Whether the connection file holds a personal access token, which
+    /// authenticates every request instead of the device-flow token.
+    github_pat_saved: bool,
+    /// The token field on the GitHub card, created on first render like the
+    /// tag pickers below. The token itself is never echoed back into it.
+    github_pat_input: Option<Entity<InputState>>,
+    _github_pat_sub: Option<Subscription>,
     _load: Option<gpui::Task<()>>,
     _connect: Option<gpui::Task<()>>,
     _sync: Option<gpui::Task<()>>,
@@ -77,6 +85,9 @@ impl IntegrationsView {
             github_last_sync: None,
             github_connecting: false,
             github_syncing: false,
+            github_pat_saved: github_auth::has_personal_token(),
+            github_pat_input: None,
+            _github_pat_sub: None,
             _load: None,
             _connect: None,
             _sync: None,
@@ -175,6 +186,7 @@ impl IntegrationsView {
                 this.update(cx, |this, cx| {
                     this.connected = list;
                     this.github_last_sync = last_sync;
+                    this.github_pat_saved = github_auth::has_personal_token();
                     if this.todoist_app_id != todoist_app_id {
                         // New (or removed) provider app: drop the cached tag
                         // picker so it rebuilds for the right app.
@@ -386,7 +398,74 @@ impl IntegrationsView {
         }));
     }
 
+        /// The token field, created on first render like the pickers below.
+    fn pat_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if let Some(input) = self.github_pat_input.clone() {
+            return input;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("ghp_… or github_pat_…", window, cx);
+            state
+        });
+        self._github_pat_sub = Some(cx.subscribe(&input, |this, _input, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.store_github_pat(None, cx),
+            _ => {}
+        }));
+        self.github_pat_input = Some(input.clone());
+        input
+    }
+
+    /// Persist the token field's contents: a blank field clears the stored
+    /// token. The field is cleared after reading when a window is at hand.
+    fn save_github_pat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let token = self.pat_input(window, cx).read(cx).text().to_string();
+        self.pat_input(window, cx).update(cx, |input, cx| {
+            input.set_value("", window, cx)
+        });
+        self.store_github_pat(Some(token), cx);
+    }
+
+    fn store_github_pat(&mut self, token: Option<String>, cx: &mut Context<Self>) {
+        let token = token.or_else(|| {
+            self.github_pat_input
+                .clone()
+                .map(|input| input.read(cx).text().to_string())
+        });
+        let save = gpui_tokio::Tokio::spawn_result(cx, async move {
+            github_auth::save_personal_token(token).await
+        });
+        self.status = Some("Saving the personal token…".to_string());
+        cx.notify();
+        self._github_sync = Some(cx.spawn(async move |this, cx| match save.await {
+            Ok(login) => {
+                this.update(cx, |this, cx| {
+                    this.github_pat_saved = login.is_some();
+                    this.status = Some(match login {
+                        Some(login) => format!("Personal token saved for @{login}."),
+                        None => "Personal token removed.".to_string(),
+                    });
+                    this.reload(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                let message = format!("Personal token failed: {e}");
+                tracing::error!("{message}");
+                this.update(cx, |this, cx| {
+                    this.github_pat_saved = github_auth::has_personal_token();
+                    this.status = Some(message.clone());
+                    cx.emit(IntegrationsEvent::Notice(message));
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
+
     fn disconnect_github(&mut self, cx: &mut Context<Self>) {
+
         let Some(id) = self
             .connected
             .iter()
@@ -405,6 +484,7 @@ impl IntegrationsView {
                     .map(|e| format!(" The stored token could not be removed: {e}"));
                 this.update(cx, |this, cx| {
                     this.github_code = None;
+                    this.github_pat_saved = false;
                     this.status = Some(match forgotten {
                         Some(note) => format!("GitHub disconnected.{note}"),
                         None => "GitHub disconnected.".to_string(),
@@ -695,9 +775,10 @@ impl IntegrationsView {
 
 impl IntegrationsView {
     /// The GitHub card: device-flow connect (the code, then the poll) and
-    /// disconnect once connected. The token lives only in
+    /// disconnect once connected, plus an optional personal access token for
+    /// orgs that never approved the OAuth app. The token lives only in
     /// `~/.config/my-todo/github.json`; the database holds the connection row.
-    fn github_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn github_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let account = self
             .connected
             .iter()
@@ -878,6 +959,55 @@ impl IntegrationsView {
                         ),
                 )
             })
+            .child(self.github_pat_block(window, cx))
+            .into_any_element()
+    }
+
+    /// Optional personal access token: authenticates every request instead
+    /// of the device-flow token, for orgs that never approved the OAuth app.
+    /// The token is write-only on screen — the field never echoes it back.
+    fn github_pat_block(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let input = self.pat_input(window, cx);
+        let using = self.github_pat_saved;
+        div()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x2e2e2e))
+            .bg(rgb(0x1e1e1e))
+            .px_3()
+            .py_2()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x737373))
+                    .child(if using {
+                        "Syncing with a personal token. Save an empty field to remove it."
+                    } else {
+                        "Optional: a personal token, for orgs that never approved the app."
+                    }),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&input).appearance(false)))
+                    .child(
+                        Button::new("github-pat-save")
+                            .ghost()
+                            .compact()
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_github_pat(window, cx);
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -951,7 +1081,7 @@ impl Render for IntegrationsView {
                     .gap_4()
                     .child(div().text_xl().font_semibold().child("Integrations"))
                     .child(self.todoist_card(window, cx))
-                    .child(self.github_card(cx))
+                    .child(self.github_card(window, cx))
                     .when_some(self.status.clone(), |this, status| {
                         this.child(
                             div().text_sm().text_color(rgb(0xa3a3a3)).child(status),
