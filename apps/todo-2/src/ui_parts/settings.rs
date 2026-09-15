@@ -679,7 +679,7 @@ impl SettingsView {
                             )
                             .into_any_element(),
                         picker.update(cx, |picker, cx| {
-                            picker.render_picker(&picker_id, window, cx)
+                            picker.render_settings_block(&picker_id, window, cx)
                         }),
                     ],
                 ));

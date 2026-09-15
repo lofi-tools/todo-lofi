@@ -547,22 +547,29 @@ impl AppSettings {
                 })
                 .unwrap_or_default();
             let label = app.label.clone();
-            lines.push(self.line(
-                "This app",
-                Button::new(format!("disable-app-{app_id}"))
-                    .ghost()
-                    .compact()
-                    .with_size(Size::Small)
-                    .text_color(rgb(DANGER))
-                    .label("Disable…")
-                    .tooltip("Stop managing everything this app owns")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let label = label.clone();
-                        let bound = bound.clone();
-                        this.confirm_disable(app_id, label, bound, window, cx);
-                    }))
+            lines.push(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_3()
+                    .min_h(px(28.))
+                    .child(div().flex_1().min_w_0())
+                    .child(
+                        Button::new(format!("disable-app-{app_id}"))
+                            .ghost()
+                            .compact()
+                            .with_size(Size::Small)
+                            .text_color(rgb(DANGER))
+                            .label(format!("Disable {label}"))
+                            .tooltip("Stop managing everything this app owns")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let label = label.clone();
+                                let bound = bound.clone();
+                                this.confirm_disable(app_id, label, bound, window, cx);
+                            })),
+                    )
                     .into_any_element(),
-            ));
+            );
         }
 
         if lines.is_empty() {

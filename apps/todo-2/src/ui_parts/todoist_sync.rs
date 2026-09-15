@@ -45,6 +45,8 @@ pub struct TodoistSyncPicker {
     local_tags: Vec<(u64, String)>,
     /// Step two of the add flow: the remote project being paired.
     selected_remote: Option<(String, String)>,
+    /// Whether the two-step add flow is open (in a popover over the pairs).
+    adding: bool,
     remote_filter: Entity<InputState>,
     local_filter: Entity<InputState>,
     _remote_sub: Subscription,
@@ -87,6 +89,7 @@ impl TodoistSyncPicker {
             remote_error: None,
             local_tags: Vec::new(),
             selected_remote: None,
+            adding: false,
             remote_filter,
             local_filter,
             _remote_sub,
@@ -100,6 +103,24 @@ impl TodoistSyncPicker {
         picker
     }
 
+    /// Open the two-step add flow in its popover.
+    pub fn start_adding(&mut self, cx: &mut Context<Self>) {
+        self.adding = true;
+        self.selected_remote = None;
+        cx.notify();
+    }
+
+    /// Close the add flow, discarding the step in progress.
+    pub fn cancel_adding(&mut self, cx: &mut Context<Self>) {
+        self.adding = false;
+        self.selected_remote = None;
+        cx.notify();
+    }
+
+    pub fn is_adding(&self) -> bool {
+        self.adding
+    }
+
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
         self._task = Some(cx.spawn(async move |this, cx| {
@@ -107,7 +128,10 @@ impl TodoistSyncPicker {
             let integration_id = integration.map(|integration| integration.id);
             let (pairs, locals) = match integration_id {
                 Some(id) => {
-                    let links = store.integration_tag_pairs(id, cx).await.unwrap_or_default();
+                    let links = store
+                        .integration_tag_pairs(id, cx)
+                        .await
+                        .unwrap_or_default();
                     let tags = store.list_tags(cx).await.unwrap_or_default();
                     let pairs = links
                         .into_iter()
@@ -127,10 +151,8 @@ impl TodoistSyncPicker {
                 match remote {
                     Ok(projects) => {
                         this.remote_error = None;
-                        let names: std::collections::HashMap<&String, &String> = projects
-                            .iter()
-                            .map(|(id, name)| (id, name))
-                            .collect();
+                        let names: std::collections::HashMap<&String, &String> =
+                            projects.iter().map(|(id, name)| (id, name)).collect();
                         this.pairs = pairs
                             .into_iter()
                             .map(|(external_id, tag_label)| {
@@ -187,7 +209,9 @@ impl TodoistSyncPicker {
             .remote
             .iter()
             .filter(|(id, _)| !self.pairs.iter().any(|pair| &pair.external_id == id))
-            .filter_map(|(id, name)| rank_tag(&query, name).map(|rank| (rank, id.clone(), name.clone())))
+            .filter_map(|(id, name)| {
+                rank_tag(&query, name).map(|rank| (rank, id.clone(), name.clone()))
+            })
             .collect();
         ranked.sort();
         ranked
@@ -207,7 +231,9 @@ impl TodoistSyncPicker {
         let mut ranked: Vec<(usize, u64, String)> = self
             .local_tags
             .iter()
-            .filter_map(|(id, label)| rank_tag(&query, label).map(|rank| (rank, *id, label.clone())))
+            .filter_map(|(id, label)| {
+                rank_tag(&query, label).map(|rank| (rank, *id, label.clone()))
+            })
             .collect();
         ranked.sort();
         ranked
@@ -270,6 +296,7 @@ impl TodoistSyncPicker {
                 }
                 this.selected_remote = None;
                 this.pending_clear_local = true;
+                this.adding = false;
                 cx.emit(TodoistSyncEvent::Changed);
                 this.refresh(cx);
                 cx.notify();
@@ -282,9 +309,7 @@ impl TodoistSyncPicker {
         let Some(integration_id) = self.integration_id else {
             return;
         };
-        let unlink = self
-            .store
-            .unlink_tag(integration_id, external_id, cx);
+        let unlink = self.store.unlink_tag(integration_id, external_id, cx);
         self._task = Some(cx.spawn(async move |this, cx| {
             let outcome = unlink.await;
             this.update(cx, |this, cx| {
@@ -299,13 +324,9 @@ impl TodoistSyncPicker {
         }));
     }
 
-    /// Full block: current pairs, then the two-step add flow.
-    pub fn render_picker(
-        &mut self,
-        id_prefix: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// Deferred input clears (event handlers lack `Window`; render has it):
+    /// remote after picking a project, local after pairing completes.
+    fn flush_pending_clears(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending_clear_remote {
             self.pending_clear_remote = false;
             self.remote_filter.update(cx, |input, cx| {
@@ -318,6 +339,17 @@ impl TodoistSyncPicker {
                 input.set_value("", window, cx);
             });
         }
+    }
+
+    /// Current pairings, the empty note, and fetch status. The add flow is
+    /// not here: it opens in a popover through `render_add_flow`.
+    pub fn render_pairs(
+        &mut self,
+        id_prefix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.flush_pending_clears(window, cx);
         if self.integration_id.is_none() {
             return div()
                 .text_sm()
@@ -364,12 +396,11 @@ impl TodoistSyncPicker {
                 div()
                     .text_sm()
                     .text_color(rgb(TEXT_MUTED))
-                    .child("No projects paired yet."),
+                    .child("No Todoist projects paired yet."),
             );
         } else {
             block = block.child(div().v_flex().gap_1().children(pair_rows));
         }
-        block = block.child(self.add_flow(id_prefix, cx));
         if let Some(error) = self.remote_error.clone() {
             block = block.child(div().text_xs().text_color(rgb(TEXT_FAINT)).child(error));
         }
@@ -377,6 +408,78 @@ impl TodoistSyncPicker {
             block = block.child(div().text_xs().text_color(rgb(TEXT_FAINT)).child(status));
         }
         block.into_any_element()
+    }
+
+    /// The two-step add flow for the popover.
+    pub fn render_add_flow(
+        &mut self,
+        id_prefix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.flush_pending_clears(window, cx);
+        if self.integration_id.is_none() {
+            return div()
+                .text_sm()
+                .text_color(rgb(TEXT_MUTED))
+                .child("Connect Todoist first to pair projects.")
+                .into_any_element();
+        }
+        self.add_flow(id_prefix, cx)
+    }
+
+    /// Settings composition: the pair list, one "+ sync project(s)" button,
+    /// and the two-step add flow in a popover over the list. Shared by the
+    /// integrations card and the settings page.
+    pub fn render_settings_block(
+        &mut self,
+        id_prefix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let adding = self.adding;
+        div()
+            .relative()
+            .v_flex()
+            .gap_2()
+            .child(self.render_pairs(id_prefix, window, cx))
+            .when(!adding, |this| {
+                this.child(
+                    div().h_flex().child(
+                        Button::new(format!("{id_prefix}-sync-projects"))
+                            .ghost()
+                            .compact()
+                            .with_size(Size::Small)
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .text_color(rgb(0xa3a3a3))
+                            .cursor_pointer()
+                            .label("+ sync project(s)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_adding(cx);
+                            })),
+                    ),
+                )
+            })
+            .when(adding, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x3a3a3a))
+                        .bg(rgb(0x1e1e1e))
+                        .px_3()
+                        .py_2()
+                        .v_flex()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.cancel_adding(cx)))
+                        .child(self.render_add_flow(id_prefix, window, cx)),
+                )
+            })
+            .into_any_element()
     }
 
     /// Step one: pick a remote project. Step two: pair it with a local tag.
@@ -419,9 +522,26 @@ impl TodoistSyncPicker {
                     .gap_1()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(TEXT_FAINT))
-                            .child("1 · Pick a Todoist project"),
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(rgb(TEXT_FAINT))
+                                    .child("1 · Pick a Todoist project"),
+                            )
+                            .child(
+                                Button::new(format!("{id_prefix}-cancel-add"))
+                                    .ghost()
+                                    .compact()
+                                    .with_size(Size::Small)
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cancel_adding(cx);
+                                    })),
+                            ),
                     )
                     .child(Input::new(&self.remote_filter).with_size(Size::Small))
                     .when(!rows.is_empty(), |this| {

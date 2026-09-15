@@ -4,8 +4,9 @@
 //! integration.
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, px, rgb, prelude::FluentBuilder,
+    AppContext, Context, Entity, EventEmitter, IntoElement, InteractiveElement, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Subscription, Window, div, px, rgb,
+    prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -13,7 +14,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 
 use crate::github_auth;
 use crate::store::Store;
-use crate::theme::APP_BG;
+use crate::theme::{APP_BG, HAIRLINE};
 use crate::todoist_auth;
 use crate::ui_parts::apps::AppSettings;
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
@@ -168,6 +169,12 @@ impl IntegrationsView {
         let mut collapsed = false;
         if self.github_settings_expanded {
             self.github_settings_expanded = false;
+            collapsed = true;
+        }
+        if let Some(picker) = self.todoist_sync.clone()
+            && picker.read_with(cx, |picker, _| picker.is_adding())
+        {
+            picker.update(cx, |picker, cx| picker.cancel_adding(cx));
             collapsed = true;
         }
         if let Some(app_id) = self.todoist_app_id
@@ -700,34 +707,21 @@ impl IntegrationsView {
         });
 
         let actions: gpui::AnyElement = if connected {
-            div()
-                .h_flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Button::new("todoist-sync")
-                        .ghost()
-                        .compact()
-                        .label(if self.syncing { "Syncing…" } else { "Sync now" })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sync_now(cx);
-                        })),
-                )
-                .child(
-                    Button::new("todoist-disconnect")
-                        .ghost()
-                        .compact()
-                        .label("Disconnect")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.disconnect_todoist(cx);
-                        })),
-                )
+            Button::new("todoist-disconnect")
+                .ghost()
+                .compact()
+                .label("Disconnect")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.disconnect_todoist(cx);
+                }))
                 .into_any_element()
         } else {
             Button::new("todoist-connect")
                 .compact()
                 .label(if self.connecting { "Waiting…" } else { "Connect" })
                 .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     this.start_todoist_connect(cx);
                 }))
                 .into_any_element()
@@ -755,9 +749,20 @@ impl IntegrationsView {
             .gap_3()
             .child(
                 div()
+                    .id("todoist-card-header")
                     .h_flex()
                     .items_center()
                     .gap_3()
+                    .when(connected && app_id.is_some(), |this| {
+                        this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(app_id) = this.todoist_app_id {
+                                this.settings.update(cx, |settings, cx| {
+                                    settings.toggle_expanded(app_id, cx)
+                                });
+                                cx.notify();
+                            }
+                        }))
+                    })
                     .child(provider_icon(todoist_icon()).when(!connected, |this| {
                         this.opacity(0.45)
                     }))
@@ -779,7 +784,14 @@ impl IntegrationsView {
                                             })
                                             .child("Todoist"),
                                     )
-                                    .when_some(gear, |this, gear| this.child(gear)),
+                                    .when_some(gear, |this, gear| {
+                                        this.child(
+                                            div()
+                                                .id("todoist-gear-guard")
+                                                .on_click(|_, _, cx| cx.stop_propagation())
+                                                .child(gear),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -794,17 +806,32 @@ impl IntegrationsView {
                     )
                     .child(controls),
             )
-            .when(connected, |this| {
-                this.child(self.todoist_sync_block(window, cx))
-            })
             .when(expanded, |this| {
                 this.when_some(settings_block, |this, block| this.child(block))
+                    .child(
+                        div().px_4().pb_1().h_flex().child(
+                            Button::new("todoist-sync")
+                                .ghost()
+                                .compact()
+                                .with_size(Size::Small)
+                                .border_1()
+                                .border_color(rgb(HAIRLINE))
+                                .text_color(rgb(0xa3a3a3))
+                                .cursor_pointer()
+                                .label(if self.syncing { "Syncing…" } else { "Sync now" })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync_now(cx);
+                                })),
+                        ),
+                    )
+                    .child(self.todoist_sync_block(window, cx))
             })
             .into_any_element()
     }
 
-    /// Project ↔ tag pairings for Todoist: the same picker used in
-    /// settings, so both menus stay in sync.
+    /// Project ↔ tag pairings for Todoist: the pair list with one
+    /// "+ sync project(s)" button. The two-step mapping picker opens in a
+    /// popover over the list and lands back here once paired.
     fn todoist_sync_block(
         &mut self,
         window: &mut Window,
@@ -843,7 +870,7 @@ impl IntegrationsView {
                     .child("Synced tags"),
             )
             .child(picker.update(cx, |picker, cx| {
-                picker.render_picker("integrations-todoist", window, cx)
+                picker.render_settings_block("integrations-todoist", window, cx)
             }))
             .into_any_element()
     }
