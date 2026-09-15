@@ -210,8 +210,7 @@ impl IntegrationsView {
     /// Collapse any expanded integration settings. Returns whether anything
     /// was open, so the window-wide Escape observer knows if it consumed
     /// the keypress.
-    pub fn collapse_settings(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut collapsed = false;
+    pub fn collapse_settings(&mut self, cx: &mut Context<Self>) -> bool {        let mut collapsed = false;
         if self.github_settings_expanded {
             self.github_settings_expanded = false;
             collapsed = true;
@@ -235,6 +234,46 @@ impl IntegrationsView {
             cx.notify();
         }
         collapsed
+    }
+
+    /// Toggle the Todoist card. Only one integration card is expanded at a
+    /// time, so expanding it collapses the GitHub card.
+    fn toggle_todoist_expanded(&mut self, cx: &mut Context<Self>) {
+        let Some(app_id) = self.todoist_app_id else {
+            return;
+        };
+        let will_expand = self
+            .settings
+            .read_with(cx, |settings, _| !settings.is_expanded(app_id));
+        self.settings.update(cx, |settings, cx| {
+            settings.toggle_expanded(app_id, cx)
+        });
+        if will_expand {
+            self.github_settings_expanded = false;
+        }
+        cx.notify();
+    }
+
+    /// Toggle the GitHub card. Only one integration card is expanded at a
+    /// time, so expanding it collapses the Todoist card.
+    fn toggle_github_expanded(&mut self, cx: &mut Context<Self>) {
+        self.set_github_expanded(!self.github_settings_expanded, cx);
+    }
+
+    /// Set the GitHub card's expansion, collapsing the Todoist card when
+    /// expanding so only one is open at a time.
+    fn set_github_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        self.github_settings_expanded = expanded;
+        if expanded
+            && let Some(app_id) = self.todoist_app_id
+        {
+            self.settings.update(cx, |settings, cx| {
+                if settings.is_expanded(app_id) {
+                    settings.toggle_expanded(app_id, cx);
+                }
+            });
+        }
+        cx.notify();
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -442,7 +481,7 @@ impl IntegrationsView {
         self.github_connecting = true;
         self.github_code = None;
         self.github_status = Some("Requesting a GitHub device code…".to_string());
-        self.github_settings_expanded = true;
+        self.set_github_expanded(true, cx);
         cx.notify();
 
         let begin = gpui_tokio::Tokio::spawn_result(cx, async move { github_auth::begin().await });
@@ -589,7 +628,7 @@ impl IntegrationsView {
         }
         self.github_syncing = true;
         self.github_status = Some("Syncing GitHub…".to_string());
-        self.github_settings_expanded = true;
+        self.set_github_expanded(true, cx);
         cx.notify();
         let sync = self.store.sync_github(full, cx);
         self._github_sync = Some(cx.spawn(async move |this, cx| match sync.await {
@@ -657,7 +696,7 @@ impl IntegrationsView {
             github_auth::save_personal_token(token).await
         });
         self.github_status = Some("Saving the personal token…".to_string());
-        self.github_settings_expanded = true;
+        self.set_github_expanded(true, cx);
         cx.notify();
         self._github_sync = Some(cx.spawn(async move |this, cx| match save.await {
             Ok(login) => {
@@ -841,10 +880,21 @@ impl IntegrationsView {
             self.settings
                 .read_with(cx, |settings, _| settings.is_expanded(app_id))
         });
-        let gear = app_id.filter(|_| connected).map(|app_id| {
-            self.settings.update(cx, |settings, cx| {
-                settings.gear_button(app_id, "Todoist", cx)
-            })
+        let gear = app_id.filter(|_| connected).map(|_| {
+            Button::new("todoist-settings")
+                .ghost()
+                .compact()
+                .with_size(Size::Small)
+                .icon(gpui_component_assets::IconName::Settings)
+                .tooltip(if expanded {
+                    "Hide settings".to_string()
+                } else {
+                    "Settings for Todoist".to_string()
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.toggle_todoist_expanded(cx);
+                }))
+                .into_any_element()
         });
         let settings_block = app_id.map(|app_id| {
             self.settings.update(cx, |settings, cx| {
@@ -909,12 +959,7 @@ impl IntegrationsView {
                     .when(connected && app_id.is_some(), |this| {
                         this.cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(app_id) = this.todoist_app_id {
-                                    this.settings.update(cx, |settings, cx| {
-                                        settings.toggle_expanded(app_id, cx)
-                                    });
-                                    cx.notify();
-                                }
+                                this.toggle_todoist_expanded(cx);
                             }))
                     })
                     .child(provider_icon(todoist_icon()).when(dimmed, |this| this.opacity(0.45)))
@@ -1061,8 +1106,7 @@ impl IntegrationsView {
                     "Settings for GitHub".to_string()
                 })
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.github_settings_expanded = !this.github_settings_expanded;
-                    cx.notify();
+                    this.toggle_github_expanded(cx);
                 }))
                 .into_any_element()
         });
@@ -1125,9 +1169,7 @@ impl IntegrationsView {
                             .gap_3()
                             .when(connected, |this| {
                                 this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                                    this.github_settings_expanded =
-                                        !this.github_settings_expanded;
-                                    cx.notify();
+                                    this.toggle_github_expanded(cx);
                                 }))
                             })
                             .child(provider_icon(gpui_component_assets::IconName::Github).when(
