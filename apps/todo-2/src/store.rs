@@ -575,6 +575,21 @@ impl Store {
         })
     }
 
+    /// Enable or re-enable an integration's app. Disabling goes through the
+    /// app settings' disable flow, which also clears the pairings.
+    pub fn set_app_enabled(
+        &self,
+        app_id: u64,
+        enabled: bool,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.set_app_enabled(app_id, enabled).await?)
+        })
+    }
+
     pub fn create_tag(&self, name: String, cx: &impl AppContext) -> Task<anyhow::Result<Tag>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -1211,6 +1226,13 @@ impl Store {
                 .collect();
             let mut total = storage::SyncSummary::default();
             for id in ids {
+                let disabled = backend
+                    .app_for_integration(id)
+                    .await?
+                    .is_some_and(|app| !app.enabled);
+                if disabled {
+                    continue;
+                }
                 let summary = backend.sync_todoist_integration(&token, id).await?;
                 total.projects += summary.projects;
                 total.sections += summary.sections;

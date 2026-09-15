@@ -667,22 +667,27 @@ impl SettingsView {
             if slug.starts_with("todoist") {
                 let picker_id = format!("settings-sync-{slug}");
                 let picker = self.sync_picker(&slug, window, cx);
-                page = page.child(Self::section(
-                    "Synced tags",
-                    vec![
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x737373))
-                            .child(
-                                "Which Todoist projects sync into which local tags. \
-                                 Pick a project first, then pair it with a tag.",
-                            )
-                            .into_any_element(),
-                        picker.update(cx, |picker, cx| {
-                            picker.render_settings_block(&picker_id, window, cx)
-                        }),
-                    ],
-                ));
+                let disabled = self
+                    .apps
+                    .read_with(cx, |apps, _| apps.app(app_id).is_some_and(|app| !app.enabled));
+                let mut rows = vec![
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x737373))
+                        .child(if disabled {
+                            "Todoist is disabled. Re-enable it on the integrations card to resume syncing."
+                        } else {
+                            "Which Todoist projects sync into which local tags. \
+                             Pick a project first, then pair it with a tag."
+                        })
+                        .into_any_element(),
+                ];
+                if !disabled {
+                    rows.push(picker.update(cx, |picker, cx| {
+                        picker.render_settings_block(&picker_id, window, cx)
+                    }));
+                }
+                page = page.child(Self::section("Synced tags", rows));
             } else {
                 let picker_id = format!("settings-tags-{slug}");
                 let picker = self.tag_picker(&slug, app_id, true, window, cx);

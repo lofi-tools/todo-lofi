@@ -1256,7 +1256,13 @@ impl TodoStore {
                 Ok(())
             })
         })
-        .await
+        .await?;
+        // A disabled integration stops syncing: its pairings go, while the
+        // integration row and the synced task links stay for the history.
+        if let Some(integration_id) = self.integration_id_for_app(app_id).await? {
+            self.clear_integration_pairings(integration_id).await?;
+        }
+        Ok(())
     }
 
     /// Idempotent startup backfill: register the builtin demo app and give

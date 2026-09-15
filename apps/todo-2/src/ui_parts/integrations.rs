@@ -37,6 +37,10 @@ pub struct IntegrationsView {
     /// The app a connected provider manages content through, so its card can
     /// carry the ownership settings (which tags it captures into).
     todoist_app_id: Option<u64>,
+    /// Whether that app is enabled. A connected integration whose app is
+    /// disabled keeps its row for the history but stops syncing, and its
+    /// card offers only re-enabling.
+    todoist_app_enabled: bool,
     settings: Entity<AppSettings>,
     todoist_sync: Option<Entity<TodoistSyncPicker>>,
     connecting: bool,
@@ -78,6 +82,7 @@ impl IntegrationsView {
             store,
             connected: Vec::new(),
             todoist_app_id: None,
+            todoist_app_enabled: true,
             settings,
             todoist_sync: None,
             connecting: false,
@@ -200,13 +205,13 @@ impl IntegrationsView {
             Ok(list) => {
                 // The provider's app is what owns tags, so look it up for the
                 // card's settings before rendering.
-                let todoist_app_id = match list.iter().find(|i| i.provider == "todoist") {
+                let todoist_app = match list.iter().find(|i| i.provider == "todoist") {
                     Some(integration) => store
                         .app_for_integration(integration.id, cx)
                         .await
                         .ok()
                         .flatten()
-                        .map(|app| app.id),
+                        .map(|app| (app.id, app.enabled)),
                     None => None,
                 };
                 // The card's status line reads the last successful pass (§5.8).
@@ -222,12 +227,14 @@ impl IntegrationsView {
                     this.connected = list;
                     this.github_last_sync = last_sync;
                     this.github_pat_saved = github_auth::has_personal_token();
+                    let todoist_app_id = todoist_app.map(|(id, _)| id);
                     if this.todoist_app_id != todoist_app_id {
                         // New (or removed) provider app: drop the cached tag
                         // picker so it rebuilds for the right app.
                         this.todoist_sync = None;
                     }
                     this.todoist_app_id = todoist_app_id;
+                    this.todoist_app_enabled = todoist_app.map(|(_, enabled)| enabled).unwrap_or(true);
                     this._load = None;
                     cx.notify();
                 })
@@ -246,6 +253,37 @@ impl IntegrationsView {
 
     fn todoist_connected(&self) -> bool {
         self.connected.iter().any(|i| i.provider == "todoist")
+    }
+
+    /// A connected integration whose app was disabled: the row stays for the
+    /// history, syncing stopped, and the card offers only re-enabling.
+    fn todoist_disabled(&self) -> bool {
+        self.todoist_connected() && self.todoist_app_id.is_some() && !self.todoist_app_enabled
+    }
+
+    fn re_enable_todoist(&mut self, cx: &mut Context<Self>) {
+        let Some(app_id) = self.todoist_app_id else {
+            return;
+        };
+        let enable = self.store.set_app_enabled(app_id, true, cx);
+        self._load = Some(cx.spawn(async move |this, cx| match enable.await {
+            Ok(()) => {
+                this.update(cx, |this, cx| {
+                    this.status = Some("Todoist re-enabled.".to_string());
+                    cx.emit(IntegrationsEvent::Changed);
+                    this.reload(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                this.update(cx, |this, cx| {
+                    this.status = Some(format!("Re-enable failed: {e}"));
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
     }
 
     /// Start the device flow: ask GitHub for a code, show it, then poll until
@@ -692,12 +730,15 @@ impl IntegrationsView {
     /// (which tags it captures into).
     fn todoist_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let connected = self.todoist_connected();
+        let disabled = self.todoist_disabled();
+        let dimmed = !connected || disabled;
         let app_id = self.todoist_app_id;
-        let expanded = app_id.is_some_and(|app_id| {
-            self.settings
-                .read_with(cx, |settings, _| settings.is_expanded(app_id))
-        });
-        let gear = app_id.filter(|_| connected).map(|app_id| {
+        let expanded = !disabled
+            && app_id.is_some_and(|app_id| {
+                self.settings
+                    .read_with(cx, |settings, _| settings.is_expanded(app_id))
+            });
+        let gear = app_id.filter(|_| connected && !disabled).map(|app_id| {
             self.settings
                 .update(cx, |settings, cx| settings.gear_button(app_id, "Todoist", cx))
         });
@@ -706,7 +747,16 @@ impl IntegrationsView {
                 .update(cx, |settings, cx| settings.settings_block(app_id, 0, cx))
         });
 
-        let actions: gpui::AnyElement = if connected {
+        let actions: gpui::AnyElement = if disabled {
+            Button::new("todoist-re-enable")
+                .compact()
+                .label("Re-enable")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.re_enable_todoist(cx);
+                }))
+                .into_any_element()
+        } else if connected {
             Button::new("todoist-disconnect")
                 .ghost()
                 .compact()
@@ -730,21 +780,29 @@ impl IntegrationsView {
         let mut controls = div().h_flex().items_center().gap_2().child(
             div()
                 .text_sm()
-                .text_color(if connected {
+                .text_color(if connected && !disabled {
                     rgb(0x4ade80)
                 } else {
                     rgb(0x737373)
                 })
-                .child(if connected { "Connected" } else { "Not connected" }),
+                .child(if disabled {
+                    "Disabled"
+                } else if connected {
+                    "Connected"
+                } else {
+                    "Not connected"
+                }),
         );
         controls = controls.child(actions);
 
-        let description = if connected {
+        let description = if disabled {
+            "Todoist is disabled. Re-enable to resume syncing."
+        } else if connected {
             "Sync projects both ways with Todoist."
         } else {
             "Sync projects both ways with Todoist. Connect to get started."
         };
-        integration_card(!connected)
+        integration_card(dimmed)
             .v_flex()
             .gap_3()
             .child(
@@ -753,7 +811,7 @@ impl IntegrationsView {
                     .h_flex()
                     .items_center()
                     .gap_3()
-                    .when(connected && app_id.is_some(), |this| {
+                    .when(connected && !disabled && app_id.is_some(), |this| {
                         this.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
                             if let Some(app_id) = this.todoist_app_id {
                                 this.settings.update(cx, |settings, cx| {
@@ -763,7 +821,7 @@ impl IntegrationsView {
                             }
                         }))
                     })
-                    .child(provider_icon(todoist_icon()).when(!connected, |this| {
+                    .child(provider_icon(todoist_icon()).when(dimmed, |this| {
                         this.opacity(0.45)
                     }))
                     .child(
@@ -779,7 +837,7 @@ impl IntegrationsView {
                                     .child(
                                         div()
                                             .font_semibold()
-                                            .when(!connected, |this| {
+                                            .when(dimmed, |this| {
                                                 this.text_color(rgb(0x6b6b6b))
                                             })
                                             .child("Todoist"),
@@ -796,10 +854,10 @@ impl IntegrationsView {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(if connected {
-                                        rgb(0xa3a3a3)
-                                    } else {
+                                    .text_color(if dimmed {
                                         rgb(0x5f5f5f)
+                                    } else {
+                                        rgb(0xa3a3a3)
                                     })
                                     .child(description),
                             ),

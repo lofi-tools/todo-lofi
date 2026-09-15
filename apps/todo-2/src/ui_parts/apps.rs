@@ -371,6 +371,8 @@ impl AppSettings {
                         div()
                             .v_flex()
                             .gap_3()
+                            .w_full()
+                            .min_w_0()
                             .child(div().text_sm().text_color(rgb(TEXT_MUTED)).child(format!(
                                 "{summary} It stops managing everything, and completed or \
                                  edited items are always kept."
@@ -378,6 +380,7 @@ impl AppSettings {
                             .child(
                                 div()
                                     .h_flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_2()
                                     .child(

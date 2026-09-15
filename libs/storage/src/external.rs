@@ -326,6 +326,38 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Remove every remote-project ↔ local-tag pairing of an integration.
+    /// Task links stay, so synced tasks and their history survive; they just
+    /// stop syncing until paired again.
+    pub async fn clear_integration_pairings(&mut self, integration_id: u64) -> QueryResult<()> {
+        toasty::sql::statement(r#"DELETE FROM external_tag_links WHERE integration_id = ?1"#)
+            .bind(integration_id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "clear integration pairings",
+            })?;
+        Ok(())
+    }
+
+    /// The integration an app was registered for, if any.
+    pub async fn integration_id_for_app(&mut self, app_id: u64) -> QueryResult<Option<u64>> {
+        let rows = toasty::sql::query(r#"SELECT id FROM integrations WHERE app_id = ?1"#)
+            .column_types([toasty::stmt::Type::I64])
+            .bind(app_id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "integration for app",
+            })?;
+        Ok(rows.first().and_then(|row| match row {
+            toasty::stmt::Value::Record(record) => {
+                record.first().and_then(|v| v.to_i64()).map(|id| id as u64)
+            }
+            _ => None,
+        }))
+    }
+
     pub async fn link_tag(
         &mut self,
         integration_id: u64,
@@ -609,8 +641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deleting_an_integration_releases_its_capture_bindings() -> anyhow::Result<()> {
-        let mut storage = TodoStore::for_test().await?;
+    async fn test_deleting_an_integration_releases_its_capture_bindings() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
         let integration = storage.create_integration("todoist", None).await?;
         let app = storage
             .app_for_integration(integration.id)
@@ -660,6 +691,52 @@ mod tests {
         assert_eq!(
             storage.watermark(integration.id, "proj-1").await?.as_deref(),
             Some("w1")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_disabling_an_integration_clears_pairings_but_keeps_history(
+    ) -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("todoist", None).await?;
+        let app = storage
+            .app_for_integration(integration.id)
+            .await?
+            .expect("creating an integration registers its app");
+        let tag = storage.create_tag("Work").await?;
+        storage
+            .link_tag(integration.id, "proj-1", tag.id, "project", false)
+            .await?;
+        let task = storage.create_task(Task::create().title("Synced")).await?;
+        storage
+            .link_task(integration.id, "ext-1", task.id, None)
+            .await?;
+
+        storage.disable_app(app.id, false).await?;
+
+        assert!(storage.tag_link(integration.id, "proj-1").await?.is_none());
+        assert!(
+            storage
+                .task_link(integration.id, "ext-1")
+                .await?
+                .is_some(),
+            "task links stay for the history"
+        );
+        assert!(
+            storage
+                .list_integrations()
+                .await?
+                .iter()
+                .any(|i| i.id == integration.id),
+            "the integration row stays"
+        );
+        assert!(
+            !storage
+                .app_by_id(app.id)
+                .await?
+                .expect("the app row stays")
+                .enabled
         );
         Ok(())
     }
