@@ -210,7 +210,8 @@ impl IntegrationsView {
     /// Collapse any expanded integration settings. Returns whether anything
     /// was open, so the window-wide Escape observer knows if it consumed
     /// the keypress.
-    pub fn collapse_settings(&mut self, cx: &mut Context<Self>) -> bool {        let mut collapsed = false;
+    pub fn collapse_settings(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut collapsed = false;
         if self.github_settings_expanded {
             self.github_settings_expanded = false;
             collapsed = true;
@@ -245,9 +246,8 @@ impl IntegrationsView {
         let will_expand = self
             .settings
             .read_with(cx, |settings, _| !settings.is_expanded(app_id));
-        self.settings.update(cx, |settings, cx| {
-            settings.toggle_expanded(app_id, cx)
-        });
+        self.settings
+            .update(cx, |settings, cx| settings.toggle_expanded(app_id, cx));
         if will_expand {
             self.github_settings_expanded = false;
         }
@@ -264,9 +264,7 @@ impl IntegrationsView {
     /// expanding so only one is open at a time.
     fn set_github_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         self.github_settings_expanded = expanded;
-        if expanded
-            && let Some(app_id) = self.todoist_app_id
-        {
+        if expanded && let Some(app_id) = self.todoist_app_id {
             self.settings.update(cx, |settings, cx| {
                 if settings.is_expanded(app_id) {
                     settings.toggle_expanded(app_id, cx);
@@ -1218,7 +1216,7 @@ impl IntegrationsView {
                                             .child(if disabled {
                                                 "GitHub is disabled. Expand to re-enable; synced data is kept."
                                             } else {
-                                                "Issue-backed tasks get branches, worktrees and pull requests."
+                                                "Sync github issues & projects, auto-create branches & pull requests"
                                             }),
                                     )
                             )
@@ -1421,7 +1419,7 @@ impl IntegrationsView {
             .child(div().text_xs().text_color(rgb(0x737373)).child(if using {
                 "Syncing with a personal token. Save an empty field to remove it."
             } else {
-                "Optional: a personal token, for orgs that never approved the app."
+                "Personal access token [optional]: for syncing organization data without approval"
             }))
             .child(
                 div()
