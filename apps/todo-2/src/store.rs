@@ -44,6 +44,23 @@ async fn push_captured_task(store: &mut TodoStore, task_id: u64) -> anyhow::Resu
     Ok(())
 }
 
+/// Run the capture push for `task_id` on the shared runtime, detached from the
+/// caller's task, so the UI never waits on the provider round trip (or on the
+/// token refresh it may need). The local task already exists, so a failure is
+/// only logged and the task stays local.
+fn push_captured_task_in_background(
+    store: &Arc<tokio::sync::Mutex<TodoStore>>,
+    task_id: u64,
+) {
+    let store = store.clone();
+    tokio::spawn(async move {
+        let mut s = store.lock().await;
+        if let Err(error) = push_captured_task(&mut s, task_id).await {
+            tracing::error!(task_id, %error, "capture push failed; the task stays local");
+        }
+    });
+}
+
 /// Push a field delta to every Todoist task linked to `task_id`. No links
 /// (or no token) → no-op, so purely local tasks never touch the network.
 /// Must run on the Tokio runtime. A push failure fails the whole edit so
@@ -107,16 +124,13 @@ impl Store {
                         .ok_or_else(|| anyhow::anyhow!("tag not found: {tag_name}"))?;
                     // An app managing this tag may capture new tasks (e.g.
                     // push them to Todoist). The task itself stays the
-                    // user's: capture never makes it read-only.
+                    // user's: capture never makes it read-only. The push is
+                    // detached so it does not hold up the row the user just
+                    // typed; only the local capture has to be done by the
+                    // time the list is returned.
                     let captured = s.capture_task(task.id).await?;
-                    if !captured.is_empty()
-                        && let Err(error) = push_captured_task(&mut s, task.id).await
-                    {
-                        tracing::error!(
-                            task_id = task.id,
-                            %error,
-                            "capture push failed; the task stays local"
-                        );
+                    if !captured.is_empty() {
+                        push_captured_task_in_background(&store, task.id);
                     }
                     s.list_tasks_by_tag(tag_id).await.unwrap_or_default()
                 }
@@ -907,14 +921,8 @@ impl Store {
             let mut s = store.lock().await;
             s.set_task_tags(task_id, &tags).await?;
             let captured = s.capture_task(task_id).await?;
-            if !captured.is_empty()
-                && let Err(error) = push_captured_task(&mut s, task_id).await
-            {
-                tracing::error!(
-                    task_id,
-                    %error,
-                    "capture push failed; the task stays local"
-                );
+            if !captured.is_empty() {
+                push_captured_task_in_background(&store, task_id);
             }
             Ok(())
         })

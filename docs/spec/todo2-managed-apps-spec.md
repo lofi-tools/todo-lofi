@@ -643,12 +643,14 @@ Implemented and covered by tests (`cargo test -p storage`: 109 passed;
   client `temp_id` and the real remote id is read back from
   `temp_id_mapping` and linked. Linking a remote project/section gives the
   integration's app a capturing binding (`ensure_capture_binding`), and
-  `insert_task` runs capture and then the push after assigning the tag, so
-  a task typed into a linked tag also appears in Todoist. The details-pane
-  tag editor captures the same way when an existing task is tagged into a
-  linked tag, and a task already mirrored for that integration is never
-  added twice. Disconnecting an integration disables its app and releases
-  those bindings.
+  `insert_task` runs capture after assigning the tag, and the push that
+  capture triggers runs in the background so the new row never waits on the
+  provider round trip; a task typed into a linked tag still appears in
+  Todoist. The details-pane tag editor captures the same way (and pushes in
+  the background too) when an existing task is tagged into a linked tag, and
+  a task already mirrored for that integration is never added twice.
+  Disconnecting an integration disables its app and releases those
+  bindings.
 - `is_seed` is retired: `0020_seed_ownership.sql` moves existing demo rows
   onto the builtin app (captured, so they stay editable but never sync) and
   `0021_drop_is_seed.sql` drops `tasks.is_seed` / `tags.is_seed`. Seeding
