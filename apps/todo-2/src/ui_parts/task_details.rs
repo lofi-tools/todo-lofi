@@ -69,6 +69,17 @@ fn phase_roadmap_title(phase: &str) -> &'static str {
     }
 }
 
+/// The label a step row shows. The seeded `coding-task` interview node spells
+/// out "the feature", which crowds the row's two actions; recipes are
+/// immutable per install, so the shorter form lives here rather than in the
+/// seed. Every other step shows its own task title.
+fn step_row_title(step: &RunStepView) -> String {
+    match step.node.title.as_str() {
+        "Interview & spec the feature" => "Interview & spec".to_string(),
+        _ => step.task.title.clone(),
+    }
+}
+
 /// The UI's cycle counter: the run starts at round 1 and every rejection
 /// opens a new one. Derived from the log rather than from the step rows,
 /// because a rejection tombstones the previous cycle's steps.
@@ -941,34 +952,37 @@ impl TaskDetails {
         self.selected.clone()
     }
 
-    /// Request selecting a task. When edits are unsaved and the task is a
-    /// different one, the request is stashed and a confirm dialog is shown
-    /// instead; returns true when deferred.
+    /// Request selecting a task. When edits would be lost (a field open on a
+    /// different task, with something changed), the request is stashed and a
+    /// confirm dialog is shown instead; returns true when deferred. An
+    /// untouched editor is unwound silently: there is nothing to lose.
     pub fn request_select(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) -> bool {
         let same_task = self.selected.as_ref().is_some_and(|t| t.id == task.id);
         if self.is_editing() && !same_task {
-            self.pending = Some(PendingTarget::Select(task));
-            self.confirming = true;
-            cx.notify();
-            true
-        } else {
-            self.set_selected(task, cx);
-            false
+            if self.any_dirty(cx) {
+                self.pending = Some(PendingTarget::Select(task));
+                self.confirming = true;
+                cx.notify();
+                return true;
+            }
+            self.cancel_editing(cx);
         }
+        self.set_selected(task, cx);
+        false
     }
 
-    /// Request deselecting. Defers with a confirm dialog when edits are
-    /// unsaved; returns true when deferred.
+    /// Request deselecting. Defers with a confirm dialog when edits would be
+    /// lost; an untouched editor is unwound silently. Returns true when
+    /// deferred.
     pub fn request_clear(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.is_editing() {
+        if self.is_editing() && self.any_dirty(cx) {
             self.pending = Some(PendingTarget::Deselect);
             self.confirming = true;
             cx.notify();
-            true
-        } else {
-            self.clear(cx);
-            false
+            return true;
         }
+        self.clear(cx);
+        false
     }
 
     /// Request opening another field editor. When the current edits are
@@ -3640,31 +3654,34 @@ impl TaskDetails {
                         .min_w_0()
                         .text_sm()
                         .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
-                        .child(step.task.title.clone())
+                        .child(step_row_title(step))
                         .on_click(cx.listener(move |_this, _, _, cx| {
                             cx.emit(TaskDetailsEvent::SelectTask { task_id: step_id });
                         })),
                 );
+            // Skipping the agent is the alternative to starting the interview,
+            // so that affordance sits on the interview step's own row, with the
+            // forward action closing the row as its CTA.
+            if !done && step.node.id == "interview" {
+                row = row.child(
+                    Button::new(format!("coding-manual-spec-{step_id}"))
+                        .secondary()
+                        .compact()
+                        .with_size(gpui_component::Size::Small)
+                        .text_color(rgb(0xa3a3a3))
+                        .label("Write manually")
+                        .tooltip("Skip the agent and write the spec yourself")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_coding_spec(window, cx);
+                        })),
+                );
+            }
             if done {
                 row = row.child(div().text_xs().text_color(rgb(0x737373)).child("done"));
             } else if is_current
                 && let Some(action) = self.coding_primary_action(task, view, step, cx)
             {
                 row = row.child(action);
-            }
-            // Skipping the agent is the alternative to starting the interview,
-            // so that affordance sits on the interview step's own row.
-            if !done && step.node.id == "interview" {
-                row = row.child(
-                    Button::new(format!("coding-manual-spec-{step_id}"))
-                        .ghost()
-                        .compact()
-                        .label("Write spec manually")
-                        .tooltip("Skip the agent and write the spec yourself")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_coding_spec(window, cx);
-                        })),
-                );
             }
             rows.push(row.into_any_element());
 
@@ -3888,7 +3905,7 @@ impl TaskDetails {
         // and 35).
         let pull_request = self.pull_request_step(run_id);
         let label = match node_id.as_str() {
-            "interview" => "Start interview",
+            "interview" => "Start",
             "spec" => "Approve spec",
             "implement" => "Start implementation",
             "review" => "Approve review",
@@ -3906,8 +3923,13 @@ impl TaskDetails {
         let task_for_prompt = task.clone();
         let view_for_prompt = view.clone();
         Some(
+            // The row's CTA: the phase action keeps its own weight, with the
+            // app's hairline border so it sits in the row like its neighbours.
             Button::new(format!("coding-primary-{step_id}"))
                 .compact()
+                .with_size(gpui_component::Size::Small)
+                .border_1()
+                .border_color(rgb(HAIRLINE))
                 .label(label)
                 .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| match node_id.as_str() {
@@ -4270,24 +4292,35 @@ impl TaskDetails {
                     .child("GitHub"),
             )
             .child(
-                // Gray like the list's issue badge: the source is a reference,
-                // not the pane's own content.
+                // The repo name is the recognizable half of `owner/repo`, so it
+                // stands alone with the issue number dimmed beside it.
                 div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child(format!(
-                        "{}/{}#{}",
-                        issue.issue.owner, issue.issue.repo, issue.issue.number
-                    )),
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(issue.issue.repo.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x737373))
+                            .child(format!("#{}", issue.issue.number)),
+                    ),
             );
         if let Some(url) = issue.state.url.clone() {
             // A bare link icon: the issue number beside it already names what
-            // opens, so a text label would only repeat the target.
+            // opens, so a text label would only repeat the target. Its gray
+            // matches the repo name, so the row reads as one reference.
             heading = heading.child(
                 Button::new("github-open")
                     .ghost()
                     .compact()
                     .icon(IconName::ExternalLink)
+                    .text_color(rgb(0xa3a3a3))
                     .tooltip("Open on GitHub")
                     .on_click(move |_, _, _| {
                         crate::todoist_auth::open_browser(&url);
