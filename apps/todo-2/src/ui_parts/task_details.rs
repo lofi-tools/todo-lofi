@@ -5,6 +5,7 @@ use gpui::{
     svg,
 };
 use gpui_component::Disableable;
+use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -3502,8 +3503,16 @@ impl TaskDetails {
             .mt_2();
 
         // The steps first: they are the run, and the next one carries its
-        // action on its own row.
-        section = section.child(self.coding_steps(task, &view, window, cx));
+        // action on its own row. They are subtasks of the feature task, so
+        // they carry the same small header the linked lists use.
+        section = section
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Subtasks"),
+            )
+            .child(self.coding_steps(task, &view, window, cx));
 
         let mut meta = div().h_flex().items_center().gap_2().flex_wrap();
         meta = meta.child(chip(&format!("Round {round}")));
@@ -4252,11 +4261,14 @@ impl TaskDetails {
                     )),
             );
         if let Some(url) = issue.state.url.clone() {
+            // A bare link icon: the issue number beside it already names what
+            // opens, so a text label would only repeat the target.
             heading = heading.child(
                 Button::new("github-open")
                     .ghost()
                     .compact()
-                    .label("Open on GitHub")
+                    .icon(IconName::ExternalLink)
+                    .tooltip("Open on GitHub")
                     .on_click(move |_, _, _| {
                         crate::todoist_auth::open_browser(&url);
                     }),
