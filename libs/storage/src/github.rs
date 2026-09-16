@@ -87,6 +87,15 @@ pub struct IssueFieldState {
     pub author: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// The issue's own database id, recorded whenever a payload carries it so
+    /// a linked task can be attached as a sub-issue without another lookup.
+    #[serde(default)]
+    pub issue_id: Option<u64>,
+    /// `owner/repo#number` of the issue this one hangs under on GitHub, so an
+    /// attachment is not pushed twice and a remote un-parenting is noticed
+    /// (§5.5). GitHub owns the relationship.
+    #[serde(default)]
+    pub parent_issue: Option<String>,
     /// Set when the local task was deleted: the issue was closed and later
     /// pulls must not resurrect the row.
     #[serde(default)]
@@ -114,6 +123,9 @@ impl IssueFieldState {
 /// One issue as the API returns it, narrowed to the fields we map.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteIssue {
+    /// GitHub's own row id, which the sub-issue endpoints address an issue
+    /// by. `0` when the payload did not carry one.
+    pub id: u64,
     pub number: u64,
     pub title: String,
     pub body: String,
@@ -124,7 +136,14 @@ pub struct RemoteIssue {
     pub milestone: Option<String>,
     pub author: Option<String>,
     pub url: Option<String>,
+    /// `owner/repo` the issue lives in, from the payload. A sub-issue may live
+    /// in another repo of the same owner, so this is what keeps its number from
+    /// being paired with the parent's repo (§5.9).
+    pub repository: Option<String>,
     pub updated_at: Option<jiff::Timestamp>,
+    /// How many sub-issues the issue has, from the listing's summary: the
+    /// trigger for reading a parent's children (§5.5).
+    pub sub_issue_total: u64,
 }
 
 impl RemoteIssue {
@@ -1009,6 +1028,7 @@ pub fn remote_issue_from_json(value: &serde_json::Value) -> Option<RemoteIssue> 
             .unwrap_or_default()
     };
     Some(RemoteIssue {
+        id: value.get("id").and_then(|id| id.as_u64()).unwrap_or_default(),
         number,
         title: value
             .get("title")
@@ -1045,7 +1065,28 @@ pub fn remote_issue_from_json(value: &serde_json::Value) -> Option<RemoteIssue> 
             .get("updated_at")
             .and_then(|at| at.as_str())
             .and_then(|at| at.parse().ok()),
+        sub_issue_total: value
+            .get("sub_issues_summary")
+            .and_then(|summary| summary.get("total"))
+            .and_then(|total| total.as_u64())
+            .unwrap_or_default(),
+        repository: value
+            .get("repository_url")
+            .and_then(|url| url.as_str())
+            .and_then(repository_from_api_url),
     })
+}
+
+/// The `owner/repo` at the end of a repository API URL, for the sub-issue
+/// check above.
+fn repository_from_api_url(url: &str) -> Option<String> {
+    let mut parts = url.trim_end_matches('/').rsplit('/');
+    let repo = parts.next()?;
+    let owner = parts.next()?;
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 /// A pull request as GitHub returns it, narrowed to what the PR step needs.
@@ -1361,6 +1402,36 @@ pub trait GithubClient {
         title: &'a str,
         body: &'a str,
     ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a;
+
+    /// One issue by number, for the fields a link made before ids were stored
+    /// never recorded.
+    fn get_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a;
+
+    /// Hang `sub_issue_id` under the issue `number`. `replace_parent` moves a
+    /// sub-issue GitHub still has under another parent, which is what mirroring
+    /// the local tree wants (§5.5).
+    fn add_sub_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        sub_issue_id: u64,
+        replace_parent: bool,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
+    /// The sub-issues of one issue, in the parent's order (§5.5). One page of
+    /// 100 covers GitHub's own limit, so this is the complete set.
+    fn list_sub_issues<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteIssue>>> + Send + 'a;
 
     /// Every repository the account can reach, most recently pushed first:
     /// what the tag settings binding picker offers (§5.3).
@@ -1702,6 +1773,60 @@ impl GithubClient for GithubHttpClient {
         }
     }
 
+    fn get_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/issues/{number}");
+            let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
+            let body = self.json(response, "issue").await?;
+            remote_issue_from_json(&body).ok_or_else(|| {
+                anyhow::anyhow!("GitHub did not describe issue #{number}: {body}")
+            })
+        }
+    }
+
+    fn add_sub_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        sub_issue_id: u64,
+        replace_parent: bool,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/issues/{number}/sub_issues");
+            self.post_json(
+                &path,
+                serde_json::json!({
+                    "sub_issue_id": sub_issue_id,
+                    "replace_parent": replace_parent,
+                }),
+            )
+            .await
+        }
+    }
+
+    fn list_sub_issues<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteIssue>>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/issues/{number}/sub_issues?per_page=100");
+            let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
+            let body = self.json(response, "sub-issue list").await?;
+            Ok(body
+                .as_array()
+                .map(|items| items.iter().filter_map(remote_issue_from_json).collect())
+                .unwrap_or_default())
+        }
+    }
+
     fn create_pull_request<'a>(
         &'a self,
         owner: &'a str,
@@ -1988,6 +2113,8 @@ pub struct GithubSyncSummary {
     pub labels: usize,
     pub comments: usize,
     pub tombstoned: usize,
+    /// Sub-issue relationships newly mirrored onto the local tree.
+    pub nested: usize,
 }
 
 impl GithubSyncSummary {
@@ -1999,6 +2126,7 @@ impl GithubSyncSummary {
         self.labels += other.labels;
         self.comments += other.comments;
         self.tombstoned += other.tombstoned;
+        self.nested += other.nested;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2006,13 +2134,20 @@ impl GithubSyncSummary {
             && self.updated == 0
             && self.pushed == 0
             && self.tombstoned == 0
+            && self.nested == 0
     }
 
     /// One line for the card's status row.
     pub fn describe(&self) -> String {
         format!(
-            "{} repo(s): {} imported, {} updated, {} pushed, {} comments, {} removed.",
-            self.repos, self.imported, self.updated, self.pushed, self.comments, self.tombstoned
+            "{} repo(s): {} imported, {} updated, {} pushed, {} comments, {} sub-issues, {} removed.",
+            self.repos,
+            self.imported,
+            self.updated,
+            self.pushed,
+            self.comments,
+            self.nested,
+            self.tombstoned
         )
     }
 }
@@ -2023,6 +2158,21 @@ fn non_empty(text: &str) -> Option<String> {
 
 fn completed_at_for(issue: &RemoteIssue) -> Option<u64> {
     (issue.state == "closed").then(|| jiff::Timestamp::now().as_second() as u64)
+}
+
+/// The link state a freshly seen issue starts from: its mapped values as the
+/// snapshot, the read-only metadata, and its own identity for the sub-issue
+/// endpoints.
+fn issue_state_for(issue: &RemoteIssue) -> IssueFieldState {
+    IssueFieldState {
+        remote: issue.field_values(),
+        assignees: issue.assignees.clone(),
+        milestone: issue.milestone.clone(),
+        author: issue.author.clone(),
+        url: issue.url.clone(),
+        issue_id: (issue.id != 0).then_some(issue.id),
+        ..Default::default()
+    }
 }
 
 impl TodoStore {
@@ -2230,60 +2380,241 @@ impl TodoStore {
         Ok(None)
     }
 
+    /// The issue of the nearest ancestor that has one, with the integration
+    /// that owns it. A deleted ancestor is stepped over, and a tombstoned link
+    /// names an issue that is gone or inaccessible, so neither can host a
+    /// sub-issue. Walks with a visited set, so a corrupted parent chain cannot
+    /// loop.
+    async fn nearest_ancestor_issue(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Option<(u64, IssueRef)>> {
+        let mut current = Some(task_id);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                return Ok(None);
+            }
+            let task = self.get_task(id).await?;
+            if task.deleted_at.is_none()
+                && let Some(link) = self.issue_link_for_task(id).await?
+                && !link.state.tombstoned
+            {
+                return Ok(Some((link.integration_id, link.issue)));
+            }
+            current = task.parent_id;
+        }
+        Ok(None)
+    }
+
+    /// Whether `task_id`'s ancestry says it has to stay local: it sits inside a
+    /// workflow run's tree (run content is the app's, not the issue's), or the
+    /// chain loops, which would otherwise walk forever. Walks up with a visited
+    /// set.
+    async fn ancestry_blocks_sync(&mut self, task_id: u64) -> QueryResult<bool> {
+        let mut current = Some(task_id);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = current {
+            if !visited.insert(id) {
+                return Ok(true);
+            }
+            let task = self.get_task(id).await?;
+            if task.workflow_run_id.is_some() {
+                return Ok(true);
+            }
+            current = task.parent_id;
+        }
+        Ok(false)
+    }
+
+    /// The issue's own database id, which the sub-issue endpoints address a
+    /// child by. Recorded at every write; a link made before ids were stored
+    /// pays one lookup and keeps the answer.
+    async fn issue_database_id<C: GithubClient>(
+        &mut self,
+        client: &C,
+        link: &TaskIssue,
+    ) -> anyhow::Result<Option<u64>> {
+        if let Some(id) = link.state.issue_id {
+            return Ok(Some(id));
+        }
+        let issue = client
+            .get_issue(&link.issue.owner, &link.issue.repo, link.issue.number)
+            .await?;
+        if issue.id == 0 {
+            return Ok(None);
+        }
+        let mut state = link.state.clone();
+        state.issue_id = Some(issue.id);
+        let external_id = issue_external_id(&link.issue.owner, &link.issue.repo, link.issue.number);
+        self.save_issue_field_state(link.integration_id, &external_id, &state)
+            .await?;
+        Ok(Some(issue.id))
+    }
+
+    /// Hang a task's issue under its parent's issue, once (§5.5). The recorded
+    /// relationship short-circuits a repeat; otherwise `replace_parent` moves
+    /// an issue GitHub still has under an older parent. Nothing happens for a
+    /// child whose issue lives in another repo, because the link's external id
+    /// names the child inside its own repo.
+    async fn attach_sub_issue<C: GithubClient>(
+        &mut self,
+        client: &C,
+        parent: &IssueRef,
+        child_task_id: u64,
+    ) -> anyhow::Result<()> {
+        let Some(link) = self.issue_link_for_task(child_task_id).await? else {
+            return Ok(());
+        };
+        if link.issue.owner != parent.owner || link.issue.repo != parent.repo {
+            return Ok(());
+        }
+        let parent_external_id = issue_external_id(&parent.owner, &parent.repo, parent.number);
+        if link.state.parent_issue.as_deref() == Some(parent_external_id.as_str()) {
+            return Ok(());
+        }
+        let Some(sub_issue_id) = self.issue_database_id(client, &link).await? else {
+            return Ok(());
+        };
+        client
+            .add_sub_issue(
+                &parent.owner,
+                &parent.repo,
+                parent.number,
+                sub_issue_id,
+                true,
+            )
+            .await?;
+        let external_id = issue_external_id(&link.issue.owner, &link.issue.repo, link.issue.number);
+        let mut state = link.state.clone();
+        // The lookup may have just recorded the id, so it is written back from
+        // here rather than relying on the stale clone.
+        state.issue_id = Some(sub_issue_id);
+        state.parent_issue = Some(parent_external_id);
+        self.save_issue_field_state(link.integration_id, &external_id, &state)
+            .await?;
+        Ok(())
+    }
+
+    /// The issue for one task, opening it when the task has none. Its subtasks
+    /// are not walked here; `push_github_new_task` owns that, so callers of the
+    /// chain below never recurse into a sibling's tree.
+    async fn ensure_github_issue<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<Option<(u64, IssueRef)>> {
+        let task = self.get_task(task_id).await?;
+        if task.deleted_at.is_some()
+            || task.workflow_run_id.is_some()
+            || self.is_builtin_owned(task_id).await?
+            || self.ancestry_blocks_sync(task_id).await?
+        {
+            return Ok(None);
+        }
+        // A subtask hangs under the nearest ancestor that is on GitHub, so a
+        // chain of local-only tasks in between is no obstacle. When nothing
+        // above it has an issue yet, the parent's own chain is opened first
+        // and the child hangs under the issue that appears.
+        let parent = match task.parent_id {
+            Some(parent_id) => match self.nearest_ancestor_issue(parent_id).await? {
+                Some(found) => Some(found),
+                // Boxed, because this is the recursion the future's size would
+                // otherwise be defined in terms of.
+                None => Box::pin(self.ensure_github_issue(client, parent_id)).await?,
+            },
+            None => None,
+        };
+        if let Some(link) = self.issue_link_for_task(task_id).await? {
+            if let Some((_, parent_issue)) = &parent {
+                self.attach_sub_issue(client, parent_issue, task_id).await?;
+            }
+            return Ok(Some((link.integration_id, link.issue)));
+        }
+        // A sub-issue lives in its parent's repo; a top-level task goes where
+        // its own project tag is bound.
+        let destination = match &parent {
+            Some((integration_id, issue)) => {
+                Some((*integration_id, issue.owner.clone(), issue.repo.clone()))
+            }
+            None => self
+                .bound_repo_for_task(task_id)
+                .await?
+                .map(|bound| (bound.integration_id, bound.owner, bound.repo)),
+        };
+        let Some((integration_id, owner, repo)) = destination else {
+            return Ok(None);
+        };
+        let issue = client
+            .create_issue(
+                &owner,
+                &repo,
+                &task.title,
+                task.description.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        let external_id = issue_external_id(&owner, &repo, issue.number);
+        let state = issue_state_for(&issue);
+        self.link_issue(integration_id, &external_id, task_id, &state, issue.updated_at)
+            .await?;
+        if let Some((_, parent_issue)) = &parent {
+            self.attach_sub_issue(client, parent_issue, task_id).await?;
+        }
+        Ok(Some((
+            integration_id,
+            IssueRef {
+                owner,
+                repo,
+                number: issue.number,
+            },
+        )))
+    }
+
     /// Open the issue for a task captured by a repo-bound project tag, so a
-    /// task typed into that project also exists on GitHub (§5.2). The link is
-    /// recorded with the returned issue as its snapshot, so the first pull
-    /// after this merges instead of importing a duplicate. `None` when the
-    /// task is already issue-backed, must never sync, or sits in no
+    /// task typed into that project also exists on GitHub (§5.2), and mirror
+    /// the task's subtask tree under it (§5.5). The link is recorded with the
+    /// opened issue as its snapshot, so the first pull after this merges
+    /// instead of importing a duplicate. Returns the issue the task ended up
+    /// with, and `None` only when the task must never sync or sits in no
     /// repo-bound project.
     pub async fn push_github_new_task<C: GithubClient>(
         &mut self,
         client: &C,
         task_id: u64,
     ) -> anyhow::Result<Option<IssueRef>> {
-        let task = self.get_task(task_id).await?;
-        if task.deleted_at.is_some()
-            || task.workflow_run_id.is_some()
-            || self.is_builtin_owned(task_id).await?
-        {
+        let mut seen = std::collections::HashSet::new();
+        self.mirror_github_task(client, task_id, &mut seen).await
+    }
+
+    /// The issue for one task, plus the same for its subtask tree: a parent
+    /// that gains an issue later still picks up the children it already has.
+    /// Each task is visited once, so a corrupted parent chain cannot recurse
+    /// forever, and a subtask that fails is reported without stopping its
+    /// siblings.
+    async fn mirror_github_task<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+        seen: &mut std::collections::HashSet<u64>,
+    ) -> anyhow::Result<Option<IssueRef>> {
+        if !seen.insert(task_id) {
             return Ok(None);
         }
-        if self.issue_link_for_task(task_id).await?.is_some() {
-            return Ok(None);
+        let issue = self.ensure_github_issue(client, task_id).await?;
+        let mut failed = None;
+        for subtask in self.list_subtasks(task_id).await? {
+            // Boxed, because this is the recursion the future's size would
+            // otherwise be defined in terms of.
+            if let Err(error) = Box::pin(self.mirror_github_task(client, subtask.id, seen)).await
+                && failed.is_none()
+            {
+                failed = Some(error);
+            }
         }
-        let Some(bound) = self.bound_repo_for_task(task_id).await? else {
-            return Ok(None);
-        };
-        let issue = client
-            .create_issue(
-                &bound.owner,
-                &bound.repo,
-                &task.title,
-                task.description.as_deref().unwrap_or_default(),
-            )
-            .await?;
-        let external_id = issue_external_id(&bound.owner, &bound.repo, issue.number);
-        let state = IssueFieldState {
-            remote: issue.field_values(),
-            assignees: issue.assignees.clone(),
-            milestone: issue.milestone.clone(),
-            author: issue.author.clone(),
-            url: issue.url.clone(),
-            ..Default::default()
-        };
-        self.link_issue(
-            bound.integration_id,
-            &external_id,
-            task_id,
-            &state,
-            issue.updated_at,
-        )
-        .await?;
-        Ok(Some(IssueRef {
-            owner: bound.owner,
-            repo: bound.repo,
-            number: issue.number,
-        }))
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(issue.map(|(_, issue)| issue)),
+        }
     }
 
     /// The issue a task is synced from, when it is issue-backed. Other
@@ -2454,11 +2785,49 @@ impl TodoStore {
             .await?;
 
         let mut seen = std::collections::HashSet::new();
+        // Issues that have sub-issues of their own: their children are read in
+        // a second pass, one call per parent rather than one per issue (§5.5).
+        let mut parents: Vec<(String, u64)> = Vec::new();
         for issue in &page.issues {
-            seen.insert(issue_external_id(&bound.owner, &bound.repo, issue.number));
+            let external_id = issue_external_id(&bound.owner, &bound.repo, issue.number);
+            seen.insert(external_id.clone());
+            if issue.sub_issue_total > 0 {
+                parents.push((external_id, issue.number));
+            }
         }
         for issue in page.issues {
             self.sync_github_issue(client, bound, &issue, summary).await?;
+        }
+
+        // Parents we recorded children under are read too: a parent whose last
+        // sub-issue was removed on GitHub still has to notice.
+        for link in self.issue_links_for_integration(bound.integration_id).await? {
+            if link.state.tombstoned {
+                continue;
+            }
+            let Some(parent_external_id) = link.state.parent_issue else {
+                continue;
+            };
+            if parents.iter().any(|(known, _)| known == &parent_external_id) {
+                continue;
+            }
+            if let Some(parent) = parse_issue_external_id(&parent_external_id)
+                && parent.owner == bound.owner
+                && parent.repo == bound.repo
+            {
+                parents.push((parent_external_id, parent.number));
+            }
+        }
+        for (parent_external_id, parent_number) in parents {
+            self.sync_github_sub_issues(
+                client,
+                bound,
+                &parent_external_id,
+                parent_number,
+                &seen,
+                summary,
+            )
+            .await?;
         }
 
         // A missing link is only evidence of deletion when the listing was
@@ -2545,6 +2914,157 @@ impl TodoStore {
             .await
     }
 
+    /// Mirror one parent's sub-issues locally. GitHub owns the relationship:
+    /// a child that moved parents is re-parented, and one the parent no longer
+    /// lists is un-nested. Children of this repo sync like any other issue; a
+    /// child whose issue the page never carried is only re-nested when its own
+    /// link already exists, because a sub-issue may live in another repo of
+    /// the same owner and this repo's number would name a different issue.
+    async fn sync_github_sub_issues<C: GithubClient>(
+        &mut self,
+        client: &C,
+        bound: &BoundRepo,
+        parent_external_id: &str,
+        parent_number: u64,
+        in_page: &std::collections::HashSet<String>,
+        summary: &mut GithubSyncSummary,
+    ) -> anyhow::Result<()> {
+        let Some(parent) = self.issue_link(bound.integration_id, parent_external_id).await? else {
+            return Ok(());
+        };
+        if parent.state.tombstoned {
+            return Ok(());
+        }
+        let children = client
+            .list_sub_issues(&bound.owner, &bound.repo, parent_number)
+            .await?;
+        let mut listed = std::collections::HashSet::new();
+        for child in &children {
+            // A sub-issue can live in another repo of the same owner, where its
+            // number is not this repo's: pairing the two would name a
+            // different issue, so such a child is left alone (§9).
+            if child
+                .repository
+                .as_deref()
+                .is_some_and(|slug| !slug.eq_ignore_ascii_case(&bound.external_id()))
+            {
+                continue;
+            }
+            let child_external_id = issue_external_id(&bound.owner, &bound.repo, child.number);
+            listed.insert(child_external_id.clone());
+            if in_page.contains(&child_external_id) {
+                self.sync_github_issue(client, bound, child, summary).await?;
+            } else if self
+                .issue_link(bound.integration_id, &child_external_id)
+                .await?
+                .is_none()
+            {
+                continue;
+            }
+            if self
+                .nest_issue(
+                    bound.integration_id,
+                    &child_external_id,
+                    parent.task_id,
+                    parent_external_id,
+                )
+                .await?
+            {
+                summary.nested += 1;
+            }
+        }
+        self.detach_unlisted_sub_issues(
+            bound.integration_id,
+            parent_external_id,
+            parent.task_id,
+            &listed,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Put a linked child task under the task of its parent issue, and record
+    /// the relationship so a later push does not repeat it. A cycle is refused
+    /// rather than allowed to corrupt the local tree. Returns whether anything
+    /// changed.
+    async fn nest_issue(
+        &mut self,
+        integration_id: u64,
+        child_external_id: &str,
+        parent_task_id: u64,
+        parent_external_id: &str,
+    ) -> QueryResult<bool> {
+        let Some(link) = self.issue_link(integration_id, child_external_id).await? else {
+            return Ok(false);
+        };
+        if link.state.tombstoned {
+            return Ok(false);
+        }
+        let child = self.get_task(link.task_id).await?;
+        if child.deleted_at.is_some() {
+            return Ok(false);
+        }
+        if child.parent_id == Some(parent_task_id)
+            && link.state.parent_issue.as_deref() == Some(parent_external_id)
+        {
+            return Ok(false);
+        }
+        let mut current = Some(parent_task_id);
+        let mut visited = std::collections::HashSet::new();
+        while let Some(id) = current {
+            if id == child.id {
+                return Ok(false);
+            }
+            if !visited.insert(id) {
+                break;
+            }
+            current = self.get_task(id).await?.parent_id;
+        }
+        Task::update_by_id(child.id)
+            .parent_id(Some(parent_task_id))
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id: child.id })?;
+        let mut state = link.state.clone();
+        state.parent_issue = Some(parent_external_id.to_string());
+        self.save_issue_field_state(integration_id, child_external_id, &state)
+            .await?;
+        Ok(true)
+    }
+
+    /// A child the parent no longer lists was un-parented on GitHub: undo the
+    /// local nesting without touching the issue itself.
+    async fn detach_unlisted_sub_issues(
+        &mut self,
+        integration_id: u64,
+        parent_external_id: &str,
+        parent_task_id: u64,
+        listed: &std::collections::HashSet<String>,
+    ) -> QueryResult<()> {
+        for link in self.issue_links_for_integration(integration_id).await? {
+            if link.state.tombstoned
+                || listed.contains(&link.external_id)
+                || link.state.parent_issue.as_deref() != Some(parent_external_id)
+            {
+                continue;
+            }
+            let task = self.get_task(link.task_id).await?;
+            if task.deleted_at.is_some() || task.parent_id != Some(parent_task_id) {
+                continue;
+            }
+            Task::update_by_id(link.task_id)
+                .parent_id(None)
+                .exec(&mut self.db)
+                .await
+                .context(crate::error::UpdateTaskSnafu { id: link.task_id })?;
+            let mut state = link.state.clone();
+            state.parent_issue = None;
+            self.save_issue_field_state(integration_id, &link.external_id, &state)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn import_github_issue<C: GithubClient>(
         &mut self,
         client: &C,
@@ -2577,14 +3097,7 @@ impl TodoStore {
                 .await
                 .context(crate::error::UpdateTaskSnafu { id: created.id })?;
         }
-        let state = IssueFieldState {
-            remote: issue.field_values(),
-            assignees: issue.assignees.clone(),
-            milestone: issue.milestone.clone(),
-            author: issue.author.clone(),
-            url: issue.url.clone(),
-            ..Default::default()
-        };
+        let state = issue_state_for(issue);
         self.link_issue(
             bound.integration_id,
             external_id,
@@ -2719,6 +3232,11 @@ impl TodoStore {
         state.milestone = issue.milestone.clone();
         state.author = issue.author.clone();
         state.url = issue.url.clone();
+        // The relationship is GitHub's, so it is never touched here; only the
+        // id is refreshed from the payload.
+        if issue.id != 0 {
+            state.issue_id = Some(issue.id);
+        }
         for field in take_remote.iter().chain(keep_local.iter()) {
             state.local_changed_at.remove(*field);
         }
@@ -2861,6 +3379,7 @@ mod tests {
 
     fn remote(number: u64, title: &str, state: &str, at: i64) -> RemoteIssue {
         RemoteIssue {
+            id: number,
             number,
             title: title.to_string(),
             body: "body".to_string(),
@@ -2871,6 +3390,7 @@ mod tests {
             author: Some("someone".to_string()),
             url: Some(format!("https://github.com/o/r/issues/{number}")),
             updated_at: jiff::Timestamp::from_second(at).ok(),
+            ..Default::default()
         }
     }
 
@@ -3179,6 +3699,9 @@ mod tests {
         /// `(repo, title, body)` per issue opened through the API, so a test
         /// can assert that a capture opened exactly one.
         created_issues: std::sync::Mutex<Vec<(String, String, String)>>,
+        /// `(parent repo, parent number, child repo, child id)` per accepted
+        /// sub-issue call.
+        sub_issues: std::sync::Mutex<Vec<(String, u64, String, u64)>>,
         labels: std::sync::Mutex<Vec<String>>,
         /// `(repo, head_branch, pull request)`, so `find_pull_request` works
         /// the way GitHub's `head=` filter does.
@@ -3214,6 +3737,31 @@ mod tests {
             self
         }
 
+        /// Record a sub-issue relationship both ways GitHub shows it: the
+        /// relationship itself, and the parent's own summary count (the sync's
+        /// trigger for reading a parent's children).
+        fn with_sub_issue(self, repo: &str, parent: u64, child: u64) -> Self {
+            self.with_sub_issue_from(repo, parent, repo, child)
+        }
+
+        /// The same, for a sub-issue that lives in another repo of the same
+        /// owner: GitHub allows it, and its number means nothing in the
+        /// parent's repo.
+        fn with_sub_issue_from(self, repo: &str, parent: u64, child_repo: &str, child: u64) -> Self {
+            if let Some(issues) = self.issues.lock().expect("issues lock").get_mut(repo)
+                && let Some(issue) = issues.iter_mut().find(|issue| issue.number == parent)
+            {
+                issue.sub_issue_total += 1;
+            }
+            self.sub_issues.lock().expect("sub-issues lock").push((
+                repo.to_string(),
+                parent,
+                child_repo.to_string(),
+                child,
+            ));
+            self
+        }
+
         fn with_repo(self, full_name: &str, private: bool) -> Self {
             self.repos.lock().expect("repos lock").push(RemoteRepo {
                 full_name: full_name.to_string(),
@@ -3228,6 +3776,22 @@ mod tests {
             }
         }
 
+        /// Un-parent a sub-issue the way the GitHub UI does: the relationship
+        /// goes and the parent's summary drops with it.
+        fn remove_sub_issue(&self, repo: &str, parent: u64, child: u64) {
+            self.sub_issues
+                .lock()
+                .expect("sub-issues lock")
+                .retain(|(slug, number, _, sub_issue)| {
+                    !(slug == repo && *number == parent && *sub_issue == child)
+                });
+            if let Some(issues) = self.issues.lock().expect("issues lock").get_mut(repo)
+                && let Some(issue) = issues.iter_mut().find(|issue| issue.number == parent)
+            {
+                issue.sub_issue_total = issue.sub_issue_total.saturating_sub(1);
+            }
+        }
+
         fn push_count(&self) -> usize {
             self.updates.lock().expect("updates lock").len()
         }
@@ -3237,6 +3801,15 @@ mod tests {
                 .lock()
                 .expect("created issues lock")
                 .clone()
+        }
+
+        fn sub_issue_calls(&self) -> Vec<(String, u64, u64)> {
+            self.sub_issues
+                .lock()
+                .expect("sub-issues lock")
+                .iter()
+                .map(|(repo, parent, _, child)| (repo.clone(), *parent, *child))
+                .collect()
         }
 
         fn last_patch(&self) -> IssuePatch {
@@ -3357,6 +3930,9 @@ mod tests {
                 // by hand cannot have one overwritten.
                 let number = list.iter().map(|issue| issue.number).max().unwrap_or(0) + 1;
                 let created = RemoteIssue {
+                    // The fake numbers its issues per repo, so an id equal to
+                    // the number is enough for the sub-issue calls.
+                    id: number,
                     number,
                     title: title.to_string(),
                     body: body.to_string(),
@@ -3366,6 +3942,87 @@ mod tests {
                 };
                 list.push(created.clone());
                 Ok(created)
+            }
+        }
+
+        fn get_issue<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+        ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a {
+            async move {
+                self.issues
+                    .lock()
+                    .expect("issues lock")
+                    .get(&format!("{owner}/{repo}"))
+                    .and_then(|issues| issues.iter().find(|issue| issue.number == number))
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("the fake has no issue {number}"))
+            }
+        }
+
+        fn add_sub_issue<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+            sub_issue_id: u64,
+            replace_parent: bool,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                let key = format!("{owner}/{repo}");
+                let exists = self
+                    .issues
+                    .lock()
+                    .expect("issues lock")
+                    .get(&key)
+                    .is_some_and(|issues| issues.iter().any(|issue| issue.number == number));
+                if !exists {
+                    anyhow::bail!("the fake has no issue {number} in {key}");
+                }
+                let mut sub_issues = self.sub_issues.lock().expect("sub-issues lock");
+                if replace_parent {
+                    sub_issues.retain(|(_, _, _, child)| *child != sub_issue_id);
+                }
+                sub_issues.push((key.clone(), number, key, sub_issue_id));
+                Ok(())
+            }
+        }
+
+        fn list_sub_issues<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteIssue>>> + Send + 'a {
+            async move {
+                let key = format!("{owner}/{repo}");
+                let children = self
+                    .sub_issues
+                    .lock()
+                    .expect("sub-issues lock")
+                    .iter()
+                    .filter(|(slug, parent, _, _)| slug == &key && *parent == number)
+                    .map(|(_, _, child_repo, child)| (child_repo.clone(), *child))
+                    .collect::<Vec<(String, u64)>>();
+                let issues = self.issues.lock().expect("issues lock");
+                Ok(children
+                    .into_iter()
+                    .filter_map(|(child_repo, child)| {
+                        let issue = issues
+                            .get(&child_repo)?
+                            .iter()
+                            .find(|issue| issue.id == child)?
+                            .clone();
+                        // GitHub stamps every payload with the repo it came
+                        // from, which is how a cross-repo child is spotted.
+                        Some(RemoteIssue {
+                            repository: Some(child_repo),
+                            ..issue
+                        })
+                    })
+                    .collect())
             }
         }
 
@@ -3733,8 +4390,15 @@ mod tests {
         assert_eq!(summary.imported, 0);
         assert_eq!(storage.list_tasks().await?.len(), 1);
 
-        // A task that is already issue-backed never opens a second issue.
-        assert!(storage.push_github_new_task(&fake, task.id).await?.is_none());
+        // A task that is already issue-backed never opens a second issue; the
+        // push reports the issue it has.
+        assert_eq!(
+            storage
+                .push_github_new_task(&fake, task.id)
+                .await?
+                .map(|issue| issue.number),
+            Some(1)
+        );
         assert_eq!(fake.created_issues().len(), 1);
         Ok(())
     }
@@ -3781,6 +4445,273 @@ mod tests {
         let fake = FakeGithub::default();
         assert!(storage.push_github_new_task(&fake, step.id).await?.is_none());
         assert!(fake.created_issues().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_subtask_opens_an_issue_under_its_parents_issue() -> anyhow::Result<()> {
+        let (mut storage, integration, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let parent = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
+        storage.assign_tag_to_task(parent.id, &tag.name).await?;
+        let subtask = storage
+            .create_task(
+                Task::create()
+                    .title("Sketch the form".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        // Nothing above the subtask is on GitHub yet, so the push opens the
+        // parent's issue first and then hangs the child under it.
+        let fake = FakeGithub::default();
+        let opened = storage.push_github_new_task(&fake, subtask.id).await?;
+        assert_eq!(opened.as_ref().map(|issue| issue.number), Some(2));
+        assert_eq!(fake.created_issues().len(), 2);
+        assert_eq!(
+            fake.sub_issue_calls(),
+            vec![("lofi-tools/todo-lofi".to_string(), 1, 2)]
+        );
+        let child = storage
+            .issue_link(integration.id, "lofi-tools/todo-lofi#2")
+            .await?
+            .expect("the child issue was linked");
+        assert_eq!(child.task_id, subtask.id);
+        assert_eq!(child.state.issue_id, Some(2));
+        assert_eq!(
+            child.state.parent_issue.as_deref(),
+            Some("lofi-tools/todo-lofi#1")
+        );
+
+        // A second push is quiet: both links exist and the relationship is
+        // recorded, so neither an issue nor a sub-issue call is repeated.
+        assert!(
+            storage
+                .push_github_new_task(&fake, subtask.id)
+                .await?
+                .is_some()
+        );
+        assert_eq!(fake.created_issues().len(), 2);
+        assert_eq!(fake.sub_issue_calls().len(), 1);
+
+        // The pull that follows merges both and keeps the tree: no duplicate
+        // task, and the child stays a subtask.
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.imported, 0);
+        assert_eq!(summary.nested, 0);
+        assert_eq!(storage.list_tasks().await?.len(), 2);
+        assert_eq!(storage.list_subtasks(parent.id).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_nested_subtask_chain_mirrors_under_each_level() -> anyhow::Result<()> {
+        let (mut storage, integration, tag) = bound_store("o", "r").await?;
+        let grandparent = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
+        storage.assign_tag_to_task(grandparent.id, &tag.name).await?;
+        let parent = storage
+            .create_task(
+                Task::create()
+                    .title("The form".to_string())
+                    .parent_id(Some(grandparent.id)),
+            )
+            .await?;
+        let child = storage
+            .create_task(
+                Task::create()
+                    .title("Sketch it".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+
+        // Pushing the leaf opens the whole chain, top down, and hangs each
+        // issue under the one above it.
+        let fake = FakeGithub::default();
+        assert!(
+            storage
+                .push_github_new_task(&fake, child.id)
+                .await?
+                .is_some()
+        );
+        assert_eq!(fake.created_issues().len(), 3);
+        assert_eq!(
+            fake.sub_issue_calls(),
+            vec![("o/r".to_string(), 1, 2), ("o/r".to_string(), 2, 3)]
+        );
+        assert_eq!(
+            storage
+                .issue_link(integration.id, "o/r#3")
+                .await?
+                .unwrap()
+                .state
+                .parent_issue
+                .as_deref(),
+            Some("o/r#2")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_child_link_without_a_recorded_id_is_looked_up_before_attaching()
+    -> anyhow::Result<()> {
+        let (mut storage, integration, tag) = bound_store("o", "r").await?;
+        let parent = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
+        storage.assign_tag_to_task(parent.id, &tag.name).await?;
+        let subtask = storage
+            .create_task(
+                Task::create()
+                    .title("Sketch the form".to_string())
+                    .parent_id(Some(parent.id)),
+            )
+            .await?;
+        // The child as an older build linked it: which issue it is, known; its
+        // row id, not.
+        storage
+            .link_issue(
+                integration.id,
+                "o/r#1",
+                subtask.id,
+                &IssueFieldState::default(),
+                None,
+            )
+            .await?;
+
+        // Only the parent's issue is opened (#2, since #1 exists), and the
+        // attachment uses the id the lookup returned for the child.
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Sketch the form", "open", 100));
+        assert!(
+            storage
+                .push_github_new_task(&fake, subtask.id)
+                .await?
+                .is_some()
+        );
+        assert_eq!(fake.created_issues().len(), 1);
+        assert_eq!(fake.sub_issue_calls(), vec![("o/r".to_string(), 2, 1)]);
+        let child = storage.issue_link(integration.id, "o/r#1").await?.unwrap();
+        assert_eq!(child.state.issue_id, Some(1));
+        assert_eq!(child.state.parent_issue.as_deref(), Some("o/r#2"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nothing_under_a_workflow_step_is_pushed() -> anyhow::Result<()> {
+        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let run = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
+        storage.assign_tag_to_task(run.id, &tag.name).await?;
+        let step = storage
+            .create_task(
+                Task::create()
+                    .title("Interview".to_string())
+                    .workflow_run_id(Some(4))
+                    .parent_id(Some(run.id)),
+            )
+            .await?;
+        let note = storage
+            .create_task(
+                Task::create()
+                    .title("Answer the questions".to_string())
+                    .parent_id(Some(step.id)),
+            )
+            .await?;
+
+        // Run content is the app's, not the issue's: a step is not pushed, and
+        // neither is anything under it.
+        let fake = FakeGithub::default();
+        assert!(storage.push_github_new_task(&fake, note.id).await?.is_none());
+        assert!(fake.created_issues().is_empty());
+        // The run's own task still syncs; only its step subtask is left out.
+        assert!(storage.push_github_new_task(&fake, run.id).await?.is_some());
+        assert_eq!(fake.created_issues().len(), 1);
+        assert!(fake.sub_issue_calls().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pulled_sub_issue_becomes_a_subtask_and_un_nests_when_removed() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default()
+            .with_issue("o/r", remote(1, "Add login", "open", 100))
+            .with_issue("o/r", remote(2, "Sketch the form", "open", 100))
+            .with_sub_issue("o/r", 1, 2);
+
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.nested, 1);
+        let parent_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+        let child_id = storage
+            .issue_link(integration.id, "o/r#2")
+            .await?
+            .unwrap()
+            .task_id;
+        assert_eq!(storage.get_task(child_id).await?.parent_id, Some(parent_id));
+        assert_eq!(
+            storage
+                .issue_link(integration.id, "o/r#2")
+                .await?
+                .unwrap()
+                .state
+                .parent_issue
+                .as_deref(),
+            Some("o/r#1")
+        );
+
+        // Un-parenting it on GitHub un-nests it locally even though the parent
+        // no longer reports children in its summary: the recorded
+        // relationship is what finds it.
+        fake.remove_sub_issue("o/r", 1, 2);
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(storage.get_task(child_id).await?.parent_id, None);
+        assert_eq!(
+            storage
+                .issue_link(integration.id, "o/r#2")
+                .await?
+                .unwrap()
+                .state
+                .parent_issue,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sub_issue_in_another_repo_is_left_alone() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default()
+            .with_issue("o/r", remote(1, "Add login", "open", 100))
+            .with_issue("o/r", remote(9, "A local issue", "open", 100))
+            .with_issue("o/other", remote(9, "Elsewhere", "open", 100))
+            .with_sub_issue_from("o/r", 1, "o/other", 9);
+
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        // This repo's #9 is a task of its own; the other repo's #9 shares its
+        // number, so it is not paired with it and nothing is nested.
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.nested, 0);
+        let child_id = storage
+            .issue_link(integration.id, "o/r#9")
+            .await?
+            .expect("this repo's #9 imported")
+            .task_id;
+        assert_eq!(storage.get_task(child_id).await?.parent_id, None);
         Ok(())
     }
 

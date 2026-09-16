@@ -58,6 +58,7 @@ describe, so building it first would mean building it against a stub.
 | 34 | 9 | The OAuth app is registered **under the `lofi-tools` org** with device flow enabled (the org that hosts this repo); the client id ships in the binary and `GITHUB_CLIENT_ID` overrides it for forks/self-builds |
 | 35 | 9 | **No local-merge escape hatch** once a remote resolves to github.com — the PR step is absolute there. Local merge survives only where no such remote exists (decision 17) |
 | 36 | 9 | Generated PRs follow the **`AGENTS.md` PR-hygiene convention**: imperative title, no conventional-commit prefix, no trailing punctuation, and a final `Release Notes:` section |
+| 37 | 10 | Sub-issues ↔ subtasks are **synced both ways**: a local subtask in a repo-bound tree opens its own issue and is attached under its parent's issue (the parent's chain is opened first when none of it is on GitHub yet), and a **pulled sub-issue becomes a local subtask**, un-nested when the relationship is removed on GitHub. The relationship is tracked in the child's link, one repo's issues only |
 
 ## 3. Current state (verified in this repo)
 
@@ -187,7 +188,8 @@ branch-creation guard refuses a dirty tree; see §6.2).
 | Labels | Tags | two-way, additive (decision 27) |
 | Comments | `tasks.comments` (one-way import) | GitHub → local |
 | Assignees, milestone, author, `html_url` | Metadata chips (stored in the link's `field_state`, rendered read-only) | GitHub → local |
-| Sub-issues, PRs, Projects v2 boards, milestones-as-sections | — | **out of scope** (§9) |
+| Sub-issue relationship | `tasks.parent_id` (the child's link also records the parent issue) | two-way, GitHub owns the relationship (§5.9) |
+| PRs, Projects v2 boards, milestones-as-sections | — | **out of scope** (§9) |
 
 Namespacing reuses the Todoist collision rule: an imported repo tag never merges
 into an existing local tag of the same name; it is created (and thereafter
@@ -271,7 +273,10 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
   never deletes or renames label objects, and never removes a label it did not
   add. (Whether the app may *remove* a label it previously added when the tag is
   removed locally is an open item — §10.)
-- Workflow-step tasks (`workflow_run_id` set) never sync, matching today's rule.
+- **Subtasks** are mirrored too: a subtask opens its own issue and is attached
+  under its parent's issue, opening the parent's chain first (§5.9).
+- Workflow-step tasks (`workflow_run_id` set) never sync, matching today's rule
+  — and neither does anything under one, since run content is the app's.
 - All calls are `PATCH`/`POST` on the specific fields only — no full-object
   round trips that could clobber fields we do not model.
 
@@ -312,6 +317,61 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
   **Open on GitHub** link.
 - Sync problems render as inline reasons/blocks (the pattern already used by
   blocked phases), not modal errors.
+
+### 5.9 Sub-issues ↔ subtasks
+
+The local subtask tree and GitHub's sub-issues are the same shape, so they are
+mirrored (decision 37). The relationship is *GitHub's*: the child's
+`external_task_links.field_state` records the parent issue it hangs under
+(`parent_issue = "owner/repo#number"`), which is what makes the push idempotent
+and a remote un-parenting visible.
+
+**Push (local → GitHub)**
+
+1. A subtask's issue is opened in its **parent's repo**, not its own binding —
+   that is where a sub-issue lives. A top-level task still goes where its own
+   project tag is bound.
+2. When the parent has no issue yet, the parent's own chain is opened first
+   (each ancestor in turn), so the mirrored tree matches the local one. A
+   subtask whose ancestry reaches no repo-bound project stays local, and so do
+   its children.
+3. The child is attached with `POST /repos/{owner}/{repo}/issues/{n}/sub_issues`
+   using its **database id** (not its number), which the link records at every
+   write; a link made before ids were stored pays one `GET /issues/{n}` and
+   keeps the answer. `replace_parent` is set, so a tree that moved is repaired
+   rather than rejected.
+4. Pushing a task also walks its subtasks, so a parent that gains an issue later
+   picks up the children it already has. A subtask that fails is reported
+   without stopping its siblings.
+5. A task inside a run's tree — a step (`workflow_run_id` set) or anything under
+   one — never syncs, extending §5.5's step rule to the step's content.
+6. An attachment is only made when the child's issue is in the parent's repo:
+   the link's external id names the child inside its own repo, so a cross-repo
+   sub-issue (allowed on GitHub within one owner) is left alone rather than
+   recorded as a different issue of this repo.
+
+**Pull (GitHub → local)**
+
+1. Children are read **from the parent side**: one `list_sub_issues` call per
+   issue whose listing summary reports children, plus the parents a link already
+   records children under — so a relationship removed on GitHub is noticed even
+   once the parent reports no children at all. This is a few calls per pass
+   instead of one per issue.
+2. A listed child is synced like any other issue and then nested under the
+   parent's task. A child whose payload names another repo of the same owner is
+   skipped — its number is not this repo's, and pairing the two would name a
+   different issue. A child of *this* repo that the page never carried is only
+   re-nested when its own link already exists.
+3. A child the parent no longer lists is un-nested locally (`parent_id` cleared,
+   the recorded relationship dropped); the issue itself is untouched.
+4. A cycle is refused rather than allowed to corrupt the local tree.
+
+**Known limits, stated rather than hidden:** ordering within a parent is not
+mirrored (no `sub_issues/priority` calls); GitHub's 100-sub-issue and 8-level
+nesting limits surface as a failed attach, which is logged and retried by the
+next push of that tree; and a relationship created on GitHub for an issue that
+has not moved since the cursor is picked up when that issue next appears in a
+listing (a full **Sync now** always sees it).
 
 ## 6. Part B — the coding workflow becomes git/PR-backed
 
@@ -523,6 +583,8 @@ compatibility; the per-repo truth lives in `run_worktrees`.
 | Both sides edited a field | Per-field resolution, GitHub wins ties (§5.4) |
 | Local delete | Tombstone + close the issue; never resurrected by pulls |
 | Issue closed | Task completed (never tombstoned) |
+| Sub-issue attach refused (cross-repo child, nesting limit, no recorded id) | Nothing is written; the task and its issue stay as they are, and the next push of that tree retries |
+| Sub-issue relationship removed on GitHub | The local task is un-nested (kept, never deleted or tombstoned) |
 | No remote resolves to github.com (none, or other hosts only) | Merge step keeps today's local merge (decision 17) |
 | Push rejected (non-fast-forward, no credentials) | Block with git's stderr; no retry loop |
 | Several remotes, only one of them GitHub (this repo: `github` + `gitlab`) | The GitHub remote is the only one used for push/PR; other hosts are never pushed to or mirrored |
@@ -536,7 +598,9 @@ compatibility; the per-repo truth lives in `run_worktrees`.
 ## 9. Out of scope
 
 - Multiple GitHub accounts and GitHub Enterprise/base-URL support (decision 31).
-- PRs as tasks, Projects v2 boards, milestones → sections, sub-issues → subtasks.
+- PRs as tasks, Projects v2 boards, milestones → sections. Cross-repo
+  sub-issues (a sub-issue whose repo differs from its parent's) are never
+  mirrored, and sub-issue ordering is never written back (§5.9).
 - Two-way comments; milestone/assignee write-back.
 - Webhooks (polling only), and deleting remote branches after merge.
 - Unattended/scheduled coding runs (still user-present, per the coding workflow spec).
@@ -608,6 +672,10 @@ Everything runs against fakes; **no live network in CI** (decision 29).
 - Binding: explicit sync target, auto-detected remote persisted, undetectable
   remote left alone, repo-invisible (404) reason.
 - `integration_sync_state` cursor behaviour and idempotent re-sync.
+- Sub-issues (§5.9): a subtask opening its parent's chain and attaching once, a
+  repeat push making no call, a pulled sub-issue nesting locally, an un-parented
+  child being un-nested, a step's subtree staying local, and a child link with
+  no recorded id being looked up before it is attached.
 - Worktree/PR rows: several per run, per-repo base branches, UNIQUE on PR
   identity, `state` transitions.
 

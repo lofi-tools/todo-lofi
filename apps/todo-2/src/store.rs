@@ -83,6 +83,22 @@ fn push_captured_task_in_background(
     });
 }
 
+/// The same, for GitHub alone. A subtask is mirrored as a sub-issue of its
+/// parent's issue (§5.5); pushing it to Todoist as well would land it there as
+/// a top-level item, so that provider is left out.
+fn push_github_capture_in_background(
+    store: &Arc<tokio::sync::Mutex<TodoStore>>,
+    task_id: u64,
+) {
+    let store = store.clone();
+    tokio::spawn(async move {
+        let mut s = store.lock().await;
+        if let Err(error) = push_github_capture(&mut s, task_id).await {
+            tracing::error!(task_id, %error, "GitHub capture push failed; the tree stays local");
+        }
+    });
+}
+
 /// Push a field delta to every Todoist task linked to `task_id`. No links
 /// (or no token) → no-op, so purely local tasks never touch the network.
 /// Must run on the Tokio runtime. A push failure fails the whole edit so
@@ -173,12 +189,17 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s.create_task(
-                TaskCreate::default()
-                    .title(title)
-                    .parent_id(Some(parent_id)),
-            )
-            .await?)
+            let task = s
+                .create_task(
+                    TaskCreate::default()
+                        .title(title)
+                        .parent_id(Some(parent_id)),
+                )
+                .await?;
+            // The parent's issue, and the sub-issue link to it, are opened in
+            // the background: the row appears as soon as the task exists.
+            push_github_capture_in_background(&store, task.id);
+            Ok(task)
         })
     }
 
