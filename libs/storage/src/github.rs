@@ -1351,6 +1351,17 @@ pub trait GithubClient {
         patch: &'a IssuePatch,
     ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a;
 
+    /// Open a new issue. Returns the remote row, which the caller records as
+    /// the task's snapshot so the app's own creation never reads back as a
+    /// remote edit (§5.4).
+    fn create_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        title: &'a str,
+        body: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a;
+
     /// Every repository the account can reach, most recently pushed first:
     /// what the tag settings binding picker offers (§5.3).
     fn list_repos(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_;
@@ -1666,6 +1677,28 @@ impl GithubClient for GithubHttpClient {
                 })
             })?;
             Ok(remote_issue_from_json(&body).unwrap_or_default())
+        }
+    }
+
+    fn create_issue<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        title: &'a str,
+        body: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/issues");
+            let response = self
+                .send(
+                    self.request(reqwest::Method::POST, &path)
+                        .json(&serde_json::json!({ "title": title, "body": body })),
+                )
+                .await?;
+            let created = self.json(response, "issue").await?;
+            remote_issue_from_json(&created).ok_or_else(|| {
+                anyhow::anyhow!("GitHub did not describe the issue it created: {created}")
+            })
         }
     }
 
@@ -2140,6 +2173,117 @@ impl TodoStore {
             }
         }
         Ok(out)
+    }
+
+    /// The repo a task's project tag is bound to, so a task added locally can
+    /// be opened as an issue there. Resolves through a section's parent the
+    /// way the Todoist destination lookup does (a task in a section of a
+    /// bound project still belongs to that project). `None` leaves the task
+    /// purely local.
+    async fn bound_repo_for_task(&mut self, task_id: u64) -> QueryResult<Option<BoundRepo>> {
+        let integration_ids: Vec<u64> = self
+            .list_integrations()
+            .await?
+            .into_iter()
+            .filter(|integration| integration.provider == "github")
+            .map(|integration| integration.id)
+            .collect();
+        if integration_ids.is_empty() {
+            return Ok(None);
+        }
+        for tag in self.get_direct_task_tags(task_id).await? {
+            let mut chain = vec![tag.id];
+            chain.extend(self.get_parents(tag.id).await?.into_iter().map(|tag| tag.id));
+            for tag_id in chain {
+                // The tag's own binding first: detection persists it there
+                // (§5.3), so it is the common case and needs no link scan.
+                if let Some(target) = self.tag_settings(tag_id).await?.sync_target
+                    && integration_ids.contains(&target.integration_id)
+                    && let Some((owner, repo)) = target.external_id.split_once('/')
+                {
+                    return Ok(Some(BoundRepo {
+                        integration_id: target.integration_id,
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                        tag_id,
+                    }));
+                }
+                for integration_id in &integration_ids {
+                    let link = self
+                        .tag_links_for_integration(*integration_id)
+                        .await?
+                        .into_iter()
+                        .find(|link| link.tag_id == tag_id && link.source_kind == "repo");
+                    if let Some(link) = link
+                        && let Some((owner, repo)) = link.external_id.split_once('/')
+                    {
+                        return Ok(Some(BoundRepo {
+                            integration_id: *integration_id,
+                            owner: owner.to_string(),
+                            repo: repo.to_string(),
+                            tag_id,
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open the issue for a task captured by a repo-bound project tag, so a
+    /// task typed into that project also exists on GitHub (§5.2). The link is
+    /// recorded with the returned issue as its snapshot, so the first pull
+    /// after this merges instead of importing a duplicate. `None` when the
+    /// task is already issue-backed, must never sync, or sits in no
+    /// repo-bound project.
+    pub async fn push_github_new_task<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<Option<IssueRef>> {
+        let task = self.get_task(task_id).await?;
+        if task.deleted_at.is_some()
+            || task.workflow_run_id.is_some()
+            || self.is_builtin_owned(task_id).await?
+        {
+            return Ok(None);
+        }
+        if self.issue_link_for_task(task_id).await?.is_some() {
+            return Ok(None);
+        }
+        let Some(bound) = self.bound_repo_for_task(task_id).await? else {
+            return Ok(None);
+        };
+        let issue = client
+            .create_issue(
+                &bound.owner,
+                &bound.repo,
+                &task.title,
+                task.description.as_deref().unwrap_or_default(),
+            )
+            .await?;
+        let external_id = issue_external_id(&bound.owner, &bound.repo, issue.number);
+        let state = IssueFieldState {
+            remote: issue.field_values(),
+            assignees: issue.assignees.clone(),
+            milestone: issue.milestone.clone(),
+            author: issue.author.clone(),
+            url: issue.url.clone(),
+            ..Default::default()
+        };
+        self.link_issue(
+            bound.integration_id,
+            &external_id,
+            task_id,
+            &state,
+            issue.updated_at,
+        )
+        .await?;
+        Ok(Some(IssueRef {
+            owner: bound.owner,
+            repo: bound.repo,
+            number: issue.number,
+        }))
     }
 
     /// The issue a task is synced from, when it is issue-backed. Other
@@ -3032,6 +3176,9 @@ mod tests {
         issues: std::sync::Mutex<std::collections::HashMap<String, Vec<RemoteIssue>>>,
         comments: std::sync::Mutex<std::collections::HashMap<String, Vec<ExternalComment>>>,
         updates: std::sync::Mutex<Vec<(String, u64, IssuePatch)>>,
+        /// `(repo, title, body)` per issue opened through the API, so a test
+        /// can assert that a capture opened exactly one.
+        created_issues: std::sync::Mutex<Vec<(String, String, String)>>,
         labels: std::sync::Mutex<Vec<String>>,
         /// `(repo, head_branch, pull request)`, so `find_pull_request` works
         /// the way GitHub's `head=` filter does.
@@ -3083,6 +3230,13 @@ mod tests {
 
         fn push_count(&self) -> usize {
             self.updates.lock().expect("updates lock").len()
+        }
+
+        fn created_issues(&self) -> Vec<(String, String, String)> {
+            self.created_issues
+                .lock()
+                .expect("created issues lock")
+                .clone()
         }
 
         fn last_patch(&self) -> IssuePatch {
@@ -3181,6 +3335,37 @@ mod tests {
                 // unless the local stamp is explicitly newer.
                 issue.updated_at = jiff::Timestamp::from_second(2_000_000_000).ok();
                 Ok(issue.clone())
+            }
+        }
+
+        fn create_issue<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            title: &'a str,
+            body: &'a str,
+        ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a {
+            async move {
+                let key = format!("{owner}/{repo}");
+                self.created_issues
+                    .lock()
+                    .expect("created issues lock")
+                    .push((key.clone(), title.to_string(), body.to_string()));
+                let mut issues = self.issues.lock().expect("issues lock");
+                let list = issues.entry(key).or_default();
+                // Continue the repo's numbering, so a test that seeded issues
+                // by hand cannot have one overwritten.
+                let number = list.iter().map(|issue| issue.number).max().unwrap_or(0) + 1;
+                let created = RemoteIssue {
+                    number,
+                    title: title.to_string(),
+                    body: body.to_string(),
+                    state: "open".to_string(),
+                    updated_at: jiff::Timestamp::from_second(2_000_000_000).ok(),
+                    ..Default::default()
+                };
+                list.push(created.clone());
+                Ok(created)
             }
         }
 
@@ -3507,6 +3692,95 @@ mod tests {
         assert_eq!(summary.updated, 0);
         assert_eq!(fake.push_count(), 0);
         assert_eq!(storage.get_task(task_id).await?.title, "Step title");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_new_task_in_a_bound_project_opens_an_issue() -> anyhow::Result<()> {
+        let (mut storage, integration, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let task = storage
+            .create_task(
+                Task::create()
+                    .title("Add login".to_string())
+                    .description(Some("With OAuth".to_string())),
+            )
+            .await?;
+        storage.assign_tag_to_task(task.id, &tag.name).await?;
+
+        let fake = FakeGithub::default();
+        let opened = storage.push_github_new_task(&fake, task.id).await?;
+        assert_eq!(opened.as_ref().map(|issue| issue.number), Some(1));
+        assert_eq!(
+            fake.created_issues(),
+            vec![(
+                "lofi-tools/todo-lofi".to_string(),
+                "Add login".to_string(),
+                "With OAuth".to_string()
+            )]
+        );
+
+        // The link carries the fresh issue as its snapshot, so the pass that
+        // follows merges instead of importing a second task for it.
+        let link = storage
+            .issue_link(integration.id, "lofi-tools/todo-lofi#1")
+            .await?
+            .expect("the issue was linked");
+        assert_eq!(link.task_id, task.id);
+        assert_eq!(link.state.remote.title, "Add login");
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.imported, 0);
+        assert_eq!(storage.list_tasks().await?.len(), 1);
+
+        // A task that is already issue-backed never opens a second issue.
+        assert!(storage.push_github_new_task(&fake, task.id).await?.is_none());
+        assert_eq!(fake.created_issues().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_section_task_resolves_its_projects_repo() -> anyhow::Result<()> {
+        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let section = storage.create_tag("In progress").await?;
+        storage.add_tag_implication(section.id, tag.id).await?;
+        let task = storage.create_task(Task::create().title("Add login".to_string())).await?;
+        storage.assign_tag_to_task(task.id, "In progress").await?;
+
+        let fake = FakeGithub::default();
+        assert!(storage.push_github_new_task(&fake, task.id).await?.is_some());
+        assert_eq!(fake.created_issues().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tasks_outside_a_bound_project_open_nothing() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        storage.create_integration("github", None).await?;
+        let task = storage.create_task(Task::create().title("Local only".to_string())).await?;
+        storage.assign_tag_to_task(task.id, "errands").await?;
+
+        let fake = FakeGithub::default();
+        assert!(storage.push_github_new_task(&fake, task.id).await?.is_none());
+        assert!(fake.created_issues().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_run_step_never_opens_an_issue() -> anyhow::Result<()> {
+        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let step = storage
+            .create_task(
+                Task::create()
+                    .title("Interview".to_string())
+                    .workflow_run_id(Some(4)),
+            )
+            .await?;
+        storage.assign_tag_to_task(step.id, &tag.name).await?;
+
+        let fake = FakeGithub::default();
+        assert!(storage.push_github_new_task(&fake, step.id).await?.is_none());
+        assert!(fake.created_issues().is_empty());
         Ok(())
     }
 

@@ -26,11 +26,22 @@ struct WorktreePlan {
 }
 
 /// Tell the apps that captured a freshly created task about it. Todoist
-/// turns that into a remote item, so adding a task to a linked tag also
-/// adds it to the user's Todoist project. Failures are logged rather than
-/// returned: the local task already exists, and failing here would leave
-/// the UI showing stale state instead of the task the user just typed.
-async fn push_captured_task(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
+/// turns that into a remote item and GitHub opens an issue, so adding a task
+/// to a linked tag also shows up on the provider. Each provider is told
+/// independently: a failure is logged rather than returned (the local task
+/// already exists) and never stops the other one.
+async fn push_captured_task(store: &mut TodoStore, task_id: u64) {
+    if let Err(error) = push_todoist_capture(store, task_id).await {
+        tracing::error!(task_id, %error, "Todoist capture push failed; the task stays local");
+    }
+    if let Err(error) = push_github_capture(store, task_id).await {
+        tracing::error!(task_id, %error, "GitHub capture push failed; the task stays local");
+    }
+}
+
+/// Add the captured task to the user's Todoist project when the tag is linked
+/// there. No Todoist integration, no work.
+async fn push_todoist_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
     let has_todoist = store
         .list_integrations()
         .await?
@@ -41,6 +52,19 @@ async fn push_captured_task(store: &mut TodoStore, task_id: u64) -> anyhow::Resu
     }
     let token = crate::todoist_auth::access_token().await?;
     store.push_todoist_new_task(&token, task_id).await?;
+    Ok(())
+}
+
+/// Open the issue for a captured task in a repo-bound project tag (§5.2).
+/// Skipped without GitHub credentials and for tags that bind no repo, so a
+/// purely local tag costs no API call.
+async fn push_github_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
+    if !crate::github_auth::has_usable_credentials() {
+        return Ok(());
+    }
+    let token = crate::github_auth::access_token().await?;
+    let client = storage::GithubHttpClient::new(token);
+    store.push_github_new_task(&client, task_id).await?;
     Ok(())
 }
 
@@ -55,9 +79,7 @@ fn push_captured_task_in_background(
     let store = store.clone();
     tokio::spawn(async move {
         let mut s = store.lock().await;
-        if let Err(error) = push_captured_task(&mut s, task_id).await {
-            tracing::error!(task_id, %error, "capture push failed; the task stays local");
-        }
+        push_captured_task(&mut s, task_id).await;
     });
 }
 

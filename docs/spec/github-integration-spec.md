@@ -257,6 +257,13 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 
 ### 5.5 Push rules
 
+- **A new local task in a repo-bound project opens an issue.** Capture is the
+  GitHub counterpart of Todoist's new-item push: the task's title becomes the
+  issue `title`, its description the `body`, and the issue is opened. The
+  returned issue is stored as the link's snapshot, so the first pull merges it
+  rather than importing a second task. A task outside a repo-bound project, an
+  already-issue-backed task, a workflow step, and a builtin/demo task all stay
+  local; no GitHub connection means no work at all.
 - Pushed: `title`, `body`, `state` (open/closed), labels.
 - Not pushed: assignees, milestone, comment threads.
 - **Additive labels** (decision 27): adding a local tag creates the label if
