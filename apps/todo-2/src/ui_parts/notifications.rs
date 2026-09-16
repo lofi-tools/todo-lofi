@@ -7,7 +7,7 @@
 //! Every error and warning is also shown as a toast when it is recorded;
 //! informational messages stay in the pane and the footer's indicator.
 
-use gpui::{App, Global};
+use gpui::{px, rgb, App, Global, Styled};
 use gpui_component::notification::Notification;
 use gpui_component::IconName;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -81,7 +81,11 @@ impl Notice {
 /// of it, and a retry loop cannot pile up identical cards.
 pub fn error_toast(message: impl Into<String>) -> Notification {
     let message = message.into();
-    Notification::error(message.clone()).id1::<Notice>(message)
+    Notification::error(message.clone())
+        .id1::<Notice>(message)
+        .px(px(20.))
+        .py(px(16.))
+        .bg(rgb(theme::ERROR_TOAST_BG))
 }
 
 /// The card one warning is shown in, keyed the same way as an error card.
@@ -138,6 +142,10 @@ pub enum NoticeFilter {
 }
 
 impl NoticeFilter {
+    pub fn options() -> [Self; 2] {
+        [Self::Problems, Self::All]
+    }
+
     pub fn shows(self, level: NoticeLevel) -> bool {
         match self {
             Self::Problems => level != NoticeLevel::Info,
@@ -149,13 +157,6 @@ impl NoticeFilter {
         match self {
             Self::Problems => "Errors & warnings",
             Self::All => "All",
-        }
-    }
-
-    pub fn toggle(self) -> Self {
-        match self {
-            Self::Problems => Self::All,
-            Self::All => Self::Problems,
         }
     }
 }
@@ -348,8 +349,10 @@ mod tests {
         assert!(NoticeFilter::Problems.shows(NoticeLevel::Warning));
         assert!(NoticeFilter::Problems.shows(NoticeLevel::Error));
         assert!(NoticeFilter::All.shows(NoticeLevel::Info));
-        assert_eq!(NoticeFilter::Problems.toggle(), NoticeFilter::All);
-        assert_eq!(NoticeFilter::All.toggle(), NoticeFilter::Problems);
+        assert_eq!(
+            NoticeFilter::options(),
+            [NoticeFilter::Problems, NoticeFilter::All]
+        );
     }
 
     /// The path from a logged failure to the pane's feed, which is how a

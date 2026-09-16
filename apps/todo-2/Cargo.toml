@@ -32,3 +32,6 @@ gpui_platform = { package = "gpui-pre-platform", version = "0.3.4", features = [
 gpui_tokio = { path = "../../libs/gpui-tokio" }
 gpui-component = "0.6.1"
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.1" }
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "0.3.4", features = ["test-support"] }

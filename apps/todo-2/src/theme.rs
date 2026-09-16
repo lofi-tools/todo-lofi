@@ -37,6 +37,10 @@ pub const WARNING: u32 = 0xf59e0b;
 /// Error state (failed tool calls, launch failures).
 pub const DANGER: u32 = 0xef4444;
 
+/// Error toast surface: a neutral gray that keeps the card distinct from app
+/// panels while letting the error icon carry the severity.
+pub const ERROR_TOAST_BG: u32 = 0x2e2e2e;
+
 /// Added-line tint in a rendered diff.
 pub const DIFF_ADD_BG: u32 = 0x16301f;
 

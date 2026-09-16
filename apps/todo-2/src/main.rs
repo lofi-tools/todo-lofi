@@ -5,12 +5,13 @@ use gpui::{
 };
 use gpui_component::WindowExt;
 use gpui_component::StyledExt;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::input::*;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{
-    Disableable, IconName, ResizableState, Theme, ThemeMode, TitleBar, h_resizable, resizable_panel,
+    Disableable, IconName, ResizableState, Selectable, Sizable, Size, Theme, ThemeMode, TitleBar,
+    h_resizable, resizable_panel,
 };
 use storage::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -1144,6 +1145,44 @@ async fn lookup_managed_tag(
         format!("Notifications — {}", parts.join(", "))
     }
 
+    /// One notifications filter pill. Selection is explicit: exactly one of
+    /// the two options is marked selected and pressed at a time.
+    fn notice_filter_pill(
+        option: NoticeFilter,
+        selected: bool,
+        on_select: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Button {
+        // Buttons install their own hover style; adding another one panics
+        // at render time.
+        Button::new(format!("notifications-filter-{}", option.label()))
+            .ghost()
+            .compact()
+            .with_size(Size::Small)
+            .rounded(ButtonRounded::Small)
+            .label(option.label())
+            .selected(selected)
+            .toggled(selected)
+            .tooltip(match (option, selected) {
+                (NoticeFilter::Problems, true) => "Showing errors and warnings",
+                (NoticeFilter::Problems, false) => "Show errors and warnings only",
+                (NoticeFilter::All, true) => "Showing every message",
+                (NoticeFilter::All, false) => "Show every message, informational ones included",
+            })
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(rgb(theme::PANEL_HOVER))
+                    .border_1()
+                    .border_color(rgb(theme::HAIRLINE))
+                    .text_color(rgb(theme::TEXT_STRONG))
+            })
+            .when(!selected, |this| {
+                this.border_1()
+                    .border_color(rgb(theme::HAIRLINE))
+                    .text_color(rgb(theme::TEXT_MUTED))
+            })
+            .on_click(on_select)
+    }
+
     /// The notifications pane, expanded above the footer: everything the app
     /// reported, newest first, filtered to failures unless asked for more. It
     /// uses a fixed pixel height derived from the current viewport, with its
@@ -1205,21 +1244,6 @@ async fn lookup_managed_tag(
                             .child("Notifications"),
                     )
                     .child(
-                        Button::new("notifications-filter")
-                            .ghost()
-                            .compact()
-                            .label(filter.label())
-                            .tooltip(if filter == NoticeFilter::Problems {
-                                "Show every message, informational ones included"
-                            } else {
-                                "Show errors and warnings only"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.notice_filter = this.notice_filter.toggle();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
                         Button::new("notifications-clear")
                             .ghost()
                             .compact()
@@ -1241,6 +1265,24 @@ async fn lookup_managed_tag(
                                 cx.notify();
                             })),
                     ),
+            )
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1()
+                    .p(px(2.))
+                    .bg(rgb(theme::PANEL_BG))
+                    .children(NoticeFilter::options().map(|option| {
+                        Self::notice_filter_pill(
+                            option,
+                            filter == option,
+                            cx.listener(move |this, _, _, cx| {
+                                this.notice_filter = option;
+                                cx.notify();
+                            }),
+                        )
+                    })),
             )
             .child(
                 div()
@@ -1994,4 +2036,29 @@ fn init_logging(notices: NoticeSink) {
         .with(NoticeLayer::new(notices))
         .with(filter)
         .init();
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct NoticeFilterPills;
+
+    impl Render for NoticeFilterPills {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().h_flex().children(NoticeFilter::options().map(|option| {
+                Layout::notice_filter_pill(option, option == NoticeFilter::All, |_, _, _| {})
+            }))
+        }
+    }
+
+    /// Both pill states must render: an unselected pill with its own hover
+    /// style panics inside the button component.
+    #[gpui::test]
+    fn notification_filter_pills_render_without_panicking(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| NoticeFilterPills);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
 }

@@ -10,6 +10,7 @@
 //! (spec decision 30), so a token never reaches `.git/config`, a remote URL, or
 //! a credential helper.
 
+use std::future::Future;
 use std::time::Duration;
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -27,6 +28,124 @@ const DEFAULT_CLIENT_ID: &str = "Ov23liq9LUbDfFPGJ0dC";
 
 /// How much GitHub asks us to add to the interval on `slow_down`.
 const SLOW_DOWN_STEP: u64 = 5;
+
+/// One initial connection attempt plus three retries.
+const CONNECT_ATTEMPTS: u32 = 4;
+/// First retry delay, doubled after each consecutive transport failure.
+const CONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// Ceiling on the retry delay, so an outage does not park the flow too long.
+const CONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// A connection attempt's outcome, with its retry behavior attached. anyhow
+/// flattens typed failures into strings, so the marker preserves whether a
+/// transport failure may be retried separately from the message shown to users.
+#[derive(Debug)]
+struct AttemptError {
+    error: anyhow::Error,
+    retryable: bool,
+}
+
+impl AttemptError {
+    fn retryable(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            retryable: true,
+        }
+    }
+
+    fn permanent(error: anyhow::Error) -> Self {
+        Self {
+            error,
+            retryable: false,
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    fn into_inner(self) -> anyhow::Error {
+        self.error
+    }
+}
+
+impl std::fmt::Display for AttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.error)
+    }
+}
+
+impl std::error::Error for AttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
+
+/// Delay before retrying a failed connection attempt, doubling each time.
+fn connect_backoff_delay(failed_attempts: u32) -> Duration {
+    let shift = failed_attempts.min(5);
+    CONNECT_BACKOFF_BASE
+        .saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
+        .min(CONNECT_BACKOFF_MAX)
+}
+
+/// Delay after one retryable failure, then count it toward the next delay.
+async fn note_retryable_failure(failed_attempts: &mut u32) {
+    tokio::time::sleep(connect_backoff_delay(*failed_attempts)).await;
+    *failed_attempts = failed_attempts.saturating_add(1);
+}
+
+/// Retry one connection operation with exponential backoff. Permanent
+/// failures—bad configuration, denied authorization, invalid tokens—return
+/// immediately instead of waiting and retrying.
+async fn retry_connection<T, Attempt, AttemptFuture>(mut attempt: Attempt) -> anyhow::Result<T>
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: Future<Output = Result<T, AttemptError>>,
+{
+    let mut failed_attempts = 0;
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if error.is_retryable() && failed_attempts + 1 < CONNECT_ATTEMPTS =>
+            {
+                note_retryable_failure(&mut failed_attempts).await;
+            }
+            Err(error) => return Err(error.into_inner()),
+        }
+    }
+}
+
+/// Transport failures and rate limits may be retried; other statuses need the
+/// user to fix credentials, permissions, or the request.
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+/// Read a JSON response while preserving whether its failure may be retried.
+/// A malformed body from a retryable status is treated as another transport
+/// failure; otherwise the malformed body itself is the permanent problem.
+async fn read_json_response(
+    response: reqwest::Response,
+    source: &str,
+) -> Result<(reqwest::StatusCode, serde_json::Value), AttemptError> {
+    let status = response.status();
+    let text = response.text().await.map_err(|error| {
+        AttemptError::retryable(anyhow::anyhow!("{source} response could not be read: {error}"))
+    })?;
+    let body = serde_json::from_str(&text).map_err(|error| {
+        let error = anyhow::anyhow!("{source} response was not JSON: {error}");
+        if is_retryable_status(status) {
+            AttemptError::retryable(error)
+        } else {
+            AttemptError::permanent(error)
+        }
+    })?;
+    Ok((status, body))
+}
 
 /// Registered connection persisted to `~/.config/my-todo/github.json`. Tokens
 /// live here too (owner-only permissions), matching the Todoist file.
@@ -228,9 +347,15 @@ impl PollSchedule {
     }
 }
 
-/// Begin a device flow and return the code for the user to enter.
+/// Begin a device flow and return the code for the user to enter. Transport
+/// failures back off and retry; configuration and response-shape failures do
+/// not.
 pub async fn begin() -> anyhow::Result<DeviceLogin> {
-    let (client_id, _) = configured_client_id()?;
+    retry_connection(begin_request).await
+}
+
+async fn begin_request() -> Result<DeviceLogin, AttemptError> {
+    let (client_id, _) = configured_client_id().map_err(AttemptError::permanent)?;
     let body = format!(
         "client_id={}&scope={}",
         crate::todoist_auth::url_encode(&client_id),
@@ -246,26 +371,28 @@ pub async fn begin() -> anyhow::Result<DeviceLogin> {
         .body(body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Could not reach GitHub: {e}"))?;
-    let status = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Device flow response was not JSON: {e}"))?;
+        .map_err(|error| {
+            AttemptError::retryable(anyhow::anyhow!("Could not reach GitHub: {error}"))
+        })?;
+    let (status, body) = read_json_response(response, "Device flow").await?;
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "GitHub device flow failed ({status}): {body}"
-        ));
+        let error = anyhow::anyhow!("GitHub device flow failed ({status}): {body}");
+        if is_retryable_status(status) {
+            return Err(AttemptError::retryable(error));
+        }
+        return Err(AttemptError::permanent(error));
     }
-    parse_device_login(&body)
+    parse_device_login(&body).map_err(AttemptError::permanent)
 }
 
 /// Poll until the user approves, then persist the token and return the login.
-/// Runs on the Tokio runtime; never on GPUI's executor.
+/// Runs on the Tokio runtime; never on GPUI's executor. Transport failures
+/// back off and rejoin the poll; authorization failures stop it immediately.
 pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
     let (client_id, from_env) = configured_client_id()?;
     let mut schedule = PollSchedule::new(login.interval);
     let client = reqwest::Client::new();
+    let mut failed_attempts = 0;
     loop {
         tokio::time::sleep(schedule.delay()).await;
         let body = format!(
@@ -274,7 +401,7 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
             crate::todoist_auth::url_encode(&login.device_code),
             crate::todoist_auth::url_encode("urn:ietf:params:oauth:grant-type:device_code"),
         );
-        let response = client
+        let response = match client
             .post(TOKEN_URL)
             .header(reqwest::header::ACCEPT, "application/json")
             .header(
@@ -284,11 +411,32 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
             .body(body)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Could not reach GitHub: {e}"))?;
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("Token response was not JSON: {e}"))?;
+        {
+            Ok(response) => {
+                failed_attempts = 0;
+                response
+            }
+            Err(_error) => {
+                note_retryable_failure(&mut failed_attempts).await;
+                continue;
+            }
+        };
+        let (status, body) = match read_json_response(response, "Token").await {
+            Ok(response) => response,
+            Err(error) if error.is_retryable() => {
+                note_retryable_failure(&mut failed_attempts).await;
+                continue;
+            }
+            Err(error) => return Err(error.into_inner()),
+        };
+        if !status.is_success() {
+            let error = anyhow::anyhow!("GitHub sign-in failed ({status}): {body}");
+            if is_retryable_status(status) {
+                note_retryable_failure(&mut failed_attempts).await;
+                continue;
+            }
+            return Err(error);
+        }
         match schedule.absorb(&body) {
             PollAction::Wait | PollAction::SlowDown => continue,
             PollAction::Failed(message) => return Err(anyhow::anyhow!(message)),
@@ -326,8 +474,14 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
     }
 }
 
-/// The connected account's login, for the integration card's label.
+/// The connected account's login, for the integration card's label. Transport
+/// failures back off and retry; an unacceptable token fails immediately.
 pub async fn account_login(token: &str) -> anyhow::Result<String> {
+    let token = token.to_owned();
+    retry_connection(move || account_login_request(token.clone())).await
+}
+
+async fn account_login_request(token: String) -> Result<String, AttemptError> {
     let response = reqwest::Client::new()
         .get(format!("{API_BASE}/user"))
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
@@ -335,22 +489,24 @@ pub async fn account_login(token: &str) -> anyhow::Result<String> {
         .bearer_auth(token)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Could not reach GitHub: {e}"))?;
-    let status = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Account response was not JSON: {e}"))?;
+        .map_err(|error| {
+            AttemptError::retryable(anyhow::anyhow!("Could not reach GitHub: {error}"))
+        })?;
+    let (status, body) = read_json_response(response, "Account").await?;
     if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Could not read the GitHub account ({status}): {body}"
-        ));
+        let error = anyhow::anyhow!("Could not read the GitHub account ({status}): {body}");
+        if is_retryable_status(status) {
+            return Err(AttemptError::retryable(error));
+        }
+        return Err(AttemptError::permanent(error));
     }
     body.get("login")
         .and_then(|value| value.as_str())
         .filter(|login| !login.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Account response had no `login`: {body}"))
+        .ok_or_else(|| {
+            AttemptError::permanent(anyhow::anyhow!("Account response had no `login`: {body}"))
+        })
 }
 
 fn stored_credentials_at(path: &std::path::Path) -> Option<StoredCredentials> {
@@ -557,6 +713,37 @@ mod tests {
             PollSchedule::default().absorb(&json!({})),
             PollAction::Failed(_)
         ));
+    }
+
+    #[test]
+    fn connection_backoff_doubles_until_its_ceiling() {
+        assert_eq!(connect_backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(connect_backoff_delay(1), Duration::from_secs(2));
+        assert_eq!(connect_backoff_delay(2), Duration::from_secs(4));
+        assert_eq!(connect_backoff_delay(3), Duration::from_secs(8));
+        assert_eq!(connect_backoff_delay(10), CONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn only_transport_like_statuses_are_retryable() {
+        use reqwest::StatusCode;
+
+        for status in [
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            assert!(is_retryable_status(status), "{status} should back off");
+        }
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ] {
+            assert!(!is_retryable_status(status), "{status} needs the user");
+        }
     }
 
     /// The whole file lifecycle, against an explicit path so it never has to
