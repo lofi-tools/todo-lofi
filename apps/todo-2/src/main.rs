@@ -23,7 +23,7 @@ use projects::Project;
 use store::Store;
 use theme::APP_BG;
 use ui_parts::agent_pane::{AgentPane, AgentPaneEvent, AgentProject, build_task_context};
-use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
+use ui_parts::navbar::{NavBar, NavBarEvent, NavDestination};
 use ui_parts::settings::SettingsView;
 use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::apps::{AppSettings, AppSettingsEvent};
@@ -138,8 +138,6 @@ struct Layout {
     /// Integrations panels. Held so the panels share one instance.
     _apps: Entity<AppSettings>,
     settings: Entity<SettingsView>,
-    /// Main panel shown next to the navbar (task list by default).
-    panel: NavPanel,
     /// Everything the app reported: the footer's indicator and the pane.
     notices: NoticeLog,
     /// Whether the notifications pane is expanded above the footer.
@@ -302,23 +300,32 @@ impl Layout {
             &nav_bar,
             window,
             move |this, _nav, event, window, cx| match event {
-                NavBarEvent::TagSelected(path) => {
-                    // Tag navigation is handled by the TaskListView's own
-                    // subscription; make sure the task panel is visible.
-                    this.show_panel(NavPanel::Tasks, cx);
-                    this.check_managed_tag(path, &layout_weak, cx);
-                    this.sync_agent_project(path, window, cx);
-                }
-                NavBarEvent::AllTasks => {
-                    this.managed_tag = None;
-                    this.show_panel(NavPanel::Tasks, cx);
-                    this.agent_available = false;
-                    let agent_pane = this.agent_pane.clone();
-                    agent_pane.update(cx, |pane, cx| pane.set_project(None, cx));
-                    this.task_list.update(cx, |list, cx| {
-                        list.set_empty_action(None, cx);
-                    });
-                }
+                // The navbar owns the navigation stack, so the panel follows
+                // the destination it reports: no panel state to keep in
+                // sync here, and a menu panel is left the same way a tag is
+                // entered (and the same way back).
+                NavBarEvent::Navigated(destination) => match destination {
+                    NavDestination::Tag(path) => {
+                        this.check_managed_tag(path, &layout_weak, cx);
+                        this.sync_agent_project(path, window, cx);
+                    }
+                    NavDestination::AllTasks => {
+                        this.managed_tag = None;
+                        this.agent_available = false;
+                        let agent_pane = this.agent_pane.clone();
+                        agent_pane.update(cx, |pane, cx| pane.set_project(None, cx));
+                        this.task_list.update(cx, |list, cx| {
+                            list.set_empty_action(None, cx);
+                        });
+                    }
+                    // A menu panel is the whole destination: the task list
+                    // is not rendered and keeps the tag it was pointed at,
+                    // so navigating back restores the view that was on
+                    // screen without a reload.
+                    NavDestination::Integrations
+                    | NavDestination::Automations
+                    | NavDestination::Settings => {}
+                },
                 NavBarEvent::OpenProjectPicker => {
                     let projects = this._projects.clone();
                     let store = this.store.clone();
@@ -375,15 +382,6 @@ impl Layout {
                     this.tag_settings
                         .update(cx, |panel, cx| panel.open(name.clone(), candidates, cx));
                     cx.notify();
-                }
-                NavBarEvent::OpenIntegrations => {
-                    this.show_panel(NavPanel::Integrations, cx);
-                }
-                NavBarEvent::OpenAutomations => {
-                    this.show_panel(NavPanel::Automations, cx);
-                }
-                NavBarEvent::OpenSettings => {
-                    this.show_panel(NavPanel::Settings, cx);
                 }
             },
         );
@@ -625,15 +623,25 @@ impl Layout {
                     }
                     // An expanded integration's settings collapse first; the
                     // next Escape leaves the panel as usual.
-                    if layout.panel == NavPanel::Integrations
+                    if layout.nav_bar.read(cx).destination() == &NavDestination::Integrations
                         && layout
                             .integrations
                             .update(cx, |view, cx| view.collapse_settings(cx))
                     {
                         return;
                     }
-                    if layout.panel != NavPanel::Tasks {
-                        layout.show_panel(NavPanel::Tasks, cx);
+                    // A menu panel is one navigation step; Escape takes it
+                    // back to the destination it was opened from (the tag
+                    // pane, normally) rather than to a fixed panel.
+                    if !layout.nav_bar.read(cx).destination().is_tasks() {
+                        let went_back = layout
+                            .nav_bar
+                            .update(cx, |nav, cx| nav.navigate_back(cx));
+                        if !went_back {
+                            layout.nav_bar.update(cx, |nav, cx| {
+                                nav.navigate_to(NavDestination::AllTasks, cx)
+                            });
+                        }
                         return;
                     }
                     if layout.details.read(cx).adding_subtask() {
@@ -714,7 +722,6 @@ impl Layout {
             automations,
             _apps: apps,
             settings,
-            panel: NavPanel::Tasks,
             notices: NoticeLog::default(),
             notices_open: false,
             notice_filter: NoticeFilter::default(),
@@ -782,7 +789,8 @@ async fn lookup_managed_tag(
                     // Drop a retried result if the user navigated elsewhere
                     // while waiting.
                     if retried
-                        && this.nav_bar.read(cx).selected_path() != path.as_slice()
+                        && this.nav_bar.read(cx).destination()
+                            != &NavDestination::Tag(path.clone())
                     {
                         return;
                     }
@@ -1346,13 +1354,6 @@ async fn lookup_managed_tag(
         cx.notify();
     }
 
-    /// Swap the main panel, keeping the navbar footer highlight in sync.
-    fn show_panel(&mut self, panel: NavPanel, cx: &mut Context<Self>) {
-        self.panel = panel;
-        self.nav_bar.update(cx, |nav, cx| nav.set_panel(panel, cx));
-        cx.notify();
-    }
-
     fn handle_pick_project(
         &mut self,
         project: Project,
@@ -1700,8 +1701,10 @@ impl Render for Layout {
                     // clamp to the remaining window height instead.
                     .min_h_0()
                     .child(div().w_auto().max_w(px(256.)).flex_none().child(self.nav_bar.clone()))
-                    .child(match self.panel {
-                        NavPanel::Tasks if self.managed_tag.is_some() => div()
+                    .child(match self.nav_bar.read(cx).destination().clone() {
+                        // Only a tag can be automation-managed, so the special
+                        // panel is reached through the tag destination alone.
+                        NavDestination::Tag(_) if self.managed_tag.is_some() => div()
                             .id("managed-panel")
                             .relative()
                             .flex_1()
@@ -1757,7 +1760,7 @@ impl Render for Layout {
                                     .update(cx, |panel, cx| panel.popover(window, cx)),
                             )
                             .into_any_element(),
-                        NavPanel::Tasks => div()
+                        NavDestination::AllTasks | NavDestination::Tag(_) => div()
                             .id("right-column")
                             .relative()
                             .flex_1()
@@ -1825,21 +1828,21 @@ impl Render for Layout {
                                     .update(cx, |panel, cx| panel.popover(window, cx)),
                             )
                             .into_any_element(),
-                        NavPanel::Integrations => div()
+                        NavDestination::Integrations => div()
                             .flex_1()
                             .flex()
                             .flex_row()
                             .min_h_0()
                             .child(div().flex_1().child(self.integrations.clone()))
                             .into_any_element(),
-                        NavPanel::Automations => div()
+                        NavDestination::Automations => div()
                             .flex_1()
                             .flex()
                             .flex_row()
                             .min_h_0()
                             .child(div().flex_1().child(self.automations.clone()))
                             .into_any_element(),
-                        NavPanel::Settings => div()
+                        NavDestination::Settings => div()
                             .flex_1()
                             .flex()
                             .flex_row()

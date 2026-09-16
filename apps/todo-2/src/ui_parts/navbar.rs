@@ -16,41 +16,108 @@ use crate::theme::{PANEL_BG, PANEL_HOVER, SUCCESS, TEXT_FAINT, TEXT_MUTED};
 
 #[derive(Clone)]
 pub enum NavBarEvent {
-    TagSelected(Vec<String>),
-    AllTasks,
+    /// The navbar moved to another destination: a tag row click, a footer
+    /// row click, or Escape stepping back. The layout shows the matching
+    /// panel and the task list follows when the destination is a tag.
+    Navigated(NavDestination),
     /// The + button was clicked; the parent should open the project picker.
     OpenProjectPicker,
     /// A tag row's context menu asked for its settings; the parent shows the
     /// tag settings popover for that tag.
     OpenTagSettings(String),
-    /// The footer "Integrations" row was clicked.
-    OpenIntegrations,
-    /// The footer "Automations" row was clicked.
-    OpenAutomations,
-    /// The footer "Settings" row was clicked.
-    OpenSettings,
 }
 
-/// Which main panel is shown next to the navbar. The navbar highlights
-/// the matching footer row.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum NavPanel {
+/// One place the main panel can be pointed at: a task view (all tasks or one
+/// tag) or one of the menu panels. Exactly one destination is current at a
+/// time, which keeps the navbar's highlight unambiguous and makes a menu a
+/// normal navigation step rather than a mode stacked on top of the tag pane.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum NavDestination {
     #[default]
-    Tasks,
+    AllTasks,
+    /// A tag, by the path it was reached through: the path disambiguates a
+    /// project that is placed under several parents.
+    Tag(Vec<String>),
     Integrations,
     Automations,
     Settings,
 }
 
+impl NavDestination {
+    /// Whether this destination shows the task list (with its optional
+    /// details/agent panes).
+    pub fn is_tasks(&self) -> bool {
+        matches!(self, Self::AllTasks | Self::Tag(_))
+    }
+}
+
+/// The navigation stack: where the app is pointed, plus the destinations
+/// visited before it. Held in state so every navigation path — a tag row, a
+/// footer row, or Escape — moves through the same stack, and `current` is the
+/// single source of truth for both the highlighted row and the panel on
+/// screen.
+#[derive(Clone, Debug, Default)]
+pub struct NavHistory {
+    current: NavDestination,
+    back: Vec<NavDestination>,
+}
+
+impl NavHistory {
+    pub fn current(&self) -> &NavDestination {
+        &self.current
+    }
+
+    /// Point at `destination`, remembering where we came from so back returns
+    /// here. False when that is already the destination, which is what makes
+    /// re-clicking the row of the destination on screen a no-op.
+    pub fn navigate(&mut self, destination: NavDestination) -> bool {
+        if self.current == destination {
+            return false;
+        }
+        self.back.push(std::mem::replace(&mut self.current, destination));
+        true
+    }
+
+    /// Step back one destination. False when there is nothing to step back
+    /// to; `current` is where the app ended up.
+    pub fn go_back(&mut self) -> bool {
+        match self.back.pop() {
+            Some(previous) => {
+                self.current = previous;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The tag branch the navbar keeps expanded: the current tag, or the last
+    /// tag visited before a menu. Keeping the branch open is what lets a
+    /// nested tag still be clicked while a menu panel is showing, so it can be
+    /// navigated back to.
+    pub fn expanded_path(&self) -> &[String] {
+        if let NavDestination::Tag(path) = &self.current {
+            return path;
+        }
+        self.back
+            .iter()
+            .rev()
+            .find_map(|destination| match destination {
+                NavDestination::Tag(path) => Some(path.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
 pub struct NavBar {
     store: Store,
     /// Every tag row, already ordered and indented by the store. Rendering
-    /// folds it to the selected path — top-level rows plus the one branch the
-    /// selected tag sits in — so the nav stays collapsed until a tag is
-    /// picked, and no per-tag expand state is kept.
+    /// folds it to the expanded path — top-level rows plus the one branch the
+    /// visited tag sits in — so the nav stays collapsed until a tag is picked,
+    /// and no per-tag expand state is kept.
     rows: Vec<TagTreeRow>,
-    selected_path: Vec<String>,
-    active_panel: NavPanel,
+    /// Where the app is pointed and how it got there.
+    nav: NavHistory,
     /// Provider per synced tag (`tag_id → provider`), for the corner badge
     /// on synced tag icons. Unlinked tags are absent.
     linked_providers: HashMap<u64, String>,
@@ -87,8 +154,7 @@ impl NavBar {
         Self {
             store,
             rows: Vec::new(),
-            selected_path: Vec::new(),
-            active_panel: NavPanel::Tasks,
+            nav: NavHistory::default(),
             linked_providers: HashMap::new(),
             busy_tags: HashSet::new(),
             _fetch_tags,
@@ -113,17 +179,33 @@ impl NavBar {
         self.busy_tags.contains(tag_name)
     }
 
-    /// Highlight the footer row matching the visible main panel.
-    pub fn set_panel(&mut self, panel: NavPanel, cx: &mut Context<Self>) {
-        if self.active_panel != panel {
-            self.active_panel = panel;
+    /// The destination the main panel should be showing. This is the one
+    /// place navigation state is read from: the highlighted row and the panel
+    /// can never disagree.
+    pub fn destination(&self) -> &NavDestination {
+        self.nav.current()
+    }
+
+    /// Navigate to `destination` (a tag row, a footer row, or a programmatic
+    /// jump). Emits `Navigated` only when it actually moved, so re-clicking
+    /// the row of the destination on screen is a no-op.
+    pub fn navigate_to(&mut self, destination: NavDestination, cx: &mut Context<Self>) {
+        if self.nav.navigate(destination.clone()) {
+            cx.emit(NavBarEvent::Navigated(destination));
             cx.notify();
         }
     }
 
-    /// The currently selected tag path.
-    pub fn selected_path(&self) -> &[String] {
-        &self.selected_path
+    /// Step back one navigation step (Escape from a menu). False when there is
+    /// nothing to step back to.
+    pub fn navigate_back(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.nav.go_back() {
+            return false;
+        }
+        let destination = self.nav.current().clone();
+        cx.emit(NavBarEvent::Navigated(destination));
+        cx.notify();
+        true
     }
 
     /// Re-fetch the tag tree after a tag, placement, or section changed
@@ -149,28 +231,16 @@ impl NavBar {
             .ok();
         }));
     }
-
-    /// Select a tag by the path it was reached through. The path is what
-    /// disambiguates a project that is placed under several parents. The
-    /// selection also decides which branch of the tree render shows expanded.
-    fn navigate_to_tag(&mut self, path: &[String], cx: &mut Context<Self>) {
-        if self.selected_path == path {
-            return;
-        }
-        self.selected_path = path.to_vec();
-        cx.emit(NavBarEvent::TagSelected(path.to_vec()));
-        cx.notify();
-    }
 }
 
-/// Whether `row` should render under the current selection. Top-level rows
-/// are always visible; a nested row is shown only when every ancestor along
-/// its path is on the selected path, so exactly the branch of the selected
-/// tag is expanded and everything else stays collapsed.
-fn row_visible(path: &[String], selected_path: &[String]) -> bool {
+/// Whether `row` should render under the expanded path. Top-level rows are
+/// always visible; a nested row is shown only when every ancestor along its
+/// path is on the expanded path, so exactly the branch of the visited tag is
+/// expanded and everything else stays collapsed.
+fn row_visible(path: &[String], expanded_path: &[String]) -> bool {
     path.iter()
         .take(path.len().saturating_sub(1))
-        .all(|ancestor| selected_path.contains(ancestor))
+        .all(|ancestor| expanded_path.contains(ancestor))
 }
 
 /// A small pulsing dot shown on a project row while its agent turn streams.
@@ -194,11 +264,14 @@ impl EventEmitter<NavBarEvent> for NavBar {}
 
 impl Render for NavBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_all_tasks = self.selected_path.is_empty();
         // Cloned so the row closures do not borrow `self` while `cx.listener`
         // borrows `cx`.
+        let destination = self.nav.current().clone();
+        // The branch to keep open is the visited tag even while a menu panel
+        // is showing, so the row that leads back to it stays clickable.
+        let expanded_path = self.nav.expanded_path().to_vec();
+        let is_all_tasks = destination == NavDestination::AllTasks;
         let rows = self.rows.clone();
-        let selected_path = self.selected_path.clone();
         let linked_providers = self.linked_providers.clone();
         let busy_tags = self.busy_tags.clone();
         let nav = cx.weak_entity();
@@ -258,13 +331,11 @@ impl Render for NavBar {
                             })
                             .hover(|s| s.bg(rgb(0x2a2a2a)))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.selected_path.clear();
-                                cx.emit(NavBarEvent::AllTasks);
-                                cx.notify();
+                                this.navigate_to(NavDestination::AllTasks, cx);
                             })),
                     )
                     .children(rows.into_iter().filter_map(|row| {
-                        row_visible(&row.path, &selected_path).then_some(row)
+                        row_visible(&row.path, &expanded_path).then_some(row)
                     }).map(|row| {
                         let TagTreeRow {
                             tag,
@@ -276,7 +347,7 @@ impl Render for NavBar {
                         let tag_id = tag.id;
                         let tag_name = tag.name.clone();
                         let label = tag.label();
-                        let is_selected = path == selected_path;
+                        let is_selected = destination == NavDestination::Tag(path.clone());
                         let busy = busy_tags.contains(&tag_name);
                         // A duplicated row (the same project under several
                         // parents) must not reuse an element id, so the path
@@ -340,7 +411,10 @@ impl Render for NavBar {
                                     })
                                     .hover(|s| s.bg(rgb(0x2a2a2a)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.navigate_to_tag(&click_path, cx);
+                                        this.navigate_to(
+                                            NavDestination::Tag(click_path.clone()),
+                                            cx,
+                                        );
                                     }))
                                     .context_menu(move |menu, _window, _cx| {
                                         let nav = menu_nav.clone();
@@ -371,24 +445,24 @@ impl Render for NavBar {
                         "nav-automations",
                         gpui_component_assets::IconName::Bot,
                         "Automations",
-                        self.active_panel == NavPanel::Automations,
-                        NavBarEvent::OpenAutomations,
+                        destination == NavDestination::Automations,
+                        NavDestination::Automations,
                         cx,
                     ))
                     .child(nav_footer_row(
                         "nav-integrations",
                         integrations_icon(),
                         "Integrations",
-                        self.active_panel == NavPanel::Integrations,
-                        NavBarEvent::OpenIntegrations,
+                        destination == NavDestination::Integrations,
+                        NavDestination::Integrations,
                         cx,
                     ))
                     .child(nav_footer_row(
                         "nav-settings",
                         gpui_component_assets::IconName::Settings,
                         "Settings",
-                        self.active_panel == NavPanel::Settings,
-                        NavBarEvent::OpenSettings,
+                        destination == NavDestination::Settings,
+                        NavDestination::Settings,
                         cx,
                     )),
             )
@@ -427,14 +501,15 @@ fn sync_badge(provider: &str) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// A footer row pinned at the bottom of the navbar (Integrations,
-/// Settings): icon + label, same hover treatment as the tag rows.
+/// A footer row pinned at the bottom of the navbar (Automations,
+/// Integrations, Settings): icon + label, same hover treatment as the tag
+/// rows, and the same navigation step a tag row makes.
 fn nav_footer_row(
     id: &'static str,
     icon: impl IntoElement,
     label: &'static str,
     active: bool,
-    event: NavBarEvent,
+    destination: NavDestination,
     cx: &mut Context<NavBar>,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -458,7 +533,59 @@ fn nav_footer_row(
                 .child(icon),
         )
         .child(label)
-        .on_click(cx.listener(move |_this, _, _, cx| {
-            cx.emit(event.clone());
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.navigate_to(destination.clone(), cx);
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tag(name: &str) -> NavDestination {
+        NavDestination::Tag(vec![name.to_string()])
+    }
+
+    #[test]
+    fn a_menu_step_leaves_the_visited_tag_clickable() {
+        let mut nav = NavHistory::default();
+        assert!(nav.navigate(tag("todo-lofi")));
+        assert!(nav.navigate(NavDestination::Integrations));
+
+        // The branch of the tag visited before the menu stays expanded, so
+        // the very row that leads back to it is still on screen.
+        assert_eq!(nav.expanded_path(), ["todo-lofi".to_string()]);
+
+        // And re-clicking it navigates back to the tag: the whole point of
+        // tracking the destination rather than the panel.
+        assert!(nav.navigate(tag("todo-lofi")));
+        assert_eq!(nav.current(), &tag("todo-lofi"));
+        assert_eq!(nav.expanded_path(), ["todo-lofi".to_string()]);
+    }
+
+    #[test]
+    fn re_clicking_the_current_destination_changes_nothing() {
+        let mut nav = NavHistory::default();
+        assert!(nav.navigate(NavDestination::Settings));
+        assert!(!nav.navigate(NavDestination::Settings));
+        assert!(nav.navigate(tag("dev")));
+        assert!(!nav.navigate(tag("dev")));
+        assert!(nav.navigate(tag("other")));
+    }
+
+    #[test]
+    fn back_steps_through_every_destination_visited() {
+        let mut nav = NavHistory::default();
+        nav.navigate(tag("dev"));
+        nav.navigate(NavDestination::Integrations);
+        nav.navigate(NavDestination::Settings);
+
+        assert!(nav.go_back());
+        assert_eq!(nav.current(), &NavDestination::Integrations);
+        assert!(nav.go_back());
+        assert_eq!(nav.current(), &tag("dev"));
+        assert!(nav.go_back());
+        assert_eq!(nav.current(), &NavDestination::AllTasks);
+        assert!(!nav.go_back());
+    }
 }

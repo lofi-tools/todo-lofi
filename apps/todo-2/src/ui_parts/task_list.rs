@@ -11,7 +11,7 @@ use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
-use super::navbar::{NavBar, NavBarEvent};
+use super::navbar::{NavBar, NavBarEvent, NavDestination};
 use super::task_row::{TaskRow, TaskRowEvent};
 use crate::store::Store;
 use crate::theme::HAIRLINE;
@@ -138,20 +138,29 @@ impl TaskListView {
 
         let nav_subscription =
             cx.subscribe(&nav_bar, move |this, _nav_bar, event, cx| match event {
-                NavBarEvent::TagSelected(path) => {
-                    this.selected_path = path.clone();
-                    this.refresh(cx);
-                }
-                NavBarEvent::AllTasks => {
-                    this.selected_path.clear();
-                    this.selected_labels.clear();
-                    this.refresh(cx);
-                }
-                NavBarEvent::OpenProjectPicker
-                | NavBarEvent::OpenTagSettings(_)
-                | NavBarEvent::OpenIntegrations
-                | NavBarEvent::OpenAutomations
-                | NavBarEvent::OpenSettings => {
+                NavBarEvent::Navigated(destination) => match destination {
+                    NavDestination::Tag(path) => {
+                        if this.selected_path == *path {
+                            return;
+                        }
+                        this.selected_path = path.clone();
+                        this.refresh(cx);
+                    }
+                    NavDestination::AllTasks => {
+                        if this.selected_path.is_empty() {
+                            return;
+                        }
+                        this.selected_path.clear();
+                        this.selected_labels.clear();
+                        this.refresh(cx);
+                    }
+                    // A menu panel replaces the list on screen; its own
+                    // selection is kept for the navigation back to it.
+                    NavDestination::Integrations
+                    | NavDestination::Automations
+                    | NavDestination::Settings => {}
+                },
+                NavBarEvent::OpenProjectPicker | NavBarEvent::OpenTagSettings(_) => {
                     // Picker/popover open is handled by the Layout; the task
                     // list is unaffected.
                 }
