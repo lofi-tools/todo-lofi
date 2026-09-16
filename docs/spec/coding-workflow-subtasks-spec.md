@@ -74,18 +74,29 @@ except at the merge step, which will not finish while subtasks are still open.
 | 19 | Merge gate | The merge/PR action **refuses while open subtasks exist**, with a waiver affordance. |
 | 20 | Gap signal | Only in the subtask's **own details** — no row markers, no banner by the spec artifact — plus the coverage line in the run meta. |
 | 21 | Spec artifact | The umbrella spec block lists per-subtask specs as **nested expandable rows**. |
-| 22 | Fix actions | All three, in this order: reopen the interview (new round) / start a sub-interview / write the spec by hand. Plus promote-to-run. |
+| 22 | Fix actions | All three, in this order: reopen the interview (a **real rewind**, #26) / start a sub-interview / write the spec by hand. Plus promote-to-run. |
 | 23 | Tool shape | **One `save_spec`** carrying the umbrella plus the subtask specs and the covered ids. |
 | 24 | Interview prompt | The app **enumerates** the open subtasks (id + title) and states the coverage contract. |
 | 25 | Vocabulary | Run section = **Workflow** (rows are *steps*); tree = **Subtasks (N)**; states = *specced* / *unspecced* / *covered by the feature spec*. |
+| 26 | Rewind scope | **Reopen the interview** works in **any phase**, including mid-implement, and is a *real* rewind: the current phase stops and the run goes back to the interview. It is not a late "write specs only" pass. |
+| 27 | Rewind gate | Blocked while the phase's agent turn is **running**. The active phase row carries a **Stop** control (the agent pane's stop-turn, surfaced on the row); stopping leaves the step open and the branch as it is, and only then does the rewind become available. A stopped step reads as an ordinary pending step — no separate "Stopped" state. |
+| 28 | Rewind confirm | A confirm dialog **only when a phase is open** (past the spec gate): it names what stops and states that commits stay on the branch. At the interview-only state there is nothing to interrupt, so no dialog. |
+| 29 | Rewind accounting | Logged as **`kind: "reject"`** with a body — no new note kind — so `Round N` (1 + rejections) numbers every cycle truthfully. |
+| 30 | Step reuse | Nothing is **tombstoned** by a rejection or a rewind: the interview row is **re-used in place** (today's `retry_task`: `done=false`, `step_results["interview"]` cleared), the spec gate gets a **fresh row each round** (round 1's approved spec stays visible), and pending implement/review/merge rows are **re-used**. Engine rule: a node with an open step row in the run re-uses it; a node whose rows are all done spawns a fresh one. |
+| 31 | Step specs | `tasks.spec` is **never** written on a step row: the pane offers the spec editor only for `role <> 'step'`, and `save_spec` / `save_task_spec` reject a step id. |
+| 32 | Promoted subtask | It keeps **syncing its own GitHub issue**, its nested run's branch/PR name and `Closes #n` use **its own** issue, it **stays in `Subtasks (N)`** and in `spec covers N/M` **counted as covered**, its row shows the nested run's state and links into it (no coverage chip — #20), its own details read **`Covered by its own run`**, and the parent's merge refuses while it is open (waivable — #19). |
+| 33 | Coverage history | `spec_covered_at` stays a plain timestamp (no round number stored); the round log and the spec versions carry that history. |
 
-Two earlier answers were superseded during the interview and are recorded here
+Three earlier answers were superseded during the interview and are recorded here
 so the transcript is not misleading:
 
 - "a model-created subtask with a description counts as specced" →
   **superseded by #6**: descriptions never count, whoever wrote them.
 - "the coverage denominator is every subtask" → **superseded by #11**: done
   subtasks drop out (and are never flagged).
+- "interview and spec rows are both respawned each round, one row per phase
+  always" → **superseded by #30**: the interview row is re-used in place and
+  only the spec gate is fresh per round.
 
 ## 3. Current state (verified in this repo)
 
@@ -139,6 +150,17 @@ so the transcript is not misleading:
   `0025_*`.
 - **No staleness concept exists anywhere** (grep for `stale`/`invalidat` finds
   nothing in the task/spec paths), so §5 is greenfield.
+- **Retrigger path**: `retry_task` re-opens the feeder of a rejecting approval
+  (`done=false`, `step_results[node_id]` cleared) and tombstones its pending
+  children. For `coding-task` the feeders are the `interview` node (`retrigger_node`
+  of the spec gate) and `review`, so a rejection already re-opens the interview
+  **row in place** — decision #30 only removes the tombstoning.
+- **A phase runs in the agent pane**: the details pane emits
+  `CodingLaunch { phase, prompt }`, the Layout inserts the text into the agent
+  pane and the *user* sends it (`main.rs`), and the pane owns the turn
+  lifecycle including its `Stop the turn` button (`agent_pane.rs`). So "is this
+  phase running" is a pane fact, not a run fact, and there is no per-phase stop
+  on the run today (only the run-level `Cancel run`, which tombstones the steps).
 
 ## 4. The model on one page
 
@@ -160,6 +182,9 @@ feature task (run root)                          Workflow section (steps only)
   Steps are never subtasks and subtasks are never steps.
 - **Coverage** = per-subtask state, surfaced where the user can act on it (the
   subtask's own details) and summarised once (`spec covers x/y subtasks`).
+- **Promotion** = a subtask becomes a run of its own (decision #16). It stays a
+  subtask of the parent (in the list, in the count, counted covered) and keeps
+  syncing its own issue; the work moves into the nested run (#32).
 
 ## 5. Data model and engine
 
@@ -229,8 +254,15 @@ as subtasks (see §10, "Run started before the change").
 
 - `spawn_node_task`: when the node's role is `step`, set `tasks.role = 'step'`
   on the spawned row. `parent_id` stays the run root (decision #2), so every
-  existing engine path (`retry_task` re-opening the feeder, completion walk,
-  tombstoning pending children) keeps working untouched.
+  existing engine path (completion walk, retrigger, the step list read) keeps
+  working untouched.
+- **Re-use before spawn** (decision #30): `spawn_node_task` first looks for an
+  **open** step row for that node in this run (not done, not tombstoned) and
+  returns it instead of inserting. A node whose rows are all done gets a fresh
+  row. That one rule produces the intended geometry with no extra state: the
+  re-opened `interview` row is picked up again, each round's spec gate is a new
+  row (the previous one completed), and a pending `implement` survives a rewind
+  instead of being duplicated by the new cycle.
 - New read helper used by everything:
 
   ```rust
@@ -263,9 +295,19 @@ as subtasks (see §10, "Run started before the change").
 - `cover_subtask_at` is set (not cleared) when the same subtask is later given
   its own spec: an own spec wins over the mark in `subtask_coverage` ordering,
   and the mark stays as history.
-- `retry_task` / re-spec: when the interview is re-opened for a new round, the
-  subtask specs and marks are **kept** (they are still true statements about
-  those subtasks); the new round only has to handle what it enumerates.
+- `retry_task` / re-spec (decision #30): it **no longer tombstones the pending
+  children**. It re-opens the approver's `retrigger_node` (the `interview` step:
+  `done=false`, `step_results["interview"]` cleared) and appends the `reject`
+  note. Everything else stays: the interview row in place, the completed steps
+  (an approved or rejected spec gate) as history, and the pending
+  implement/review/merge rows as pending. Subtask specs and coverage marks are
+  **kept** (still true statements about those subtasks); the new round only
+  handles what it enumerates.
+- `stop_coding_phase(step_id)`: ends that step's phase agent turn (the same stop
+  the agent pane's **Stop the turn** performs, keyed on the run's checkout) and
+  leaves the step open (`done = false`) with whatever the turn already wrote
+  left on the branch. Nothing else about the run changes — the phase simply
+  stops running, which is what unblocks the rewind (decision #27).
 
 ### 5.5 Filtering (the four subtask surfaces)
 
@@ -274,7 +316,7 @@ as subtasks (see §10, "Run started before the change").
 | Task list (`subtasks_map` / `list_subtasks`, `task_list.rs:489`, `:901`) | exclude `role = 'step'` rows, so steps no longer render under the feature task. |
 | Details pane `Subtasks (N)` (`task_details.rs:2901`, `plain_subtasks`) | same filter (today it filters `node_id.is_none()`); with #15 the list and the task list now agree exactly. |
 | MCP `get_coding_context.sub_tasks[]` (`coding_mcp.rs:434`) | same filter, plus the per-subtask `spec` state (§6). |
-| GitHub sub-issue sync (`libs/storage/src/github.rs`, spec §5.9) | steps are already excluded via `workflow_run_id`; the filter becomes explicit on `role = 'step'` so the rule survives any future change to the run-root tagging. |
+| GitHub sub-issue sync (`libs/storage/src/github.rs`, spec §5.9) | the exclusion becomes explicit and narrower: a task syncs unless it **or an ancestor** is `role = 'step'`. A promoted subtask (which carries a run of its own — decision #32) therefore **keeps syncing its own issue**, and an outer run root no longer blocks its child's sync. |
 
 ## 6. MCP tool surface
 
@@ -308,7 +350,8 @@ as subtasks (see §10, "Run started before the change").
 Behaviour: writes the umbrella, each subtask spec, each covered mark, appends
 the `spec` note, and completes the open `interview` step of that run — exactly
 as today, so the phase machine is unchanged. A subtask id that is not a direct,
-non-step child of `task_id` returns a tool error and writes nothing.
+non-step child of `task_id` returns a tool error and writes nothing, and so does
+a **step** id in either list (decision #31).
 
 ### 6.3 `create_sub_task` — never under a step
 
@@ -354,6 +397,22 @@ Changes against today:
   like the existing warning chips (not an error style — decision #6/#12).
 - The spec block lists the umbrella first, then one collapsible row per subtask
   that has its own spec, labelled with the subtask title and its line count.
+- The row of a phase that is **running** carries a **Stop** action, and the
+  rewind only becomes available once it stops (decisions #27/#28).
+- A rewind adds a round without rewriting history (decision #30): the same
+  interview row re-opens, a **new `approve the spec` row** appears for the new
+  round, and the earlier cycle's rows stay. Rows stay ordered by **phase**, so
+  each round's spec gate sits directly under the interview row it belongs to:
+
+  ```
+  Workflow
+    ☑ interview & spec                                  re-opened, round 2
+    ☑ approve the spec                                  approved · round 1
+    ◐ approve the spec                                  [ Approve spec ] · round 2
+    ☐ implement the feature
+    ☐ review & annotate
+    ☐ merge the branch
+  ```
 
 ### 7.2 A subtask's own details (selected subtask)
 
@@ -366,14 +425,20 @@ Spec
                                                   "No spec yet"
                                                   "Specced · 11 lines"
                                                   "Covered by the feature spec"
+                                                  "Covered by its own run"  ← promoted (#32)
   [ Reopen the interview ]  [ Start a sub-interview ]  [ Write the spec ]
   [ Give it its own run ]                      ← promotion, always available
 ```
 
-- **Reopen the interview** — re-opens the run's `interview` step as a new round
-  (the same engine path a review rejection uses), which the pane then shows with
-  its `Start` action; the composed prompt enumerates the uncovered subtasks
-  (§9).
+- **Reopen the interview** — a **real rewind** of the run (decision #26),
+  available in any phase. It is disabled while the current phase's agent turn
+  runs, with the tooltip naming the **Stop** control that clears it (#27); once
+  the phase is stopped, a phase is open, so a confirm dialog names what stops
+  and notes that commits stay on the branch (#28). Underneath it is the engine's
+  retrigger path with reuse instead of tombstoning (#30), so the pane shows the
+  re-opened interview row with its `Start` action and a prompt enumerating the
+  uncovered subtasks (§8.1). The rewind is logged as a rejection (#29), which
+  is why the run's `Round N` chip advances.
 - **Start a sub-interview** — the existing `request_sub_task_interview` path:
   a `coding-sub-interview` run rooted at this subtask, launched by the user.
 - **Write the spec** — a manual spec editor for this subtask, mirroring the
@@ -383,7 +448,10 @@ Spec
 - **Give it its own run** — starts a `coding-task` run rooted at the subtask
   (nested runs are exempt from the one-run-per-project guard). With no spec on
   it, the new run starts at `interview`; with one, the user can still launch the
-  interview or move straight on.
+  interview or move straight on. The nested run's branch and PR belong to the
+  subtask's **own** issue (which keeps syncing), the parent counts the subtask as
+  covered, and the parent's merge refuses while the nested run is open
+  (waivable) — decision #32.
 - The row itself (in `Subtasks (N)`) is **unchanged**: no badge, no chip
   (decision #20). The only in-list hint that something is off is the run meta
   count.
@@ -394,7 +462,33 @@ The merge/PR action refuses while any subtask of the run is open, listing them
 on the row's secondary line (path-style, like the dirty-worktree refusal), with
 **Waive the open subtasks** to complete the run anyway. Unspecced subtasks are
 *not* part of this refusal (decision #12 vs #19): they are named in the same
-line as a warning but only the open ones block.
+line as a warning but only the open ones block. A subtask promoted to its own
+run is open for this purpose while that nested run is unfinished, and it is the
+one refusal that the user will hit in normal use — the waiver is the escape
+hatch (decision #32).
+
+### 7.5 Stopping a phase, and rewinding the interview
+
+```
+Workflow
+  ☑ interview & spec                                               done
+  ☑ approve the spec                                              approved · round 1
+  ☐ implement the feature              ◐ running       [ Stop ]
+  ☐ review & annotate
+  ☐ merge the branch
+```
+
+- **Stop** appears on the row whose phase is running and delegates to the agent
+  pane's stop-turn for the run's checkout; the step stays open and the branch
+  keeps what the turn wrote. The row then reads as an ordinary pending step
+  again (decision #27).
+- The pane needs exactly one new input: whether the current phase's turn is
+  running. The Layout (`main.rs`) already owns both the agent pane and the
+  details pane, so it can tell the pane on refresh (the way the checkout already
+  follows the run), or the details pane can read the agent pane entity's session
+  state.
+- Rewinding is then the subtask's **Reopen the interview** action, which is the
+  same rewind the user reaches from a subtask's details (decisions #26–#29).
 
 ### 7.4 Vocabulary and microcopy
 
@@ -403,10 +497,13 @@ line as a warning but only the open ones block.
 | Run section heading | `Workflow` |
 | Tree heading | `Subtasks (N)` (unchanged) |
 | Run meta | `spec covers 2/3 subtasks` (omitted when there are no subtasks) |
-| Subtask state | `No spec yet` / `Specced · 11 lines` / `Covered by the feature spec` |
+| Subtask state | `No spec yet` / `Specced · 11 lines` / `Covered by the feature spec` / `Covered by its own run` |
 | Fix actions | `Reopen the interview` · `Start a sub-interview` · `Write the spec` |
 | Promotion | `Give it its own run` |
 | Merge refusal | `3 open subtasks — close them or waive` · `Waive the open subtasks` |
+| Phase stop | `Stop` (tooltip: `Stop this phase's agent turn; the branch keeps what it wrote`) |
+| Rewind disabled | `Stop the implement phase first` |
+| Rewind confirm | `Reopen the interview?` · `This stops the implement phase and starts a new round. Commits stay on the branch.` → `Reopen the interview` |
 
 ## 8. Phase prompts
 
@@ -461,7 +558,13 @@ No mechanical checking in this spec (no diff parsing).
 | Agent never calls `save_spec` (or no agent configured) | The manual paths cover it: `Write the spec` per subtask, `Write spec manually` for the umbrella, and the spec gate advances by hand. Coverage accepts hand-written specs (they are just `tasks.spec`). |
 | Agent returns ids that are not subtasks of the run | Tool error, nothing written (§6.2). |
 | Agent marks a subtask covered and later specs it | Own spec wins in `subtask_coverage`; the mark stays as history. |
-| Re-interview (new round) after the spec gate | The engine's retrigger path re-opens `interview`; the previous cycle's steps stay as history and the run returns to the spec gate. See open question 1. |
+| Re-interview (new round) after the spec gate | A rewind: the interview row re-opens, a fresh spec gate row spawns for the round, pending steps are re-used, and the previous cycle's rows stay as history (decisions #26–#30). |
+| Rewind while the phase's agent turn runs | Disabled, with the tooltip pointing at `Stop` on the active row. Stopping ends the turn (commits kept); the rewind then confirms (decisions #27/#28). |
+| Rewind mid-implement | Confirm, then the implement step stops and returns to open; the interview re-opens; when the new spec is approved the *same* implement row picks up again in the same worktree with the new spec appended to its prompt. |
+| Rewind logged | Appends `kind: "reject"`, so `Round N` and the log agree (decision #29). |
+| Spec written on a step row | Rejected: the pane has no spec editor for a step, and `save_spec` refuses a step id (decision #31). |
+| Promoted subtask and GitHub | It keeps syncing its own issue; its nested run's branch name and PR `Closes #n` name its issue, not the parent's (decision #32). |
+| Promoted subtask and the parent's counts | Counted in `spec covers N/M` as covered; its row shows the nested run's state and links into it; the parent's merge refuses while the nested run is open, waivable (decisions #19/#32). |
 | Run cancelled with uncovered subtasks | Nothing special; the flags live with the tasks, not the run. |
 | Promoted subtask (nested run) | Its own run has the same model, recursively (decision #17); while it is active it is an open subtask of the parent, so the parent's merge refuses until it finishes or is waived. |
 | Run started before this change (v1 recipe, steps are subtasks) | Steps keep `role = NULL` and stay visible as subtasks in the task list for that run. Acceptable: the recipe is immutable per install and only new runs get steps. Alternative (not chosen): backfill `role='step'` for any `node_id` row whose run's recipe has phases. |
@@ -480,9 +583,12 @@ No mechanical checking in this spec (no diff parsing).
    v2; `ensure_coding_recipes` version upsert; `spawn_node_task` writes
    `role = 'step'`; `run_subtasks`; `subtask_coverage` / `coverage_summary`;
    `save_subtask_specs` (+ `save_task_spec` reuse) and `cover_subtasks`;
-   `subtasks_map` / `list_subtasks` exclude steps.
-4. `github.rs`: make the step exclusion explicit (`role = 'step'`) in the
-   sub-issue push/pull paths.
+   `subtasks_map` / `list_subtasks` exclude steps; `spawn_node_task`'s
+   re-use-before-spawn; `retry_task` stops tombstoning pending children;
+   `stop_coding_phase`.
+4. `github.rs`: make the step exclusion explicit and narrow it (`role = 'step'`
+   on the task or an ancestor) in the sub-issue push/pull paths, so a promoted
+   subtask keeps syncing.
 
 **`apps/todo-2/`**
 
@@ -491,15 +597,18 @@ No mechanical checking in this spec (no diff parsing).
    `create_sub_task` parents to the run root in a coding run and echoes the
    parent used.
 6. `store.rs`: wrappers `reopen_coding_interview(task_id)`,
-   `write_subtask_spec(task_id, spec)`, `promote_subtask(sub_task_id)`, and
-   `run_subtasks(task_id)`; `save_coding_spec` grows the subtask payload.
+   `write_subtask_spec(task_id, spec)`, `promote_subtask(sub_task_id)`,
+   `stop_coding_phase(step_id)`, and `run_subtasks(task_id)`; `save_coding_spec`
+   grows the subtask payload.
 7. `ui_parts/task_details.rs`: `Workflow` heading; coverage clause in the run
    meta; nested subtask-spec rows in `coding_spec_artifact`; the subtask `Spec`
-   block with the four actions; merge refusal + waiver; the interview prompt's
+   block with the four actions; merge refusal + waiver; `Stop` on the running
+   phase row and the rewind's disabled/confirm states; the interview prompt's
    subtask section; the implement prompt's per-subtask specs.
 8. `ui_parts/task_list.rs`: steps filtered out of `subtasks_map`.
 9. `main.rs`: wiring for the new events/actions (re-interview, promote) since
-   both need the run to refresh and the pane to follow.
+   both need the run to refresh and the pane to follow, plus the phase-busy
+   signal the disabled rewind reads.
 
 ## 11. Testing plan
 
@@ -519,7 +628,13 @@ No mechanical checking in this spec (no diff parsing).
   commit; rejects a foreign id, a step id, and a grandchild id; completes the
   interview step; a re-opened interview keeps earlier specs and marks.
 - Promotion starts a nested run and is exempt from the one-run-per-project
-  guard.
+  guard; a promoted subtask still syncs its own issue while a step (or a step's
+  descendant) does not; a promoted subtask counts as covered in the parent's
+  summary.
+- Re-use before spawn: re-opening the interview does not duplicate the pending
+  implement row; a completed spec gate yields a **new** spec row for the next
+  round; `retry_task` leaves pending children in place instead of tombstoning.
+- `stop_coding_phase` leaves the step open with `done = false`.
 
 **todo-2 (`cargo test -p todo-2`)**
 
@@ -533,12 +648,17 @@ No mechanical checking in this spec (no diff parsing).
   covered ones by title.
 - Merge gate: refuses with open subtasks, proceeds after waiver.
 - Task list: a step row never appears in `compute_row_specs`.
+- `save_spec` with a step id in `subtasks` or `covered` errors and writes
+  nothing.
 
 **UI (GPUI, `TestAppContext`)**
 
 - The subtask `Spec` block renders the three states and the four actions; the
   coverage clause appears only when the run has subtasks.
 - The spec artifact expands to nested subtask-spec rows.
+- Reopen the interview: disabled with its tooltip while the phase is running,
+  enabled once stopped, and the confirm dialog appears only when a phase is
+  open.
 
 ## 12. Out of scope
 
@@ -553,34 +673,30 @@ No mechanical checking in this spec (no diff parsing).
 - Changing Todoist sync behaviour or the generic `RecipeNode.subtask` lazy spawn
   for non-coding recipes.
 - A diff of specs between rounds (no spec versioning beyond "the current one").
+- Rewinding the **branch**: a rewind never resets the worktree or the commits a
+  stopped phase already wrote (decision #27); it only turns the run back to the
+  interview.
 
 ## 13. Open questions
 
-1. **Does "Reopen the interview" rewind an advanced run?** Today a re-spec
-   (retrigger) tombstones pending children and returns the run to the spec
-   gate; using it from a subtask mid-implement therefore *stops* the implement
-   step. The alternative is a late-round interview that writes subtask specs
-   without touching the current step. Recommend: use the same retrigger path
-   (one mechanism, legible round history) and make the action's tooltip say so.
-2. **GitHub sync of a promoted subtask.** A subtask with `workflow_run_id` set
-   (a nested-run root) is currently outside the sync rule, so promoting a
-   subtask would stop its issue from syncing. Should a promoted subtask keep
-   syncing its own issue? Recommend: yes for the nested root (it is still a
-   real subtask), which means narrowing the "anything under a run never syncs"
-   rule to "anything that is not the nested root".
-3. **Coverage wording.** `spec covers 2/3 subtasks` vs `2 of 3 subtasks
-   specced` — chosen for the spec, easy to change.
-4. **Where "covered" is recorded for history.** `spec_covered_at` is a
-   timestamp only; should the covering round number also be stored (so the pane
-   can say "covered in round 2")?
-5. **Promotion and the parent's coverage.** After a subtask is promoted, its own
-   run's umbrella covers its own subtasks; does the parent's coverage still
-   require the promoted root itself to be specced or covered? Recommend: the
-   promoted root counts as covered by its own run (it has a spec or an
-   interview), so the parent should treat it as `Covered` automatically.
-6. **Manual spec for a step.** Steps have no spec column use today (their
-   "spec" is the feature's). Confirm nothing should write `tasks.spec` on a step
-   row (recommend: never; the tool guard rejects step ids).
+The six carried over from the first two rounds are all resolved (decisions
+#26–#33). Mapping, for the record:
+
+| Was open | Resolved as |
+| --- | --- |
+| 1. Does "Reopen the interview" rewind an advanced run? | Yes — a real rewind, any phase (#26), gated on a running turn (#27), confirmed when a phase is open (#28), logged as a rejection (#29), with rows re-used rather than tombstoned (#30). |
+| 2. GitHub sync of a promoted subtask | It keeps syncing its own issue (#32). |
+| 3. Coverage wording | `spec covers 2/3 subtasks` (#11). |
+| 4. Round recorded with the mark | No — `spec_covered_at` stays a timestamp (#33). |
+| 5. Promotion and the parent's coverage | Counted as covered in the parent's count, shown as a nested run on the row (#32). |
+| 6. Manual spec for a step | Never; the pane has no such editor and the tools refuse a step id (#31). |
+
+Two copy-level things are deliberately left open, both cheap to settle during
+implementation:
+
+- The exact confirm-dialog wording beyond the sketch in §7.4.
+- Whether a stop that is followed by a rewind gets its own round-log line or is
+  only implied by the `reject` entry.
 
 ## 14. Implementation order
 
@@ -594,7 +710,10 @@ No mechanical checking in this spec (no diff parsing).
    review coverage line. Prompt unit tests.
 4. **Details pane**: `Workflow` heading, coverage clause, nested spec rows, the
    subtask `Spec` block with its four actions, the manual subtask spec editor.
-5. **Gates**: merge refusal + waiver; promotion wiring (`main.rs` events).
+5. **Gates and rewinds**: merge refusal + waiver; promotion wiring (`main.rs`
+   events); the phase **Stop** control and the rewind's disabled/confirm
+   states plus the phase-busy signal; `stop_coding_phase`; `retry_task`'s reuse
+   (no tombstoning) and the re-use-before-spawn rule.
 6. **Task list**: step filter; sweep for any other surface that should not see
    steps.
 7. **Polish**: empty states (a feature with no subtasks reads exactly as
