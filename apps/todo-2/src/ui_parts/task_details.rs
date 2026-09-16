@@ -13,7 +13,10 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
-use storage::prelude::{CODING_PHASES, RunNote, RunStepView, RunView, run_notes};
+use storage::prelude::{
+    CODING_PHASES, RunNote, RunStepView, RunView, SubtaskCoverage, coverage_summary, run_notes,
+    subtask_coverage,
+};
 
 use crate::components::Checkbox;
 use crate::components::{DateTimePicker, DateTimePickerEvent};
@@ -206,6 +209,31 @@ and ask clarifying questions before producing a detailed spec.
 
 Request to interview: ";
 
+/// The open subtasks of a run, in id order: the audience of the interview's
+/// coverage contract and of the coverage line (decision #11).
+fn open_subtasks(subtasks: &[TaskWithMeta]) -> Vec<&TaskWithMeta> {
+    subtasks.iter().filter(|task| !task.done).collect()
+}
+
+/// The interview prompt's subtask section (§8.1): the app enumerates the open
+/// subtasks and states the coverage contract, so the model cannot miss one.
+/// Omitting it entirely when there are none keeps a plain feature's prompt
+/// identical to today's.
+fn subtask_coverage_brief(subtasks: &[TaskWithMeta]) -> Option<String> {
+    let open = open_subtasks(subtasks);
+    if open.is_empty() {
+        return None;
+    }
+    let mut brief = format!(
+        "\n\n## Subtasks that must be covered\n\nThis feature has {} open subtasks. For each one, either save its own spec (`save_spec` with `subtasks: [{{ task_id, spec }}]`) or mark it as covered by the feature spec (`covered: [task_id]`). Do not leave one undecided.\n",
+        open.len()
+    );
+    for subtask in open {
+        brief.push_str(&format!("\n- #{} {}", subtask.id, subtask.title));
+    }
+    Some(brief)
+}
+
 /// The prompt the app drops into the agent pane for a phase (§8.1 of the
 /// coding workflow spec). The user edits and sends it; nothing is auto-sent.
 fn phase_prompt(
@@ -213,6 +241,7 @@ fn phase_prompt(
     notes: &[RunNote],
     branch: Option<&str>,
     phase: &str,
+    subtasks: &[TaskWithMeta],
 ) -> String {
     let context = build_task_context(task);
     match phase {
@@ -239,6 +268,9 @@ fn phase_prompt(
                     ));
                 }
             }
+            if let Some(brief) = subtask_coverage_brief(subtasks) {
+                target.push_str(&brief);
+            }
             format!("{INTERVIEW_BASE_PROMPT}{target}")
         }
         "implement" => {
@@ -246,6 +278,36 @@ fn phase_prompt(
             prompt.push_str(&context);
             if let Some(spec) = task.spec.as_deref().filter(|spec| !spec.is_empty()) {
                 prompt.push_str(&format!("\n\nSpec:\n{spec}"));
+            }
+            // Every open subtask spec is inlined too (decision #18): the
+            // implementer works from the whole approved scope, not the umbrella
+            // alone. A covered subtask contributes its title only — its detail
+            // is in the umbrella.
+            let covered: Vec<&TaskWithMeta> = subtasks
+                .iter()
+                .filter(|subtask| subtask_coverage(subtask) == SubtaskCoverage::Covered)
+                .collect();
+            for subtask in open_subtasks(subtasks) {
+                let own = subtask
+                    .spec
+                    .as_deref()
+                    .filter(|spec| !spec.trim().is_empty());
+                if let Some(spec) = own {
+                    prompt.push_str(&format!(
+                        "\n\n### {} (subtask #{})\n{spec}",
+                        subtask.title, subtask.id
+                    ));
+                }
+            }
+            if !covered.is_empty() {
+                let bullets: Vec<String> = covered
+                    .iter()
+                    .map(|subtask| format!("- {} (subtask #{})", subtask.title, subtask.id))
+                    .collect();
+                prompt.push_str(&format!(
+                    "\n\nCovered by the feature spec:\n{}",
+                    bullets.join("\n")
+                ));
             }
             let annotations: Vec<String> = notes
                 .iter()
@@ -259,10 +321,30 @@ fn phase_prompt(
             prompt.push_str(&format!("\n\nWork on branch `{branch}`. Do not merge it."));
             prompt
         }
-        "review" => format!(
-            "{context}\n\nSummarise what you changed on `{}` and call `complete_phase`, then wait for my review notes.",
-            branch.unwrap_or("the feature branch")
-        ),
+        "review" => {
+            // One line naming the subtasks and their coverage, so the reviewer's
+            // summary can say whether the branch did what the specs asked (§8.3).
+            let mut state = String::new();
+            let listing: Vec<String> = open_subtasks(subtasks)
+                .into_iter()
+                .map(|subtask| {
+                    let coverage = match subtask_coverage(subtask) {
+                        SubtaskCoverage::Own => "has its own spec",
+                        SubtaskCoverage::Covered => "covered by the feature spec",
+                        SubtaskCoverage::Unspecced => "no spec yet",
+                        SubtaskCoverage::NotApplicable => "done",
+                    };
+                    format!("#{} {} ({coverage})", subtask.id, subtask.title)
+                })
+                .collect();
+            if !listing.is_empty() {
+                state = format!("\n\nOpen subtasks: {}", listing.join("; "));
+            }
+            format!(
+                "{context}{state}\n\nSummarise what you changed on `{}` and call `complete_phase`, then wait for my review notes.",
+                branch.unwrap_or("the feature branch")
+            )
+        }
         "sub-interview" => {
             let mut target = task.title.clone();
             if let Some(description) = task.description.as_deref()
@@ -274,6 +356,23 @@ fn phase_prompt(
         }
         other => format!("{context}\n\nContinue the {other} phase."),
     }
+}
+
+/// The run meta's coverage clause (decision #11/#25): `spec covers 2/3
+/// subtasks`, over the open subtasks. `None` when the run has no subtasks, so
+/// a plain feature's meta line is unchanged.
+fn coverage_clause(subtasks: &[TaskWithMeta]) -> Option<(String, bool)> {
+    let summary = coverage_summary(subtasks);
+    if summary.total == 0 {
+        return None;
+    }
+    Some((
+        format!(
+            "spec covers {}/{} subtasks",
+            summary.covered, summary.total
+        ),
+        summary.covered < summary.total,
+    ))
 }
 
 /// How long after an outside mousedown closed a picker card before the
@@ -313,6 +412,9 @@ pub enum TaskDetailsEvent {
         phase: String,
         prompt: String,
     },
+    /// Stop the current phase's agent turn from the run's Workflow row
+    /// (decision #27). The layout forwards it to the agent pane's stop-turn.
+    CodingStopPhase,
 }
 
 /// Something that should happen once the current field edits are resolved.
@@ -513,6 +615,23 @@ pub struct TaskDetails {
     coding: Option<RunView>,
     /// Sub-tasks the model created *under* a phase step, keyed by step task id.
     step_subtasks: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    /// The run's real subtasks (never steps), for the coverage line, the
+    /// nested spec rows and the merge gate (decisions #5/#11/#19).
+    coding_subtasks: Vec<TaskWithMeta>,
+    /// The coding run of the selected subtask's parent, when the selected task
+    /// is a real subtask of a feature task with a run. Drives the subtask
+    /// Spec block and its rewind (decisions #6/#22).
+    subtask_parent_run: Option<RunView>,
+    /// The manual spec editor for a subtask ("Write the spec").
+    subtask_spec_open: bool,
+    subtask_spec_input: Option<Entity<InputState>>,
+    _subtask_spec_subscription: Option<Subscription>,
+    /// The rewind's confirm dialog is open (decision #28): a phase is open, so
+    /// reopening the interview has to say what it interrupts.
+    coding_rewind_confirm: bool,
+    /// Whether the current phase's agent turn is running (decision #27). Fed by
+    /// the layout from the agent pane; a rewind is blocked until it stops.
+    coding_phase_running: bool,
     /// The run's worktrees and its opened pull requests. A worktree with a
     /// GitHub remote turns the merge step into the PR step (§6.5).
     run_worktrees: Vec<storage::RunWorktree>,
@@ -543,6 +662,9 @@ pub struct TaskDetails {
     _coding_spec_subscription: Option<Subscription>,
     /// The spec artifact is expanded.
     coding_spec_expanded: bool,
+    /// Which nested subtask spec row is expanded under the umbrella (decision
+    /// #21).
+    coding_subtask_spec_expanded: Option<u64>,
     /// The GitHub issue the selected task is synced from, when it is
     /// issue-backed. Read-only: the source, the metadata chips and the
     /// one-way comment list (spec §5.2).
@@ -626,6 +748,13 @@ impl TaskDetails {
             _repeat_template_fetch: None,
             coding: None,
             step_subtasks: std::collections::HashMap::new(),
+            coding_subtasks: Vec::new(),
+            subtask_parent_run: None,
+            subtask_spec_open: false,
+            subtask_spec_input: None,
+            _subtask_spec_subscription: None,
+            coding_rewind_confirm: false,
+            coding_phase_running: false,
             run_worktrees: Vec::new(),
             run_pull_requests: Vec::new(),
             coding_dirty: Vec::new(),
@@ -641,6 +770,7 @@ impl TaskDetails {
             coding_spec_input: None,
             _coding_spec_subscription: None,
             coding_spec_expanded: false,
+            coding_subtask_spec_expanded: None,
             issue: None,
             _issue_fetch: None,
         }
@@ -668,6 +798,12 @@ impl TaskDetails {
         self.link_error = None;
         self.coding = None;
         self.step_subtasks = std::collections::HashMap::new();
+        self.coding_subtasks = Vec::new();
+        self.subtask_parent_run = None;
+        self.subtask_spec_open = false;
+        self.subtask_spec_input = None;
+        self._subtask_spec_subscription = None;
+        self.coding_rewind_confirm = false;
         self.run_worktrees = Vec::new();
         self.run_pull_requests = Vec::new();
         self.coding_dirty = Vec::new();
@@ -675,6 +811,7 @@ impl TaskDetails {
         self.coding_auto_started = false;
         self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
+        self.coding_subtask_spec_expanded = None;
         self.issue = None;
         let issue_fetch = self.store.github_issue_for_task(task_id, cx);
         self._issue_fetch = Some(cx.spawn(async move |this, cx| match issue_fetch.await {
@@ -799,6 +936,13 @@ impl TaskDetails {
     /// the select of a feature task lands on its already-active interview.
     fn load_coding(&mut self, task_id: u64, auto_start: bool, cx: &mut Context<Self>) {
         let store = self.store.clone();
+        // The selected task's parent, so a real subtask can show its own Spec
+        // block against the parent's run.
+        let parent_id = self
+            .selected
+            .as_ref()
+            .filter(|task| task.id == task_id)
+            .and_then(|task| task.parent_id);
         self._coding_fetch = Some(cx.spawn(async move |this, cx| {
             let view = match store.coding_run_for_task(task_id, cx).await {
                 Ok(view) => view,
@@ -876,6 +1020,23 @@ impl TaskDetails {
                 cx,
             )
             .await;
+            let subtasks = match store.run_subtasks(task_id, cx).await {
+                Ok(subtasks) => subtasks,
+                Err(error) => {
+                    tracing::error!("Failed to fetch run subtasks: {error}");
+                    Vec::new()
+                }
+            };
+            let subtask_parent_run = match parent_id {
+                Some(parent_id) => match store.coding_run_for_task(parent_id, cx).await {
+                    Ok(view) => view,
+                    Err(error) => {
+                        tracing::error!("Failed to fetch the parent run: {error}");
+                        None
+                    }
+                },
+                None => None,
+            };
             let auto_started = view.is_some() && auto_start;
             let has_run = view.is_some();
             this.update(cx, |this, cx| {
@@ -883,6 +1044,8 @@ impl TaskDetails {
                     return;
                 }
                 this.coding = view;
+                this.coding_subtasks = subtasks;
+                this.subtask_parent_run = subtask_parent_run;
                 this.step_subtasks = step_subtasks;
                 this.run_worktrees = run_worktrees;
                 this.run_pull_requests = run_pull_requests;
@@ -2898,10 +3061,13 @@ impl TaskDetails {
         // floating picker cards, which are siblings added after `lists`.
         // Coding phase steps are subtasks too, but they read as the run's step
         // list at the bottom of the panel, so they are left out here.
+        // Run steps are filtered at the query, but the pane keeps its own
+        // gate on the explicit role: the tree may only ever list real subtasks
+        // (decisions #4/#5/#25).
         let plain_subtasks: Vec<storage::Task> = self
             .subtasks
             .iter()
-            .filter(|subtask| subtask.node_id.is_none())
+            .filter(|subtask| !storage::prelude::is_step(subtask))
             .cloned()
             .collect();
         if !plain_subtasks.is_empty() {
@@ -3258,6 +3424,13 @@ impl TaskDetails {
     ) {
         let store = self.store.clone();
         let target = self.selected.as_ref().map(|task| task.id);
+        // A subtask's Spec block acts on its parent's run, so the refresh has
+        // to reload that run rather than the selected subtask's own (absent)
+        // one.
+        let root = self
+            .subtask_parent_run
+            .as_ref()
+            .and_then(|view| view.run.root_task_id);
         self._coding_fetch = Some(cx.spawn(async move |this, cx| {
             let failure = action.await.err();
             let refused = refused_worktrees(failure.as_ref());
@@ -3276,32 +3449,152 @@ impl TaskDetails {
                 },
                 None => None,
             };
-            let step_ids: Vec<u64> = view
+            let subtask_parent_run = match root {
+                Some(root) => match store.coding_run_for_task(root, cx).await {
+                    Ok(view) => view,
+                    Err(fetch_error) => {
+                        tracing::error!("Failed to reload the parent run: {fetch_error}");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let reloaded = view.clone().or_else(|| subtask_parent_run.clone());
+            let step_ids: Vec<u64> = reloaded
                 .as_ref()
                 .map(|view| view.steps.iter().map(|step| step.task.id).collect())
                 .unwrap_or_default();
             let (step_subtasks, run_worktrees, run_pull_requests) = load_run_extras(
                 &store,
-                view.as_ref().map(|view| view.run.id),
+                reloaded.as_ref().map(|view| view.run.id),
                 step_ids,
                 cx,
             )
             .await;
+            let subtasks = match root.or(target) {
+                Some(id) => match store.run_subtasks(id, cx).await {
+                    Ok(subtasks) => subtasks,
+                    Err(fetch_error) => {
+                        tracing::error!("Failed to reload run subtasks: {fetch_error}");
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
             this.update(cx, |this, cx| {
                 this.coding = view;
+                this.coding_subtasks = subtasks;
+                this.subtask_parent_run = subtask_parent_run;
                 this.step_subtasks = step_subtasks;
                 this.run_worktrees = run_worktrees;
                 this.run_pull_requests = run_pull_requests;
                 this.coding_dirty = refused.unwrap_or_default();
                 this.coding_error = error;
                 this._coding_fetch = None;
+                this.coding_rewind_confirm = false;
                 this.close_coding_notes();
                 this.close_coding_spec();
+                this.close_subtask_spec();
                 cx.emit(TaskDetailsEvent::CodingChanged);
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// The layout's report of whether the current phase's agent turn is
+    /// running (decision #27): the rewind is blocked until it stops.
+    pub fn set_coding_phase_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        if self.coding_phase_running != running {
+            self.coding_phase_running = running;
+            cx.notify();
+        }
+    }
+
+    /// Ask to rewind the run to its interview. The interview-only state has
+    /// nothing to interrupt, so it rewinds directly; once a phase is open a
+    /// confirm names what stops (decision #28).
+    fn request_reopen_interview(&mut self, root_task_id: u64, cx: &mut Context<Self>) {
+        let source = self
+            .coding
+            .as_ref()
+            .or(self.subtask_parent_run.as_ref());
+        let at_interview = source
+            .and_then(|view| current_step(&view.steps))
+            .is_some_and(|step| step.node.id == "interview");
+        if at_interview {
+            self.confirm_reopen_interview(root_task_id, cx);
+            return;
+        }
+        self.coding_rewind_confirm = true;
+        cx.notify();
+    }
+
+    /// Perform the rewind: a real turn back to the interview, logged as a
+    /// rejection so `Round N` advances (decisions #26/#29).
+    fn confirm_reopen_interview(&mut self, root_task_id: u64, cx: &mut Context<Self>) {
+        self.coding_rewind_confirm = false;
+        let action = self.store.reopen_coding_interview(root_task_id, None, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    fn close_subtask_spec(&mut self) {
+        self.subtask_spec_open = false;
+        self.subtask_spec_input = None;
+        self._subtask_spec_subscription = None;
+    }
+
+    /// Open (or close) the subtask's manual spec editor.
+    fn open_subtask_spec(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.subtask_spec_open {
+            self.close_subtask_spec();
+            cx.notify();
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("What should this subtask do? Then Enter", window, cx);
+            state
+        });
+        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit_subtask_spec(cx);
+            }
+        });
+        self.subtask_spec_open = true;
+        self.subtask_spec_input = Some(input);
+        self._subtask_spec_subscription = Some(subscription);
+        cx.notify();
+    }
+
+    /// Save the hand-written subtask spec; it is exactly what the interview
+    /// would have stored, so coverage accepts it (§9).
+    fn commit_subtask_spec(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let spec = self
+            .subtask_spec_input
+            .as_ref()
+            .map(|input| input.read(cx).value().to_string())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if spec.is_empty() {
+            return;
+        }
+        let action = self.store.write_subtask_spec(task_id, spec, cx);
+        self.run_coding_action(action, cx);
+    }
+
+    /// Give the subtask its own run (decision #16): the parent keeps counting
+    /// it, as covered, and the work moves into the nested run.
+    fn promote_subtask(&mut self, sub_task_id: u64, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let action = cx.spawn(async move |_, cx| {
+            store.promote_subtask(sub_task_id, cx).await.map(|_| ())
+        });
+        self.run_coding_action(action, cx);
     }
 
     fn start_coding_run(&mut self, task_id: u64, cx: &mut Context<Self>) {
@@ -3466,7 +3759,13 @@ impl TaskDetails {
         cx: &mut Context<Self>,
     ) {
         let notes = run_notes(&view.run.step_results.0);
-        let prompt = phase_prompt(task, &notes, view.run.branch.as_deref(), phase);
+        let prompt = phase_prompt(
+            task,
+            &notes,
+            view.run.branch.as_deref(),
+            phase,
+            &self.coding_subtasks,
+        );
         cx.emit(TaskDetailsEvent::CodingLaunch {
             phase: phase.to_string(),
             prompt,
@@ -3533,19 +3832,27 @@ impl TaskDetails {
             .mt_2();
 
         // The steps first: they are the run, and the next one carries its
-        // action on its own row. They are subtasks of the feature task, so
-        // they carry the same small header the linked lists use.
+        // action on its own row. The section is the run's Workflow — steps are
+        // never subtasks (decisions #4/#25).
         section = section
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(0xa3a3a3))
-                    .child("Subtasks"),
+                    .child("Workflow"),
             )
             .child(self.coding_steps(task, &view, window, cx));
 
         let mut meta = div().h_flex().items_center().gap_2().flex_wrap();
         meta = meta.child(chip(&format!("Round {round}")));
+        if let Some((clause, uncovered)) = coverage_clause(&self.coding_subtasks) {
+            meta = meta.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if uncovered { 0xfbbf24 } else { 0xa3a3a3 }))
+                    .child(clause),
+            );
+        }
         match view.run.branch.clone() {
             Some(branch) => {
                 let status = view.run.branch_status.clone().unwrap_or_default();
@@ -3678,6 +3985,23 @@ impl TaskDetails {
             }
             if done {
                 row = row.child(div().text_xs().text_color(rgb(0x737373)).child("done"));
+            } else if is_current && self.coding_phase_running {
+                // The phase's agent turn is running: the row carries Stop, and
+                // stopping is what unblocks the rewind (decision #27).
+                row = row
+                    .child(div().text_xs().text_color(rgb(0xd4d4d4)).child("running"))
+                    .child(
+                        Button::new(format!("coding-stop-{step_id}"))
+                            .compact()
+                            .with_size(gpui_component::Size::Small)
+                            .label("Stop")
+                            .tooltip(
+                                "Stop this phase's agent turn; the branch keeps what it wrote",
+                            )
+                            .on_click(cx.listener(|_this, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::CodingStopPhase);
+                            })),
+                    );
             } else if is_current
                 && let Some(action) = self.coding_primary_action(task, view, step, cx)
             {
@@ -3743,6 +4067,18 @@ impl TaskDetails {
             .ml_2()
             .children(rows)
             .into_any_element()
+    }
+
+    /// The run's open subtasks, with their titles: the merge gate lists them
+    /// and the waiver is the way past it (decision #19). A subtask promoted to
+    /// its own run stays open until that run finishes and marks it done
+    /// (decision #32).
+    fn open_coding_subtasks(&self) -> Vec<(u64, String)> {
+        self.coding_subtasks
+            .iter()
+            .filter(|task| !task.done)
+            .map(|task| (task.id, task.title.clone()))
+            .collect()
     }
 
     /// Whether the merge step acts as the PR step for this run: one of its
@@ -3904,6 +4240,11 @@ impl TaskDetails {
         // local merge survives only where no such remote exists (decisions 17
         // and 35).
         let pull_request = self.pull_request_step(run_id);
+        // The merge step refuses while subtasks are still open; the waiver in
+        // the secondary row is the way past it (decision #19).
+        if node_id == "merge" && !self.open_coding_subtasks().is_empty() {
+            return None;
+        }
         let label = match node_id.as_str() {
             "interview" => "Start",
             "spec" => "Approve spec",
@@ -3998,9 +4339,53 @@ impl TaskDetails {
             Some("merge") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
                 let run_id = view.run.id;
+                // The merge/PR action refuses while subtasks are still open:
+                // name them and offer the waiver (decision #19). Unspecced
+                // subtasks are a warning elsewhere, never a block (decision
+                // #12), so only the open ones appear here.
+                let open_subtasks = self.open_coding_subtasks();
+                if !open_subtasks.is_empty() {
+                    let listing: Vec<String> = open_subtasks
+                        .iter()
+                        .map(|(id, title)| format!("#{id} {title}"))
+                        .collect();
+                    // Unspecced subtasks are named as a warning in the same
+                    // line but never block (decisions #12/#19).
+                    let unspecced = self
+                        .coding_subtasks
+                        .iter()
+                        .filter(|subtask| subtask_coverage(subtask) == SubtaskCoverage::Unspecced)
+                        .count();
+                    let warning = if unspecced == 0 {
+                        String::new()
+                    } else {
+                        format!(" {unspecced} of them have no spec yet.")
+                    };
+                    actions = actions
+                        .child(div().v_flex().gap_1().w_full().child(
+                            div().text_xs().text_color(rgb(0xfbbf24)).child(format!(
+                                "{} open subtasks — close them or waive: {}.{warning}",
+                                open_subtasks.len(),
+                                listing.join(", ")
+                            )),
+                        ))
+                        .child(
+                            Button::new(format!("coding-merge-waive-{step_id}"))
+                                .compact()
+                                .label("Waive the open subtasks")
+                                .tooltip("Complete the run with the subtasks still open")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.pull_request_step(run_id) {
+                                        this.open_pull_request_step(run_id, false, cx);
+                                    } else {
+                                        this.merge_coding_run(run_id, cx);
+                                    }
+                                })),
+                        );
+                }
                 // The PR step refused over uncommitted work: list it and offer
                 // to commit and continue (§6.7).
-                if !self.coding_dirty.is_empty() {
+                if open_subtasks.is_empty() && !self.coding_dirty.is_empty() {
                     let mut block = div().v_flex().gap_1().w_full().child(
                         div().text_xs().text_color(rgb(0xfbbf24)).child(
                             "Commit the work in the run's worktrees before opening a pull request:",
@@ -4033,7 +4418,7 @@ impl TaskDetails {
                         pull_request.run_id == run_id && pull_request.state == "open"
                     })
                     .count();
-                if open > 0 {
+                if open_subtasks.is_empty() && open > 0 {
                     actions = actions.child(
                         Button::new(format!("coding-pr-waive-{step_id}"))
                             .ghost()
@@ -4261,10 +4646,262 @@ impl TaskDetails {
                         .child(spec.clone()),
                 )
             });
+        // Then one collapsible row per subtask that holds its own spec
+        // (decision #21): the umbrella stays first, the per-subtask specs nest
+        // below it, labelled with the subtask's title and line count.
+        let subtask_specs: Vec<(u64, String, String, usize)> = self
+            .coding_subtasks
+            .iter()
+            .filter_map(|subtask| {
+                let spec = subtask.spec.clone().filter(|spec| !spec.trim().is_empty())?;
+                let lines = spec.lines().count();
+                Some((subtask.id, subtask.title.clone(), spec, lines))
+            })
+            .collect();
+        if !subtask_specs.is_empty() {
+            let rows: Vec<AnyElement> = subtask_specs
+                .into_iter()
+                .map(|(subtask_id, title, subtask_spec, lines)| {
+                    let expanded = self.coding_subtask_spec_expanded == Some(subtask_id);
+                    div()
+                        .v_flex()
+                        .gap_1()
+                        .pl_4()
+                        .child(
+                            div()
+                                .id(("coding-subtask-spec-toggle", subtask_id))
+                                .text_xs()
+                                .text_color(rgb(0xa3a3a3))
+                                .cursor_pointer()
+                                .child(format!(
+                                    "{} {title} ({lines} lines)",
+                                    if expanded { "▾" } else { "▸" }
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.coding_subtask_spec_expanded =
+                                        if this.coding_subtask_spec_expanded == Some(subtask_id) {
+                                            None
+                                        } else {
+                                            Some(subtask_id)
+                                        };
+                                    cx.notify();
+                                })),
+                        )
+                        .when(expanded, |this| {
+                            this.child(
+                                div()
+                                    .max_h(px(200.))
+                                    .overflow_y_scrollbar()
+                                    .p_2()
+                                    .rounded_md()
+                                    .bg(rgb(APP_BG))
+                                    .text_xs()
+                                    .text_color(rgb(0xd4d4d4))
+                                    .child(subtask_spec.clone()),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect();
+            block = block.child(div().v_flex().gap_1().children(rows));
+        }
         // Keep the run in the signature: the artifact is part of the run, and
         // callers pass it so the render order matches the other sections.
         let _ = view;
         block = block.w_full();
+        block.into_any_element()
+    }
+
+    /// A real subtask's own Spec block (decision #22): how its coverage stands
+    /// and the four ways to fix it. Rendered only for a non-step subtask of a
+    /// feature task that has a run; a step stays invisible here by construction
+    /// (decision #31).
+    fn subtask_spec_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(task) = self.selected.clone() else {
+            return div().into_any_element();
+        };
+        if task.parent_id.is_none() || task.role.as_deref() == Some("step") {
+            return div().into_any_element();
+        }
+        let Some(parent_run) = self.subtask_parent_run.clone() else {
+            return div().into_any_element();
+        };
+        let Some(root_task_id) = parent_run.run.root_task_id else {
+            return div().into_any_element();
+        };
+        let task_id = task.id;
+        let promoted = task.workflow_run_id.is_some();
+        let (state, uncovered) = if promoted {
+            ("Covered by its own run".to_string(), false)
+        } else if let Some(spec) = task.spec.as_deref().filter(|spec| !spec.trim().is_empty()) {
+            (format!("Specced · {} lines", spec.lines().count()), false)
+        } else if task.spec_covered_at.is_some() {
+            ("Covered by the feature spec".to_string(), false)
+        } else {
+            ("No spec yet".to_string(), true)
+        };
+        let mut block = div()
+            .v_flex()
+            .gap_1()
+            .child(field_label("Spec"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(if uncovered { 0xfbbf24 } else { 0xa3a3a3 }))
+                    .child(state),
+            );
+        let run_active = parent_run.run.status == "active";
+        let current_phase = current_step(&parent_run.steps)
+            .and_then(|step| step.node.phase.clone())
+            .unwrap_or_default();
+        let mut actions = div().h_flex().items_center().gap_2().flex_wrap();
+        if run_active {
+            // Available in any phase, but blocked while the phase's turn runs:
+            // the tooltip names the Stop control that clears it (decision #27).
+            let rewind = Button::new(format!("subtask-rewind-{task_id}"))
+                .ghost()
+                .compact()
+                .label("Reopen the interview");
+            actions = actions.child(if self.coding_phase_running {
+                rewind.disabled(true).tooltip(if current_phase.is_empty() {
+                    "Stop the running phase first".to_string()
+                } else {
+                    format!("Stop the {current_phase} phase first")
+                })
+            } else {
+                rewind
+                    .tooltip("Rewind the run to the interview and start a new round")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_reopen_interview(root_task_id, cx);
+                    }))
+            });
+        }
+        if !promoted {
+            actions = actions.child(
+                Button::new(format!("subtask-interview-{task_id}"))
+                    .ghost()
+                    .compact()
+                    .label("Start a sub-interview")
+                    .tooltip("Interview just this subtask and save its own spec")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_sub_task_interview(task_id, cx);
+                    })),
+            );
+        }
+        actions = actions.child(
+            Button::new(format!("subtask-spec-{task_id}"))
+                .ghost()
+                .compact()
+                .label("Write the spec")
+                .tooltip("Write this subtask's spec yourself, no agent involved")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_subtask_spec(window, cx);
+                })),
+        );
+        if !promoted {
+            actions = actions.child(
+                Button::new(format!("subtask-promote-{task_id}"))
+                    .ghost()
+                    .compact()
+                    .label("Give it its own run")
+                    .tooltip("Start a full coding run rooted at this subtask")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.promote_subtask(task_id, cx);
+                    })),
+            );
+        }
+        block = block.child(actions);
+        if self.subtask_spec_open
+            && let Some(input) = self.subtask_spec_input.clone()
+        {
+            block = block.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Input::new(&input)
+                            .small()
+                            .appearance(false)
+                            .bg(rgb(APP_BG))
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .rounded_md(),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("subtask-spec-cancel-{task_id}"))
+                                    .ghost()
+                                    .compact()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_subtask_spec();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("subtask-spec-save-{task_id}"))
+                                    .compact()
+                                    .label("Save spec")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit_subtask_spec(cx);
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        if self.coding_rewind_confirm {
+            let what = if current_phase.is_empty() {
+                "the open phase".to_string()
+            } else {
+                format!("the {current_phase} phase")
+            };
+            block = block.child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xfbbf24))
+                            .child(format!(
+                                "Reopen the interview? This stops {what} and starts a new round. Commits stay on the branch."
+                            )),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("subtask-rewind-cancel-{task_id}"))
+                                    .ghost()
+                                    .compact()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.coding_rewind_confirm = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("subtask-rewind-confirm-{task_id}"))
+                                    .compact()
+                                    .label("Reopen the interview")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.confirm_reopen_interview(root_task_id, cx);
+                                    })),
+                            ),
+                    ),
+            );
+        }
+        let _ = window;
         block.into_any_element()
     }
 
@@ -4818,6 +5455,9 @@ impl Render for TaskDetails {
                 if let Some(section) = self.github_section(&task) {
                     details = details.child(section);
                 }
+                // A real subtask's own Spec block: its coverage state and the
+                // fix actions (decisions #6/#20/#22).
+                details = details.child(self.subtask_spec_section(window, cx));
                 details = details.child(self.relationships_section(window, cx));
                 // The coding steps are subtasks of the feature task, so they
                 // close the panel, after the ordinary fields and links.
@@ -5048,7 +5688,8 @@ mod coding_tests {
                 approval: false,
                 retrigger_on_reject: false,
                 phase: Some(phase.to_string()),
-                subtask: true,
+                subtask: false,
+                role: Some("step".to_string()),
                 retrigger_node: None,
             },
             outgoing: Vec::new(),
@@ -5081,6 +5722,8 @@ mod coding_tests {
                 node_id: Some(node_id.to_string()),
                 spec: None,
                 spec_path: None,
+                role: None,
+                spec_covered_at: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },
@@ -5104,7 +5747,7 @@ mod coding_tests {
     #[test]
     fn interview_prompt_is_a_full_prompt() {
         let task = feature("Add OAuth", Some("Sign in with Google."));
-        let prompt = phase_prompt(&task, &[], None, "interview");
+        let prompt = phase_prompt(&task, &[], None, "interview", &[]);
         assert!(
             !prompt.starts_with('/'),
             "a pre-filled prompt must not be an unknown slash command (opencode drops \
@@ -5125,7 +5768,7 @@ mod coding_tests {
     fn reopened_interview_carries_the_rejection_notes() {
         let task = feature("Add OAuth", None);
         let notes = vec![note("reject", "Needs a migration test.")];
-        let prompt = phase_prompt(&task, &notes, None, "interview");
+        let prompt = phase_prompt(&task, &notes, None, "interview", &[]);
         assert!(prompt.contains("round 2"), "{prompt}");
         assert!(prompt.contains("Needs a migration test."), "{prompt}");
     }
@@ -5135,10 +5778,94 @@ mod coding_tests {
         let mut task = feature("Add OAuth", None);
         task.task.spec = Some("Spec body".to_string());
         let notes = vec![note("annotation", "Guard the empty-input case.")];
-        let prompt = phase_prompt(&task, &notes, Some("feature/7-add-oauth"), "implement");
+        let prompt = phase_prompt(
+            &task,
+            &notes,
+            Some("feature/7-add-oauth"),
+            "implement",
+            &[],
+        );
         assert!(prompt.contains("feature/7-add-oauth"), "{prompt}");
         assert!(prompt.contains("Spec body"), "{prompt}");
         assert!(prompt.contains("Guard the empty-input case."), "{prompt}");
+    }
+
+    /// A subtask helper for the coverage prompts.
+    fn subtask(id: u64, title: &str, done: bool) -> TaskWithMeta {
+        let mut meta = phase_step_task(id, "subtask", done);
+        meta.task.title = title.to_string();
+        meta.task.node_id = None;
+        meta
+    }
+
+    /// The interview prompt enumerates the open subtasks and states the
+    /// coverage contract; done subtasks are omitted (decisions #5/#11), and a
+    /// feature with no subtasks gets the plain prompt (decision #24).
+    #[test]
+    fn the_interview_prompt_enumerates_open_subtasks() {
+        let task = feature("Add OAuth", None);
+        let subtasks = vec![
+            subtask(41, "Add token refresh", false),
+            subtask(42, "Wire the callback URL", false),
+            subtask(43, "Already done", true),
+        ];
+        let prompt = phase_prompt(&task, &[], None, "interview", &subtasks);
+        assert!(prompt.contains("This feature has 2 open subtasks"), "{prompt}");
+        assert!(prompt.contains("- #41 Add token refresh"), "{prompt}");
+        assert!(prompt.contains("- #42 Wire the callback URL"), "{prompt}");
+        assert!(!prompt.contains("#43"), "a done subtask is not in scope: {prompt}");
+
+        let plain = phase_prompt(&task, &[], None, "interview", &[]);
+        assert!(
+            !plain.contains("Subtask") && !plain.contains("subtasks"),
+            "a feature with no subtasks keeps today's prompt: {plain}"
+        );
+    }
+
+    /// The implement prompt inlines the umbrella and every open subtask spec,
+    /// and lists covered subtasks by title only (decision #18).
+    #[test]
+    fn the_implement_prompt_inlines_subtask_specs() {
+        let mut task = feature("Add OAuth", None);
+        task.task.spec = Some("Umbrella spec".to_string());
+        let mut owned = subtask(41, "Add token refresh", false);
+        owned.task.spec = Some("Refresh the token every hour".to_string());
+        let mut covered = subtask(42, "Wire the callback URL", false);
+        covered.task.spec_covered_at = Some(jiff::Timestamp::now());
+        let mut bare = subtask(43, "Bump the changelog", false);
+        bare.task.spec = Some("Add a changelog entry".to_string());
+
+        let prompt = phase_prompt(
+            &task,
+            &[],
+            Some("feature/7-add-oauth"),
+            "implement",
+            &[owned, covered, bare],
+        );
+        assert!(prompt.contains("Umbrella spec"), "{prompt}");
+        assert!(
+            prompt.contains("### Add token refresh (subtask #41)"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Refresh the token every hour"), "{prompt}");
+        assert!(prompt.contains("### Bump the changelog (subtask #43)"), "{prompt}");
+        // The covered one contributes its title only: its detail is the
+        // umbrella's job.
+        assert!(prompt.contains("- Wire the callback URL (subtask #42)"), "{prompt}");
+    }
+
+    #[test]
+    fn the_coverage_clause_counts_open_subtasks() {
+        assert!(coverage_clause(&[]).is_none(), "no subtasks, no clause");
+        let mut owned = subtask(41, "Add token refresh", false);
+        owned.task.spec = Some("spec".to_string());
+        let mut covered = subtask(42, "Wire the callback URL", false);
+        covered.task.spec_covered_at = Some(jiff::Timestamp::now());
+        let open = subtask(43, "Bump the changelog", false);
+        let done = subtask(44, "Shipped", true);
+        let (clause, uncovered) = coverage_clause(&[owned, covered, open, done]).expect("clause");
+        assert_eq!(clause, "spec covers 2/3 subtasks");
+        assert!(uncovered, "an unspecced subtask tints the count");
     }
 
     #[test]

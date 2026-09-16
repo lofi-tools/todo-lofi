@@ -1572,6 +1572,89 @@ impl Store {
         })
     }
 
+    /// The run's real subtasks: direct children of the feature task that are
+    /// not workflow steps (decision #5), with their coverage state.
+    pub fn run_subtasks(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.run_subtasks(task_id).await?)
+        })
+    }
+
+    /// Re-open a coding run's interview as a real rewind (decisions #26–#30):
+    /// the current phase stops, the interview step re-opens in place, and the
+    /// rewind is logged as a rejection so the run's round advances. The caller
+    /// stops a running agent turn first.
+    pub fn reopen_coding_interview(
+        &self,
+        task_id: u64,
+        reason: Option<String>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let run = s
+                .find_run_by_root_task(task_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("this task has no coding run"))?;
+            if run.status != "active" {
+                anyhow::bail!("the run is no longer active");
+            }
+            s.reopen_coding_interview(run.id, reason.as_deref().unwrap_or_default())
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Write a subtask's own spec by hand (the no-agent path): stores it on
+    /// the subtask, which is exactly what the interview would have saved.
+    pub fn write_subtask_spec(
+        &self,
+        task_id: u64,
+        spec: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.save_task_spec(task_id, Some(spec), None).await?;
+            Ok(())
+        })
+    }
+
+    /// Give a subtask its own run (decision #16/#32): a `coding-task` run
+    /// rooted at the subtask, which starts at the interview when the subtask
+    /// has no spec. The subtask stays a subtask of its parent and is counted
+    /// as covered there. Nested runs are exempt from the one-run-per-project
+    /// guard.
+    pub fn promote_subtask(
+        &self,
+        sub_task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<u64>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let recipe_id = s
+                .recipe_id_by_slug("coding-task")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the coding-task recipe is missing"))?;
+            let run = s
+                .create_task_run(sub_task_id, recipe_id, serde_json::json!({}))
+                .await?;
+            // The parent's coverage line counts it as covered: its own run is
+            // where the work and its spec now live.
+            s.cover_subtask_at(sub_task_id, jiff::Timestamp::now()).await?;
+            Ok(run.id)
+        })
+    }
+
     /// Cancelled or completed coding runs that still hold a branch.
     pub fn list_branch_cleanup_runs(
         &self,

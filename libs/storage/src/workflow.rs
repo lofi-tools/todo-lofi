@@ -75,6 +75,10 @@ pub struct RecipeNode {
     /// Materialize as a subtask of the run's root task instead of at the top
     /// level (coding phases hang off the feature task).
     pub subtask: bool,
+    /// Coding recipes only: `step` materializes a run step that is *not* a
+    /// subtask, so no subtask surface ever shows it. `subtask` is the
+    /// explicit spelling of today's lazy spawn. Exactly one of the two.
+    pub role: Option<String>,
     /// Node to re-open when this approval rejects. Defaults to the approval's
     /// feeder task, which is what generic recipes expect; coding recipes point
     /// it back at the interview step so a rejection re-specs the feature.
@@ -151,6 +155,109 @@ pub struct RunView {
 
 /// Phase names a coding recipe node may declare.
 pub const CODING_PHASES: [&str; 5] = ["interview", "spec", "implement", "review", "merge"];
+
+/// Node roles a recipe may declare (decision #3): `step` is run scaffolding,
+/// `subtask` is a real subtask the engine lazy-spawns.
+pub const RECIPE_ROLES: [&str; 2] = ["step", "subtask"];
+
+/// The `tasks.role` value of an engine-materialized run step.
+pub const STEP_ROLE: &str = "step";
+
+/// Whether a task row is a workflow step rather than a real subtask.
+pub fn is_step(task: &crate::Task) -> bool {
+    task.role.as_deref() == Some(STEP_ROLE)
+}
+
+/// Whether a materialized task row for `node` is a run step.
+fn node_is_step(node: &RecipeNode) -> bool {
+    node.role.as_deref() == Some("step")
+}
+
+/// How a subtask's spec coverage stands (decision #10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtaskCoverage {
+    /// The subtask holds its own spec (`tasks.spec` non-empty).
+    Own,
+    /// The umbrella spec was accepted as covering it (`spec_covered_at`), or
+    /// the subtask was promoted to a run of its own (decision #32).
+    Covered,
+    /// Neither: flagged in the subtask's own details, never blocking.
+    Unspecced,
+    /// Done subtasks are never flagged and leave the count (decision #11).
+    NotApplicable,
+}
+
+impl SubtaskCoverage {
+    /// The `spec` state the MCP context and the pane show: `own` | `covered`
+    /// | `none`. `NotApplicable` (done) reports `none` and is excluded from
+    /// the count, so a done subtask is never flagged.
+    pub fn label(self) -> &'static str {
+        match self {
+            SubtaskCoverage::Own => "own",
+            SubtaskCoverage::Covered => "covered",
+            SubtaskCoverage::Unspecced | SubtaskCoverage::NotApplicable => "none",
+        }
+    }
+
+    /// Whether the subtask counts as covered by the run's coverage line.
+    pub fn is_covered(self) -> bool {
+        matches!(self, SubtaskCoverage::Own | SubtaskCoverage::Covered)
+    }
+}
+
+/// `spec covers covered/total subtasks`, over the open subtasks (decision #11;
+/// done subtasks leave both numbers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverageSummary {
+    pub covered: usize,
+    pub total: usize,
+}
+
+/// The coverage of one subtask. Done wins over everything: a finished subtask
+/// is never flagged, even when nothing was ever written for it.
+pub fn subtask_coverage(task: &crate::TaskWithMeta) -> SubtaskCoverage {
+    if task.done {
+        return SubtaskCoverage::NotApplicable;
+    }
+    if task
+        .spec
+        .as_deref()
+        .is_some_and(|spec| !spec.trim().is_empty())
+    {
+        return SubtaskCoverage::Own;
+    }
+    if task.spec_covered_at.is_some() {
+        return SubtaskCoverage::Covered;
+    }
+    SubtaskCoverage::Unspecced
+}
+
+/// The run's coverage line. A description never counts as a spec (decision
+/// #6), so only `own` and the explicit mark do.
+pub fn coverage_summary(subtasks: &[crate::TaskWithMeta]) -> CoverageSummary {
+    let mut summary = CoverageSummary {
+        covered: 0,
+        total: 0,
+    };
+    for task in subtasks {
+        let coverage = subtask_coverage(task);
+        if coverage == SubtaskCoverage::NotApplicable {
+            continue;
+        }
+        summary.total += 1;
+        if coverage.is_covered() {
+            summary.covered += 1;
+        }
+    }
+    summary
+}
+
+/// One `<subtask, spec>` pair in a [`TodoStore::save_subtask_specs`] call.
+#[derive(Debug, Clone)]
+pub struct SubtaskSpecInput {
+    pub task_id: u64,
+    pub spec: String,
+}
 
 /// Reserved `workflow_runs.step_results` key holding the run's ordered log.
 /// Node ids are `[A-Za-z0-9_-]+`, so `@` cannot collide with a node result.
@@ -237,7 +344,9 @@ pub fn run_notes(results: &Value) -> Vec<RunNote> {
 
 /// The coding recipe declarations shipped with the app. `coding-task` is the
 /// full feature pipeline; `coding-sub-interview` is the single-node run used
-/// when a sub-task needs its own interview round.
+/// when a sub-task needs its own interview round. `coding-task` v2 declares
+/// its phase nodes as `role: "step"` (decision #3) so run scaffolding stops
+/// masquerading as a subtask.
 pub fn coding_recipes() -> Vec<(&'static str, Value)> {
     vec![
         (
@@ -256,7 +365,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "description": "Interview & spec the feature out (the app composes the full interview prompt), ask clarifying questions, then save the spec.",
                         "ai": true,
                         "phase": "interview",
-                        "subtask": true
+                        "role": "step"
                     },
                     {
                         "id": "spec",
@@ -264,7 +373,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "title": "Approve the spec",
                         "description": "Read the spec. Approve to start implementation, or reject with notes to re-interview.",
                         "phase": "spec",
-                        "subtask": true,
+                        "role": "step",
                         "approval": true,
                         "retrigger_on_reject": true,
                         "retrigger_node": "interview"
@@ -276,7 +385,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "description": "Implement the approved spec on the feature branch, then confirm.",
                         "ai": true,
                         "phase": "implement",
-                        "subtask": true
+                        "role": "step"
                     },
                     {
                         "id": "review",
@@ -285,7 +394,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "description": "Review the implementation, annotate findings, then approve to merge or reject to re-spec.",
                         "ai": true,
                         "phase": "review",
-                        "subtask": true,
+                        "role": "step",
                         "approval": true,
                         "retrigger_on_reject": true,
                         "retrigger_node": "interview"
@@ -296,7 +405,7 @@ pub fn coding_recipes() -> Vec<(&'static str, Value)> {
                         "title": "Merge the branch",
                         "description": "Merge the feature branch into its base branch and mark the feature complete.",
                         "phase": "merge",
-                        "subtask": true
+                        "role": "step"
                     }
                 ],
                 "edges": [
@@ -481,6 +590,32 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
                 "node `{id}`: `subtask` is only valid on action nodes"
             ));
         }
+        let role = obj.get("role").and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(role) = &role {
+            if !RECIPE_ROLES.contains(&role.as_str()) {
+                return Err(format!(
+                    "node `{id}`: invalid role `{role}` (expected one of {})",
+                    RECIPE_ROLES.join(", ")
+                ));
+            }
+            if subtask {
+                return Err(format!(
+                    "node `{id}`: `role` and `subtask: true` declare the same thing; keep one"
+                ));
+            }
+            if role == "step" {
+                if kind != "action" {
+                    return Err(format!(
+                        "node `{id}`: `role: \"step\"` is only valid on action nodes"
+                    ));
+                }
+                if obj.get("phase").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!(
+                        "node `{id}`: `role: \"step\"` requires a `phase`"
+                    ));
+                }
+            }
+        }
         let retrigger_node = obj
             .get("retrigger_node")
             .and_then(|v| v.as_str())
@@ -500,6 +635,7 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             retrigger_on_reject,
             phase,
             subtask,
+            role,
             retrigger_node,
         });
     }
@@ -1683,9 +1819,21 @@ impl TodoStore {
         let Some(node) = recipe.nodes.iter().find(|n| n.id == node_id) else {
             return Err(invalid(format!("recipe node `{node_id}` not found")));
         };
-        // Coding phases hang off the run's feature task. An explicit parent
-        // (approval subtasks) always wins.
-        let parent_id = parent_id.or_else(|| node.subtask.then_some(run.root_task_id).flatten());
+        // A node that already has an open row in this run is re-used rather
+        // than duplicated (decision #30): a re-opened interview is picked up
+        // again, a pending implement survives a rewind, and each round's spec
+        // gate is a fresh row because the previous one completed.
+        if let Some(existing) = self.open_node_task_id(run.id, node_id).await? {
+            return self.get_task(existing).await;
+        }
+        // Coding phases hang off the run's feature task; a step is always a
+        // direct child of the run root (decision #15). An explicit parent
+        // (an approval gate reviewing a step) always wins.
+        let parent_id = parent_id.or_else(|| {
+            (node.subtask || node_is_step(node))
+                .then_some(run.root_task_id)
+                .flatten()
+        });
         let task = self
             .create_task(
                 crate::Task::create()
@@ -1693,6 +1841,7 @@ impl TodoStore {
                     .description(node.description.clone())
                     .workflow_run_id(Some(run.id))
                     .node_id(Some(node.id.clone()))
+                    .role(node_is_step(node).then(|| STEP_ROLE.to_string()))
                     .parent_id(parent_id)
                     .blocked_until(blocked_until)
                     .source_task_id(sources.first().copied()),
@@ -1716,8 +1865,31 @@ impl TodoStore {
         Ok(task)
     }
 
-    /// Re-open an automated task (done=false, result cleared) and tombstone
-    /// its pending approval subtasks so a revised pass can spawn fresh ones.
+    /// The id of `node_id`'s open (pending) task row in this run, if any.
+    async fn open_node_task_id(
+        &mut self,
+        run_id: u64,
+        node_id: &str,
+    ) -> QueryResult<Option<u64>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = ?2
+               AND done = 0 AND deleted_at IS NULL ORDER BY id LIMIT 1"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(run_id as i64)
+        .bind(node_id)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "find open node task",
+        })?;
+        Ok(rows.first().and_then(|row| row_id(row)))
+    }
+
+    /// Re-open an automated task (done=false, result cleared). Pending rows
+    /// are left in place: they are re-used when the node runs again, so a
+    /// rejection or a rewind adds a round instead of rewriting history
+    /// (decision #30).
     async fn retry_task(
         &mut self,
         task_id: u64,
@@ -1751,23 +1923,6 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "clear workflow result on retry",
             })?;
-        // Tombstone pending approval subtasks; the completed approval that
-        // triggered the retry stays visible as done.
-        let rows = toasty::sql::query(
-            r#"SELECT id FROM tasks WHERE parent_id = ?1 AND done = 0 AND deleted_at IS NULL"#,
-        )
-        .column_types([toasty::stmt::Type::I64])
-        .bind(task_id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "list pending approval subtasks",
-        })?;
-        for row in rows {
-            if let Some(id) = row_id(&row) {
-                self.tombstone_task(id).await?;
-            }
-        }
         Ok(())
     }
 
@@ -1808,13 +1963,23 @@ impl TodoStore {
 // ─── Coding runs ───────────────────────────────────────────────────────────
 
 impl TodoStore {
-    /// Create the built-in coding recipes when they are missing. Recipes are
-    /// immutable, so an existing one is never overwritten; changing a
-    /// declaration means a new version through `create_recipe`.
+    /// Install the built-in coding recipes. A missing slug is created; an
+    /// existing one is left alone unless the shipped declaration changed, in
+    /// which case the changed declaration becomes a new immutable version
+    /// (runs pin the recipe row they started with, so existing runs keep the
+    /// semantics they were created under).
     pub async fn ensure_coding_recipes(&mut self) -> QueryResult<()> {
         for (slug, recipe_json) in coding_recipes() {
-            if self.recipe_id_by_slug(slug).await?.is_none() {
-                self.create_recipe(slug, recipe_json).await?;
+            match self.recipe_id_by_slug(slug).await? {
+                None => {
+                    self.create_recipe(slug, recipe_json).await?;
+                }
+                Some(installed) => {
+                    let current = self.get_recipe(installed).await?;
+                    if current.recipe_json.0 != recipe_json {
+                        self.create_recipe(slug, recipe_json).await?;
+                    }
+                }
             }
         }
         Ok(())
@@ -1888,6 +2053,150 @@ impl TodoStore {
             return Ok(None);
         };
         self.workflow_run_view(run.id).await
+    }
+
+    /// Re-open a coding run's interview step as a real rewind (decision #26):
+    /// the run turns back to the interview in place, keeping the branch, the
+    /// commits and every earlier row, and the rewind is logged as a rejection
+    /// so `Round N` advances (decision #29). Available in any phase; the
+    /// caller stops a running agent turn first (decision #27).
+    pub async fn reopen_coding_interview(
+        &mut self,
+        run_id: u64,
+        reason: &str,
+    ) -> QueryResult<()> {
+        let run = self.get_run(run_id).await?;
+        let recipe_row = self.get_recipe(run.recipe_id).await?;
+        let recipe = parse_recipe(&recipe_row.recipe_json.0)
+            .map_err(|message| invalid(format!("recipe {}: {message}", run.recipe_id)))?;
+        let existing = self.open_node_task_id(run.id, "interview").await?;
+        let interview = match existing {
+            Some(step) => Some(step),
+            None => self.node_latest_task_id(&run, "interview").await?,
+        }
+        .ok_or_else(|| invalid("this run has no interview step to re-open"))?;
+        self.retry_task(interview, &recipe, &run).await?;
+        let body = if reason.trim().is_empty() {
+            "Reopened the interview".to_string()
+        } else {
+            reason.trim().to_string()
+        };
+        self.append_run_note(run_id, "reject", "interview", "interview", &body)
+            .await?;
+        Ok(())
+    }
+
+    /// The run's real subtasks: direct children of the root that are not
+    /// steps (decision #5). Ordered by id, so the pane, the MCP context and
+    /// the coverage line all read the same list in the same order.
+    pub async fn run_subtasks(
+        &mut self,
+        root_task_id: u64,
+    ) -> QueryResult<Vec<crate::TaskWithMeta>> {
+        let rows = toasty::sql::query(
+            r#"SELECT id FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL
+               AND (role IS NULL OR role <> 'step') ORDER BY id"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(root_task_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list run subtasks",
+        })?;
+        let mut subtasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            if let Some(id) = row_id(&row) {
+                subtasks.push(self.get_task_with_meta(id).await?);
+            }
+        }
+        Ok(subtasks)
+    }
+
+    /// Whether `subtask_id` may be spelled out by a spec payload: a direct,
+    /// non-step child of `root_task_id`. A hallucinated id is refused rather
+    /// than written into another task (decision #31, §6.2).
+    pub async fn is_direct_subtask(
+        &mut self,
+        root_task_id: u64,
+        subtask_id: u64,
+    ) -> QueryResult<bool> {
+        let rows = toasty::sql::query(
+            r#"SELECT id FROM tasks WHERE id = ?1 AND parent_id = ?2 AND deleted_at IS NULL
+               AND (role IS NULL OR role <> 'step')"#,
+        )
+        .column_types([toasty::stmt::Type::I64])
+        .bind(subtask_id as i64)
+        .bind(root_task_id as i64)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "check subtask belongs to run root",
+        })?;
+        Ok(rows.first().and_then(row_id).is_some())
+    }
+
+    /// Write an interview's whole output in one transaction: the umbrella spec
+    /// on the run root, each subtask's own spec, each covered mark, the run's
+    /// `spec` note, and the completed `interview` step. Every id is validated
+    /// first, so a bad id writes nothing at all. A step id, or an id that is
+    /// not a direct child of the root, is refused (decisions #6/#31).
+    pub async fn save_subtask_specs(
+        &mut self,
+        root_task_id: u64,
+        umbrella: Option<String>,
+        umbrella_path: Option<String>,
+        subtask_specs: Vec<SubtaskSpecInput>,
+        covered_ids: Vec<u64>,
+    ) -> QueryResult<()> {
+        for id in subtask_specs
+            .iter()
+            .map(|input| input.task_id)
+            .chain(covered_ids.iter().copied())
+        {
+            if !self.is_direct_subtask(root_task_id, id).await? {
+                return Err(invalid(format!(
+                    "task {id} is not an open subtask of task {root_task_id}"
+                )));
+            }
+        }
+        let now = jiff::Timestamp::now();
+        self.with_transaction(move |store| {
+            Box::pin(async move {
+                if umbrella.is_some() || umbrella_path.is_some() {
+                    store
+                        .save_task_spec(root_task_id, umbrella, umbrella_path)
+                        .await?;
+                }
+                for input in &subtask_specs {
+                    store
+                        .save_task_spec(input.task_id, Some(input.spec.clone()), None)
+                        .await?;
+                }
+                for id in &covered_ids {
+                    store.cover_subtask_at(*id, now).await?;
+                }
+                if let Some(view) = store.coding_run_for_task(root_task_id).await?
+                    && view.run.status == "active"
+                {
+                    store
+                        .append_run_note(view.run.id, "spec", "interview", "interview", "Spec saved")
+                        .await?;
+                    if let Some(step) = view
+                        .steps
+                        .iter()
+                        .find(|step| step.node.id == "interview" && !step.task.done)
+                        .map(|step| step.task.id)
+                    {
+                        store
+                            .complete_workflow_step(step, serde_json::json!({}))
+                            .await?;
+                    }
+                }
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// The newest run whose root task is `task_id`.
@@ -2683,9 +2992,180 @@ mod tests {
             .find(|node| node.id == "review")
             .expect("review node");
         assert_eq!(review.phase.as_deref(), Some("review"));
-        assert!(review.subtask);
+        // v2 declares steps explicitly: run scaffolding is never a subtask
+        // (decisions #3/#4).
+        assert_eq!(review.role.as_deref(), Some("step"));
+        assert!(!review.subtask);
         assert_eq!(review.retrigger_node.as_deref(), Some("interview"));
         Ok(())
+    }
+
+    /// Changing the shipped declaration appends exactly one new version, and
+    /// the runs that pinned the old one keep its semantics (decision #3).
+    #[tokio::test]
+    async fn test_ensure_coding_recipes_upserts_a_changed_builtin() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        // Install the pre-change v1 declaration by hand, then let the startup
+        // path notice the shipped v2 differs.
+        let v1 = serde_json::json!({
+            "name": "Coding task",
+            "nodes": [
+                {
+                    "id": "interview",
+                    "kind": "action",
+                    "title": "Interview & spec the feature",
+                    "ai": true,
+                    "phase": "interview",
+                    "subtask": true
+                }
+            ],
+            "edges": []
+        });
+        let installed = store.create_recipe("coding-task", v1).await?;
+        store.ensure_coding_recipes().await?;
+        store.ensure_coding_recipes().await?;
+        let versions: Vec<u64> = store
+            .list_recipes()
+            .await?
+            .iter()
+            .filter(|recipe| recipe.slug == "coding-task")
+            .map(|recipe| recipe.version)
+            .collect();
+        assert_eq!(versions.len(), 2, "one upsert, then idempotent: {versions:?}");
+        let current = store
+            .recipe_id_by_slug("coding-task")
+            .await?
+            .expect("newest version");
+        assert_ne!(current, installed.id, "the newest version is the shipped one");
+        // The pinned v1 row still declares its step as a subtask.
+        let v1_recipe = parse_recipe(&store.get_recipe(installed.id).await?.recipe_json.0)
+            .expect("v1 validates");
+        assert!(v1_recipe.nodes[0].subtask);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_recipe_role_validation() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        // `role` and `subtask` together declare the same thing twice.
+        assert!(
+            store
+                .create_recipe(
+                    "role-and-subtask",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [{ "id": "a", "kind": "action", "title": "A", "phase": "interview", "role": "step", "subtask": true }],
+                        "edges": []
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // An unknown role.
+        assert!(
+            store
+                .create_recipe(
+                    "bad-role",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [{ "id": "a", "kind": "action", "title": "A", "phase": "interview", "role": "middle" }],
+                        "edges": []
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        // A step always belongs to a phase.
+        assert!(
+            store
+                .create_recipe(
+                    "step-without-phase",
+                    serde_json::json!({
+                        "name": "Bad",
+                        "nodes": [{ "id": "a", "kind": "action", "title": "A", "role": "step" }],
+                        "edges": []
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// A small helper for the coverage tests.
+    fn coverage_task(id: u64, done: bool) -> crate::TaskWithMeta {
+        crate::TaskWithMeta {
+            task: crate::Task {
+                id,
+                title: format!("task {id}"),
+                description: None,
+                branch_name: None,
+                labels: None,
+                deadline: None,
+                blocked_until: None,
+                importance_factor: 1.0,
+                urgency_factor: 1.0,
+                done,
+                completed_at: None,
+                created_at: jiff::Timestamp::now(),
+                updated_at: jiff::Timestamp::now(),
+                parent_id: None,
+                source_task_id: None,
+                deleted_at: None,
+                timezone: None,
+                comments: None,
+                workflow_run_id: None,
+                node_id: None,
+                spec: None,
+                spec_path: None,
+                role: None,
+                spec_covered_at: None,
+                subtasks: toasty::Deferred::default(),
+                parent: toasty::Deferred::default(),
+            },
+            direct_tags: Vec::new(),
+            inherited_tags: Vec::new(),
+            inferred_tags: Vec::new(),
+            leaf_tags: Vec::new(),
+            blocked: false,
+            managed_by: None,
+            managed_label: None,
+            managed_mode: None,
+            managed_editable: false,
+            user_modified: false,
+        }
+    }
+
+    /// Coverage: an own spec beats the mark, the mark is the umbrella's
+    /// answer, done tasks never count, and a description never counts
+    /// (decisions #6/#10/#11).
+    #[test]
+    fn test_subtask_coverage_states() {
+        let mut own = coverage_task(1, false);
+        own.task.spec = Some("its own spec".to_string());
+        let mut marked = coverage_task(2, false);
+        marked.task.spec_covered_at = Some(jiff::Timestamp::now());
+        let mut bare = coverage_task(3, false);
+        bare.task.description = Some("a description is not a spec".to_string());
+        let done = coverage_task(4, true);
+        let mut done_but_specced = coverage_task(5, true);
+        done_but_specced.task.spec = Some("spec".to_string());
+
+        assert_eq!(subtask_coverage(&own), SubtaskCoverage::Own);
+        assert_eq!(subtask_coverage(&marked), SubtaskCoverage::Covered);
+        assert_eq!(subtask_coverage(&bare), SubtaskCoverage::Unspecced);
+        assert_eq!(subtask_coverage(&done), SubtaskCoverage::NotApplicable);
+        assert_eq!(
+            subtask_coverage(&done_but_specced),
+            SubtaskCoverage::NotApplicable
+        );
+        assert_eq!(subtask_coverage(&own).label(), "own");
+        assert_eq!(subtask_coverage(&bare).label(), "none");
+
+        // The count excludes done subtasks and never counts a description.
+        let summary = coverage_summary(&[own, marked, bare, done, done_but_specced]);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.covered, 2);
     }
 
     #[tokio::test]
@@ -3000,5 +3480,288 @@ mod tests {
         assert!(long.split('-').count() <= 5, "{long}");
         assert!(long.chars().count() <= 60, "{long}");
         assert!(!long.ends_with('-'), "{long}");
+    }
+
+    /// Steps are not subtasks: they carry the explicit role, and none of the
+    /// subtask surfaces return them (decisions #4/#5).
+    #[tokio::test]
+    async fn test_steps_are_not_subtasks() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let interview = pending_step(&view, "interview");
+        assert_eq!(interview.task.role.as_deref(), Some("step"));
+        assert!(store.run_subtasks(feature_id).await?.is_empty());
+        assert!(!store.list_subtasks(feature_id).await?.iter().any(|task| task.id == interview.task.id));
+        assert!(
+            store
+                .subtasks_map(&[feature_id])
+                .await?
+                .get(&feature_id)
+                .is_none()
+        );
+
+        // Approval gates nest under the step they review, and are steps too.
+        store
+            .complete_workflow_step(interview.task.id, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let spec = pending_step(&view, "spec");
+        assert_eq!(spec.task.parent_id, Some(interview.task.id));
+        assert_eq!(spec.task.role.as_deref(), Some("step"));
+        assert!(store.list_subtasks(interview.task.id).await?.is_empty());
+
+        // A real subtask of the feature task does show up.
+        let subtask = store
+            .create_task(
+                crate::Task::create()
+                    .title("Add token refresh".to_string())
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        let seen = store.run_subtasks(feature_id).await?;
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, subtask.id);
+        assert!(store.is_direct_subtask(feature_id, subtask.id).await?);
+        assert!(
+            !store
+                .is_direct_subtask(feature_id, spec.task.id)
+                .await?,
+            "a step is never a settable subtask"
+        );
+        Ok(())
+    }
+
+    /// One `save_subtask_specs` writes the umbrella, the subtask specs and
+    /// the covered marks atomically, completes the interview step, and
+    /// refuses any id that is not a direct, non-step child (decisions
+    /// #6/#10/#23/#31).
+    #[tokio::test]
+    async fn test_save_subtask_specs_writes_and_guards() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let owned = store
+            .create_task(
+                crate::Task::create()
+                    .title("Add token refresh".to_string())
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        let covered = store
+            .create_task(
+                crate::Task::create()
+                    .title("Wire the callback URL".to_string())
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        let grandchild = store
+            .create_task(
+                crate::Task::create()
+                    .title("Deeper".to_string())
+                    .parent_id(Some(owned.id)),
+            )
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let interview_step = pending_step(&view, "interview").task.id;
+
+        // A grandchild id is refused before anything is written.
+        let refused = store
+            .save_subtask_specs(
+                feature_id,
+                Some("# Umbrella".to_string()),
+                None,
+                vec![SubtaskSpecInput {
+                    task_id: grandchild.id,
+                    spec: "nope".to_string(),
+                }],
+                Vec::new(),
+            )
+            .await;
+        assert!(refused.is_err());
+        assert!(store.get_task(feature_id).await?.spec.is_none());
+        assert!(store.get_task(grandchild.id).await?.spec.is_none());
+
+        store
+            .save_subtask_specs(
+                feature_id,
+                Some("# Umbrella".to_string()),
+                Some("docs/spec/add-oauth-spec.md".to_string()),
+                vec![SubtaskSpecInput {
+                    task_id: owned.id,
+                    spec: "Refresh hourly".to_string(),
+                }],
+                vec![covered.id],
+            )
+            .await?;
+        let feature = store.get_task(feature_id).await?;
+        assert_eq!(feature.spec.as_deref(), Some("# Umbrella"));
+        assert_eq!(
+            store.get_task(owned.id).await?.spec.as_deref(),
+            Some("Refresh hourly")
+        );
+        assert!(store.get_task(covered.id).await?.spec_covered_at.is_some());
+        // The interview step completed, so the run advanced to the spec gate.
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        assert!(
+            view.steps
+                .iter()
+                .any(|step| step.task.id == interview_step && step.task.done)
+        );
+        assert!(view.steps.iter().any(|step| step.node.id == "spec"));
+        assert!(
+            run_notes(&view.run.step_results.0)
+                .iter()
+                .any(|note| note.kind == "spec")
+        );
+        // A step id is refused too.
+        assert!(
+            store
+                .save_subtask_specs(
+                    feature_id,
+                    None,
+                    None,
+                    Vec::new(),
+                    vec![interview_step],
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// Re-opening the interview re-uses rows instead of duplicating them: the
+    /// interview row re-opens in place, a pending implement survives, and each
+    /// round's spec gate is a fresh row (decision #30).
+    #[tokio::test]
+    async fn test_rewind_reuses_pending_rows() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let interview = pending_step(&view, "interview").task.id;
+        store
+            .complete_workflow_step(interview, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let spec = pending_step(&view, "spec").task.id;
+        store
+            .complete_workflow_step(spec, serde_json::json!({ "approved": true }))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let implement = pending_step(&view, "implement").task.id;
+
+        // Rewind from the implement phase: the interview row is the same row,
+        // the pending implement row is untouched, and the rewind is logged as
+        // a rejection.
+        store.reopen_coding_interview(run.id, "Scope changed").await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let reopened = pending_step(&view, "interview");
+        assert_eq!(reopened.task.id, interview);
+        assert_eq!(pending_step(&view, "implement").task.id, implement);
+        assert!(
+            run_notes(&view.run.step_results.0)
+                .iter()
+                .any(|note| note.kind == "reject" && note.body == "Scope changed")
+        );
+        assert_eq!(
+            view.steps.iter().filter(|step| step.node.id == "spec").count(),
+            1
+        );
+
+        // The new round approves the spec and picks the same implement row
+        // back up rather than spawning a second one.
+        store
+            .complete_workflow_step(reopened.task.id, serde_json::json!({}))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let spec = pending_step(&view, "spec").task.id;
+        assert_eq!(
+            view.steps.iter().filter(|step| step.node.id == "spec").count(),
+            2,
+            "each round's spec gate is a fresh row"
+        );
+        store
+            .complete_workflow_step(spec, serde_json::json!({ "approved": true }))
+            .await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        assert_eq!(
+            view.steps
+                .iter()
+                .filter(|step| step.node.id == "implement")
+                .count(),
+            1
+        );
+        assert_eq!(pending_step(&view, "implement").task.id, implement);
+        Ok(())
+    }
+
+    /// A hand-written subtask spec is just `tasks.spec`, so coverage accepts
+    /// it; a covered subtask later given an own spec reports `own` (the mark
+    /// stays as history).
+    #[tokio::test]
+    async fn test_own_spec_wins_over_the_coverage_mark() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, _run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let subtask = store
+            .create_task(
+                crate::Task::create()
+                    .title("Wire the callback URL".to_string())
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        store.cover_subtask_at(subtask.id, jiff::Timestamp::now()).await?;
+        let marked = store.get_task_with_meta(subtask.id).await?;
+        assert_eq!(subtask_coverage(&marked), SubtaskCoverage::Covered);
+
+        store
+            .save_task_spec(subtask.id, Some("Write it by hand".to_string()), None)
+            .await?;
+        let own = store.get_task_with_meta(subtask.id).await?;
+        assert_eq!(subtask_coverage(&own), SubtaskCoverage::Own);
+        assert!(own.spec_covered_at.is_some(), "the mark stays as history");
+
+        // Steps refuse a spec outright (decision #31).
+        let (_feature, run) = start_coding_run(&mut store, "Another feature").await?;
+        let view = store.workflow_run_view(run.id).await?.expect("run view");
+        let step = pending_step(&view, "interview").task.id;
+        assert!(
+            store
+                .save_task_spec(step, Some("nope".to_string()), None)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// Promotion gives a subtask its own run and counts it as covered in the
+    /// parent: nested runs are exempt from the one-run-per-project guard
+    /// (decisions #16/#32).
+    #[tokio::test]
+    async fn test_promoted_subtask_gets_a_nested_run() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, _run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let subtask = store
+            .create_task(
+                crate::Task::create()
+                    .title("Session storage".to_string())
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        store
+            .cover_subtask_at(subtask.id, jiff::Timestamp::now())
+            .await?;
+        let recipes = store.recipe_id_by_slug("coding-task").await?.expect("recipe");
+        let nested = store
+            .create_task_run(subtask.id, recipes, serde_json::json!({}))
+            .await?;
+        assert_eq!(nested.root_task_id, Some(subtask.id));
+
+        // It is still a subtask of the parent, and counted covered there.
+        let subtasks = store.run_subtasks(feature_id).await?;
+        assert_eq!(subtasks.len(), 1);
+        assert_eq!(subtasks[0].id, subtask.id);
+        assert!(subtasks[0].workflow_run_id.is_some());
+        let summary = coverage_summary(&subtasks);
+        assert_eq!((summary.covered, summary.total), (1, 1));
+        Ok(())
     }
 }

@@ -451,6 +451,12 @@ impl AgentPane {
         self.active_entry().map(|entry| entry.busy).unwrap_or(false)
     }
 
+    /// Stop the on-screen project's streaming turn, as the pane's own Stop
+    /// control does. The run's Workflow row delegates here (decision #27).
+    pub fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        self.stop(cx);
+    }
+
     /// Number of prompts queued for the on-screen project.
     pub fn queue_len(&self) -> usize {
         self.active_entry()

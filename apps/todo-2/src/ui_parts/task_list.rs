@@ -1021,6 +1021,8 @@ mod tests {
                 node_id: None,
                 spec: None,
                 spec_path: None,
+                role: None,
+                spec_covered_at: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },

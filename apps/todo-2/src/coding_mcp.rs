@@ -238,24 +238,41 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "save_spec",
-            "description": "Save the spec you interviewed out. Stores it on the feature task and completes the interview phase.",
+            "description": "Save the spec you interviewed out: the umbrella spec on the feature task, plus a spec for each subtask that needs its own, plus the ids of the subtasks the umbrella covers. Completes the interview phase. Every subtask id must be a direct subtask (never a workflow step).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "integer" },
-                    "content": { "type": "string", "description": "The spec markdown." },
-                    "path": { "type": "string", "description": "Where the spec was written on disk." }
+                    "content": { "type": "string", "description": "The umbrella spec markdown." },
+                    "path": { "type": "string", "description": "Where the spec was written on disk." },
+                    "subtasks": {
+                        "type": "array",
+                        "description": "Subtask specs: one entry per subtask you specced individually.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": { "type": "integer", "description": "The subtask's id from get_coding_context.sub_tasks." },
+                                "spec": { "type": "string", "description": "That subtask's spec markdown." }
+                            },
+                            "required": ["task_id", "spec"]
+                        }
+                    },
+                    "covered": {
+                        "type": "array",
+                        "description": "Ids of the subtasks the umbrella spec covers, with nothing of their own to add.",
+                        "items": { "type": "integer" }
+                    }
                 },
                 "required": ["task_id", "content"]
             }
         }),
         json!({
             "name": "create_sub_task",
-            "description": "Split the current step into a sub-task: pass the step's task id (from `get_coding_context`) as parent_task_id, so the work hangs off that step and the step's progress reflects it. Set nested=true when the sub-task is complex enough to deserve its own coding run.",
+            "description": "Add a subtask to the feature: the new task always hangs off the feature task itself, never off a workflow step, so it appears in the feature's subtask list. Set nested=true when the subtask is complex enough to deserve its own coding run.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "parent_task_id": { "type": "integer", "description": "A step's task id, or the feature task for run-level work." },
+                    "parent_task_id": { "type": "integer", "description": "The feature task or a step's task id; a step id resolves to the feature task." },
                     "title": { "type": "string" },
                     "description": { "type": "string" },
                     "nested": { "type": "boolean", "default": false }
@@ -425,18 +442,22 @@ async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<
             .spec,
         None => None,
     };
+    // The run's real subtasks (never steps), with the same coverage state the
+    // pane shows, so the model reads exactly what the user sees (§6.1).
     let sub_tasks: Vec<Value> = match root_task_id {
         Some(task_id) => store
-            .list_subtasks(task_id)
+            .run_subtasks(task_id)
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|task| task.node_id.is_none())
             .map(|task| {
+                let coverage = subtask_coverage(&task);
                 json!({
                     "id": task.id,
                     "title": task.title,
                     "done": task.done,
+                    "spec": coverage.label(),
+                    "description": task.description,
                     "nested_run": task.workflow_run_id.is_some(),
                 })
             })
@@ -461,38 +482,67 @@ async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<
 }
 
 async fn save_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, view) = resolve(store, arguments).await?;
-    let task_id = run
+    let (_run, view) = resolve(store, arguments).await?;
+    let task_id = view
+        .run
         .root_task_id
         .ok_or_else(|| "this run has no feature task".to_string())?;
     let content = arg_str(arguments, "content").ok_or_else(|| "`content` is required".to_string())?;
     let path = arg_str(arguments, "path");
-    store
-        .save_task_spec(task_id, Some(content), path)
-        .await
-        .map_err(|e| e.to_string())?;
-    store
-        .append_run_note(run.id, "spec", "interview", "interview", "Spec saved")
-        .await
-        .map_err(|e| e.to_string())?;
-    let interview = view
+    let subtask_specs = arg_subtask_specs(arguments)?;
+    let covered = arg_covered_ids(arguments);
+    let awaiting_interview = view
         .steps
         .iter()
-        .find(|step| step.node.id == "interview" && !step.task.done);
-    match interview {
-        Some(step) => {
-            store
-                .complete_workflow_step(step.task.id, json!({}))
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "saved": true, "phase_advanced": "spec" }))
-        }
-        None => Ok(json!({ "saved": true, "phase_advanced": null })),
+        .any(|step| step.node.id == "interview" && !step.task.done);
+    // One transaction: umbrella, subtask specs, coverage marks, the run note
+    // and the completed interview step. An id that is not a direct, non-step
+    // subtask of this run is refused before anything is written (§6.2).
+    store
+        .save_subtask_specs(task_id, Some(content), path, subtask_specs, covered)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "saved": true,
+        "phase_advanced": awaiting_interview.then_some("spec"),
+    }))
+}
+
+/// Parse the optional `subtasks` payload. A malformed entry is an error rather
+/// than a silently dropped subtask: the model must say what it meant.
+fn arg_subtask_specs(arguments: &Value) -> Result<Vec<SubtaskSpecInput>, String> {
+    let Some(items) = arguments.get("subtasks").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut specs = Vec::with_capacity(items.len());
+    for item in items {
+        let task_id = item
+            .get("task_id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "each `subtasks` entry needs an integer `task_id`".to_string())?;
+        let spec = item
+            .get("spec")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "each `subtasks` entry needs a `spec`".to_string())?;
+        specs.push(SubtaskSpecInput {
+            task_id,
+            spec: spec.to_string(),
+        });
     }
+    Ok(specs)
+}
+
+/// Parse the optional `covered` id list.
+fn arg_covered_ids(arguments: &Value) -> Vec<u64> {
+    arguments
+        .get("covered")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default()
 }
 
 async fn create_sub_task(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let parent_task_id = arg_u64(arguments, "parent_task_id")?;
+    let requested_parent = arg_u64(arguments, "parent_task_id")?;
     let title =
         arg_str(arguments, "title").ok_or_else(|| "`title` is required".to_string())?;
     let description = arg_str(arguments, "description");
@@ -500,6 +550,10 @@ async fn create_sub_task(store: &mut TodoStore, arguments: &Value) -> Result<Val
         .get("nested")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // In a coding run every subtask is a direct child of the run root
+    // (decision #15): a step id passed as the parent resolves to the root, so
+    // steps never grow children and the new work is visible as a subtask.
+    let parent_task_id = resolve_subtask_parent(store, requested_parent).await?;
     let sub_task = store
         .create_task(
             TaskCreate::default()
@@ -522,7 +576,28 @@ async fn create_sub_task(store: &mut TodoStore, arguments: &Value) -> Result<Val
             .map_err(|e| e.to_string())?;
         run_id = Some(run.id);
     }
-    Ok(json!({ "sub_task_id": sub_task.id, "run_id": run_id }))
+    Ok(json!({
+        "sub_task_id": sub_task.id,
+        "run_id": run_id,
+        // Echo the parent actually used, so a corrected step id is visible.
+        "parent_task_id": parent_task_id,
+    }))
+}
+
+/// The parent a new subtask lands on: the run root when the requested parent
+/// belongs to a coding run (a step, or the root itself), the requested task
+/// otherwise.
+async fn resolve_subtask_parent(store: &mut TodoStore, requested: u64) -> Result<u64, String> {
+    let task = store.get_task(requested).await.map_err(|e| e.to_string())?;
+    let Some(run_id) = task.workflow_run_id else {
+        return Ok(requested);
+    };
+    Ok(store
+        .find_run(run_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .and_then(|run| run.root_task_id)
+        .unwrap_or(requested))
 }
 
 async fn request_sub_task_interview(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
@@ -815,6 +890,117 @@ mod tests {
         let notes = run_notes(&run.step_results.0);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].kind, "finding");
+    }
+
+    /// A feature run with two real subtasks added after the interview started.
+    async fn started_run_with_subtasks(store: &mut TodoStore) -> (u64, u64, u64, u64) {
+        let (task_id, run_id) = started_run(store).await;
+        let mut ids = Vec::new();
+        for title in ["Add token refresh", "Wire the callback URL"] {
+            let sub = dispatch(
+                store,
+                "create_sub_task",
+                json!({ "parent_task_id": task_id, "title": title }),
+            )
+            .await
+            .expect("create sub-task");
+            ids.push(sub["sub_task_id"].as_u64().expect("sub-task id"));
+        }
+        (task_id, run_id, ids[0], ids[1])
+    }
+
+    #[tokio::test]
+    async fn context_reports_each_subtask_state() {
+        let mut store = store().await;
+        let (task_id, _, owned, covered) = started_run_with_subtasks(&mut store).await;
+        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
+            .await
+            .expect("context");
+        let sub_tasks = context["sub_tasks"].as_array().expect("sub tasks");
+        assert_eq!(sub_tasks.len(), 2);
+        // Both start unspecced, so the model is told to decide.
+        assert!(
+            sub_tasks
+                .iter()
+                .all(|sub| sub["spec"].as_str() == Some("none"))
+        );
+        assert!(sub_tasks[0].get("description").is_some());
+
+        dispatch(
+            &mut store,
+            "save_spec",
+            json!({
+                "task_id": task_id,
+                "content": "# Umbrella",
+                "subtasks": [{ "task_id": owned, "spec": "Refresh hourly" }],
+                "covered": [covered]
+            }),
+        )
+        .await
+        .expect("save spec");
+        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
+            .await
+            .expect("context");
+        let sub_tasks = context["sub_tasks"].as_array().expect("sub tasks");
+        assert_eq!(sub_tasks[0]["spec"].as_str(), Some("own"));
+        assert_eq!(sub_tasks[1]["spec"].as_str(), Some("covered"));
+        // The whole payload advanced the run to the spec gate.
+        assert_eq!(context["phase"], "spec");
+        assert_eq!(
+            store.get_task(owned).await.expect("task").spec.as_deref(),
+            Some("Refresh hourly")
+        );
+    }
+
+    #[tokio::test]
+    async fn save_spec_refuses_a_foreign_or_step_id_without_writing() {
+        let mut store = store().await;
+        let (task_id, _, owned, _) = started_run_with_subtasks(&mut store).await;
+        // A step id is not a subtask, so the whole call fails and nothing is
+        // written (decision #31).
+        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
+            .await
+            .expect("context");
+        let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
+        let refused = dispatch(
+            &mut store,
+            "save_spec",
+            json!({
+                "task_id": task_id,
+                "content": "# Umbrella",
+                "subtasks": [{ "task_id": owned, "spec": "Refresh hourly" }],
+                "covered": [step_id]
+            }),
+        )
+        .await;
+        assert!(refused.is_err(), "a step id is refused");
+        assert!(store.get_task(task_id).await.expect("task").spec.is_none());
+        assert!(store.get_task(owned).await.expect("task").spec.is_none());
+    }
+
+    /// A step id passed as the parent of a new subtask resolves to the run
+    /// root, so steps never grow children (decision #15).
+    #[tokio::test]
+    async fn create_sub_task_under_a_step_lands_on_the_run_root() {
+        let mut store = store().await;
+        let (task_id, _) = started_run(&mut store).await;
+        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
+            .await
+            .expect("context");
+        let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
+        let created = dispatch(
+            &mut store,
+            "create_sub_task",
+            json!({ "parent_task_id": step_id, "title": "Bump the changelog" }),
+        )
+        .await
+        .expect("create sub-task");
+        assert_eq!(created["parent_task_id"].as_u64(), Some(task_id));
+        let sub_task_id = created["sub_task_id"].as_u64().expect("sub-task id");
+        assert_eq!(
+            store.get_task(sub_task_id).await.expect("task").parent_id,
+            Some(task_id)
+        );
     }
 
     #[tokio::test]

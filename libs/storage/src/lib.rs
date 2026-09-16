@@ -44,9 +44,10 @@ pub mod prelude {
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta, factors_between};
     pub use crate::workflow::{
-        CODING_PHASES, Recipe, RecipeEdge, RecipeMeta, RecipeNode, RUN_NOTES_KEY, RunNote,
-        RunStepView, RunView, WorkflowRecipe, WorkflowRun, coding_recipes, issue_branch_name,
-        issue_branch_slug, normalize_branch_name, run_notes,
+        CODING_PHASES, CoverageSummary, RECIPE_ROLES, Recipe, RecipeEdge, RecipeMeta, RecipeNode,
+        RUN_NOTES_KEY, STEP_ROLE, RunNote, RunStepView, RunView, SubtaskCoverage, SubtaskSpecInput,
+        WorkflowRecipe, WorkflowRun, coding_recipes, coverage_summary, is_step, issue_branch_name,
+        issue_branch_slug, normalize_branch_name, run_notes, subtask_coverage,
     };
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;

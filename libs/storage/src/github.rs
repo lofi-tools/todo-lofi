@@ -2407,10 +2407,14 @@ impl TodoStore {
         Ok(None)
     }
 
-    /// Whether `task_id`'s ancestry says it has to stay local: it sits inside a
-    /// workflow run's tree (run content is the app's, not the issue's), or the
-    /// chain loops, which would otherwise walk forever. Walks up with a visited
-    /// set.
+    /// Whether `task_id`'s ancestry says it has to stay local: it is a workflow
+    /// step, or sits under one (a step is run scaffolding, not a subtask), or
+    /// the chain loops, which would otherwise walk forever. Walks up with a
+    /// visited set.
+    ///
+    /// The test is the explicit `role` (decision #4), not "a run is involved":
+    /// a run root and a promoted subtask both carry a run of their own and keep
+    /// syncing their own issue.
     async fn ancestry_blocks_sync(&mut self, task_id: u64) -> QueryResult<bool> {
         let mut current = Some(task_id);
         let mut visited = std::collections::HashSet::new();
@@ -2419,7 +2423,7 @@ impl TodoStore {
                 return Ok(true);
             }
             let task = self.get_task(id).await?;
-            if task.workflow_run_id.is_some() {
+            if crate::workflow::is_step(&task) {
                 return Ok(true);
             }
             current = task.parent_id;
@@ -2506,7 +2510,7 @@ impl TodoStore {
     ) -> anyhow::Result<Option<(u64, IssueRef)>> {
         let task = self.get_task(task_id).await?;
         if task.deleted_at.is_some()
-            || task.workflow_run_id.is_some()
+            || crate::workflow::is_step(&task)
             || self.is_builtin_owned(task_id).await?
             || self.ancestry_blocks_sync(task_id).await?
         {
@@ -2901,13 +2905,17 @@ impl TodoStore {
                 .await;
         };
         // A tombstoned link is never resurrected, and neither is a task the
-        // user deleted locally. A workflow-step task never syncs at all — the
-        // same rule the Todoist engine applies (§5.5).
+        // user deleted locally. A step — or anything under one — never syncs
+        // at all: steps are run scaffolding the issue tracker has no place for
+        // (§5.5). A promoted subtask keeps syncing its own issue.
         if link.state.tombstoned {
             return Ok(());
         }
         let task = self.get_task(link.task_id).await?;
-        if task.deleted_at.is_some() || task.workflow_run_id.is_some() {
+        if task.deleted_at.is_some()
+            || crate::workflow::is_step(&task)
+            || self.ancestry_blocks_sync(link.task_id).await?
+        {
             return Ok(());
         }
         self.merge_github_issue(client, bound, &external_id, &link, issue, summary)
@@ -4337,9 +4345,12 @@ mod tests {
         let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
 
         // A run step's task is the run's, not the issue's: a local rename
-        // stays local instead of being pushed as an issue edit (§5.5).
+        // stays local instead of being pushed as an issue edit (§5.5). The
+        // exclusion reads the explicit step role, so a run root or a promoted
+        // subtask (which also carries a run) keeps syncing.
         Task::update_by_id(task_id)
             .workflow_run_id(Some(4))
+            .role(Some("step".to_string()))
             .exec(&mut storage.db)
             .await?;
         storage.update_task_title(task_id, "Step title").await?;
@@ -4437,7 +4448,8 @@ mod tests {
             .create_task(
                 Task::create()
                     .title("Interview".to_string())
-                    .workflow_run_id(Some(4)),
+                    .workflow_run_id(Some(4))
+                    .role(Some("step".to_string())),
             )
             .await?;
         storage.assign_tag_to_task(step.id, &tag.name).await?;
@@ -4612,6 +4624,7 @@ mod tests {
                 Task::create()
                     .title("Interview".to_string())
                     .workflow_run_id(Some(4))
+                    .role(Some("step".to_string()))
                     .parent_id(Some(run.id)),
             )
             .await?;

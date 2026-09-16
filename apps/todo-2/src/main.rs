@@ -387,6 +387,16 @@ impl Layout {
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
+        // Whether the phase's agent turn is running is a pane fact (decisions
+        // #27/#28): the details pane reads it to disable the rewind and to put
+        // Stop on the active step row.
+        let details_for_busy = details.clone();
+        let _busy_subscription = cx.subscribe(&agent_pane, move |_this, pane, event, cx| {
+            if matches!(event, AgentPaneEvent::BusyChanged { .. }) {
+                let busy = pane.read(cx).is_busy();
+                details_for_busy.update(cx, |details, cx| details.set_coding_phase_running(busy, cx));
+            }
+        });
         // One ownership-settings entity, embedded by the panels below.
         let apps = cx.new(|cx| AppSettings::new(store.clone(), cx));
         let automations = cx.new(|cx| AutomationsPanel::new(store.clone(), apps.clone(), cx));
@@ -585,6 +595,15 @@ impl Layout {
                     this.agent_pane
                         .update(cx, |pane, cx| pane.insert_prompt_text(prompt, window, cx));
                     this.show_right_pane(RightPane::Agent, window, cx);
+                }
+                // Stop on a run step delegates to the agent pane's stop-turn:
+                // the step stays open and the branch keeps what the turn wrote
+                // (decision #27).
+                TaskDetailsEvent::CodingStopPhase => {
+                    this.agent_pane.update(cx, |pane, cx| pane.stop_turn(cx));
+                    let busy = this.agent_pane.read(cx).is_busy();
+                    this.details
+                        .update(cx, |details, cx| details.set_coding_phase_running(busy, cx));
                 }
             },
         )

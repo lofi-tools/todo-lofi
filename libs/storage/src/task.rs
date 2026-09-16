@@ -59,10 +59,18 @@ pub struct Task {
     pub node_id: Option<String>,
     /// The spec artifact of a coding run's feature task (markdown text saved by
     /// the agent's interview phase, or pasted by the user in the details panel).
+    /// A real subtask may hold its own spec here too; never written on a step.
     pub spec: Option<String>,
     /// Where the spec was written on disk, when the agent reported a path. The
     /// details panel offers an "open file" affordance for it.
     pub spec_path: Option<String>,
+    /// Coding runs only: `'step'` on an engine-materialized run step, so every
+    /// subtask surface can tell scaffolding from work. `NULL` for plain tasks,
+    /// user- and model-added subtasks, and nested-run roots.
+    pub role: Option<String>,
+    /// Coding runs only: when the feature spec was accepted as covering this
+    /// subtask. An own `spec` always wins over this mark.
+    pub spec_covered_at: Option<jiff::Timestamp>,
     #[has_many(pair = parent)]
     pub subtasks: Deferred<Vec<Task>>,
     #[belongs_to(key = parent_id, references = id)]
@@ -250,10 +258,15 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let completed_at = record.get(15).and_then(|v| v.to_u64());
     let workflow_run_id = record.get(16).and_then(|v| v.to_i64()).map(|id| id as u64);
     let node_id = record.get(17).and_then(|v| v.as_str()).map(str::to_owned);
-    // The spec columns are only selected by queries that need them, so these
-    // reads are optional rather than positional requirements.
+    // The spec and role columns are only selected by queries that need them,
+    // so these reads are optional rather than positional requirements.
     let spec = record.get(18).and_then(|v| v.as_str()).map(str::to_owned);
     let spec_path = record.get(19).and_then(|v| v.as_str()).map(str::to_owned);
+    let role = record.get(20).and_then(|v| v.as_str()).map(str::to_owned);
+    let spec_covered_at = record
+        .get(21)
+        .and_then(|v| v.as_str())
+        .and_then(|raw| raw.parse::<jiff::Timestamp>().ok());
 
     let task = Task {
         id,
@@ -278,6 +291,8 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         node_id,
         spec,
         spec_path,
+        role,
+        spec_covered_at,
         subtasks: Deferred::default(),
         parent: Deferred::default(),
     };
@@ -363,6 +378,7 @@ impl TodoStore {
 
     /// Store a coding feature task's spec artifact (and the path the agent
     /// wrote it to, when it reported one). `None` leaves the column alone.
+    /// A step row never carries a spec (decision #31), so it is refused.
     #[fastrace::trace]
     pub async fn save_task_spec(
         &mut self,
@@ -370,6 +386,7 @@ impl TodoStore {
         spec: Option<String>,
         spec_path: Option<String>,
     ) -> crate::QueryResult<()> {
+        self.ensure_not_a_step(id, "spec").await?;
         let mut update = Task::update_by_id(id);
         if let Some(spec) = spec {
             update = update.spec(Some(spec));
@@ -378,6 +395,40 @@ impl TodoStore {
             update = update.spec_path(Some(path));
         }
         update
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
+    }
+
+    /// Reject writes to a run step: a step is scaffolding, never a subtask, so
+    /// it has no spec, no coverage mark and no place in a subtask surface.
+    pub(crate) async fn ensure_not_a_step(
+        &mut self,
+        id: u64,
+        what: &str,
+    ) -> crate::QueryResult<()> {
+        let task = self.get_task(id).await?;
+        if crate::workflow::is_step(&task) {
+            return Err(crate::QueryErr::UnexpectedValue {
+                message: format!("task {id} is a workflow step and cannot hold a {what}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Mark `id` as covered by its run's umbrella spec (decision #10). The
+    /// mark is set, never cleared by a later own spec: an own spec wins in
+    /// `subtask_coverage` and the mark stays as history.
+    #[fastrace::trace]
+    pub async fn cover_subtask_at(
+        &mut self,
+        id: u64,
+        covered_at: jiff::Timestamp,
+    ) -> crate::QueryResult<()> {
+        self.ensure_not_a_step(id, "coverage mark").await?;
+        Task::update_by_id(id)
+            .spec_covered_at(Some(covered_at))
             .exec(&mut self.db)
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;
@@ -498,6 +549,12 @@ impl TodoStore {
         self.list_tasks_by_priority_impl(true).await
     }
 
+    /// WHERE fragment excluding engine run steps: they belong to a run's
+    /// Workflow section, never to a task list.
+    fn not_a_step_where_sql(table: &str) -> String {
+        format!("AND ({table}role IS NULL OR {table}role <> 'step')")
+    }
+
     async fn list_tasks_by_priority_impl(
         &mut self,
         include_distant: bool,
@@ -520,9 +577,11 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql(""),
+            Self::not_a_step_where_sql(""),
             near,
             Self::priority_order_sql(),
         ))
@@ -655,10 +714,12 @@ impl TodoStore {
             {}
             {}
             {}
+            {}
             "#,
             task_placeholders.join(","),
             Self::completed_visible_where_sql(),
             Self::not_deleted_where_sql("t."),
+            Self::not_a_step_where_sql("t."),
             if include_distant {
                 String::new()
             } else {
