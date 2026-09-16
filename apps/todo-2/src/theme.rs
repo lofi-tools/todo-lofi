@@ -30,6 +30,10 @@ pub const TEXT_STRONG: u32 = 0xe5e5e5;
 /// Success state (completed tool calls, connected integrations).
 pub const SUCCESS: u32 = 0x4ade80;
 
+/// Warning state (degraded but not failing: a sync that fell back, a stale
+/// token).
+pub const WARNING: u32 = 0xf59e0b;
+
 /// Error state (failed tool calls, launch failures).
 pub const DANGER: u32 = 0xef4444;
 

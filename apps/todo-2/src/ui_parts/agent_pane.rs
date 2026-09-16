@@ -38,6 +38,7 @@ use crate::theme::{
     APP_BG, CARD_BG, DANGER, DIFF_ADD_BG, DIFF_DEL_BG, HAIRLINE, PANEL_BG, PANEL_HOVER, SUCCESS,
     TEXT_FAINT, TEXT_MUTED, TEXT_STRONG,
 };
+use crate::ui_parts::notifications::{self, NoticeLevel as Severity};
 
 const AGENT_PANE_CONTEXT: &str = "AgentPane";
 /// How long after an outside-mousedown close a selector-button click is
@@ -811,6 +812,9 @@ impl AgentPane {
                 let events = forward_events(&mut connection, tag_name, cx);
                 entry.transcript.seed_controls(modes, config_options);
                 if let Some(notice) = notice {
+                    // An agent failure belongs in the app's notification log
+                    // as well as the transcript, which the pane owns.
+                    notifications::report(cx, Severity::Error, notice.clone());
                     entry.transcript.push_notice(NoticeLevel::Error, notice);
                 }
                 entry.state = PaneState::Ready(Box::new(LiveSession {
@@ -928,9 +932,9 @@ impl AgentPane {
             };
             entry.busy = false;
             if let Err(error) = result {
-                entry
-                    .transcript
-                    .push_error(format!("The turn ended with an error: {error}"));
+                let message = format!("The turn ended with an error: {error}");
+                notifications::report(cx, Severity::Error, message.clone());
+                entry.transcript.push_error(message);
             }
             entry.queue.pop_front()
         };
@@ -1050,10 +1054,10 @@ impl AgentPane {
                 match result {
                     Ok(()) => pane.start_session(&tag_owned, true, cx),
                     Err(error) => {
+                        let message = format!("Sign-in failed: {error}");
+                        notifications::report(cx, Severity::Error, message.clone());
                         if let Some(entry) = pane.projects.get_mut(&tag_owned) {
-                            entry
-                                .transcript
-                                .push_error(format!("Sign-in failed: {error}"));
+                            entry.transcript.push_error(message);
                         }
                     }
                 }
@@ -1652,10 +1656,10 @@ impl AgentPane {
                 .await;
             this.update(cx, |pane, cx| {
                 if let Err(error) = result {
+                    let message = format!("Could not change the option: {error}");
+                    notifications::report(cx, Severity::Error, message.clone());
                     if let Some(entry) = pane.active_entry_mut() {
-                        entry
-                            .transcript
-                            .push_error(format!("Could not change the option: {error}"));
+                        entry.transcript.push_error(message);
                     }
                     pane.sync_scroller(cx);
                 }
@@ -1688,10 +1692,10 @@ impl AgentPane {
                 .await;
             this.update(cx, |pane, cx| {
                 if let Err(error) = result {
+                    let message = format!("Could not change the mode: {error}");
+                    notifications::report(cx, Severity::Error, message.clone());
                     if let Some(entry) = pane.active_entry_mut() {
-                        entry
-                            .transcript
-                            .push_error(format!("Could not change the mode: {error}"));
+                        entry.transcript.push_error(message);
                     }
                     pane.sync_scroller(cx);
                 }

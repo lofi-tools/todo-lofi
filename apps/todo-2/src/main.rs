@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
+    Anchor, AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
     IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
     StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px, rgb,
 };
@@ -7,10 +7,13 @@ use gpui_component::WindowExt;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::text::TextView;
 use gpui_component::{
     Disableable, IconName, ResizableState, Theme, ThemeMode, TitleBar, h_resizable, resizable_panel,
 };
 use storage::prelude::*;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
@@ -23,7 +26,10 @@ use ui_parts::navbar::{NavBar, NavBarEvent, NavPanel};
 use ui_parts::settings::SettingsView;
 use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::apps::{AppSettings, AppSettingsEvent};
-use ui_parts::integrations::{IntegrationsEvent, IntegrationsView};
+use ui_parts::integrations::{IntegrationsEvent, IntegrationsView, since_label};
+use ui_parts::notifications::{
+    Notice, NoticeFeed, NoticeFilter, NoticeLayer, NoticeLevel, NoticeLog, NoticeSink,
+};
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
@@ -44,6 +50,7 @@ mod ui_parts {
     pub mod automations;
     pub mod integrations;
     pub mod navbar;
+    pub mod notifications;
     pub mod settings;
     pub mod project_picker;
     pub mod repeat_picker;
@@ -70,6 +77,17 @@ const DETAILS_PANE_WIDTH: f32 = 672.;
 const DETAILS_PANE_MIN_WIDTH: f32 = 320.;
 const DETAILS_PANE_MAX_FRACTION: f32 = 0.60;
 const SPLIT_RIGHT_PANE_MAX_WIDTH: f32 = 1500.;
+
+/// Height of the window-wide footer strip. The notifications pane anchors
+/// its own top edge to the footer's, so both share the number.
+const FOOTER_HEIGHT: f32 = 28.;
+
+/// Width cap for a notification card. Narrow enough that a card reads as a
+/// floating note rather than a band across the window.
+const NOTIFICATION_WIDTH: f32 = 360.;
+
+/// Gap between a notification card and the window edges.
+const NOTIFICATION_MARGIN: f32 = 12.;
 
 /// The selected tag that is owned by an automation: the Layout swaps the
 /// task list for the automation's special panel while it is selected.
@@ -119,6 +137,12 @@ struct Layout {
     /// Persistent failure notice, visible on every panel until dismissed
     /// (integration errors otherwise only show inside their own card).
     notice: Option<String>,
+    /// Everything the app reported: the footer's indicator and the pane.
+    notices: NoticeLog,
+    /// Whether the notifications pane is expanded above the footer.
+    notices_open: bool,
+    /// Which severities the pane lists.
+    notice_filter: NoticeFilter,
     store: Store,
     /// Repos found by the home-directory scan, shown in the project picker
     /// modal opened by the + button.
@@ -137,9 +161,38 @@ impl Layout {
     fn new(
         input: Entity<InputState>,
         store: Store,
+        notices: UnboundedReceiver<Notice>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The notification feed reaches here from `main`: every recorded
+        // notification is logged for the pane and pops up as a toast. The
+        // window handle lets a background failure (a tracing event) toast too.
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let mut notices = notices;
+            while let Some(notice) = notices.recv().await {
+                let logged = match this.update(cx, |this, cx| {
+                    this.log_notice(notice.level, notice.message.clone(), cx)
+                }) {
+                    Ok(logged) => logged,
+                    // The layout is gone; nothing is left to notify.
+                    Err(_) => return,
+                };
+                // A collapsed repeat only bumps a count, and only errors pop
+                // up: a warning stays in the pane and the footer's indicator.
+                if logged && let Some(toast) = notice.toast() {
+                    // A closed window has nowhere to show the toast; the
+                    // entry stays in the pane either way.
+                    if let Err(error) = window_handle
+                        .update(cx, |_, window, cx| window.push_notification(toast, cx))
+                    {
+                        tracing::debug!("toast dropped: {error}");
+                    }
+                }
+            }
+        })
+        .detach();
         // The agent's tool surface: a loopback MCP endpoint over the same
         // store the UI uses. Every mutating tool call signals this channel so
         // the panels reload when the agent attaches a spec or spawns a
@@ -409,6 +462,9 @@ impl Layout {
                     this.sync_agent_checkout_for_selection(cx);
                 }
                 IntegrationsEvent::Notice(message) => {
+                    // The card logs the same text before emitting this, so the
+                    // notification layer already recorded it; re-reporting here
+                    // would show one failure twice.
                     this.notice = Some(message.clone());
                     cx.notify();
                 }
@@ -650,6 +706,9 @@ impl Layout {
             settings,
             panel: NavPanel::Tasks,
             notice: None,
+            notices: NoticeLog::default(),
+            notices_open: false,
+            notice_filter: NoticeFilter::default(),
             store: store.clone(),
             _projects: Vec::new(),
             _project_subscription: project_subscription,
@@ -975,13 +1034,13 @@ async fn lookup_managed_tag(
         }
     }
 
-    /// Window-wide footer: the two right-pane switchers and nothing else.
+    /// Window-wide footer: the notifications indicator on the left, the two
+    /// right-pane switchers on the right.
     fn render_pane_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-
         let agent_enabled = self.agent_available;
         div()
             .flex_none()
-            .h(px(28.))
+            .h(px(FOOTER_HEIGHT))
             .flex()
             .items_center()
             .justify_end()
@@ -990,6 +1049,9 @@ async fn lookup_managed_tag(
             .border_t_1()
             .border_color(rgb(theme::HAIRLINE))
             .bg(rgb(theme::PANEL_BG))
+            .child(self.render_notifications_button(cx))
+            // The indicator owns the left end; the pane switchers stay right.
+            .child(div().flex_1())
             .child(
                 Button::new("pane-switch-details")
                     .ghost()
@@ -1018,6 +1080,271 @@ async fn lookup_managed_tag(
                     })),
             )
             .into_any_element()
+    }
+
+    /// The persistent failure notice: a floating strip above the footer, so
+    /// an integration error never pushes the layout around.
+    fn render_notice_banner(&self, notice: String, cx: &mut Context<Self>) -> AnyElement {
+        let copy_text = notice.clone();
+        div()
+            .id("notice-banner")
+            // Floating over the content, so clicks land here and not on
+            // whatever the banner covers.
+            .occlude()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(0x7f1d1d))
+            .bg(rgb(0x2a1215))
+            .shadow_md()
+            .child(
+                // A text view rather than a plain div so the message
+                // can be selected and dragged out; the copy button
+                // takes the whole thing in one press.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(rgb(0xfca5a5))
+                    .child(TextView::markdown("notice-message", notice).selectable(true)),
+            )
+            .child(
+                Button::new("notice-copy")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Copy)
+                    .tooltip("Copy this message")
+                    .on_click(move |_, _, cx: &mut App| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
+                    }),
+            )
+            .child(
+                Button::new("notice-dismiss")
+                    .ghost()
+                    .compact()
+                    .label("Dismiss")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.notice = None;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The footer's notifications indicator: a red error icon once anything has
+    /// failed, amber for warnings alone, and a plain bell while the log is
+    /// clean. Pressing it toggles the pane.
+    fn render_notifications_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let errors = self.notices.count(NoticeLevel::Error);
+        let warnings = self.notices.count(NoticeLevel::Warning);
+        let (icon, color) = if errors > 0 {
+            (IconName::CircleX, theme::DANGER)
+        } else if warnings > 0 {
+            (IconName::TriangleAlert, theme::WARNING)
+        } else {
+            (IconName::Bell, theme::TEXT_MUTED)
+        };
+        let problems = errors + warnings;
+        Button::new("footer-notifications")
+            .ghost()
+            .compact()
+            .icon(icon)
+            .toggled(self.notices_open)
+            .text_color(rgb(color))
+            .when(problems > 0, |this| this.label(problems.to_string()))
+            .tooltip(self.notifications_tooltip())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.notices_open = !this.notices_open;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// What the footer indicator says on hover: the counts, worst first.
+    fn notifications_tooltip(&self) -> String {
+        let errors = self.notices.count(NoticeLevel::Error);
+        let warnings = self.notices.count(NoticeLevel::Warning);
+        if errors == 0 && warnings == 0 {
+            return "Notifications".to_string();
+        }
+        let mut parts = Vec::new();
+        for (count, level) in [
+            (errors, NoticeLevel::Error),
+            (warnings, NoticeLevel::Warning),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {}", level.noun()));
+            }
+        }
+        format!("Notifications — {}", parts.join(", "))
+    }
+
+    /// The notifications pane, expanded above the footer: everything the app
+    /// reported, newest first, filtered to failures unless asked for more.
+    fn render_notifications_pane(&self, cx: &mut Context<Self>) -> AnyElement {
+        let filter = self.notice_filter;
+        let now = jiff::Timestamp::now();
+        let shown: Vec<(usize, &Notice)> = self
+            .notices
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, notice)| filter.shows(notice.level))
+            .collect();
+        let hidden = self.notices.entries().len() - shown.len();
+        let mut list = div().v_flex().gap_1();
+        if shown.is_empty() {
+            list = list.child(
+                div()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(self.empty_notifications_label(hidden)),
+            );
+        }
+        for (index, notice) in shown.iter().rev() {
+            list = list.child(self.notice_row(*index, notice, now));
+        }
+        div()
+            .id("notifications-pane")
+            // Floating over the content, so clicks land here and not on
+            // whatever the pane covers.
+            .occlude()
+            .flex_none()
+            .v_flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(rgb(theme::HAIRLINE))
+            .bg(rgb(theme::PANEL_BG))
+            .shadow_md()
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(rgb(theme::TEXT_STRONG))
+                            .child("Notifications"),
+                    )
+                    .child(
+                        Button::new("notifications-filter")
+                            .ghost()
+                            .compact()
+                            .label(filter.label())
+                            .tooltip(if filter == NoticeFilter::Problems {
+                                "Show every message, informational ones included"
+                            } else {
+                                "Show errors and warnings only"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.notice_filter = this.notice_filter.toggle();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("notifications-clear")
+                            .ghost()
+                            .compact()
+                            .label("Clear")
+                            .disabled(self.notices.entries().is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.notices.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("notifications-close")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Close)
+                            .tooltip("Hide the notifications pane")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.notices_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .max_h(px(180.))
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(list),
+            )
+            .into_any_element()
+    }
+
+    /// What the pane says when it has nothing to show, and why.
+    fn empty_notifications_label(&self, hidden: usize) -> String {
+        if hidden > 0 {
+            return format!(
+                "No errors or warnings. {hidden} informational message{} hidden.",
+                if hidden == 1 { "" } else { "s" }
+            );
+        }
+        "Nothing reported yet.".to_string()
+    }
+
+    /// One notification row: severity, message, repeat count and age.
+    fn notice_row(&self, index: usize, notice: &Notice, now: jiff::Timestamp) -> AnyElement {
+        div()
+            .id(("notice-row", index))
+            .h_flex()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .pt_0p5()
+                    .text_color(rgb(notice.level.color()))
+                    .child(notice.level.icon()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child(
+                        TextView::markdown(("notice-message", index), notice.message.clone())
+                            .selectable(true),
+                    ),
+            )
+            .when(notice.repeats > 0, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .child(format!("×{}", notice.repeats + 1)),
+                )
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(since_label(notice.at, now)),
+            )
+            .into_any_element()
+    }
+
+    /// Record one notification in the pane's log. Returns whether it added an
+    /// entry, which is what earns a toast: a collapsed repeat does not.
+    fn log_notice(&mut self, level: NoticeLevel, message: String, cx: &mut Context<Self>) -> bool {
+        let added = self.notices.push(level, message, jiff::Timestamp::now());
+        cx.notify();
+        added
     }
 
     /// Swap the main panel, keeping the navbar footer highlight in sync.
@@ -1320,14 +1647,17 @@ async fn lookup_managed_tag(
 impl Render for Layout {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The gpui-component Root only paints its main view; overlays like
-        // dialogs must be layered on top by the app (same composition as
-        // gpui-component's story app).
+        // dialogs and notification toasts must be layered on top by the app
+        // (same composition as gpui-component's story app).
+        let notification_layer = gpui_component::Root::render_notification_layer(window, cx);
         let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
         let details_open =
             self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
 
-        div()
-            .relative()
+        // The app's own column: title bar, content, banner, footer. It is the
+        // only in-flow child of the frame below, so the overlaid layers cannot
+        // move it.
+        let app = div()
             .size_full()
             .v_flex()
             .child(
@@ -1522,39 +1852,33 @@ impl Render for Layout {
             // The footer is window-wide chrome: it stays pinned to the
             // bottom on every panel, including Integrations, Automations
             // and Settings.
-            .when_some(self.notice.clone(), |this, notice| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(rgb(0x7f1d1d))
-                        .bg(rgb(0x2a1215))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(rgb(0xfca5a5))
-                                .child(notice),
-                        )
-                        .child(
-                            Button::new("notice-dismiss")
-                                .ghost()
-                                .compact()
-                                .label("Dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.notice = None;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .child(self.render_pane_footer(cx))
-            // Keep the dialog layer last so dialogs paint above everything.
+            .child(self.render_pane_footer(cx));
+
+        div()
+            .relative()
+            .size_full()
+            .child(app)
+            // The failure banner and the notifications pane hang off the
+            // footer's top edge and float over the layout: showing either
+            // must not move anything underneath. They stack in one
+            // bottom-anchored column, so neither hides the other.
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(FOOTER_HEIGHT))
+                    .v_flex()
+                    .when_some(self.notice.clone(), |this, notice| {
+                        this.child(self.render_notice_banner(notice, cx))
+                    })
+                    .when(self.notices_open, |this| {
+                        this.child(self.render_notifications_pane(cx))
+                    }),
+            )
+            // Toasts sit above the app but below dialogs; keep the dialog
+            // layer last so it paints above everything.
+            .children(notification_layer)
             .children(dialog_layer)
             .when(self.details_resize_grab.is_some(), |this| {
                 this.child(
@@ -1584,11 +1908,16 @@ impl Render for Layout {
 }
 
 fn main() {
-    init_logging();
+    // The feed exists before logging so the tracing layer can publish into it.
+    let notices = NoticeFeed::new();
+    init_logging(notices.sink());
 
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
 
     app.run(move |cx| {
+        // Every view reaches the notification log through this global.
+        cx.set_global(notices.sink());
+        let notices = notices.into_receiver();
         gpui_tokio::init(cx);
         gpui_component::init(cx);
         ui_parts::project_picker::init(cx);
@@ -1641,13 +1970,14 @@ fn main() {
             Ok::<_, anyhow::Error>((Store::new(store), tasks))
         });
 
-        cx.spawn(|cx: &mut AsyncApp| {
+        cx.spawn(move |cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
                 match init_store.await {
                     Ok((store, tasks)) => {
                         cx.open_window(TitleBar::window_options(), |window, cx| {
                             Theme::change(ThemeMode::Dark, Some(window), cx);
+                            configure_notifications(cx);
 
                             let input = cx.new(|cx| {
                                 let mut input_state = InputState::new(window, cx);
@@ -1655,7 +1985,7 @@ fn main() {
                                 input_state
                             });
 
-                            let mini = cx.new(|cx| Layout::new(input, store, window, cx));
+                            let mini = cx.new(|cx| Layout::new(input, store, notices, window, cx));
 
                             let entity = mini.clone();
                             cx.spawn(move |cx: &mut AsyncApp| {
@@ -1686,7 +2016,20 @@ fn main() {
     });
 }
 
-fn init_logging() {
+/// Notification cards float in the bottom-right corner: out of the reading
+/// line, clear of the footer's chrome, and never the full window width. The
+/// slide-and-fade in and out is the component's own animation.
+fn configure_notifications(cx: &mut App) {
+    let theme = Theme::global_mut(cx);
+    theme.notification.placement = Anchor::BottomRight;
+    theme.notification.width = px(NOTIFICATION_WIDTH);
+    theme.notification.margins.right = px(NOTIFICATION_MARGIN);
+    theme.notification.margins.bottom = px(FOOTER_HEIGHT + NOTIFICATION_MARGIN);
+}
+
+/// Install logging: the fmt layer, and a layer that routes the app's own
+/// warnings and errors into the notification log.
+fn init_logging(notices: NoticeSink) {
     let debug = std::env::args().any(|arg| arg == "--debug" || arg == "-d");
     let filter = if debug {
         EnvFilter::new("debug")
@@ -1695,6 +2038,7 @@ fn init_logging() {
     };
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_target(true))
+        .with(NoticeLayer::new(notices))
         .with(filter)
         .init();
 }

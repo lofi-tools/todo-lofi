@@ -10,6 +10,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::text::TextView;
 use gpui_component::{Sizable, Size, StyledExt};
 
 use crate::github_auth;
@@ -17,6 +18,7 @@ use crate::store::Store;
 use crate::theme::{APP_BG, DANGER, HAIRLINE};
 use crate::todoist_auth;
 use crate::ui_parts::apps::AppSettings;
+use crate::ui_parts::notifications::{self, NoticeLevel};
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 /// Demand-driven polling (decision 23): short while a PR or a run is live,
@@ -348,7 +350,9 @@ impl IntegrationsView {
             }
             Err(e) => {
                 this.update(cx, |this, cx| {
-                    this.status = Some(format!("Could not load integrations: {e}"));
+                    let message = format!("Could not load integrations: {e}");
+                    notifications::report(cx, NoticeLevel::Error, message.clone());
+                    this.status = Some(message);
                     this._load = None;
                     cx.notify();
                 })
@@ -388,7 +392,9 @@ impl IntegrationsView {
             }
             Err(e) => {
                 this.update(cx, |this, cx| {
-                    this.status = Some(format!("Disable failed: {e}"));
+                    let message = format!("Disable failed: {e}");
+                    notifications::report(cx, NoticeLevel::Error, message.clone());
+                    this.status = Some(message);
                     cx.notify();
                 })
                 .ok();
@@ -411,7 +417,9 @@ impl IntegrationsView {
             }
             Err(e) => {
                 this.update(cx, |this, cx| {
-                    this.status = Some(format!("Re-enable failed: {e}"));
+                    let message = format!("Re-enable failed: {e}");
+                    notifications::report(cx, NoticeLevel::Error, message.clone());
+                    this.status = Some(message);
                     cx.notify();
                 })
                 .ok();
@@ -605,9 +613,10 @@ impl IntegrationsView {
                         this.github_code = None;
                         this.github_code_expires = None;
                         this.github_connecting = false;
-                        this.github_status = Some(
-                            "The GitHub device code expired. Connect again to finish.".to_string(),
-                        );
+                        let message =
+                            "The GitHub device code expired. Connect again to finish.".to_string();
+                        notifications::report(cx, NoticeLevel::Warning, message.clone());
+                        this.github_status = Some(message);
                         cx.notify();
                         false
                     }
@@ -737,8 +746,13 @@ impl IntegrationsView {
                                 }
                                 Err(e) => {
                                     this.update(cx, |this, cx| {
-                                        this.github_status =
-                                            Some(format!("GitHub connect failed: {e}"));
+                                        let message = format!("GitHub connect failed: {e}");
+                                        notifications::report(
+                                            cx,
+                                            NoticeLevel::Error,
+                                            message.clone(),
+                                        );
+                                        this.github_status = Some(message);
                                         cx.notify();
                                     })
                                     .ok();
@@ -779,7 +793,9 @@ impl IntegrationsView {
                 cx.notify();
             }
             Err(e) => {
-                self.github_status = Some(format!("Sync frequency failed: {e}"));
+                let message = format!("Sync frequency failed: {e}");
+                notifications::report(cx, NoticeLevel::Warning, message.clone());
+                self.github_status = Some(message);
                 cx.notify();
             }
         }
@@ -814,7 +830,9 @@ impl IntegrationsView {
                 Err(e) => {
                     this.update(cx, |this, cx| {
                         this.connecting = false;
-                        this.status = Some(format!("Todoist connect failed: {e}"));
+                        let message = format!("Todoist connect failed: {e}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
                         cx.notify();
                     })
                     .ok();
@@ -834,7 +852,11 @@ impl IntegrationsView {
                         this.status = Some("Todoist connected.".to_string());
                         cx.emit(IntegrationsEvent::Changed);
                     }
-                    Err(e) => this.status = Some(format!("Todoist connect failed: {e}")),
+                    Err(e) => {
+                        let message = format!("Todoist connect failed: {e}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 this.reload(cx);
                 cx.notify();
@@ -870,7 +892,9 @@ impl IntegrationsView {
             Err(e) => {
                 this.update(cx, |this, cx| {
                     this.syncing = false;
-                    this.status = Some(format!("Sync failed: {e}"));
+                    let message = format!("Sync failed: {e}");
+                    notifications::report(cx, NoticeLevel::Error, message.clone());
+                    this.status = Some(message);
                     cx.notify();
                 })
                 .ok();
@@ -1414,7 +1438,41 @@ impl IntegrationsView {
                                 )
                             })
                             .when_some(status, |this, status| {
-                                this.child(div().text_sm().text_color(rgb(0xa3a3a3)).child(status))
+                                let copy_text = status.clone();
+                                this.child(
+                                    div()
+                                        .h_flex()
+                                        .items_start()
+                                        .gap_1()
+                                        // Selectable so a failure payload can be
+                                        // read and dragged out; the button
+                                        // copies the message whole.
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_sm()
+                                                .text_color(rgb(0xa3a3a3))
+                                                .child(
+                                                    TextView::markdown("github-status", status)
+                                                        .selectable(true),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new("github-status-copy")
+                                                .ghost()
+                                                .compact()
+                                                .icon(gpui_component_assets::IconName::Copy)
+                                                .tooltip("Copy this message")
+                                                .on_click(move |_, _, cx: &mut gpui::App| {
+                                                    cx.write_to_clipboard(
+                                                        gpui::ClipboardItem::new_string(
+                                                            copy_text.clone(),
+                                                        ),
+                                                    );
+                                                }),
+                                        ),
+                                )
                             }),
                     )
                     .when(!disabled, |this| {
@@ -1506,7 +1564,9 @@ fn format_countdown(remaining: std::time::Duration) -> String {
 }
 
 /// How long ago something happened, in the coarse units a status line wants.
-fn since_label(then: jiff::Timestamp, now: jiff::Timestamp) -> String {
+///
+/// Shared with the notifications pane, which ages its entries the same way.
+pub(crate) fn since_label(then: jiff::Timestamp, now: jiff::Timestamp) -> String {
     let seconds = (now.as_second() - then.as_second()).max(0);
     match seconds {
         0..=59 => "just now".to_string(),

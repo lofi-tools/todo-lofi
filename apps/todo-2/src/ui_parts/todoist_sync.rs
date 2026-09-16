@@ -21,6 +21,7 @@ use gpui_component::{Sizable, Size, StyledExt};
 use crate::store::Store;
 use crate::theme::{CARD_BG, HAIRLINE, TEXT_FAINT, TEXT_MUTED};
 use crate::ui_parts::apps::rank_tag;
+use crate::ui_parts::notifications::{self, NoticeLevel};
 
 #[derive(Clone)]
 pub enum TodoistSyncEvent {
@@ -277,7 +278,9 @@ impl TodoistSyncPicker {
         self._task = Some(cx.spawn(async move |this, cx| {
             if let Err(error) = link.await {
                 this.update(cx, |this, cx| {
-                    this.status = Some(format!("Failed: {error}"));
+                    let message = format!("Failed: {error}");
+                    notifications::report(cx, NoticeLevel::Error, message.clone());
+                    this.status = Some(message);
                     cx.notify();
                 })
                 .ok();
@@ -292,7 +295,11 @@ impl TodoistSyncPicker {
                             summary.tasks_upserted, summary.sections
                         ));
                     }
-                    Err(error) => this.status = Some(format!("Paired, but sync failed: {error}")),
+                    Err(error) => {
+                        let message = format!("Paired, but sync failed: {error}");
+                        notifications::report(cx, NoticeLevel::Warning, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 this.selected_remote = None;
                 this.pending_clear_local = true;
@@ -315,7 +322,11 @@ impl TodoistSyncPicker {
             this.update(cx, |this, cx| {
                 match outcome {
                     Ok(()) => this.status = Some("Unpaired; local tasks are kept.".to_string()),
-                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                    Err(error) => {
+                        let message = format!("Failed: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 cx.emit(TodoistSyncEvent::Changed);
                 this.refresh(cx);

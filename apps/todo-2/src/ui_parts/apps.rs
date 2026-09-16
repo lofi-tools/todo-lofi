@@ -30,6 +30,7 @@ use storage::prelude::*;
 
 use crate::store::Store;
 use crate::theme::{CARD_BG, DANGER, HAIRLINE, SUCCESS, TEXT_FAINT, TEXT_MUTED};
+use crate::ui_parts::notifications::{self, NoticeLevel};
 
 #[derive(Clone)]
 pub enum AppSettingsEvent {
@@ -95,7 +96,9 @@ impl AppSettings {
                 match (apps, tags, recipes) {
                     (Ok(apps), Ok(tags), Ok(recipes)) => this.install(apps, tags, recipes),
                     (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-                        this.status = Some(format!("Could not load app settings: {error}"));
+                        let message = format!("Could not load app settings: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
                     }
                 }
                 this._load = None;
@@ -232,12 +235,18 @@ impl AppSettings {
             this.update(cx, |this, cx| {
                 match outcome {
                     Ok(_) => this.status = on_success,
-                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                    Err(error) => {
+                        let message = format!("Failed: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 match (apps, tags, recipes) {
                     (Ok(apps), Ok(tags), Ok(recipes)) => this.install(apps, tags, recipes),
                     (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-                        this.status = Some(format!("Could not refresh app settings: {error}"));
+                        let message = format!("Could not refresh app settings: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
                     }
                 }
                 this._load = None;
@@ -993,7 +1002,11 @@ impl TagAttachPicker {
                         this.status = Some("Attached to the tag.".to_string());
                         this.pending_clear = true;
                     }
-                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                    Err(error) => {
+                        let message = format!("Failed: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 this.attached = apps
                     .iter()
@@ -1024,7 +1037,11 @@ impl TagAttachPicker {
             this.update(cx, |this, cx| {
                 match outcome {
                     Ok(()) => this.status = Some("Detached from the tag.".to_string()),
-                    Err(error) => this.status = Some(format!("Failed: {error}")),
+                    Err(error) => {
+                        let message = format!("Failed: {error}");
+                        notifications::report(cx, NoticeLevel::Error, message.clone());
+                        this.status = Some(message);
+                    }
                 }
                 this.attached = apps
                     .iter()

@@ -158,7 +158,11 @@ impl SettingsView {
 
     fn persist(&mut self) {
         if let Err(error) = self.file.save() {
-            self.status = Some(format!("Could not save settings: {error}"));
+            let message = format!("Could not save settings: {error}");
+            // No context here to report with, so the notification layer picks
+            // this up from the log line.
+            tracing::error!("{message}");
+            self.status = Some(message);
         }
     }
 
