@@ -4,7 +4,7 @@
 //! Two things feed the log. Views report a failure they are about to show
 //! inline, and a `tracing` layer turns the app's own `warn!`/`error!` events
 //! into entries, so a failure that only reached the log file is visible too.
-//! Each new error is also shown as a toast when it is recorded; warnings and
+//! Every error is also shown as a toast when it is recorded; warnings and
 //! informational messages stay in the pane and the footer's indicator.
 
 use gpui::{App, Global};
@@ -49,7 +49,6 @@ impl NoticeLevel {
             Self::Error => theme::DANGER,
         }
     }
-
 }
 
 /// One logged notification.
@@ -70,10 +69,20 @@ impl Notice {
     /// already listed, so popping up for one would just add noise.
     pub fn toast(&self) -> Option<Notification> {
         match self.level {
-            NoticeLevel::Error => Some(Notification::error(self.message.clone())),
+            NoticeLevel::Error => Some(error_toast(self.message.clone())),
             NoticeLevel::Warning | NoticeLevel::Info => None,
         }
     }
+}
+
+/// The card one error is shown in.
+///
+/// Keyed by its message, so the same failure arriving twice — a view reports
+/// what it just logged — replaces the card instead of stacking a second copy
+/// of it, and a retry loop cannot pile up identical cards.
+pub fn error_toast(message: impl Into<String>) -> Notification {
+    let message = message.into();
+    Notification::error(message.clone()).id1::<Notice>(message)
 }
 
 /// How many entries the log keeps; older ones fall off the front.
@@ -87,8 +96,7 @@ pub struct NoticeLog {
 
 impl NoticeLog {
     /// Record `message`, collapsing a repeat of the newest entry into a count so
-    /// a retry loop cannot flood the pane. Returns whether this added an entry:
-    /// a collapsed repeat is not worth another toast.
+    /// a retry loop cannot flood the pane. Returns whether this added an entry.
     pub fn push(&mut self, level: NoticeLevel, message: String, at: jiff::Timestamp) -> bool {
         if let Some(newest) = self.entries.last_mut()
             && newest.level == level

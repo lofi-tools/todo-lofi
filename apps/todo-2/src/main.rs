@@ -28,7 +28,7 @@ use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::apps::{AppSettings, AppSettingsEvent};
 use ui_parts::integrations::{IntegrationsEvent, IntegrationsView, since_label};
 use ui_parts::notifications::{
-    Notice, NoticeFeed, NoticeFilter, NoticeLayer, NoticeLevel, NoticeLog, NoticeSink,
+    Notice, NoticeFeed, NoticeFilter, NoticeLayer, NoticeLevel, NoticeLog, NoticeSink, error_toast,
 };
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
@@ -134,9 +134,6 @@ struct Layout {
     settings: Entity<SettingsView>,
     /// Main panel shown next to the navbar (task list by default).
     panel: NavPanel,
-    /// Persistent failure notice, visible on every panel until dismissed
-    /// (integration errors otherwise only show inside their own card).
-    notice: Option<String>,
     /// Everything the app reported: the footer's indicator and the pane.
     notices: NoticeLog,
     /// Whether the notifications pane is expanded above the footer.
@@ -166,24 +163,28 @@ impl Layout {
         cx: &mut Context<Self>,
     ) -> Self {
         // The notification feed reaches here from `main`: every recorded
-        // notification is logged for the pane and pops up as a toast. The
-        // window handle lets a background failure (a tracing event) toast too.
+        // notification is listed in the pane, and an error also pops up as a
+        // card. The window handle lets a failure logged on a background thread
+        // raise its card too.
         let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let mut notices = notices;
             while let Some(notice) = notices.recv().await {
-                let logged = match this.update(cx, |this, cx| {
-                    this.log_notice(notice.level, notice.message.clone(), cx)
-                }) {
-                    Ok(logged) => logged,
+                if this
+                    .update(cx, |this, cx| {
+                        this.log_notice(notice.level, notice.message.clone(), cx)
+                    })
+                    .is_err()
+                {
                     // The layout is gone; nothing is left to notify.
-                    Err(_) => return,
-                };
-                // A collapsed repeat only bumps a count, and only errors pop
-                // up: a warning stays in the pane and the footer's indicator.
-                if logged && let Some(toast) = notice.toast() {
-                    // A closed window has nowhere to show the toast; the
-                    // entry stays in the pane either way.
+                    return;
+                }
+                // Only errors pop up: a warning stays in the pane and the
+                // footer's indicator. A repeat refreshes the card it already
+                // raised, because a card is keyed by its message.
+                if let Some(toast) = notice.toast() {
+                    // A closed window has nowhere to show the card; the entry
+                    // stays in the pane either way.
                     if let Err(error) = window_handle
                         .update(cx, |_, window, cx| window.push_notification(toast, cx))
                     {
@@ -451,7 +452,7 @@ impl Layout {
         cx.subscribe_in(
             &integrations,
             window,
-            |this, _view, event, _window, cx| match event {
+            |this, _view, event, window, cx| match event {
                 IntegrationsEvent::Changed => {
                     this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
                     // A sync or a merged pull request changes both the task list
@@ -462,11 +463,14 @@ impl Layout {
                     this.sync_agent_checkout_for_selection(cx);
                 }
                 IntegrationsEvent::Notice(message) => {
-                    // The card logs the same text before emitting this, so the
-                    // notification layer already recorded it; re-reporting here
-                    // would show one failure twice.
-                    this.notice = Some(message.clone());
-                    cx.notify();
+                    // The integrations view has already logged this and set its
+                    // own status line, which is what the pane lists. Raising
+                    // the toast here, with the window in hand, puts the message
+                    // on screen the moment the failure is reported instead of
+                    // when its log record has been round tripped through the
+                    // feed. Both pushes carry the same text, and a card is
+                    // keyed by its message, so one failure is one card.
+                    window.push_notification(error_toast(message.clone()), cx);
                 }
             },
         )
@@ -705,7 +709,6 @@ impl Layout {
             _apps: apps,
             settings,
             panel: NavPanel::Tasks,
-            notice: None,
             notices: NoticeLog::default(),
             notices_open: false,
             notice_filter: NoticeFilter::default(),
@@ -1082,59 +1085,6 @@ async fn lookup_managed_tag(
             .into_any_element()
     }
 
-    /// The persistent failure notice: a floating strip above the footer, so
-    /// an integration error never pushes the layout around.
-    fn render_notice_banner(&self, notice: String, cx: &mut Context<Self>) -> AnyElement {
-        let copy_text = notice.clone();
-        div()
-            .id("notice-banner")
-            // Floating over the content, so clicks land here and not on
-            // whatever the banner covers.
-            .occlude()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(rgb(0x7f1d1d))
-            .bg(rgb(0x2a1215))
-            .shadow_md()
-            .child(
-                // A text view rather than a plain div so the message
-                // can be selected and dragged out; the copy button
-                // takes the whole thing in one press.
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .text_color(rgb(0xfca5a5))
-                    .child(TextView::markdown("notice-message", notice).selectable(true)),
-            )
-            .child(
-                Button::new("notice-copy")
-                    .ghost()
-                    .compact()
-                    .icon(IconName::Copy)
-                    .tooltip("Copy this message")
-                    .on_click(move |_, _, cx: &mut App| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_text.clone()));
-                    }),
-            )
-            .child(
-                Button::new("notice-dismiss")
-                    .ghost()
-                    .compact()
-                    .label("Dismiss")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.notice = None;
-                        cx.notify();
-                    })),
-            )
-            .into_any_element()
-    }
-
     /// The footer's notifications indicator: a red error icon once anything has
     /// failed, amber for warnings alone, and a plain bell while the log is
     /// clean. Pressing it toggles the pane.
@@ -1339,12 +1289,10 @@ async fn lookup_managed_tag(
             .into_any_element()
     }
 
-    /// Record one notification in the pane's log. Returns whether it added an
-    /// entry, which is what earns a toast: a collapsed repeat does not.
-    fn log_notice(&mut self, level: NoticeLevel, message: String, cx: &mut Context<Self>) -> bool {
-        let added = self.notices.push(level, message, jiff::Timestamp::now());
+    /// Record one notification in the pane's log.
+    fn log_notice(&mut self, level: NoticeLevel, message: String, cx: &mut Context<Self>) {
+        self.notices.push(level, message, jiff::Timestamp::now());
         cx.notify();
-        added
     }
 
     /// Swap the main panel, keeping the navbar footer highlight in sync.
@@ -1654,9 +1602,9 @@ impl Render for Layout {
         let details_open =
             self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
 
-        // The app's own column: title bar, content, banner, footer. It is the
-        // only in-flow child of the frame below, so the overlaid layers cannot
-        // move it.
+        // The app's own column: title bar, content, footer. It is the only
+        // in-flow child of the frame below, so the overlaid layers cannot move
+        // it.
         let app = div()
             .size_full()
             .v_flex()
@@ -1858,24 +1806,19 @@ impl Render for Layout {
             .relative()
             .size_full()
             .child(app)
-            // The failure banner and the notifications pane hang off the
-            // footer's top edge and float over the layout: showing either
-            // must not move anything underneath. They stack in one
-            // bottom-anchored column, so neither hides the other.
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom(px(FOOTER_HEIGHT))
-                    .v_flex()
-                    .when_some(self.notice.clone(), |this, notice| {
-                        this.child(self.render_notice_banner(notice, cx))
-                    })
-                    .when(self.notices_open, |this| {
-                        this.child(self.render_notifications_pane(cx))
-                    }),
-            )
+            // The notifications pane hangs off the footer's top edge and
+            // floats over the layout: expanding it must not move anything
+            // underneath.
+            .when(self.notices_open, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(FOOTER_HEIGHT))
+                        .child(self.render_notifications_pane(cx)),
+                )
+            })
             // Toasts sit above the app but below dialogs; keep the dialog
             // layer last so it paints above everything.
             .children(notification_layer)
