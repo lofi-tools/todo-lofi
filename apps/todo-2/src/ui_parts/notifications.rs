@@ -4,12 +4,12 @@
 //! Two things feed the log. Views report a failure they are about to show
 //! inline, and a `tracing` layer turns the app's own `warn!`/`error!` events
 //! into entries, so a failure that only reached the log file is visible too.
-//! Every error is also shown as a toast when it is recorded; warnings and
+//! Every error and warning is also shown as a toast when it is recorded;
 //! informational messages stay in the pane and the footer's indicator.
 
 use gpui::{App, Global};
-use gpui_component::IconName;
 use gpui_component::notification::Notification;
+use gpui_component::IconName;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::theme;
@@ -51,26 +51,25 @@ impl NoticeLevel {
     }
 }
 
-/// One logged notification.
+/// One logged notification. Every report becomes its own entry, including
+/// consecutive repeats, so a dismissed toast remains listed in the pane.
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub level: NoticeLevel,
     pub message: String,
     pub at: jiff::Timestamp,
-    /// How many identical messages arrived back to back after this one.
-    pub repeats: u32,
 }
 
 impl Notice {
     /// The toast this notification raises, if any.
     ///
-    /// Only errors interrupt. A warning is a quieter signal — a retry that
-    /// fell back, a token about to go stale — and the pane is where it is
-    /// already listed, so popping up for one would just add noise.
+    /// Errors and warnings interrupt, so every toast the user sees is also
+    /// recorded in the pane's log; informational messages stay quiet.
     pub fn toast(&self) -> Option<Notification> {
         match self.level {
             NoticeLevel::Error => Some(error_toast(self.message.clone())),
-            NoticeLevel::Warning | NoticeLevel::Info => None,
+            NoticeLevel::Warning => Some(warning_toast(self.message.clone())),
+            NoticeLevel::Info => None,
         }
     }
 }
@@ -85,6 +84,12 @@ pub fn error_toast(message: impl Into<String>) -> Notification {
     Notification::error(message.clone()).id1::<Notice>(message)
 }
 
+/// The card one warning is shown in, keyed the same way as an error card.
+pub fn warning_toast(message: impl Into<String>) -> Notification {
+    let message = message.into();
+    Notification::warning(message.clone()).id1::<Notice>(message)
+}
+
 /// How many entries the log keeps; older ones fall off the front.
 const NOTICE_CAPACITY: usize = 200;
 
@@ -95,27 +100,15 @@ pub struct NoticeLog {
 }
 
 impl NoticeLog {
-    /// Record `message`, collapsing a repeat of the newest entry into a count so
-    /// a retry loop cannot flood the pane. Returns whether this added an entry.
-    pub fn push(&mut self, level: NoticeLevel, message: String, at: jiff::Timestamp) -> bool {
-        if let Some(newest) = self.entries.last_mut()
-            && newest.level == level
-            && newest.message == message
-        {
-            newest.repeats += 1;
-            newest.at = at;
-            return false;
-        }
-        self.entries.push(Notice {
-            level,
-            message,
-            at,
-            repeats: 0,
-        });
+    /// Record `message` as its own entry. Consecutive duplicates are kept
+    /// separately, rather than being folded into a repeat count, so every
+    /// toast shown to the user has a matching row in the pane. The oldest
+    /// entries still fall off once the log reaches capacity.
+    pub fn push(&mut self, level: NoticeLevel, message: String, at: jiff::Timestamp) {
+        self.entries.push(Notice { level, message, at });
         if self.entries.len() > NOTICE_CAPACITY {
             self.entries.remove(0);
         }
-        true
     }
 
     pub fn entries(&self) -> &[Notice] {
@@ -183,7 +176,6 @@ impl NoticeSink {
             level,
             message: message.into(),
             at: jiff::Timestamp::now(),
-            repeats: 0,
         };
         if let Err(error) = self.0.send(notice) {
             // Only closed once the UI is gone, at shutdown. `debug` keeps this
@@ -311,17 +303,18 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_message_collapses_into_one_entry() {
+    fn repeated_messages_are_kept_as_separate_entries() {
         let mut log = NoticeLog::default();
-        assert!(log.push(NoticeLevel::Error, "sync failed".to_string(), at(1)));
-        // The retry loop's second identical failure is not a second entry.
-        assert!(!log.push(NoticeLevel::Error, "sync failed".to_string(), at(2)));
-        assert_eq!(log.entries().len(), 1);
-        assert_eq!(log.entries()[0].repeats, 1);
-        assert_eq!(log.entries()[0].at, at(2));
-        // A different message starts a new entry.
-        assert!(log.push(NoticeLevel::Warning, "retrying".to_string(), at(3)));
+        log.push(NoticeLevel::Error, "sync failed".to_string(), at(1));
+        // A retry loop's second identical failure is its own row, so a toast
+        // that has already disappeared remains listed as a previous entry.
+        log.push(NoticeLevel::Error, "sync failed".to_string(), at(2));
         assert_eq!(log.entries().len(), 2);
+        assert_eq!(log.entries()[0].at, at(1));
+        assert_eq!(log.entries()[1].at, at(2));
+        // A different message starts a new entry.
+        log.push(NoticeLevel::Warning, "retrying".to_string(), at(3));
+        assert_eq!(log.entries().len(), 3);
     }
 
     #[test]
@@ -335,18 +328,17 @@ mod tests {
         assert_eq!(log.entries()[0].message, "message 10");
     }
 
-    /// The toast policy: only errors interrupt, everything else waits in the
-    /// pane (still counted by the footer's indicator).
+    /// The toast policy: errors and warnings interrupt, informational
+    /// messages wait in the pane (still counted by the footer's indicator).
     #[test]
-    fn only_errors_raise_a_toast() {
+    fn errors_and_warnings_raise_a_toast() {
         let notice = |level| Notice {
             level,
             message: "sync failed".to_string(),
             at: at(1),
-            repeats: 0,
         };
         assert!(notice(NoticeLevel::Error).toast().is_some());
-        assert!(notice(NoticeLevel::Warning).toast().is_none());
+        assert!(notice(NoticeLevel::Warning).toast().is_some());
         assert!(notice(NoticeLevel::Info).toast().is_none());
     }
 

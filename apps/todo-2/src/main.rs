@@ -82,6 +82,11 @@ const SPLIT_RIGHT_PANE_MAX_WIDTH: f32 = 1500.;
 /// its own top edge to the footer's, so both share the number.
 const FOOTER_HEIGHT: f32 = 28.;
 
+/// Fraction of the space above the footer used by the notifications pane.
+/// The pane renders a fixed pixel height calculated from the live viewport,
+/// so opening it shows a tall, scrollable history without moving the layout.
+const NOTIFICATION_PANE_HEIGHT_FRACTION: f32 = 0.80;
+
 /// Width cap for a notification card. Narrow enough that a card reads as a
 /// floating note rather than a band across the window.
 const NOTIFICATION_WIDTH: f32 = 360.;
@@ -163,9 +168,9 @@ impl Layout {
         cx: &mut Context<Self>,
     ) -> Self {
         // The notification feed reaches here from `main`: every recorded
-        // notification is listed in the pane, and an error also pops up as a
-        // card. The window handle lets a failure logged on a background thread
-        // raise its card too.
+        // notification is listed in the pane, and an error or warning also
+        // pops up as a card. The window handle lets a failure logged on a
+        // background thread raise its card too.
         let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let mut notices = notices;
@@ -179,9 +184,9 @@ impl Layout {
                     // The layout is gone; nothing is left to notify.
                     return;
                 }
-                // Only errors pop up: a warning stays in the pane and the
-                // footer's indicator. A repeat refreshes the card it already
-                // raised, because a card is keyed by its message.
+                // Errors and warnings pop up; informational messages stay in
+                // the pane and the footer's indicator. A repeat refreshes the
+                // card it already raised, because a card is keyed by its message.
                 if let Some(toast) = notice.toast() {
                     // A closed window has nowhere to show the card; the entry
                     // stays in the pane either way.
@@ -819,6 +824,12 @@ async fn lookup_managed_tag(
         (window.viewport_size().width * DETAILS_PANE_MAX_FRACTION).max(px(DETAILS_PANE_MIN_WIDTH))
     }
 
+    /// Notifications pane height, tracking the live app height.
+    fn notifications_pane_height(window: &Window) -> Pixels {
+        let available_height = window.viewport_size().height.as_f32() - FOOTER_HEIGHT;
+        px(available_height.max(0.) * NOTIFICATION_PANE_HEIGHT_FRACTION)
+    }
+
     /// Begin a left-edge details resize drag.
     fn begin_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
         self.details_resize_grab = Some((x, self.right_pane_width));
@@ -1134,8 +1145,14 @@ async fn lookup_managed_tag(
     }
 
     /// The notifications pane, expanded above the footer: everything the app
-    /// reported, newest first, filtered to failures unless asked for more.
-    fn render_notifications_pane(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// reported, newest first, filtered to failures unless asked for more. It
+    /// uses a fixed pixel height derived from the current viewport, with its
+    /// entries scrolling underneath the header.
+    fn render_notifications_pane(
+        &self,
+        pane_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let filter = self.notice_filter;
         let now = jiff::Timestamp::now();
         let shown: Vec<(usize, &Notice)> = self
@@ -1166,6 +1183,7 @@ async fn lookup_managed_tag(
             .occlude()
             .flex_none()
             .v_flex()
+            .h(pane_height)
             .gap_2()
             .px_3()
             .py_2()
@@ -1226,7 +1244,7 @@ async fn lookup_managed_tag(
             )
             .child(
                 div()
-                    .max_h(px(180.))
+                    .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .child(list),
@@ -1245,7 +1263,7 @@ async fn lookup_managed_tag(
         "Nothing reported yet.".to_string()
     }
 
-    /// One notification row: severity, message, repeat count and age.
+    /// One notification row: severity, message and age.
     fn notice_row(&self, index: usize, notice: &Notice, now: jiff::Timestamp) -> AnyElement {
         div()
             .id(("notice-row", index))
@@ -1270,15 +1288,6 @@ async fn lookup_managed_tag(
                             .selectable(true),
                     ),
             )
-            .when(notice.repeats > 0, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(rgb(theme::TEXT_FAINT))
-                        .child(format!("×{}", notice.repeats + 1)),
-                )
-            })
             .child(
                 div()
                     .flex_none()
@@ -1801,6 +1810,7 @@ impl Render for Layout {
             // bottom on every panel, including Integrations, Automations
             // and Settings.
             .child(self.render_pane_footer(cx));
+        let notifications_pane_height = Self::notifications_pane_height(&*window);
 
         div()
             .relative()
@@ -1816,7 +1826,7 @@ impl Render for Layout {
                         .left_0()
                         .right_0()
                         .bottom(px(FOOTER_HEIGHT))
-                        .child(self.render_notifications_pane(cx)),
+                        .child(self.render_notifications_pane(notifications_pane_height, cx)),
                 )
             })
             // Toasts sit above the app but below dialogs; keep the dialog
