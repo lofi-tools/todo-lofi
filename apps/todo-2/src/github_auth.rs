@@ -18,8 +18,10 @@ const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 pub const API_BASE: &str = "https://api.github.com";
 
 /// Private repos plus writing issues, labels and pull requests; `read:user`
-/// only names the connected account in the UI.
-const SCOPE: &str = "repo read:user";
+/// only names the connected account in the UI. `offline_access` requests an
+/// expiring access token with a refresh token, so a connection can renew
+/// itself without another device-flow approval.
+const SCOPE: &str = "repo read:user offline_access";
 
 /// Client id of the app registered under the `lofi-tools` org with device flow
 /// enabled (spec decision 34). Public by design — device flow needs no secret.
@@ -98,7 +100,21 @@ async fn note_retryable_failure(failed_attempts: &mut u32) {
 /// Retry one connection operation with exponential backoff. Permanent
 /// failures—bad configuration, denied authorization, invalid tokens—return
 /// immediately instead of waiting and retrying.
-async fn retry_connection<T, Attempt, AttemptFuture>(mut attempt: Attempt) -> anyhow::Result<T>
+async fn retry_connection<T, Attempt, AttemptFuture>(attempt: Attempt) -> anyhow::Result<T>
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: Future<Output = Result<T, AttemptError>>,
+{
+    retry_connection_result(attempt)
+        .await
+        .map_err(AttemptError::into_inner)
+}
+
+/// Same as `retry_connection`, but keeps the retry marker so callers can
+/// distinguish an exhausted transport failure from a permanent one.
+async fn retry_connection_result<T, Attempt, AttemptFuture>(
+    mut attempt: Attempt,
+) -> Result<T, AttemptError>
 where
     Attempt: FnMut() -> AttemptFuture,
     AttemptFuture: Future<Output = Result<T, AttemptError>>,
@@ -112,7 +128,7 @@ where
             {
                 note_retryable_failure(&mut failed_attempts).await;
             }
-            Err(error) => return Err(error.into_inner()),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -154,6 +170,16 @@ struct GithubFile {
     client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     access_token: Option<String>,
+    /// OAuth refresh token for an expiring access token. Absent for
+    /// long-lived tokens and servers that do not return one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    /// Unix seconds when the OAuth access token expires, if expiring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access_token_expires_at: Option<i64>,
+    /// Unix seconds when the OAuth refresh token expires, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_token_expires_at: Option<i64>,
     /// Optional personal access token. When present, every API call
     /// authenticates with it instead of the device-flow token, so work repos
     /// stay reachable without an org admin approving the OAuth app.
@@ -271,6 +297,53 @@ pub fn parse_device_login(body: &serde_json::Value) -> anyhow::Result<DeviceLogi
     })
 }
 
+/// A token grant from GitHub's OAuth token endpoint. Refresh metadata is
+/// absent for long-lived tokens and servers that do not return it.
+#[derive(Debug)]
+struct TokenGrant {
+    access_token: String,
+    refresh_token: Option<String>,
+    access_expires_at: Option<i64>,
+    refresh_expires_at: Option<i64>,
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Absolute expiry for a relative `expires_in` response field, if present.
+fn token_expiry(body: &serde_json::Value, field: &str) -> Option<i64> {
+    let seconds = body.get(field)?.as_u64()?;
+    now_epoch().checked_add(i64::try_from(seconds).ok()?)
+}
+
+/// Parse an OAuth token response that must carry a new access token. A
+/// missing refresh token means the grant cannot renew itself later.
+fn parse_token_grant(
+    body: &serde_json::Value,
+    status: reqwest::StatusCode,
+) -> anyhow::Result<TokenGrant> {
+    let access_token = body
+        .get("access_token")
+        .and_then(|token| token.as_str())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("GitHub token response had no access token ({status}): {body}"))?;
+    Ok(TokenGrant {
+        access_token,
+        refresh_token: body
+            .get("refresh_token")
+            .and_then(|token| token.as_str())
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
+        access_expires_at: token_expiry(body, "expires_in"),
+        refresh_expires_at: token_expiry(body, "refresh_token_expires_in"),
+    })
+}
+
 /// What one poll of the token endpoint told us.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PollAction {
@@ -283,6 +356,9 @@ pub enum PollAction {
     Done {
         access_token: String,
         scope: Option<String>,
+        refresh_token: Option<String>,
+        access_expires_at: Option<i64>,
+        refresh_expires_at: Option<i64>,
     },
     /// Stop polling: the code expired, the user denied it, or the app is
     /// misconfigured.
@@ -326,6 +402,13 @@ impl PollSchedule {
                     .get("scope")
                     .and_then(|value| value.as_str())
                     .map(str::to_owned),
+                refresh_token: body
+                    .get("refresh_token")
+                    .and_then(|value| value.as_str())
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned),
+                access_expires_at: token_expiry(body, "expires_in"),
+                refresh_expires_at: token_expiry(body, "refresh_token_expires_in"),
             };
         }
         match body.get("error").and_then(|value| value.as_str()) {
@@ -443,6 +526,9 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
             PollAction::Done {
                 access_token,
                 scope,
+                refresh_token,
+                access_expires_at,
+                refresh_expires_at,
             } => {
                 let login = account_login(&access_token).await.ok();
                 // A client id from the environment means a developer's own
@@ -460,6 +546,9 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
                         &GithubFile {
                             client_id,
                             access_token: Some(access_token.clone()),
+                            refresh_token,
+                            access_token_expires_at: access_expires_at,
+                            refresh_token_expires_at: refresh_expires_at,
                             personal_token,
                             scope,
                             login,
@@ -509,13 +598,248 @@ async fn account_login_request(token: String) -> Result<String, AttemptError> {
         })
 }
 
+/// Which stored secret backs one API call. A personal token is explicit and
+/// never refreshed; an OAuth token may be renewed with its refresh token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialKind {
+    Personal,
+    OAuth,
+}
+
+/// A usable GitHub credential plus the secret class it came from, so a 401
+/// can clear or renew exactly the secret GitHub rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveCredential {
+    pub token: String,
+    pub kind: CredentialKind,
+}
+
+/// Whether the connection file holds any secret worth trying: a personal
+/// token, an access token, or a refresh token that can mint a new one.
+pub fn has_usable_credentials() -> bool {
+    client_file_path()
+        .ok()
+        .and_then(|path| load_at(&path).ok().flatten())
+        .is_some_and(|file| {
+            file.personal_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+                || file.access_token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty())
+                || file.refresh_token
+                    .as_deref()
+                    .is_some_and(|token| !token.is_empty())
+        })
+}
+
+/// Load a usable access token, renewing an expired OAuth token first. A
+/// personal token is returned as-is because GitHub does not refresh it.
+/// Runs on the Tokio runtime; never on GPUI's executor.
+pub async fn access_token() -> anyhow::Result<String> {
+    active_credential()
+        .await
+        .map(|credential| credential.token)
+}
+
+/// Same as `access_token`, keeping which secret was selected.
+pub async fn active_credential() -> anyhow::Result<ActiveCredential> {
+    active_credential_at(&client_file_path()?).await
+}
+
+async fn active_credential_at(path: &std::path::Path) -> anyhow::Result<ActiveCredential> {
+    let Some(file) = load_at(path)? else {
+        return Err(anyhow::anyhow!("Connect GitHub first"));
+    };
+    if let Some(token) = file.personal_token.clone().filter(|token| !token.is_empty()) {
+        return Ok(ActiveCredential {
+            token,
+            kind: CredentialKind::Personal,
+        });
+    }
+    if let Some(token) = file.access_token.clone().filter(|token| !token.is_empty())
+        && !access_token_expired(file.access_token_expires_at)
+    {
+        return Ok(ActiveCredential {
+            token,
+            kind: CredentialKind::OAuth,
+        });
+    }
+    refresh_oauth_token_at(path).await.map(|token| ActiveCredential {
+        token,
+        kind: CredentialKind::OAuth,
+    })
+}
+
+/// Whether an expiring OAuth token should be renewed before use. A missing
+/// expiry means a long-lived token. The minute of skew keeps a token from
+/// expiring between this check and the API call.
+fn access_token_expired(expires_at: Option<i64>) -> bool {
+    expires_at.is_some_and(|expires_at| expires_at <= now_epoch() + 60)
+}
+
+/// Renew the stored OAuth access token with its refresh token, persisting
+/// the rotated pair. A refresh the server rejects clears the OAuth tokens so
+/// later calls fail as “connect first” instead of retrying a dead secret.
+async fn refresh_oauth_token_at(path: &std::path::Path) -> anyhow::Result<String> {
+    let Some(file) = load_at(path)? else {
+        return Err(anyhow::anyhow!("Connect GitHub first"));
+    };
+    let Some(refresh_token) = file.refresh_token.clone().filter(|token| !token.is_empty())
+    else {
+        return Err(anyhow::anyhow!(
+            "GitHub token expired and no refresh token is stored; reconnect GitHub"
+        ));
+    };
+    if file.client_id.is_empty() {
+        return Err(anyhow::anyhow!(
+            "GitHub connection has no client id; reconnect GitHub"
+        ));
+    }
+    let client_id = file.client_id.clone();
+    match retry_connection_result(|| {
+        refresh_request(client_id.clone(), refresh_token.clone())
+    })
+    .await
+    {
+        Ok(tokens) => {
+            let mut file = load_at(path)?.ok_or_else(|| {
+                anyhow::anyhow!("GitHub connection disappeared while refreshing; reconnect GitHub")
+            })?;
+            apply_refreshed_tokens(&mut file, &tokens);
+            save_at(path, &file)?;
+            Ok(tokens.access_token)
+        }
+        Err(error) if error.is_retryable() => Err(error.into_inner()),
+        Err(_error) => {
+            clear_oauth_tokens_at(path).ok();
+            Err(anyhow::anyhow!(
+                "GitHub rejected the refresh token; reconnect GitHub"
+            ))
+        }
+    }
+}
+
+/// Exchange a refresh token for a new pair. Device-flow refreshes need the
+/// client id but no client secret.
+async fn refresh_request(
+    client_id: String,
+    refresh_token: String,
+) -> Result<TokenGrant, AttemptError> {
+    let body = format!(
+        "client_id={}&grant_type=refresh_token&refresh_token={}",
+        crate::todoist_auth::url_encode(&client_id),
+        crate::todoist_auth::url_encode(&refresh_token),
+    );
+    let response = reqwest::Client::new()
+        .post(TOKEN_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| {
+            AttemptError::retryable(anyhow::anyhow!("Could not reach GitHub: {error}"))
+        })?;
+    let (status, body) = read_json_response(response, "Token refresh").await?;
+    if !status.is_success() {
+        let error = anyhow::anyhow!("GitHub token refresh failed ({status}): {body}");
+        if is_retryable_status(status) {
+            return Err(AttemptError::retryable(error));
+        }
+        return Err(AttemptError::permanent(error));
+    }
+    parse_token_grant(&body, status).map_err(AttemptError::permanent)
+}
+
+/// Store a rotated token pair. A successful refresh revokes the old refresh
+/// token, so an omitted replacement clears it rather than keeping a dead
+/// secret. The personal token, sync cadence, and login stay untouched.
+fn apply_refreshed_tokens(file: &mut GithubFile, tokens: &TokenGrant) {
+    file.access_token = Some(tokens.access_token.clone());
+    file.refresh_token = tokens.refresh_token.clone();
+    file.access_token_expires_at = tokens.access_expires_at;
+    file.refresh_token_expires_at = tokens.refresh_expires_at;
+}
+
+/// Recover from a 401 by renewing or discarding exactly the secret GitHub
+/// rejected. Returns a replacement token when one exists; otherwise the
+/// caller should surface the reconnect error instead of retrying.
+pub async fn recover_from_rejected_token(rejected_token: &str) -> anyhow::Result<String> {
+    let path = client_file_path()?;
+    let Some(file) = load_at(&path)? else {
+        return Err(anyhow::anyhow!("Connect GitHub first"));
+    };
+    if file.personal_token.as_deref() == Some(rejected_token) {
+        invalidate_token(rejected_token)?;
+        return active_credential_at(&path).await.map(|credential| credential.token);
+    }
+    if file.access_token.as_deref() == Some(rejected_token) {
+        return refresh_oauth_token_at(&path).await;
+    }
+    Err(anyhow::anyhow!(
+        "GitHub rejected the stored token; reconnect GitHub"
+    ))
+}
+
+/// Discard a secret GitHub has rejected, keeping an alternate credential
+/// when one exists. Returns whether anything was cleared.
+fn invalidate_token(rejected_token: &str) -> anyhow::Result<bool> {
+    invalidate_token_at(&client_file_path()?, rejected_token)
+}
+
+fn invalidate_token_at(
+    path: &std::path::Path,
+    rejected_token: &str,
+) -> anyhow::Result<bool> {
+    let Some(mut file) = load_at(path)? else {
+        return Ok(false);
+    };
+    if file.personal_token.as_deref() == Some(rejected_token) {
+        file.personal_token = None;
+        if file.access_token.as_deref().is_none_or(|token| token.is_empty()) {
+            file.login = None;
+        }
+        save_at(&path, &file)?;
+        return Ok(true);
+    }
+    if file.access_token.as_deref() == Some(rejected_token) {
+        clear_oauth_tokens(&mut file);
+        save_at(&path, &file)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Clear the OAuth pair after GitHub rejects it. The personal token, sync
+/// cadence, and client id stay so an alternate credential can take over.
+fn clear_oauth_tokens(file: &mut GithubFile) {
+    file.access_token = None;
+    file.refresh_token = None;
+    file.access_token_expires_at = None;
+    file.refresh_token_expires_at = None;
+    file.login = None;
+}
+
+fn clear_oauth_tokens_at(path: &std::path::Path) -> anyhow::Result<()> {
+    let Some(mut file) = load_at(path)? else {
+        return Ok(());
+    };
+    clear_oauth_tokens(&mut file);
+    save_at(path, &file)
+}
+
 fn stored_credentials_at(path: &std::path::Path) -> Option<StoredCredentials> {
     let file = load_at(path).ok().flatten()?;
     Some(StoredCredentials {
         token: file
             .personal_token
             .clone()
-            .or(file.access_token.clone())?,
+            .filter(|token| !token.is_empty())
+            .or(file.access_token.clone().filter(|token| !token.is_empty()))?,
         login: file.login.clone(),
     })
 }
@@ -546,6 +870,9 @@ fn set_poll_interval_at(path: &std::path::Path, secs: u64) -> anyhow::Result<()>
     let mut file = load_at(path)?.unwrap_or(GithubFile {
         client_id: String::new(),
         access_token: None,
+        refresh_token: None,
+        access_token_expires_at: None,
+        refresh_token_expires_at: None,
         personal_token: None,
         scope: None,
         login: None,
@@ -574,6 +901,9 @@ pub async fn save_personal_token(token: Option<String>) -> anyhow::Result<Option
     let mut file = load_at(&path)?.unwrap_or(GithubFile {
         client_id: String::new(),
         access_token: None,
+        refresh_token: None,
+        access_token_expires_at: None,
+        refresh_token_expires_at: None,
         personal_token: None,
         scope: None,
         login: None,
@@ -663,16 +993,39 @@ mod tests {
             schedule.absorb(&json!({ "error": "authorization_pending" })),
             PollAction::Wait
         );
-        assert_eq!(
-            schedule.absorb(&json!({
-                "access_token": "gho_token",
-                "scope": "repo,read:user",
-            })),
+        let started = now_epoch();
+        match schedule.absorb(&json!({
+            "access_token": "gho_token",
+            "scope": "repo,read:user",
+            "refresh_token": "ghr_token",
+            "expires_in": 28_800,
+            "refresh_token_expires_in": 15_897_600,
+        })) {
             PollAction::Done {
-                access_token: "gho_token".to_string(),
-                scope: Some("repo,read:user".to_string()),
+                access_token,
+                scope,
+                refresh_token,
+                access_expires_at,
+                refresh_expires_at,
+            } => {
+                assert_eq!(access_token, "gho_token");
+                assert_eq!(scope.as_deref(), Some("repo,read:user"));
+                assert_eq!(refresh_token.as_deref(), Some("ghr_token"));
+                let access_expires_at =
+                    access_expires_at.expect("an expiring token records its expiry");
+                assert!(
+                    (started + 28_799..=started + 28_800).contains(&access_expires_at),
+                    "access expiry {access_expires_at} is not 8 hours out"
+                );
+                let refresh_expires_at =
+                    refresh_expires_at.expect("a refresh token records its expiry");
+                assert!(
+                    (started + 15_897_599..=started + 15_897_600).contains(&refresh_expires_at),
+                    "refresh expiry {refresh_expires_at} is not 6 months out"
+                );
             }
-        );
+            other => panic!("approval should finish polling, got {other:?}"),
+        }
     }
 
     #[test]
@@ -746,6 +1099,189 @@ mod tests {
         }
     }
 
+    #[test]
+    fn token_grant_parses_an_expiring_rotating_pair() {
+        let started = now_epoch();
+        let grant = parse_token_grant(
+            &json!({
+                "access_token": "gho_new",
+                "refresh_token": "ghr_new",
+                "expires_in": 28_800,
+                "refresh_token_expires_in": 15_897_600,
+            }),
+            reqwest::StatusCode::OK,
+        )
+        .unwrap();
+        assert_eq!(grant.access_token, "gho_new");
+        assert_eq!(grant.refresh_token.as_deref(), Some("ghr_new"));
+        let access_expires_at =
+            grant.access_expires_at.expect("an expiring token records its expiry");
+        assert!((started + 28_799..=started + 28_800).contains(&access_expires_at));
+        let refresh_expires_at =
+            grant.refresh_expires_at.expect("a refresh token records its expiry");
+        assert!((started + 15_897_599..=started + 15_897_600).contains(&refresh_expires_at));
+    }
+
+    #[test]
+    fn token_grant_keeps_long_lived_tokens_without_refresh() {
+        let grant = parse_token_grant(
+            &json!({ "access_token": "gho_token", "scope": "repo,read:user" }),
+            reqwest::StatusCode::OK,
+        )
+        .unwrap();
+        assert_eq!(grant.access_token, "gho_token");
+        assert!(grant.refresh_token.is_none());
+        assert!(grant.access_expires_at.is_none());
+        assert!(grant.refresh_expires_at.is_none());
+    }
+
+    #[test]
+    fn token_grant_requires_an_access_token() {
+        let error = parse_token_grant(
+            &json!({ "error": "bad_refresh_token" }),
+            reqwest::StatusCode::BAD_REQUEST,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no access token"), "{error}");
+    }
+
+    fn block_on<Output>(future: impl Future<Output = Output>) -> Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(future)
+    }
+
+    fn token_file_fixture() -> GithubFile {
+        GithubFile {
+            client_id: "client".to_string(),
+            access_token: Some("gho_old".to_string()),
+            refresh_token: Some("ghr_old".to_string()),
+            access_token_expires_at: Some(1),
+            refresh_token_expires_at: Some(2),
+            personal_token: Some("github_pat_token".to_string()),
+            scope: Some(SCOPE.to_string()),
+            login: Some("me".to_string()),
+            poll_interval_secs: Some(900),
+            created_at: Some(7),
+        }
+    }
+
+    #[test]
+    fn refreshed_tokens_replace_the_stored_pair_but_keep_the_rest() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-refresh-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        save_at(&path, &token_file_fixture()).unwrap();
+
+        let mut file = load_at(&path).unwrap().expect("fixture round-trips");
+        apply_refreshed_tokens(
+            &mut file,
+            &TokenGrant {
+                access_token: "gho_new".to_string(),
+                refresh_token: Some("ghr_new".to_string()),
+                access_expires_at: Some(100),
+                refresh_expires_at: Some(200),
+            },
+        );
+        save_at(&path, &file).unwrap();
+
+        let file = load_at(&path).unwrap().expect("updated file round-trips");
+        assert_eq!(file.access_token.as_deref(), Some("gho_new"));
+        assert_eq!(file.refresh_token.as_deref(), Some("ghr_new"));
+        assert_eq!(file.access_token_expires_at, Some(100));
+        assert_eq!(file.refresh_token_expires_at, Some(200));
+        assert_eq!(file.personal_token.as_deref(), Some("github_pat_token"));
+        assert_eq!(file.poll_interval_secs, Some(900));
+        assert_eq!(file.login.as_deref(), Some("me"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fresh_oauth_tokens_are_returned_without_a_refresh() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-fresh-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.access_token_expires_at = Some(now_epoch() + 3_600);
+        save_at(&path, &file).unwrap();
+
+        let credential = block_on(active_credential_at(&path)).unwrap();
+        assert_eq!(credential.token, "gho_old");
+        assert_eq!(credential.kind, CredentialKind::OAuth);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn personal_tokens_skip_oauth_expiry() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-pat-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        let mut file = token_file_fixture();
+        file.access_token_expires_at = Some(1);
+        file.refresh_token = None;
+        save_at(&path, &file).unwrap();
+
+        let credential = block_on(active_credential_at(&path)).unwrap();
+        assert_eq!(credential.token, "github_pat_token");
+        assert_eq!(credential.kind, CredentialKind::Personal);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expired_oauth_without_refresh_needs_reconnect() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-expired-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.access_token_expires_at = Some(1);
+        file.refresh_token = None;
+        save_at(&path, &file).unwrap();
+
+        let error = block_on(active_credential_at(&path)).unwrap_err().to_string();
+        assert!(error.contains("reconnect"), "{error}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalidate_token_discards_only_the_rejected_secret() {
+        // Personal-token rejection keeps the OAuth pair and its login.
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-invalidate-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        save_at(&path, &token_file_fixture()).unwrap();
+        assert!(invalidate_token_at(&path, "github_pat_token").unwrap());
+        let file = load_at(&path).unwrap().expect("file survives invalidation");
+        assert!(file.personal_token.is_none());
+        assert_eq!(file.access_token.as_deref(), Some("gho_old"));
+        assert_eq!(file.login.as_deref(), Some("me"));
+        assert!(!invalidate_token_at(&path, "unknown").unwrap());
+
+        // OAuth rejection clears the whole OAuth pair and its login.
+        assert!(invalidate_token_at(&path, "gho_old").unwrap());
+        let file = load_at(&path).unwrap().expect("file survives invalidation");
+        assert!(file.access_token.is_none());
+        assert!(file.refresh_token.is_none());
+        assert!(file.access_token_expires_at.is_none());
+        assert!(file.refresh_token_expires_at.is_none());
+        assert!(file.login.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The whole file lifecycle, against an explicit path so it never has to
     /// mutate the process-wide config dir.
     #[test]
@@ -762,6 +1298,9 @@ mod tests {
             &GithubFile {
                 client_id: "client".to_string(),
                 access_token: None,
+                refresh_token: None,
+                access_token_expires_at: None,
+                refresh_token_expires_at: None,
                 personal_token: None,
                 scope: None,
                 login: None,
@@ -777,6 +1316,9 @@ mod tests {
             &GithubFile {
                 client_id: "client".to_string(),
                 access_token: Some("gho_token".to_string()),
+                refresh_token: None,
+                access_token_expires_at: None,
+                refresh_token_expires_at: None,
                 personal_token: None,
                 scope: Some(SCOPE.to_string()),
                 login: Some("me".to_string()),
@@ -795,6 +1337,9 @@ mod tests {
             &GithubFile {
                 client_id: "client".to_string(),
                 access_token: Some("gho_token".to_string()),
+                refresh_token: None,
+                access_token_expires_at: None,
+                refresh_token_expires_at: None,
                 personal_token: Some("github_pat_token".to_string()),
                 scope: Some(SCOPE.to_string()),
                 login: Some("me".to_string()),
@@ -841,6 +1386,9 @@ mod tests {
                 &GithubFile {
                     client_id: "from-file".to_string(),
                     access_token: Some("gho_token".to_string()),
+                    refresh_token: None,
+                    access_token_expires_at: None,
+                    refresh_token_expires_at: None,
                     personal_token: None,
                     scope: None,
                     login: None,

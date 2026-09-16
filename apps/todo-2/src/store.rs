@@ -1791,7 +1791,9 @@ impl Store {
 
     /// One sync pass over every bound repo. `full` ignores the incremental
     /// cursor, which is how the manual "Sync now" also notices deletions; the
-    /// poller stays incremental.
+    /// poller stays incremental. An expired OAuth token is renewed before the
+    /// pass; a token GitHub rejects mid-pass is renewed or discarded once,
+    /// then the pass retries with the replacement.
     pub fn sync_github(
         &self,
         full: bool,
@@ -1799,32 +1801,60 @@ impl Store {
     ) -> Task<anyhow::Result<storage::GithubSyncSummary>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let credentials = crate::github_auth::stored_credentials()
-                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
-            let mut s = store.lock().await;
-            let ids: Vec<u64> = s
-                .list_integrations()
-                .await?
-                .into_iter()
-                .filter(|integration| integration.provider == "github")
-                .map(|integration| integration.id)
-                .collect();
-            let client = storage::GithubHttpClient::new(credentials.token.clone());
-            let mut total = storage::GithubSyncSummary::default();
-            for id in ids {
-                let disabled = s
-                    .app_for_integration(id)
-                    .await?
-                    .is_some_and(|app| !app.enabled);
-                if disabled {
-                    continue;
+            let token = crate::github_auth::access_token().await?;
+            let client = storage::GithubHttpClient::new(token.clone());
+            let result = {
+                let mut sync_store = store.lock().await;
+                Self::sync_all_github_integrations(&mut sync_store, &client, full).await
+            };
+            match result {
+                Err(error) if Self::is_github_unauthorized(&error) => {
+                    let token = crate::github_auth::recover_from_rejected_token(&token).await?;
+                    let client = storage::GithubHttpClient::new(token);
+                    let mut sync_store = store.lock().await;
+                    Self::sync_all_github_integrations(&mut sync_store, &client, full).await
                 }
-                Self::bind_detected_repos(&mut s, id).await?;
-                let summary = Self::sync_github_with_retry(&mut s, &client, id, full).await?;
-                total.absorb(&summary);
+                result => result,
             }
-            Ok(total)
         })
+    }
+
+    async fn sync_all_github_integrations(
+        store: &mut TodoStore,
+        client: &storage::GithubHttpClient,
+        full: bool,
+    ) -> anyhow::Result<storage::GithubSyncSummary> {
+        let ids: Vec<u64> = store
+            .list_integrations()
+            .await?
+            .into_iter()
+            .filter(|integration| integration.provider == "github")
+            .map(|integration| integration.id)
+            .collect();
+        let mut total = storage::GithubSyncSummary::default();
+        for id in ids {
+            let disabled = store
+                .app_for_integration(id)
+                .await?
+                .is_some_and(|app| !app.enabled);
+            if disabled {
+                continue;
+            }
+            Self::bind_detected_repos(store, id).await?;
+            let summary = Self::sync_github_with_retry(store, client, id, full).await?;
+            total.absorb(&summary);
+        }
+        Ok(total)
+    }
+
+    /// Whether GitHub rejected the secret itself, as opposed to the request.
+    /// Only a 401 earns credential recovery; every other permanent failure
+    /// still surfaces with its reason.
+    fn is_github_unauthorized(error: &anyhow::Error) -> bool {
+        matches!(
+            error.downcast_ref::<storage::SyncFailure>(),
+            Some(storage::SyncFailure::Permanent { status: 401, .. })
+        )
     }
 
     /// The remote object a tag syncs with, shown by the tag settings panel
@@ -1904,10 +1934,8 @@ impl Store {
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<Vec<storage::RemoteRepo>>> {
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let credentials = crate::github_auth::stored_credentials().ok_or_else(|| {
-                anyhow::anyhow!("Connect GitHub before choosing a repository")
-            })?;
-            let client = storage::GithubHttpClient::new(credentials.token);
+            let token = crate::github_auth::access_token().await?;
+            let client = storage::GithubHttpClient::new(token);
             client.list_repos().await
         })
     }
@@ -1974,8 +2002,9 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             match crate::github_auth::stored_credentials() {
-                Some(credentials) => {
-                    let client = storage::GithubHttpClient::new(credentials.token);
+                Some(_) => {
+                    let token = crate::github_auth::access_token().await?;
+                    let client = storage::GithubHttpClient::new(token);
                     s.close_issue_for_task(&client, task_id).await?;
                 }
                 None => {
@@ -2211,9 +2240,8 @@ impl Store {
     ) -> Task<anyhow::Result<Vec<storage::RunPullRequest>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let credentials = crate::github_auth::stored_credentials()
-                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
-            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let token = crate::github_auth::access_token().await?;
+            let client = storage::GithubHttpClient::new(token.clone());
             let mut s = store.lock().await;
             let run = s.get_run(run_id).await?;
             let worktrees: Vec<RunWorktree> = s
@@ -2476,9 +2504,8 @@ impl Store {
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let credentials = crate::github_auth::stored_credentials()
-                .ok_or_else(|| anyhow::anyhow!("Connect GitHub first"))?;
-            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            let token = crate::github_auth::access_token().await?;
+            let client = storage::GithubHttpClient::new(token.clone());
             let mut s = store.lock().await;
             let pull_request = s
                 .run_pull_request(pull_request_id)
@@ -2543,10 +2570,11 @@ impl Store {
     pub fn poll_pull_requests(&self, cx: &impl AppContext) -> Task<anyhow::Result<usize>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let Some(credentials) = crate::github_auth::stored_credentials() else {
+            if !crate::github_auth::has_usable_credentials() {
                 return Ok(0);
-            };
-            let client = storage::GithubHttpClient::new(credentials.token.clone());
+            }
+            let token = crate::github_auth::access_token().await?;
+            let client = storage::GithubHttpClient::new(token.clone());
             let mut s = store.lock().await;
             let open = s.open_run_pull_requests().await?;
             let mut resolved_runs: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -2646,5 +2674,25 @@ impl Store {
         let note = format!("Merged {merged} pull request(s); {waived} waived");
         store.complete_coding_pull_requests(run_id, &note).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permanent(status: u16) -> anyhow::Error {
+        anyhow::Error::new(storage::SyncFailure::Permanent {
+            status,
+            message: "test".to_string(),
+        })
+    }
+
+    #[test]
+    fn only_a_401_earns_credential_recovery() {
+        assert!(Store::is_github_unauthorized(&permanent(401)));
+        assert!(!Store::is_github_unauthorized(&permanent(404)));
+        assert!(!Store::is_github_unauthorized(&permanent(500)));
+        assert!(!Store::is_github_unauthorized(&anyhow::anyhow!("boom")));
     }
 }

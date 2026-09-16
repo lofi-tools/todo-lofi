@@ -169,7 +169,10 @@ impl IntegrationsView {
                     .await;
                 let ready = this
                     .read_with(cx, |this, _| {
-                        this.github_connected() && !this.github_disabled() && !this.github_syncing
+                        this.github_connected()
+                            && github_auth::has_usable_credentials()
+                            && !this.github_disabled()
+                            && !this.github_syncing
                     })
                     .unwrap_or(false);
                 if !ready {

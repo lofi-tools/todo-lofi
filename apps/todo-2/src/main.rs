@@ -1941,7 +1941,10 @@ fn main() {
                 store.create_integration("todoist", None).await?;
             }
             // Same for GitHub, whose account label comes from the token file.
+            // A file with only dead secrets does not create a row: without a
+            // usable token the next sync would just fail again.
             if let Some(credentials) = github_auth::stored_credentials()
+                && github_auth::has_usable_credentials()
                 && !store
                     .list_integrations()
                     .await?
