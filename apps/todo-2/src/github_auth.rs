@@ -34,9 +34,11 @@ const SLOW_DOWN_STEP: u64 = 5;
 /// One initial connection attempt plus three retries.
 const CONNECT_ATTEMPTS: u32 = 4;
 /// First retry delay, doubled after each consecutive transport failure.
-const CONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// Starts high because these retries hit GitHub's auth endpoints, where
+/// hammering a failing request only earns rate limits.
+const CONNECT_BACKOFF_BASE: Duration = Duration::from_secs(5);
 /// Ceiling on the retry delay, so an outage does not park the flow too long.
-const CONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+const CONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// A connection attempt's outcome, with its retry behavior attached. anyhow
 /// flattens typed failures into strings, so the marker preserves whether a
@@ -615,22 +617,30 @@ pub struct ActiveCredential {
 }
 
 /// Whether the connection file holds any secret worth trying: a personal
-/// token, an access token, or a refresh token that can mint a new one.
+/// token, a refresh token that can mint a new access token, or an unexpired
+/// access token. An expired access token with no refresh token can never
+/// recover, so it counts as unusable and is never retried.
 pub fn has_usable_credentials() -> bool {
     client_file_path()
         .ok()
-        .and_then(|path| load_at(&path).ok().flatten())
-        .is_some_and(|file| {
-            file.personal_token
+        .is_some_and(|path| has_usable_credentials_at(&path))
+}
+
+fn has_usable_credentials_at(path: &std::path::Path) -> bool {
+    load_at(path).ok().flatten().is_some_and(|file| {
+        file.personal_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+            || file
+                .refresh_token
                 .as_deref()
                 .is_some_and(|token| !token.is_empty())
-                || file.access_token
-                    .as_deref()
-                    .is_some_and(|token| !token.is_empty())
-                || file.refresh_token
-                    .as_deref()
-                    .is_some_and(|token| !token.is_empty())
-        })
+            || (file
+                .access_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+                && !access_token_expired(file.access_token_expires_at))
+    })
 }
 
 /// Load a usable access token, renewing an expired OAuth token first. A
@@ -682,19 +692,36 @@ fn access_token_expired(expires_at: Option<i64>) -> bool {
 /// the rotated pair. A refresh the server rejects clears the OAuth tokens so
 /// later calls fail as “connect first” instead of retrying a dead secret.
 async fn refresh_oauth_token_at(path: &std::path::Path) -> anyhow::Result<String> {
-    let Some(file) = load_at(path)? else {
-        return Err(anyhow::anyhow!("Connect GitHub first"));
+    match try_refresh_oauth_token_at(path).await {
+        Ok(token) => Ok(token),
+        Err(error) if error.is_retryable() => Err(error.into_inner()),
+        Err(_error) => {
+            clear_oauth_tokens_at(path).ok();
+            Err(anyhow::anyhow!(
+                "GitHub rejected the refresh token; reconnect GitHub"
+            ))
+        }
+    }
+}
+
+async fn try_refresh_oauth_token_at(
+    path: &std::path::Path,
+) -> Result<String, AttemptError> {
+    let Some(file) = load_at(path).map_err(AttemptError::permanent)? else {
+        return Err(AttemptError::permanent(anyhow::anyhow!(
+            "Connect GitHub first"
+        )));
     };
     let Some(refresh_token) = file.refresh_token.clone().filter(|token| !token.is_empty())
     else {
-        return Err(anyhow::anyhow!(
+        return Err(AttemptError::permanent(anyhow::anyhow!(
             "GitHub token expired and no refresh token is stored; reconnect GitHub"
-        ));
+        )));
     };
     if file.client_id.is_empty() {
-        return Err(anyhow::anyhow!(
+        return Err(AttemptError::permanent(anyhow::anyhow!(
             "GitHub connection has no client id; reconnect GitHub"
-        ));
+        )));
     }
     let client_id = file.client_id.clone();
     match retry_connection_result(|| {
@@ -703,20 +730,16 @@ async fn refresh_oauth_token_at(path: &std::path::Path) -> anyhow::Result<String
     .await
     {
         Ok(tokens) => {
-            let mut file = load_at(path)?.ok_or_else(|| {
-                anyhow::anyhow!("GitHub connection disappeared while refreshing; reconnect GitHub")
+            let mut file = load_at(path).map_err(AttemptError::permanent)?.ok_or_else(|| {
+                AttemptError::permanent(anyhow::anyhow!(
+                    "GitHub connection disappeared while refreshing; reconnect GitHub"
+                ))
             })?;
             apply_refreshed_tokens(&mut file, &tokens);
-            save_at(path, &file)?;
+            save_at(path, &file).map_err(AttemptError::permanent)?;
             Ok(tokens.access_token)
         }
-        Err(error) if error.is_retryable() => Err(error.into_inner()),
-        Err(_error) => {
-            clear_oauth_tokens_at(path).ok();
-            Err(anyhow::anyhow!(
-                "GitHub rejected the refresh token; reconnect GitHub"
-            ))
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -769,26 +792,39 @@ fn apply_refreshed_tokens(file: &mut GithubFile, tokens: &TokenGrant) {
 /// rejected. Returns a replacement token when one exists; otherwise the
 /// caller should surface the reconnect error instead of retrying.
 pub async fn recover_from_rejected_token(rejected_token: &str) -> anyhow::Result<String> {
-    let path = client_file_path()?;
-    let Some(file) = load_at(&path)? else {
+    recover_from_rejected_token_at(&client_file_path()?, rejected_token).await
+}
+
+async fn recover_from_rejected_token_at(
+    path: &std::path::Path,
+    rejected_token: &str,
+) -> anyhow::Result<String> {
+    let Some(file) = load_at(path)? else {
         return Err(anyhow::anyhow!("Connect GitHub first"));
     };
     if file.personal_token.as_deref() == Some(rejected_token) {
-        invalidate_token(rejected_token)?;
-        return active_credential_at(&path).await.map(|credential| credential.token);
+        invalidate_token_at(path, rejected_token)?;
+        return active_credential_at(path).await.map(|credential| credential.token);
     }
     if file.access_token.as_deref() == Some(rejected_token) {
-        return refresh_oauth_token_at(&path).await;
+        return match try_refresh_oauth_token_at(path).await {
+            Ok(token) => Ok(token),
+            // A transport failure leaves the secret alone: the token may be
+            // fine, so only the attempt fails.
+            Err(error) if error.is_retryable() => Err(error.into_inner()),
+            // Anything else means the rejected secret cannot renew itself.
+            // Discard it so the poller stops retrying a dead credential.
+            Err(_error) => {
+                invalidate_token_at(path, rejected_token).ok();
+                Err(anyhow::anyhow!(
+                    "GitHub rejected the stored token; reconnect GitHub"
+                ))
+            }
+        };
     }
     Err(anyhow::anyhow!(
         "GitHub rejected the stored token; reconnect GitHub"
     ))
-}
-
-/// Discard a secret GitHub has rejected, keeping an alternate credential
-/// when one exists. Returns whether anything was cleared.
-fn invalidate_token(rejected_token: &str) -> anyhow::Result<bool> {
-    invalidate_token_at(&client_file_path()?, rejected_token)
 }
 
 fn invalidate_token_at(
@@ -1070,10 +1106,10 @@ mod tests {
 
     #[test]
     fn connection_backoff_doubles_until_its_ceiling() {
-        assert_eq!(connect_backoff_delay(0), Duration::from_secs(1));
-        assert_eq!(connect_backoff_delay(1), Duration::from_secs(2));
-        assert_eq!(connect_backoff_delay(2), Duration::from_secs(4));
-        assert_eq!(connect_backoff_delay(3), Duration::from_secs(8));
+        assert_eq!(connect_backoff_delay(0), Duration::from_secs(5));
+        assert_eq!(connect_backoff_delay(1), Duration::from_secs(10));
+        assert_eq!(connect_backoff_delay(2), Duration::from_secs(20));
+        assert_eq!(connect_backoff_delay(3), Duration::from_secs(40));
         assert_eq!(connect_backoff_delay(10), CONNECT_BACKOFF_MAX);
     }
 
@@ -1278,6 +1314,83 @@ mod tests {
         assert!(file.access_token_expires_at.is_none());
         assert!(file.refresh_token_expires_at.is_none());
         assert!(file.login.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expired_tokens_without_refresh_are_not_usable() {
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-usable-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+
+        // An expired access token with no refresh token can never recover.
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.refresh_token = None;
+        file.access_token_expires_at = Some(1);
+        save_at(&path, &file).unwrap();
+        assert!(!has_usable_credentials_at(&path));
+
+        // The same expired token with a refresh token is still usable.
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.access_token_expires_at = Some(1);
+        save_at(&path, &file).unwrap();
+        assert!(has_usable_credentials_at(&path));
+
+        // A fresh access token needs no refresh token.
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.refresh_token = None;
+        file.access_token_expires_at = Some(now_epoch() + 3_600);
+        save_at(&path, &file).unwrap();
+        assert!(has_usable_credentials_at(&path));
+
+        // Nothing stored means nothing to try.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!has_usable_credentials_at(&path));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejected_legacy_token_is_discarded_not_retried() {
+        // A token saved before refresh support has no expiry and no refresh
+        // token. Once GitHub rejects it, recovery must delete the dead
+        // secret so the poller stops instead of failing every tick.
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-recover-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        save_at(
+            &path,
+            &GithubFile {
+                client_id: "client".to_string(),
+                access_token: Some("gho_dead".to_string()),
+                refresh_token: None,
+                access_token_expires_at: None,
+                refresh_token_expires_at: None,
+                personal_token: None,
+                scope: Some(SCOPE.to_string()),
+                login: Some("me".to_string()),
+                poll_interval_secs: Some(900),
+                created_at: Some(7),
+            },
+        )
+        .unwrap();
+        assert!(has_usable_credentials_at(&path));
+
+        let error = block_on(recover_from_rejected_token_at(&path, "gho_dead"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("reconnect"), "{error}");
+
+        let file = load_at(&path).unwrap().expect("file survives recovery");
+        assert!(file.access_token.is_none());
+        assert!(file.login.is_none());
+        assert!(!has_usable_credentials_at(&path));
 
         std::fs::remove_dir_all(&dir).ok();
     }
