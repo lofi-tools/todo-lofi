@@ -4,12 +4,13 @@ use gpui::{
     Styled, Subscription, Window, deferred, div, hsla, prelude::FluentBuilder, px, relative, rgb,
     svg,
 };
+use gpui::Focusable as _;
 use gpui_component::Disableable;
 use gpui_component::IconName;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
 use storage::prelude::{CODING_PHASES, RunNote, RunStepView, RunView, run_notes};
@@ -423,7 +424,7 @@ pub struct TaskDetails {
     title_input: Option<Entity<InputState>>,
     _title_subscription: Option<Subscription>,
     editing_description: bool,
-    description_input: Option<Entity<InputState>>,
+    description_input: Option<Entity<TextareaState>>,
     _description_subscription: Option<Subscription>,
     editing_tags: bool,
     tags_input: Option<Entity<InputState>>,
@@ -1024,16 +1025,25 @@ impl TaskDetails {
         }
     }
 
-    fn focus_field_input(&self, field: EditedField, window: &mut Window, _cx: &mut Context<Self>) {
-        let input = match field {
-            EditedField::Title => self.title_input.clone(),
-            EditedField::Description => self.description_input.clone(),
-            EditedField::Tags => self.tags_input.clone(),
+    /// Each field's editor state is its own type (the description is a
+    /// textarea), so focus goes through the handles instead.
+    fn focus_field_input(&self, field: EditedField, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = match field {
+            EditedField::Title => self
+                .title_input
+                .as_ref()
+                .map(|input| input.read(cx).focus_handle(cx)),
+            EditedField::Description => self
+                .description_input
+                .as_ref()
+                .map(|input| input.read(cx).focus_handle(cx)),
+            EditedField::Tags => self
+                .tags_input
+                .as_ref()
+                .map(|input| input.read(cx).focus_handle(cx)),
         };
-        if let Some(input) = input {
-            window.on_next_frame(move |window, cx| {
-                input.update(cx, |state, cx| state.focus(window, cx));
-            });
+        if let Some(handle) = handle {
+            window.on_next_frame(move |window, cx| handle.focus(window, cx));
         }
     }
 
@@ -1454,12 +1464,14 @@ impl TaskDetails {
         }
         let description = task.description.clone().unwrap_or_default();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx);
+            let mut state = TextareaState::new(window, cx).auto_grow(1, DESCRIPTION_MAX_LINES);
             state.set_value(&description, window, cx);
             state
         });
+        // Multi-line, so Enter belongs to the text: the edit commits when the
+        // field loses focus, the way the tag input does.
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if matches!(event, InputEvent::Blur) {
                 this.commit_description_edit(cx);
             }
         });
@@ -3118,6 +3130,10 @@ impl TaskDetails {
     }
 }
 
+/// The description editor grows with its text up to this many lines, then
+/// scrolls inside that height.
+const DESCRIPTION_MAX_LINES: usize = 12;
+
 /// Lucide `refresh-cw`: two half-circle arrows chasing each other. Drawn
 /// with an opaque stroke; GPUI renders SVG data as an alpha mask tinted by
 /// the element's text color, so the icon picks up the surrounding text
@@ -3636,6 +3652,20 @@ impl TaskDetails {
             {
                 row = row.child(action);
             }
+            // Skipping the agent is the alternative to starting the interview,
+            // so that affordance sits on the interview step's own row.
+            if !done && step.node.id == "interview" {
+                row = row.child(
+                    Button::new(format!("coding-manual-spec-{step_id}"))
+                        .ghost()
+                        .compact()
+                        .label("Write spec manually")
+                        .tooltip("Skip the agent and write the spec yourself")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_coding_spec(window, cx);
+                        })),
+                );
+            }
             rows.push(row.into_any_element());
 
             // The PR step's sub-items: one row per pull request the run opened
@@ -3917,18 +3947,6 @@ impl TaskDetails {
         let task_id = task.id;
         let mut actions = div().h_flex().items_center().gap_2().flex_wrap();
         match current.map(|step| step.node.id.as_str()) {
-            Some("interview") => {
-                actions = actions.child(
-                    Button::new(format!("coding-manual-spec-{task_id}"))
-                        .ghost()
-                        .compact()
-                        .label("Write spec manually")
-                        .tooltip("Skip the agent and write the spec yourself")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_coding_spec(window, cx);
-                        })),
-                );
-            }
             Some("spec") => {
                 let step_id = current.map(|step| step.task.id).unwrap_or_default();
                 actions = actions.child(
@@ -4252,9 +4270,11 @@ impl TaskDetails {
                     .child("GitHub"),
             )
             .child(
+                // Gray like the list's issue badge: the source is a reference,
+                // not the pane's own content.
                 div()
                     .text_sm()
-                    .text_color(rgb(0xe5e5e5))
+                    .text_color(rgb(0xa3a3a3))
                     .child(format!(
                         "{}/{}#{}",
                         issue.issue.owner, issue.issue.repo, issue.issue.number
@@ -4682,8 +4702,7 @@ impl Render for TaskDetails {
                     if let Some(input) = self.description_input.clone() {
                         details = details.child(
                             div().id(("details-description-edit", task_id)).child(
-                                Input::new(&input)
-                                    .small()
+                                Textarea::new(&input)
                                     .appearance(false)
                                     .bg(rgb(APP_BG))
                                     .border_1()
