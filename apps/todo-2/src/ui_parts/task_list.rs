@@ -1234,6 +1234,7 @@ mod tests {
                                 .h(px(52.))
                                 .child(format!("row {task_id}"))
                                 .into_any_element(),
+                            ListEntry::BottomPad => div().h(px(24.)).into_any_element(),
                         },
                     )
                     .render_body(),
@@ -1614,6 +1615,9 @@ pub enum ListEntry {
         task_id: u64,
         view: Entity<TaskRow>,
     },
+    /// Bottom breathing room inside the scroll area: in-flow, so it only
+    /// appears when scrolled to the very bottom and never covers a task.
+    BottomPad,
 }
 
 /// Height hinted for items the list has not measured yet: about what a row
@@ -1714,6 +1718,8 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>) -> AnyElement 
             .my(px(-4.))
             .child(row.clone())
             .into_any_element(),
+        // Plain breathing room: no hover affordance, no input.
+        ListEntry::BottomPad => div().w_full().h(px(24.)).into_any_element(),
     }
 }
 
@@ -1729,9 +1735,13 @@ fn list_header(
 ) -> impl IntoElement {
     let mut header = if divided {
         div()
+            // Full-width so the divider above spans the list and the
+            // toggle sits at the far right (list items shrink-wrap by
+            // default, which used to clip both to the title's width).
+            .w_full()
             // Upcoming breathes more above the divider, less below it so
             // its rows sit close under the label.
-            .when(top == "Upcoming", |this| this.mt(px(32.)).mb(px(-8.)))
+            .when(top == "Upcoming", |this| this.mt(px(96.)).mb(px(-8.)))
             .when(top != "Upcoming", |this| this.mt_4())
             .pt_2()
             .border_t_1()
@@ -1740,7 +1750,12 @@ fn list_header(
             .items_center()
             .justify_between()
     } else {
-        div().h_flex().items_center().justify_between().mt_2()
+        div()
+            .w_full()
+            .h_flex()
+            .items_center()
+            .justify_between()
+            .mt_2()
     };
     // A sub-section renders as "Top / sub" with the slash and sub name
     // grayed out next to the top section.
@@ -1770,15 +1785,20 @@ fn list_header(
                 .compact()
                 // Sized and toned like the "Upcoming" header beside it, so
                 // the toggle reads as part of that label rather than a call
-                // to action.
+                // to action. "Later" names what it reveals: tasks starting
+                // more than 2 days out, which stay hidden otherwise.
                 .with_size(Size::Small)
                 .text_color(rgb(0xa3a3a3))
                 .label(if show_all {
                     "Show less".to_string()
                 } else {
-                    format!("Show all ({distant})")
+                    format!("Show later ({distant})")
                 })
-                .tooltip("Reveal tasks starting more than 2 days out")
+                .tooltip(if show_all {
+                    "Only show tasks starting within the next 2 days"
+                } else {
+                    "Also show tasks starting more than 2 days from now"
+                })
                 .on_click(move |_, _, cx| {
                     view.update(cx, |this, cx| this.toggle_show_all(cx)).ok();
                 }),
@@ -1788,10 +1808,12 @@ fn list_header(
 }
 
 /// One interstitial insert row: a hover-revealed + on a horizontal line,
-/// or the inline insert input when this gap is being filled. The strip is
-/// the spacing between two rows (its 24px content box is cancelled by a
-/// negative margin, leaving the vertical padding), so the "+" sits in the
-/// gap without adding height of its own.
+/// or the inline insert input when this gap is being filled. The strip
+/// takes no height of its own: the inner content's 24px box is cancelled
+/// by its negative margin and the outer padding by the outer one, so the
+/// "+" floats over the row boundary. The hover reveal lives on the inner
+/// content (which keeps its 24px hitbox) because the zero-height strip
+/// itself is not hoverable.
 fn list_gap(
     above: Option<u64>,
     below: Option<u64>,
@@ -1819,15 +1841,15 @@ fn list_gap(
         .id(key.clone())
         .w_full()
         .py_2()
-        .my(px(-4.))
-        .opacity(0.0)
-        .hover(|style| style.opacity(1.0))
+        .my(px(-8.))
         .child(
             div()
                 .h_flex()
                 .items_center()
                 .gap_2()
                 .my_neg_3()
+                .opacity(0.0)
+                .hover(|style| style.opacity(1.0))
                 .child(
                     div()
                         .id(format!("{key}-plus"))
@@ -1879,7 +1901,12 @@ impl Render for TaskListView {
             .min_h_0()
             .min_w_0()
             .v_flex()
-            .p_8()
+            // No bottom padding: it shows the window background through and
+            // merges with the footer into a gray bar. The trailing insert
+            // gap already gives the scrolled-to-bottom content its air.
+            .px_8()
+            .pt_8()
+            .pb_0()
             .gap_4()
             .on_click(cx.listener(|this, _, _, cx| {
                 if !this.is_locked() {
@@ -2048,8 +2075,10 @@ impl TaskListView {
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
     /// tasks last under an "Upcoming" header and completed ones under
     /// "Completed". Tasks starting more than 2 days out only render when
-    /// "show all" is on. Every row is preceded by its insert gap, and the
-    /// list is closed by one trailing gap.
+    /// "show all" is on. Every row outside Upcoming is preceded by its
+    /// insert gap, the normal section is closed by one trailing gap, and
+    /// then the list is closed by one trailing gap (unless it ends inside
+    /// Upcoming, which takes no inserts).
     fn list_entries(&self) -> Vec<ListEntry> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2115,6 +2144,13 @@ impl TaskListView {
     /// followed by each of its rows behind an insert gap. Gaps are placed
     /// against the whole display order, so the gap above a section's first
     /// row still sits between it and the section header.
+    ///
+    /// The Upcoming chunk is a query, not a place: no insert gap is
+    /// rendered above (or between) its rows — new tasks are always added
+    /// in the normal section and move to Upcoming on their own once their
+    /// properties make them not immediately doable. Instead the normal
+    /// section gets one insert gap after its last row, ahead of the
+    /// Upcoming header.
     fn entries_for_chunks(&self, chunks: &[RowChunk], distant: usize) -> Vec<ListEntry> {
         let order: Vec<u64> = chunks
             .iter()
@@ -2125,34 +2161,74 @@ impl TaskListView {
                     .map(|index| self.row_specs[*index].task.id)
             })
             .collect();
+        let upcoming_ids: std::collections::HashSet<u64> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                RowChunk::Upcoming(indices) => Some(indices),
+                _ => None,
+            })
+            .flatten()
+            .map(|index| self.row_specs[*index].task.id)
+            .collect();
         let mut entries = Vec::new();
         let mut position = 0;
-        for chunk in chunks {
+        for (chunk_ix, chunk) in chunks.iter().enumerate() {
             if let Some(header) = self.chunk_header(chunk, distant) {
                 entries.push(header);
             }
             for &index in chunk.indices() {
                 let task_id = self.row_specs[index].task.id;
-                let above = (position > 0).then(|| order[position - 1]);
-                entries.push(ListEntry::Gap {
-                    above,
-                    below: Some(task_id),
-                    input: self.inserting_input(above, Some(task_id)),
-                });
+                // No "+ row" inside Upcoming: adding happens in the normal
+                // section, and the task moves here on its own.
+                if !upcoming_ids.contains(&task_id) {
+                    let above = (position > 0).then(|| order[position - 1]);
+                    entries.push(ListEntry::Gap {
+                        above,
+                        below: Some(task_id),
+                        input: self.inserting_input(above, Some(task_id)),
+                    });
+                }
                 entries.push(ListEntry::Row {
                     task_id,
                     view: self.task_views[index].clone(),
                 });
                 position += 1;
             }
+            // Bottom of the normal section: one insert gap after its last
+            // row when a query chunk (Upcoming, Completed) follows, taking
+            // the place of the suppressed gap above that chunk's first row.
+            let main = matches!(
+                chunk,
+                RowChunk::Rows(_) | RowChunk::Section(..)
+            );
+            let next_main = chunks
+                .get(chunk_ix + 1)
+                .is_some_and(|next| matches!(next, RowChunk::Rows(_) | RowChunk::Section(..)));
+            if main && !next_main && chunks.get(chunk_ix + 1).is_some() {
+                let above = (position > 0).then(|| order[position - 1]);
+                entries.push(ListEntry::Gap {
+                    above,
+                    below: None,
+                    input: self.inserting_input(above, None),
+                });
+            }
         }
-        // One trailing gap, so a task can still be added after the last row.
-        if let Some(last) = order.last().copied() {
+        // One trailing gap, so a task can still be added after the last row
+        // — unless the list ends inside Upcoming, which takes no inserts.
+        if let Some(last) = order.last().copied()
+            && !upcoming_ids.contains(&last)
+        {
             entries.push(ListEntry::Gap {
                 above: Some(last),
                 below: None,
                 input: self.inserting_input(Some(last), None),
             });
+        }
+        // Bottom breathing room inside the scroll area: in-flow, so it
+        // only shows when scrolled to the very bottom and never covers a
+        // task the way an overlay would.
+        if !order.is_empty() {
+            entries.push(ListEntry::BottomPad);
         }
         entries
     }
