@@ -1306,9 +1306,10 @@ mod tests {
     /// The geometry one task-list row rests on: the strip takes no height in
     /// the layout, the task item sits exactly `ROW_GAP` below the item's own
     /// top edge (the previous task item's bottom border), and the strip's
-    /// drawing is centred on that border — its lower half hanging over the
-    /// next task item's top edge by more than the gap pulls it back, since
-    /// the drawing is painted last and is not hidden under that item.
+    /// drawing is centred in the gap between the two task items — so its
+    /// rule keeps the same clearance above as below, and its band reaches
+    /// over the next task item's top edge rather than stopping short of it,
+    /// since the drawing is painted last and is not hidden under that item.
     #[gpui::test]
     fn test_row_item_geometry(cx: &mut gpui::TestAppContext) {
         struct RowBody;
@@ -1333,9 +1334,9 @@ mod tests {
                     .into_any_element();
                 // Auto-height box, so the assertions below see the row item's
                 // own size rather than the whole window's; pushed down so the
-                // band's upper half stays inside the window like it does in
+                // band above the item stays inside the window like it does in
                 // the list, which pads its top by the same amount.
-                div().v_flex().w(px(400.)).pt(px(GAP_BAND_HEIGHT / 2.)).child(
+                div().v_flex().w(px(400.)).pt(px(GAP_BAND_RISE)).child(
                     div()
                         .id("row-item-box")
                         .debug_selector(|| "row-item".to_string())
@@ -1357,16 +1358,21 @@ mod tests {
         // The task item starts exactly the gap below the item's top edge,
         // which is the previous task item's bottom border.
         assert_eq!(task_item.top() - item.top(), px(ROW_GAP));
-        // The hit zone spans the whole band, and the drawing is centred on
-        // that border: it starts half a band above the item, and its lower
-        // edge is drawn past the next task item's top edge.
+        // The hit zone spans the whole band, and the drawing sits on it:
+        // both are centred in the gap between the two task items, reaching
+        // `GAP_BAND_RISE` past the item's top edge above and the same
+        // distance past the next task item's top edge below.
         assert_eq!(strip.size.height, px(GAP_BAND_HEIGHT));
-        assert_eq!(strip.top() - item.top(), px(-(GAP_BAND_HEIGHT / 2.)));
+        assert_eq!(strip.top() - item.top(), px(-GAP_BAND_RISE));
         assert_eq!(overlay.size.height, px(GAP_BAND_HEIGHT));
-        assert_eq!(overlay.top() - item.top(), px(-(GAP_BAND_HEIGHT / 2.)));
+        assert_eq!(overlay.top() - item.top(), px(-GAP_BAND_RISE));
+        assert_eq!(overlay.bottom() - task_item.top(), px(GAP_BAND_RISE));
+        // So the strip's middle — the rule — keeps the same clearance above
+        // it, to the previous task item's bottom border, as below it, to the
+        // next task item's top edge.
         assert_eq!(
-            overlay.bottom() - task_item.top(),
-            px(GAP_BAND_HEIGHT / 2. - ROW_GAP)
+            overlay.center().y - item.top(),
+            task_item.top() - overlay.center().y
         );
     }
 
@@ -1823,21 +1829,29 @@ pub struct RowGap {
 const ITEM_HEIGHT_HINT: f32 = 48.0;
 
 /// Visual height of one interstitial insert strip (the "+ row"): the band
-/// holding the + and the rule that appears on hover. The strip is laid out
-/// with negative vertical margins that cancel this height, so it takes up
-/// no room between two task items — the number describes the *reveal*: how
-/// tall the strip looks and how much of a target the pointer gets. The
-/// strip is centred on the boundary it inserts at, so half of the band
-/// reaches into the box of the task item above it and half below it.
+/// holding the + and the rule that appears on hover. Its margins cancel this
+/// height, so it takes up no room between two task items — the number
+/// describes the *reveal*: how tall the strip looks and how much of a target
+/// the pointer gets. The strip is centred *in the gap* between the two task
+/// items, so the same small clearance separates it from the item above and
+/// the one below; being drawn last, the parts of it that reach past the gap
+/// are visible over those items.
 const GAP_BAND_HEIGHT: f32 = 24.0;
 
-/// The gap the layout leaves between two task items. The strip is centred on
-/// the previous item's border, so the gap is exactly how much of the strip's
-/// lower half the next task item takes back: it stays a fraction of the band
-/// so the strip — its rule and the + with it — reaches over that item's top
-/// edge instead of floating above it, while still leaving the two task
-/// items' own backgrounds a hairline apart.
-const ROW_GAP: f32 = GAP_BAND_HEIGHT / 6.0;
+/// The gap the layout leaves between two task items: room for the strip's
+/// rule (1px) and the same clearance above it as below, so the strip can sit
+/// centred in the gap and hold itself off both task items the same way. It
+/// stays far smaller than the band, so the strip still reaches over the next
+/// item's top edge rather than floating entirely above it.
+const ROW_GAP: f32 = 7.0;
+
+/// How far the strip's box reaches above the row item's own top edge (the
+/// previous task item's bottom border) — and, by symmetry, how far its lower
+/// half reaches under the next task item's top edge. Centring the band in
+/// the gap between the two items is what makes the clearance match: the
+/// band's middle lands halfway between the two borders instead of on the
+/// lower one.
+const GAP_BAND_RISE: f32 = (GAP_BAND_HEIGHT - ROW_GAP) / 2.0;
 
 /// Reusable virtualized task-list body: the flat item run, the list state
 /// the view owns (it has to outlive the element), and how to render one
@@ -1880,11 +1894,11 @@ impl ScrollableTaskList {
                     }
                 })
                 .size_full()
-                // Half an insert band: a row's strip is centred on the row's
-                // own top edge, so the first row needs this much room above
-                // it for the strip's upper half to fall inside the viewport
-                // the list clips to, instead of being cut off at the top.
-                .pt(px(GAP_BAND_HEIGHT / 2.)),
+                // A row's strip reaches `GAP_BAND_RISE` above the row's own
+                // top edge, so the first row needs that much room above it
+                // for the strip to fall inside the viewport the list clips
+                // to, instead of being cut off at the top.
+                .pt(px(GAP_BAND_RISE)),
             )
             // The list paints no scrollbar of its own; this one drives the
             // same state the wheel does, so dragging and the wheel agree.
@@ -1952,8 +1966,9 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>, cx: &mut App) 
 /// One task-list row: the insert strip that leads it (when it has one),
 /// then the task item itself, `ROW_GAP` below. Because the strip takes no
 /// height in the layout, the item's top edge is where the previous task
-/// item ended — the border the strip is centred on — and the gap is all
-/// the room the two task items have between them.
+/// item ended, and the gap is all the room the two task items have between
+/// them — the strip draws itself in that gap, so it clears both of them by
+/// the same hairline.
 ///
 /// The strip's two layers sit either side of the task item: its hit zone
 /// in front, so whatever the band reaches over inside the item keeps its
@@ -2070,32 +2085,34 @@ fn list_header(
     header
 }
 
-/// The strip's hit zone: a full-width, `GAP_BAND_HEIGHT`-tall band, centred
-/// on the boundary it straddles. Its negative vertical margins cancel its
-/// own height, taking it back out of the layout calc, while the band (and
-/// so the hitbox) keeps its full size: a zero-height strip would be
-/// unhoverable. It draws nothing — the reveal is the strip's drawing — so
-/// it can be painted under the task item it overlaps and still be the
-/// pointer's target for the whole band.
+/// The strip's hit zone: a full-width, `GAP_BAND_HEIGHT`-tall band, reaching
+/// `GAP_BAND_RISE` above the row item's top edge and the rest of the band
+/// below it, so it straddles the gap between the two task items. Its
+/// negative vertical margins cancel its own height, taking it back out of
+/// the layout calc, while the band (and so the hitbox) keeps its full size:
+/// a zero-height strip would be unhoverable. It draws nothing — the reveal
+/// is the strip's drawing — so it can be painted under the task item it
+/// reaches over and still be the pointer's target for the whole band.
 fn gap_band() -> Div {
     div()
         .w_full()
         .h(px(GAP_BAND_HEIGHT))
-        .my(px(-(GAP_BAND_HEIGHT / 2.)))
+        .mt(px(-GAP_BAND_RISE))
+        .mb(px(-(GAP_BAND_HEIGHT - GAP_BAND_RISE)))
 }
 
-/// The strip's drawing: the + and the rule, out of flow and centred on the
-/// boundary the strip straddles. It is painted *after* the task item it
-/// leads, so the band is drawn over that item (and over the one above it,
-/// whose item painted earlier) instead of being hidden under it — the rule
-/// lands on the previous task item's bottom border and the band's lower
-/// half reaches across the small gap and over the next item's top edge. It
-/// carries no id and so no hitbox: the clicks stay with the hit zone, which
-/// a task item the band overlaps outranks.
+/// The strip's drawing: the + and the rule, out of flow and centred in the
+/// gap between the two task items, directly under the hit zone. It is
+/// painted *after* the task item it leads, so the band is drawn over that
+/// item (and over the one above it, whose item painted earlier) instead of
+/// being hidden under it — the rule sits in the gap with the same clearance
+/// above it as below, and the band's lower half reaches over the next
+/// item's top edge. It carries no id and so no hitbox: the clicks stay with
+/// the hit zone, which a task item the band reaches over outranks.
 fn gap_overlay(hovered: bool) -> Div {
     div()
         .absolute()
-        .top(px(-(GAP_BAND_HEIGHT / 2.)))
+        .top(px(-GAP_BAND_RISE))
         .left_0()
         .right_0()
         .h(px(GAP_BAND_HEIGHT))
