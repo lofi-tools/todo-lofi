@@ -352,9 +352,13 @@ impl Render for TaskRow {
         let has_subrow = start_chip(&self.task).is_some()
             || !visible_tags.is_empty()
             || self.blocking.blocks.len() > 1;
+        // A parent with outstanding subtasks reads as delegated: its own
+        // title grays out so the subtask inline is the readable half.
+        let has_pending_subtasks = self.subtasks.iter().any(|task| !task.done);
         // Blocked tasks are grayed out while unworkable; completed tasks
         // gray out the moment they are done (before jumping to the bottom).
         let muted = done || self.task.blocked;
+        let title_muted = done || has_pending_subtasks;
         // …unless the row carries a live (unblocked, undone) dependant in
         // its chain or blocks list: that task is still workable, so the row
         // stays at full opacity and done/blocked titles rely on their
@@ -462,7 +466,7 @@ impl Render for TaskRow {
                         div()
                             .id(("task-title-text", task_id))
                             .text_base()
-                            .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                            .text_color(if title_muted { rgb(0x666666) } else { rgb(0xe5e5e5) })
                             .when(done, |this| this.line_through())
                             .child(self.task.title.clone())
                             .on_click(cx.listener(|this, event, window, cx| {
@@ -583,7 +587,7 @@ impl Render for TaskRow {
                         )
                     })
                     .when_some(self.subtasks.first().cloned(), |this, task| {
-                        this.child(subtask_inline(task))
+                        this.child(subtask_inline(task, &store, &entity))
                     })
             })
                     // The sub-row under the title: start chip, tags and the
@@ -804,18 +808,58 @@ fn subtask_icon(color: u32) -> impl IntoElement {
 }
 
 /// The first subtask's title, rendered inline on the title row right of
-/// the N/M counter, at the counter's own size so the two read as one
-/// unit; the counter carries the subtask glyph, so the title is bare
-/// text. Display-only: a click anywhere on the row selects the main task.
-fn subtask_inline(task: TaskWithMeta) -> impl IntoElement {
+/// the N/M counter, smaller than the main title but larger than the row's
+/// metadata. Its round checkbox mirrors the main one at px(14.) vs px(22.);
+/// clicking it toggles the subtask, while the title itself stays
+/// display-only and selects the main task.
+fn subtask_inline(task: TaskWithMeta, store: &Store, row_entity: &Entity<TaskRow>) -> impl IntoElement {
     let muted = task.done || task.blocked;
     let color = blocked_color(muted);
+    let subtask_id = task.id;
+    let subtask_done = task.done;
+    let subtask_blocked = task.blocked;
+    let store = store.clone();
+    let row_entity = row_entity.clone();
     div()
-        .id(("subtask-title", task.id))
-        .text_size(px(10.))
-        .text_color(rgb(color))
-        .when(task.done, |this| this.line_through())
-        .child(task.title.clone())
+        .id(("subtask-inline", subtask_id))
+        .h_flex()
+        .items_center()
+        .gap_1p5()
+        .child(
+            Checkbox::new(("subtask-check", subtask_id))
+                .with_size(px(14.))
+                .checked(subtask_done)
+                .disabled(subtask_blocked && !subtask_done)
+                .on_click(move |new_done, _window, cx| {
+                    cx.stop_propagation();
+                    let store = store.clone();
+                    let row_entity = row_entity.clone();
+                    let new_done = *new_done;
+                    cx.spawn(async move |cx| {
+                        if let Err(e) =
+                            store.toggle_task_done(subtask_id, new_done, cx).await
+                        {
+                            tracing::error!(?e, "Failed toggle_task_done");
+                        }
+                        row_entity.update(cx, |_row, cx| {
+                            cx.emit(TaskRowEvent::DoneToggled {
+                                task_id: subtask_id,
+                                done: new_done,
+                            });
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }),
+        )
+        .child(
+            div()
+                .id(("subtask-title", subtask_id))
+                .text_size(px(12.))
+                .text_color(rgb(color))
+                .when(task.done, |this| this.line_through())
+                .child(task.title.clone()),
+        )
 }
 
 /// True when a chain contains a live title (neither done nor blocked):
@@ -847,6 +891,10 @@ fn chain_children(node: &ChainNode) -> Vec<AnyElement> {
             .child(
                 div()
                     .text_size(px(10.))
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .bg(rgb(0x2a2a2a))
                     .text_color(rgb(0x666666))
                     .child("then"),
             )

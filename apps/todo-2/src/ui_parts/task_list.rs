@@ -1706,8 +1706,14 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>) -> AnyElement 
             below,
             input,
         } => list_gap(*above, *below, input.clone(), view).into_any_element(),
-        // The row spans the full width, like it did as a flex child.
-        ListEntry::Row { view: row, .. } => div().w_full().child(row.clone()).into_any_element(),
+        // The row spans the full width, like it did as a flex child; the
+        // negative vertical margin cancels the gap strip's own height so
+        // rows pack tight and only the padding shows.
+        ListEntry::Row { view: row, .. } => div()
+            .w_full()
+            .my(px(-4.))
+            .child(row.clone())
+            .into_any_element(),
     }
 }
 
@@ -1723,7 +1729,10 @@ fn list_header(
 ) -> impl IntoElement {
     let mut header = if divided {
         div()
-            .mt_4()
+            // Upcoming breathes more above the divider, less below it so
+            // its rows sit close under the label.
+            .when(top == "Upcoming", |this| this.mt(px(32.)).mb(px(-8.)))
+            .when(top != "Upcoming", |this| this.mt_4())
             .pt_2()
             .border_t_1()
             .border_color(rgb(0x333333))
@@ -1810,6 +1819,7 @@ fn list_gap(
         .id(key.clone())
         .w_full()
         .py_2()
+        .my(px(-4.))
         .opacity(0.0)
         .hover(|style| style.opacity(1.0))
         .child(
