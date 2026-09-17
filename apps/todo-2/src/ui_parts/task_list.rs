@@ -1808,12 +1808,11 @@ fn list_header(
 }
 
 /// One interstitial insert row: a hover-revealed + on a horizontal line,
-/// or the inline insert input when this gap is being filled. The strip
-/// takes no height of its own: the inner content's 24px box is cancelled
-/// by its negative margin and the outer padding by the outer one, so the
-/// "+" floats over the row boundary. The hover reveal lives on the inner
-/// content (which keeps its 24px hitbox) because the zero-height strip
-/// itself is not hoverable.
+/// or the inline insert input when this gap is being filled. The strip is
+/// explicitly zero-height with visibly overflowing content, so adjacent
+/// row headers touch each other: the inner content keeps its 24px hitbox
+/// (centered on the boundary by its negative margin) and carries the
+/// hover reveal, since the zero-height strip itself is not hoverable.
 fn list_gap(
     above: Option<u64>,
     below: Option<u64>,
@@ -1840,8 +1839,7 @@ fn list_gap(
     div()
         .id(key.clone())
         .w_full()
-        .py_2()
-        .my(px(-8.))
+        .h(px(0.))
         .child(
             div()
                 .h_flex()

@@ -408,11 +408,11 @@ impl Render for TaskRow {
                     .gap_3()
                     // The header grows with whatever it holds, so the
                     // sub-row stays inside it instead of bleeding past the
-                    // row's highlight, with a little room around the
-                    // content. Only a row that actually shows a sub-row
-                    // holds the full height; a bare title stays short.
-                    .py_1()
-                    .when(has_subrow, |this| this.min_h(px(44.)))
+                    // row's highlight. Only a row that actually shows a
+                    // sub-row holds the full height; a bare title stays
+                    // short.
+                    .py(px(2.))
+                    .when(has_subrow, |this| this.min_h(px(38.)))
                     .child(
                         Checkbox::new(("checkbox", task_id))
                     .with_size(px(22.))
@@ -445,7 +445,6 @@ impl Render for TaskRow {
                         div()
                             .flex_1()
                             .v_flex()
-                            .gap_0p5()
             .child(if let Some(input) = self.edit_input.clone() {
                 div().id(("task-title-edit", task_id)).pt_1().child(
                     Input::new(&input)
