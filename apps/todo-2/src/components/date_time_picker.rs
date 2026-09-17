@@ -58,6 +58,18 @@ impl DateTimePicker {
         picker
     }
 
+    /// Preselect a datetime (e.g. the task's current deadline) so the top
+    /// row, preset highlight and calendar circle reflect it from the start.
+    pub fn set_picked(&mut self, epoch_secs: u64, cx: &mut Context<Self>) {
+        if let Ok(stamp) = jiff::Timestamp::from_second(epoch_secs as i64) {
+            let zoned = stamp.to_zoned(jiff::tz::TimeZone::system());
+            self.picked_date = Some(zoned.date());
+            self.hour = zoned.hour() as u8;
+            self.minute = zoned.minute() as u8;
+            cx.notify();
+        }
+    }
+
     fn commit_text(&mut self, cx: &mut Context<Self>) {
         let raw = self.input.read(cx).text().to_string();
         match parse_future_datetime(&raw) {
@@ -183,6 +195,35 @@ impl Render for DateTimePicker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut panel = div().v_flex().gap_0();
 
+        // Currently chosen datetime, with an unset cross at the right.
+        // Only rendered once a date is picked.
+        if let Some(date) = self.picked_date {
+            let chosen = format!("{date} {:02}:{:02}", self.hour, self.minute);
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(chosen),
+                    )
+                    .child(mini_button("picker-clear", "×").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.picked_date = None;
+                            this.show_time_picker = false;
+                            this.error = None;
+                            cx.notify();
+                        },
+                    ))),
+            );
+        }
+
         panel = panel.child(
             div()
                 .px_3()
@@ -202,6 +243,17 @@ impl Render for DateTimePicker {
             );
         }
 
+        // The preset whose date the current pick matches, if any, so it
+        // can render highlighted. Only the date part compares: a deadline
+        // set for tomorrow afternoon still belongs to "Tomorrow".
+        let today = today_date();
+        let picked = self.picked_date;
+        let today_active = picked.is_some_and(|date| date == today);
+        let tomorrow_active = picked == today.tomorrow().ok();
+        let weekend_active =
+            picked.is_some_and(|date| date == next_monday_offset_weekday(today, 5, false));
+        let next_week_active =
+            picked.is_some_and(|date| date == next_monday_offset_weekday(today, 0, true));
         panel = panel.child(
             div()
                 .px_3()
@@ -211,31 +263,33 @@ impl Render for DateTimePicker {
                 .h_flex()
                 .flex_wrap()
                 .gap_2()
-                .child(mini_button("quick-today", "Today").on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.quick_today(cx);
-                    },
-                )))
                 .child(
-                    mini_button("quick-tomorrow", "Tomorrow").on_click(cx.listener(
+                    preset_button("quick-today", "Today", today_active).on_click(cx.listener(
                         |this, _, _, cx| {
+                            this.quick_today(cx);
+                        },
+                    )),
+                )
+                .child(
+                    preset_button("quick-tomorrow", "Tomorrow", tomorrow_active).on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.quick_tomorrow(cx);
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .child(
-                    mini_button("quick-weekend", "This weekend").on_click(cx.listener(
-                        |this, _, _, cx| {
+                    preset_button("quick-weekend", "This weekend", weekend_active).on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.quick_weekend(cx);
-                        },
-                    )),
+                        }),
+                    ),
                 )
                 .child(
-                    mini_button("quick-next-week", "Next week").on_click(cx.listener(
-                        |this, _, _, cx| {
+                    preset_button("quick-next-week", "Next week", next_week_active).on_click(
+                        cx.listener(|this, _, _, cx| {
                             this.quick_next_week(cx);
-                        },
-                    )),
+                        }),
+                    ),
                 ),
         );
 
@@ -348,6 +402,18 @@ impl Render for DateTimePicker {
         }
 
         panel
+    }
+}
+
+/// Small transparent button matching the relationships section style.
+/// The active preset (the one the current pick matches) renders with the
+/// same blue border + text as a selected repeat preset.
+fn preset_button(id: &'static str, label: &str, active: bool) -> Button {
+    let button = mini_button(id, label);
+    if active {
+        button.border_color(rgb(0x93c5fd)).text_color(rgb(0x93c5fd))
+    } else {
+        button
     }
 }
 

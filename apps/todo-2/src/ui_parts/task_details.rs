@@ -2414,7 +2414,8 @@ impl TaskDetails {
         if let Some(picker) = self.repeat_picker.clone() {
             div()
                 .absolute()
-                .top(px(60.))
+                .top(relative(1.))
+                .mt(px(4.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -2486,6 +2487,9 @@ impl TaskDetails {
         if self.selected.is_none() {
             return;
         }
+        // Preselect the current deadline so the picker's top row, preset
+        // highlight and calendar circle reflect it from the start.
+        let deadline = self.selected.as_ref().and_then(|task| task.deadline);
         self.until_outside_closed_at = None;
         self.blocker_outside_closed_at = None;
         self.after_outside_closed_at = None;
@@ -2495,6 +2499,9 @@ impl TaskDetails {
         self.close_after_picker();
         self.close_repeat_picker();
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
+        if let Some(deadline) = deadline {
+            picker.update(cx, |picker, cx| picker.set_picked(deadline, cx));
+        }
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
             DateTimePickerEvent::Committed(deadline) => {
                 this.write_deadline(Some(*deadline), cx);
@@ -2503,10 +2510,6 @@ impl TaskDetails {
         self.deadline_picker = Some(picker);
         self._deadline_subscription = Some(subscription);
         cx.notify();
-    }
-
-    fn clear_deadline(&mut self, cx: &mut Context<Self>) {
-        self.write_deadline(None, cx);
     }
 
     /// Optimistic local update, then persist and reload from the DB so both
@@ -2547,13 +2550,14 @@ impl TaskDetails {
     }
 
     /// Floating card below the deadline property, mirroring `until_card`.
+    /// Hug the picker instead of stretching across the pane.
     fn deadline_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(picker) = self.deadline_picker.clone() {
             div()
                 .absolute()
-                .top(px(60.))
+                .top(relative(1.))
+                .mt(px(4.))
                 .left(px(0.))
-                .right(px(0.))
                 .bg(rgb(CARD_BG))
                 .border_1()
                 .border_color(rgb(HAIRLINE))
@@ -2829,7 +2833,8 @@ impl TaskDetails {
         if let Some(picker) = self.until_picker.clone() {
             div()
                 .absolute()
-                .top(px(60.))
+                .top(relative(1.))
+                .mt(px(4.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -2850,7 +2855,8 @@ impl TaskDetails {
         if let Some(picker) = self.blocker_picker.clone() {
             div()
                 .absolute()
-                .top(px(60.))
+                .top(relative(1.))
+                .mt(px(4.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -2874,7 +2880,8 @@ impl TaskDetails {
         if let Some(picker) = self.after_picker.clone() {
             div()
                 .absolute()
-                .top(px(60.))
+                .top(relative(1.))
+                .mt(px(4.))
                 .left(px(0.))
                 .right(px(0.))
                 .bg(rgb(CARD_BG))
@@ -3051,21 +3058,10 @@ impl TaskDetails {
             .repeat_template
             .as_ref()
             .map(|template| repeat_label(template.interval_days, template.time_of_day));
-        let mut row = div().h_flex().items_center().gap_3();
+        let mut row = div().h_flex().flex_wrap().items_center().gap_3();
         row = match deadline {
             Some(deadline) => {
                 let label = format_deadline(deadline);
-                let tooltip = format!("Deadline {label}");
-                let tooltip_for_hover = tooltip.clone();
-                let clear = Button::new("clear-deadline")
-                    .ghost()
-                    .compact()
-                    .cursor_pointer()
-                    .label("×")
-                    .tooltip("Clear deadline")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.clear_deadline(cx);
-                    }));
                 row.child(
                     div()
                         .id(("details-deadline", deadline))
@@ -3076,8 +3072,7 @@ impl TaskDetails {
                         .text_color(rgb(0xe5e5e5))
                         .cursor_pointer()
                         .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(tooltip_for_hover.clone())
-                                .build(window, cx)
+                            gpui_component::tooltip::Tooltip::new("due at").build(window, cx)
                         })
                         .child(
                             svg()
@@ -3086,7 +3081,6 @@ impl TaskDetails {
                                 .text_color(rgb(0xa3a3a3)),
                         )
                         .child(label)
-                        .child(clear)
                         .on_click(cx.listener(|this, _, window, cx| {
                             if this.deadline_picker_open() {
                                 this.close_deadline_picker_and_notify(cx);
@@ -3165,12 +3159,66 @@ impl TaskDetails {
             )),
         };
         let _ = window;
+        // Blocked-by, blocked-until and after-task live on the same
+        // wrapping line as deadline and repeat; their picker cards float
+        // below this row.
+        row = row
+            .child(
+                relation_button("add-blocker", "+ blocked by task").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if this.blocker_picker_open() {
+                            this.close_blocker_picker_and_notify(cx);
+                        } else if this.take_recent_blocker_outside_close() {
+                            // The mousedown before this click already
+                            // closed the picker; don't reopen it.
+                        } else {
+                            this.open_blocker_picker(window, cx);
+                        }
+                    },
+                )),
+            )
+            .child(
+                relation_button("add-blocked-until", "+ blocked until").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if this.until_panel_open() {
+                            this.close_until_panel_and_notify(cx);
+                        } else if this.take_recent_until_outside_close() {
+                            // The mousedown before this click already
+                            // closed the card; don't reopen it.
+                        } else {
+                            this.open_until_panel(window, cx);
+                        }
+                    },
+                )),
+            )
+            .child(
+                relation_button("add-after", "+ after task").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if this.after_picker_open() {
+                            this.close_after_picker_and_notify(cx);
+                        } else if this.take_recent_after_outside_close() {
+                            // The mousedown before this click already
+                            // closed the picker; don't reopen it.
+                        } else {
+                            this.open_after_picker(window, cx);
+                        }
+                    },
+                )),
+            );
+        // Every picker card anchors just below this row and paints
+        // deferred, over the pane content underneath.
         div()
             .relative()
             .child(row)
             .when(self.deadline_picker_open(), |this| {
-                this.child(self.deadline_card(cx))
+                this.child(deferred(self.deadline_card(cx)))
             })
+            .when(self.until_panel_open(), |this| {
+                this.child(deferred(self.until_card(cx)))
+            })
+            .child(deferred(self.blocker_card(cx)))
+            .child(deferred(self.after_card(cx)))
+            .child(deferred(self.repeat_card(cx)))
     }
 
     fn relationships_section(
@@ -3187,21 +3235,10 @@ impl TaskDetails {
                 .child("Linked to"),
         );
 
-        // The lists stack in normal flow below the buttons row, so they sit
-        // under it whatever the pane width. The floating picker cards paint
-        // after both and cover (and take hits before) the content underneath.
+        // The lists stack in normal flow; the "+ subtask" / "+ follow-up"
+        // buttons sit under them. Picker cards float from the
+        // deadline/repeat row above, painted deferred over this content.
         let mut lists = div().v_flex().gap_2();
-
-        if self.adding_subtask
-            && let Some(input) = self.subtask_input.clone()
-        {
-            lists = lists.child(div().ml_2().child(Input::new(&input)));
-        }
-        if self.adding_follow_up
-            && let Some(input) = self.follow_up_input.clone()
-        {
-            lists = lists.child(div().ml_2().child(Input::new(&input)));
-        }
 
         if self.computed_blocked() {
             lists = lists.child(
@@ -3340,7 +3377,14 @@ impl TaskDetails {
             .filter(|subtask| !storage::prelude::is_step(subtask))
             .cloned()
             .collect();
-        if !plain_subtasks.is_empty() {
+        if plain_subtasks.is_empty() {
+            lists = lists.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("No subtasks"),
+            );
+        } else {
             lists = lists.child(
                 div()
                     .text_xs()
@@ -3424,7 +3468,7 @@ impl TaskDetails {
                 div()
                     .text_xs()
                     .text_color(rgb(0xa3a3a3))
-                    .child("Following tasks"),
+                    .child("then"),
             );
             lists = lists.child(div().v_flex().gap_1().ml_2().children(after_this_rows));
         }
@@ -3438,120 +3482,47 @@ impl TaskDetails {
             );
         }
 
+        // Only "+ subtask" and "+ follow-up task" remain here, under the
+        // lists: blocked-by, blocked-until and after-task moved up to the
+        // deadline/repeat row.
+        let mut actions = div().v_flex().gap_2();
+        if self.adding_subtask
+            && let Some(input) = self.subtask_input.clone()
+        {
+            actions = actions.child(div().ml_2().child(Input::new(&input)));
+        }
+        if self.adding_follow_up
+            && let Some(input) = self.follow_up_input.clone()
+        {
+            actions = actions.child(div().ml_2().child(Input::new(&input)));
+        }
+        actions = actions.child(
+            div()
+                .h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(relation_button("add-subtask", "+ subtask").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.begin_subtask(window, cx);
+                    }),
+                ))
+                .child(
+                    relation_button("add-follow-up", "+ follow-up task").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.begin_follow_up(window, cx);
+                        }),
+                    ),
+                ),
+        );
+
         section =
             section.child(
                 div()
-                    .relative()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        relation_button("add-blocker", "+ blocked by task")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.blocker_picker_open() {
-                                                    this.close_blocker_picker_and_notify(cx);
-                                                } else if this.take_recent_blocker_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the picker; don't reopen it.
-                                                } else {
-                                                    this.open_blocker_picker(window, cx);
-                                                }
-                                            })),
-                                    )
-                                    .child(
-                                        relation_button("add-blocked-until", "+ blocked until")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.until_panel_open() {
-                                                    this.close_until_panel_and_notify(cx);
-                                                } else if this.take_recent_until_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the card; don't reopen it.
-                                                } else {
-                                                    this.open_until_panel(window, cx);
-                                                }
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(relation_button("add-after", "+ after task").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            if this.after_picker_open() {
-                                                this.close_after_picker_and_notify(cx);
-                                            } else if this.take_recent_after_outside_close() {
-                                                // The mousedown before this click already
-                                                // closed the picker; don't reopen it.
-                                            } else {
-                                                this.open_after_picker(window, cx);
-                                            }
-                                        }),
-                                    ))
-                                    .child(relation_button("add-subtask", "+ subtask").on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.begin_subtask(window, cx);
-                                        }),
-                                    ))
-                                    .child(
-                                        relation_button("add-follow-up", "+ follow-up task")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.begin_follow_up(window, cx);
-                                            })),
-                                    )
-                                    .child(
-                                        // "repeat" button: an inline SVG icon left of the
-                                        // label, tinted the same color as the text.
-                                        div()
-                                            .id("repeat-task")
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .h_6()
-                                            .px_1p5()
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(rgb(HAIRLINE))
-                                            .text_sm()
-                                            .text_color(rgb(0xa3a3a3))
-                                            .cursor_pointer()
-                                            .hover(|this| this.bg(rgb(0x2a2a2a)))
-                                            .child(
-                                                svg()
-                                                    .data(REFRESH_ICON_SVG)
-                                                    .size(px(14.))
-                                                    .text_color(rgb(0xa3a3a3)),
-                                            )
-                                            .child("repeat")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                if this.repeat_picker_open() {
-                                                    this.close_repeat_picker_and_notify(cx);
-                                                } else if this.take_recent_repeat_outside_close() {
-                                                    // The mousedown before this click already
-                                                    // closed the card; don't reopen it.
-                                                } else {
-                                                    this.open_repeat_picker(window, cx);
-                                                }
-                                            })),
-                                    ),
-                            ),
-                    )
+                    .v_flex()
+                    .gap_2()
                     .child(lists)
-                    .when(self.until_panel_open(), |this| {
-                        this.child(self.until_card(cx))
-                    })
-                    .child(self.blocker_card(cx))
-                    .child(self.after_card(cx))
-                    .child(self.repeat_card(cx)),
+                    .child(actions),
             );
 
         section
@@ -3644,8 +3615,10 @@ fn format_deadline(deadline: u64) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0) as i64;
     let dl_secs = deadline as i64;
-    let time = jiff::Timestamp::from_second(dl_secs)
-        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()))
+    let zone = jiff::tz::TimeZone::system();
+    let dl_zoned = jiff::Timestamp::from_second(dl_secs).map(|t| t.to_zoned(zone.clone()));
+    let time = dl_zoned
+        .as_ref()
         .map(|t| t.strftime("%-I:%M %p").to_string())
         .unwrap_or_default();
     if dl_secs <= now_secs {
@@ -3655,7 +3628,18 @@ fn format_deadline(deadline: u64) -> String {
             format!("overdue ({time})")
         }
     } else {
-        let days = (dl_secs - now_secs) as u64 / 86400;
+        // Calendar days, not 24h periods: Thursday evening to Saturday is
+        // "in 2 days", never "tomorrow".
+        let days = dl_zoned
+            .ok()
+            .and_then(|dl| {
+                jiff::Timestamp::from_second(now_secs)
+                    .ok()
+                    .map(|now| now.to_zoned(zone).date())
+                    .map(|today| dl.date().since(today).map(|span| span.get_days()).unwrap_or(0))
+            })
+            .unwrap_or(0)
+            .max(0);
         if days == 0 {
             format!("today, {time}")
         } else if days == 1 {

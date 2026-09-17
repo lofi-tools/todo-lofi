@@ -98,20 +98,31 @@ pub fn month_block(
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
             .text_xs()
             .text_color(if is_past {
                 rgb(0x555555)
             } else {
                 rgb(0xe5e5e5)
-            })
-            .child(day.to_string());
+            });
         if is_selected {
-            cell = cell.bg(rgb(0x3a3a3a));
-        } else if is_today {
-            cell = cell.border_1().border_color(rgb(HAIRLINE));
-        } else if !is_past {
-            cell = cell.hover(|s| s.bg(rgb(0x2a2a2a)));
+            // Background circle behind the chosen date.
+            cell = cell.child(
+                div()
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(0x3a3a3a))
+                    .child(day.to_string()),
+            );
+        } else {
+            cell = cell.rounded_md().child(day.to_string());
+            if is_today {
+                cell = cell.border_1().border_color(rgb(HAIRLINE));
+            } else if !is_past {
+                cell = cell.hover(|s| s.bg(rgb(0x2a2a2a)));
+            }
         }
         if !is_past {
             if let Some(date) = date {
