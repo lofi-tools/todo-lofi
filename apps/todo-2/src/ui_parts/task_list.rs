@@ -59,11 +59,44 @@ fn row_blocking(spec: &RowSpec) -> RowBlocking {
     }
 }
 
-/// An inline insert input open in an interstitial gap: the input plus
-/// the neighbouring row task ids that position the new task.
+/// Where an open inline insert input draws itself.
+enum InsertAnchor {
+    /// The gap it was opened in, by its neighbours' task ids (`None` at the
+    /// list's own edges).
+    Gap {
+        above: Option<u64>,
+        below: Option<u64>,
+    },
+    /// The gap that leads the row below this task. A task created from the
+    /// input takes the input with it: the input then draws in whatever gap
+    /// leads the row under that task — after a re-sort, a reload, or a new
+    /// section — rather than in a pair of ids the reload may no longer have
+    /// kept next to each other.
+    BelowTask(u64),
+}
+
+impl InsertAnchor {
+    /// Whether an input anchored here draws in the gap between these two
+    /// rows.
+    fn is_gap(&self, above: Option<u64>, below: Option<u64>) -> bool {
+        match self {
+            InsertAnchor::Gap { above: a, below: b } => *a == above && *b == below,
+            InsertAnchor::BelowTask(task_id) => above == Some(*task_id),
+        }
+    }
+}
+
+/// An inline insert input open in an interstitial gap: the input, where it
+/// draws, and whether it is waiting for a task it has just created.
 struct PendingInsert {
-    above_id: Option<u64>,
-    below_id: Option<u64>,
+    anchor: InsertAnchor,
+    /// Set by `commit_insert` while the task its Enter created is still
+    /// being saved. The input keeps drawing where it is — the gap that task
+    /// is about to land in — and the reload reporting the task re-anchors it
+    /// below that task (`continue_insert_after`). A reload with this clear
+    /// moved the rows around a gap position that no longer exists, which is
+    /// when the input closes.
+    awaiting_created_task: bool,
     input: Entity<InputState>,
     _subscription: Subscription,
 }
@@ -765,8 +798,9 @@ impl TaskListView {
     }
 
     /// Open an inline input in the gap between two rows (`None` at the
-    /// list edges). Enter commits it via `commit_insert`; Esc cancels it
-    /// via `cancel_editing`.
+    /// list edges). Enter creates the task via `commit_insert` and hands the
+    /// input on to the gap below it, so a run of tasks can be typed in one
+    /// go; Esc cancels it via `cancel_editing`.
     pub fn begin_insert(
         &mut self,
         above_id: Option<u64>,
@@ -779,14 +813,19 @@ impl TaskListView {
             state.set_placeholder("New task", window, cx);
             state
         });
-        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+        // With the window, so committing can clear the field for the next
+        // title without waiting for a render pass to do it.
+        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| {
             if matches!(event, gpui_component::input::InputEvent::PressEnter { .. }) {
-                this.commit_insert(cx);
+                this.commit_insert(window, cx);
             }
         });
         self.inserting = Some(PendingInsert {
-            above_id,
-            below_id,
+            anchor: InsertAnchor::Gap {
+                above: above_id,
+                below: below_id,
+            },
+            awaiting_created_task: false,
             input: input.clone(),
             _subscription: subscription,
         });
@@ -798,24 +837,70 @@ impl TaskListView {
 
     /// Commit the inline gap input: insert the titled task with factors
     /// placing it between the gap's neighbours, like `insert_task`.
-    fn commit_insert(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.inserting.take() else {
+    ///
+    /// The input itself stays open — focused, with the field cleared — so
+    /// the next title can be typed straight in: the reload that reports the
+    /// new task moves it into the gap below that task, and the run goes on
+    /// from there. An empty field closes the input, as it always has.
+    fn commit_insert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.inserting.as_ref() else {
             return;
         };
-        let title = pending.input.read(cx).text().to_string();
+        let input = pending.input.clone();
+        let title = input.read(cx).text().to_string();
         let title = title.trim().to_string();
-        cx.notify();
         if title.is_empty() {
+            self.inserting = None;
+            cx.notify();
             return;
         }
+        // The gap the input is drawing in now, which is where the task
+        // belongs — the anchor may be a task rather than a pair of ids, and
+        // the list is the one that knows what that comes to today.
+        let (above, below) = self.inserting_gap().unwrap_or_default();
         let spec = |id: Option<u64>| {
             id.and_then(|id| self.row_specs.iter().find(|spec| spec.task.id == id))
         };
         let (importance, urgency) = storage::factors_between(
-            spec(pending.above_id).map(|spec| &spec.task.task),
-            spec(pending.below_id).map(|spec| &spec.task.task),
+            spec(above).map(|spec| &spec.task.task),
+            spec(below).map(|spec| &spec.task.task),
         );
+        if let Some(pending) = self.inserting.as_mut() {
+            pending.awaiting_created_task = true;
+        }
+        // Cleared now rather than when the task lands, so the field is ready
+        // for the next title while the save is still in flight.
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
         self.insert_task_with_factors(title, importance, urgency, cx);
+    }
+
+    /// The gap the open input is drawing in, read back from the list items:
+    /// the neighbours a task created from it goes between. `None` when the
+    /// input is drawing nowhere.
+    fn inserting_gap(&self) -> Option<(Option<u64>, Option<u64>)> {
+        let input = &self.inserting.as_ref()?.input;
+        self.entries
+            .iter()
+            .find(|entry| leading_input(entry) == Some(input))
+            .and_then(leading_gap)
+    }
+
+    /// Hand the open inline input on to the task it has just created: the
+    /// input moves to the gap below that task's row — still focused, field
+    /// still empty — so Enter after Enter keeps adding tasks down the list.
+    /// Called by the reload that reports the new task; a no-op unless this
+    /// input is the one that asked for it.
+    fn continue_insert_after(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let Some(pending) = self.inserting.as_mut() else {
+            return;
+        };
+        if !pending.awaiting_created_task {
+            return;
+        }
+        pending.anchor = InsertAnchor::BelowTask(task_id);
+        pending.awaiting_created_task = false;
+        cx.notify();
     }
 
     fn insert_task_with_factors(
@@ -843,6 +928,16 @@ impl TaskListView {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!("Failed to insert task: {e}");
+                    // The inline input is still open on an empty field: stop
+                    // it waiting for a task that is not coming, so the next
+                    // reload closes it like any other open gap.
+                    this.update(cx, |this, cx| {
+                        if let Some(pending) = this.inserting.as_mut() {
+                            pending.awaiting_created_task = false;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -866,6 +961,9 @@ impl TaskListView {
                     cx,
                 );
                 this.load_sections(cx);
+                // Keep a quick-add run going: the input that created this
+                // task moves down to the gap below it.
+                this.continue_insert_after(new_task_id, cx);
                 if let Some(task) = created {
                     this.select(task, true, cx);
                 }
@@ -887,8 +985,13 @@ impl TaskListView {
         cx: &mut Context<Self>,
     ) {
         self.editing = false;
-        // A reload reorders rows, invalidating any open gap position.
-        self.inserting = None;
+        // A reload reorders rows, invalidating any open gap position — bar
+        // the input waiting for the task its own Enter created, which
+        // `continue_insert_after` re-anchors below that task.
+        self.inserting = self
+            .inserting
+            .take()
+            .filter(|pending| pending.awaiting_created_task);
         self.blockers_map = blockers_map;
         self.blocking_map = blocking_map;
         self.subtasks_map = subtasks;
@@ -1470,6 +1573,53 @@ mod tests {
         assert_eq!(unchanged_prefix(&[], &old), 0);
     }
 
+    /// Which gap draws the open insert input. It starts on the gap it was
+    /// opened in; once Enter has created a task from it, it follows that
+    /// task — the gap under the new row, whatever the reload paired with it
+    /// — and an anchor the list has no gap for draws nowhere, which is what
+    /// `list_body` closes.
+    #[test]
+    fn test_open_input_draws_in_the_gap_it_anchors_to() {
+        let opened = InsertAnchor::Gap {
+            above: Some(1),
+            below: Some(2),
+        };
+        assert!(opened.is_gap(Some(1), Some(2)));
+        assert!(!opened.is_gap(Some(2), Some(3)));
+
+        // Task 2 came out of the input: it now leads whichever gap follows
+        // that row, whether the reload paired it with the next row or with
+        // the strip that closes the section or the list.
+        let following = InsertAnchor::BelowTask(2);
+        assert!(following.is_gap(Some(2), Some(3)));
+        assert!(following.is_gap(Some(2), Some(9)));
+        assert!(following.is_gap(Some(2), None));
+        assert!(!following.is_gap(Some(1), Some(2)));
+        assert!(!following.is_gap(None, Some(2)));
+
+        // The items the render pass matches against: a row's own leading
+        // strip, then the strip that closes the list.
+        let entries = vec![
+            header("Pack"),
+            gap(1, 2),
+            ListEntry::Gap {
+                above: Some(2),
+                below: None,
+                input: None,
+            },
+            ListEntry::BottomPad,
+        ];
+        assert!(has_gap_for(&entries, &opened));
+        assert!(has_gap_for(&entries, &following));
+        // A task whose row leads no strip — one inside Upcoming — leaves the
+        // input nothing to draw in.
+        assert!(!has_gap_for(&entries, &InsertAnchor::BelowTask(7)));
+        assert!(!has_gap_for(
+            &[header("Upcoming"), ListEntry::BottomPad],
+            &following
+        ));
+    }
+
     #[test]
     fn test_sectioned_order_groups() {
         let section_of: std::collections::HashMap<usize, String> =
@@ -1913,6 +2063,37 @@ impl ScrollableTaskList {
     }
 }
 
+/// The gap a list item leads, when it leads one: a row's own leading strip,
+/// or a strip that leads no row (it closes a section or the list).
+fn leading_gap(entry: &ListEntry) -> Option<(Option<u64>, Option<u64>)> {
+    match entry {
+        ListEntry::Row { gap: Some(gap), .. } => Some((gap.above, gap.below)),
+        ListEntry::Gap { above, below, .. } => Some((*above, *below)),
+        _ => None,
+    }
+}
+
+/// The insert input a list item draws, when it draws one: the open input sits
+/// in the gap it is anchored to, and only that one item carries it.
+fn leading_input(entry: &ListEntry) -> Option<&Entity<InputState>> {
+    match entry {
+        ListEntry::Row { gap: Some(gap), .. } => gap.input.as_ref(),
+        ListEntry::Gap { input, .. } => input.as_ref(),
+        _ => None,
+    }
+}
+
+/// Whether the list draws an input anchored here in one of its items. The
+/// render pass matches the anchor against every item's leading gap, so this
+/// is that same match, asked ahead of rendering to catch an input with no
+/// gap left to draw in.
+fn has_gap_for(entries: &[ListEntry], anchor: &InsertAnchor) -> bool {
+    entries
+        .iter()
+        .filter_map(leading_gap)
+        .any(|(above, below)| anchor.is_gap(above, below))
+}
+
 /// How many items at the front of the list `old` run are identical to the
 /// front of the new one. Everything from there on has to be measured again;
 /// before it, cached heights (and the scroll anchor's item index) hold.
@@ -2311,6 +2492,19 @@ impl TaskListView {
         // rows whose own content changed height, whose item indices are
         // fresh after that sync.
         self.sync_list_state(self.list_entries());
+        // An open input draws in the gap it is anchored to. When the list
+        // has no such gap — the row it follows leads no strip of its own,
+        // which is what a task that landed in Upcoming does — it would stay
+        // open on nothing: invisible, but still taking what is typed. Close
+        // it instead.
+        let homeless = self
+            .inserting
+            .as_ref()
+            .is_some_and(|pending| !has_gap_for(&self.entries, &pending.anchor));
+        if homeless {
+            self.inserting = None;
+            cx.notify();
+        }
         self.flush_row_measurements();
         // The row data (tasks + dependents + subtasks) is the source of
         // truth for emptiness; the views mirror it one-to-one.
@@ -2607,12 +2801,12 @@ impl TaskListView {
         }
     }
 
-    /// The inline insert input open in this gap, if this is the gap it was
-    /// opened in.
+    /// The inline insert input open in this gap, if the open input is
+    /// anchored to it.
     fn inserting_input(&self, above: Option<u64>, below: Option<u64>) -> Option<Entity<InputState>> {
         self.inserting
             .as_ref()
-            .filter(|pending| pending.above_id == above && pending.below_id == below)
+            .filter(|pending| pending.anchor.is_gap(above, below))
             .map(|pending| pending.input.clone())
     }
 }
