@@ -670,6 +670,8 @@ pub struct TaskDetails {
     /// one-way comment list (spec §5.2).
     issue: Option<storage::TaskIssue>,
     _issue_fetch: Option<gpui::Task<()>>,
+    /// The issue's imported comments are folded open under the GitHub row.
+    github_comments_expanded: bool,
 }
 
 struct TimeEditInputs {
@@ -773,6 +775,7 @@ impl TaskDetails {
             coding_subtask_spec_expanded: None,
             issue: None,
             _issue_fetch: None,
+            github_comments_expanded: false,
         }
     }
 
@@ -812,6 +815,7 @@ impl TaskDetails {
         self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
         self.coding_subtask_spec_expanded = None;
+        self.github_comments_expanded = false;
         self.issue = None;
         let issue_fetch = self.store.github_issue_for_task(task_id, cx);
         self._issue_fetch = Some(cx.spawn(async move |this, cx| match issue_fetch.await {
@@ -3354,6 +3358,38 @@ fn field(label: &str, value: String) -> impl IntoElement {
         .child(div().text_sm().text_color(rgb(0xe5e5e5)).child(value))
 }
 
+/// A coarse `3h ago` age, the way GitHub's issue header reads. The exact
+/// minute is never what the row is for, so the unit widens with the span.
+fn relative_age(now_secs: i64, at_secs: i64) -> String {
+    let seconds = (now_secs - at_secs).max(0);
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", seconds / 60),
+        3_600..=86_399 => format!("{}h ago", seconds / 3_600),
+        86_400..=604_799 => format!("{}d ago", seconds / 86_400),
+        604_800..=2_592_000 => format!("{}w ago", seconds / 604_800),
+        2_592_001..=31_536_000 => format!("{}mo ago", seconds / 2_592_000),
+        _ => format!("{}y ago", seconds / 31_536_000),
+    }
+}
+
+/// GitHub's header shows the issue's latest transition, not both dates: a
+/// closed issue reads `closed 3h ago`, an open one `opened 3h ago`. `None`
+/// when the payload carried neither date.
+fn issue_transition(
+    state: &str,
+    opened_at: Option<i64>,
+    closed_at: Option<i64>,
+    now_secs: i64,
+) -> Option<String> {
+    if state == "closed"
+        && let Some(closed_at) = closed_at
+    {
+        return Some(format!("closed {}", relative_age(now_secs, closed_at)));
+    }
+    opened_at.map(|opened_at| format!("opened {}", relative_age(now_secs, opened_at)))
+}
+
 fn format_deadline(deadline: u64) -> String {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4914,23 +4950,49 @@ impl TaskDetails {
     /// metadata GitHub owns (read-only here), and the one-way imported
     /// comments (spec §5.8). `None` for purely local tasks, so a task with no
     /// issue pays nothing for the section.
-    fn github_section(&self, task: &TaskWithMeta) -> Option<AnyElement> {
+    fn github_row(&self, task: &TaskWithMeta, cx: &mut Context<Self>) -> Option<AnyElement> {
         let issue = self.issue.as_ref()?;
-        let mut card = div().v_flex().gap_2();
-
-        let mut heading = div()
+        // One row for everything GitHub owns: the reference, the state and
+        // metadata, the link out, and the comment count. It sits directly
+        // under the title, so the issue context is the first thing read rather
+        // than a card further down the panel (§5.2).
+        let comment_count = task
+            .comments
+            .as_ref()
+            .map(|comments| comments.0.len())
+            .unwrap_or(0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let transition = issue_transition(
+            &issue.state.remote.state,
+            issue.state.created_at,
+            issue.state.closed_at,
+            now_secs,
+        );
+        let mut row = div()
+            .id("github-row")
             .h_flex()
             .items_center()
+            .flex_wrap()
             .gap_2()
             .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(0x737373))
-                    .child("GitHub"),
+                // The mark stands in for the word, in the same muted gray, so
+                // the row starts on the reference itself.
+                gpui_component::Icon::new(gpui_component_assets::IconName::Github)
+                    .with_size(gpui_component::Size::XSmall)
+                    .text_color(rgb(0x737373)),
             )
             .child(
-                // The repo name is the recognizable half of `owner/repo`, so it
-                // stands alone with the issue number dimmed beside it.
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa3a3a3))
+                    .child(issue.issue.repo.clone()),
+            )
+            .child(
+                // GitHub's own header, so the row reads the way the issue does:
+                // `#3 · nmrshll opened 3h ago`.
                 div()
                     .h_flex()
                     .items_center()
@@ -4938,21 +5000,82 @@ impl TaskDetails {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(rgb(0xa3a3a3))
-                            .child(issue.issue.repo.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
                             .text_color(rgb(0x737373))
                             .child(format!("#{}", issue.issue.number)),
-                    ),
+                    )
+                    .when_some(issue.state.author.clone(), |this, author| {
+                        this.child(div().text_sm().text_color(rgb(0x4f4f4f)).child("·"))
+                            .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(author))
+                    })
+                    .when_some(transition, |this, transition| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x737373))
+                                .child(transition),
+                        )
+                    }),
             );
+        if issue.state.tombstoned {
+            row = row.child(metadata_chip(
+                issue
+                    .state
+                    .tombstone_reason
+                    .clone()
+                    .unwrap_or_else(|| "Unavailable on GitHub".to_string()),
+                0x737373,
+            ));
+        } else {
+            row = row.child(metadata_chip(
+                if issue.state.remote.state == "closed" {
+                    "closed".to_string()
+                } else {
+                    "open".to_string()
+                },
+                0x737373,
+            ));
+        }
+        for assignee in &issue.state.assignees {
+            row = row.child(metadata_chip(format!("@{assignee}"), 0xa3a3a3));
+        }
+        if let Some(milestone) = &issue.state.milestone {
+            row = row.child(metadata_chip(format!("milestone {milestone}"), 0xa3a3a3));
+        }
+        if comment_count > 0 {
+            // The comments themselves are one-way imports (§5.2); the count
+            // opens them under the row instead of expanding the panel with
+            // every reply by default.
+            row = row.child(
+                div()
+                    .id("github-comments-toggle")
+                    .text_size(px(10.))
+                    .px(px(5.))
+                    .py(px(1.))
+                    .rounded(px(3.))
+                    .bg(rgb(0x2a2a2a))
+                    .text_color(rgb(0xa3a3a3))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(0x333333)))
+                    .child(format!(
+                        "{} {comment_count} comment{}",
+                        if self.github_comments_expanded {
+                            "▾"
+                        } else {
+                            "▸"
+                        },
+                        if comment_count == 1 { "" } else { "s" }
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.github_comments_expanded = !this.github_comments_expanded;
+                        cx.notify();
+                    })),
+            );
+        }
         if let Some(url) = issue.state.url.clone() {
             // A bare link icon: the issue number beside it already names what
             // opens, so a text label would only repeat the target. Its gray
             // matches the repo name, so the row reads as one reference.
-            heading = heading.child(
+            row = row.child(
                 Button::new("github-open")
                     .ghost()
                     .compact()
@@ -4964,79 +5087,67 @@ impl TaskDetails {
                     }),
             );
         }
-        card = card.child(heading);
+        Some(row.into_any_element())
+    }
 
-        let mut meta = div().h_flex().flex_wrap().items_center().gap_1();
-        if issue.state.tombstoned {
-            meta = meta.child(metadata_chip(
-                issue
-                    .state
-                    .tombstone_reason
-                    .clone()
-                    .unwrap_or_else(|| "Unavailable on GitHub".to_string()),
-                0x737373,
-            ));
-        } else {
-            meta = meta.child(metadata_chip(
-                if issue.state.remote.state == "closed" {
-                    "closed".to_string()
-                } else {
-                    "open".to_string()
-                },
-                0x737373,
-            ));
+    /// The imported comments, shown directly under the GitHub row once its
+    /// count is expanded. Bounded and scrollable, so a long thread cannot push
+    /// the rest of the panel out of reach.
+    fn github_comments(&self, task: &TaskWithMeta) -> Option<AnyElement> {
+        if !self.github_comments_expanded {
+            return None;
         }
-        if let Some(author) = &issue.state.author {
-            meta = meta.child(metadata_chip(format!("by {author}"), 0x737373));
-        }
-        for assignee in &issue.state.assignees {
-            meta = meta.child(metadata_chip(format!("@{assignee}"), 0xa3a3a3));
-        }
-        if let Some(milestone) = &issue.state.milestone {
-            meta = meta.child(metadata_chip(format!("milestone {milestone}"), 0xa3a3a3));
-        }
-        card = card.child(meta);
-
-        // One-way: comments are imported, never written back (§5.2).
         let comments = task
             .comments
             .as_ref()
             .map(|comments| comments.0.clone())
             .unwrap_or_default();
-        if !comments.is_empty() {
-            let mut list = div().v_flex().gap_1();
-            for comment in comments.iter().take(20) {
-                list = list.child(
-                    div()
-                        .v_flex()
-                        .gap_0p5()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(HAIRLINE))
-                        .px_2()
-                        .py_1()
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(0x737373))
-                                .child(
-                                    comment
-                                        .author
-                                        .clone()
-                                        .unwrap_or_else(|| "someone".to_string()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xa3a3a3))
-                                .child(comment.text.clone()),
-                        ),
-                );
-            }
-            card = card.child(list);
+        if comments.is_empty() {
+            return None;
         }
-        Some(card.into_any_element())
+        let rows: Vec<AnyElement> = comments
+            .iter()
+            .take(20)
+            .map(|comment| {
+                div()
+                    .v_flex()
+                    .gap_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .px_2()
+                    .py_1()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(0x737373))
+                            .child(
+                                comment
+                                    .author
+                                    .clone()
+                                    .unwrap_or_else(|| "someone".to_string()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(comment.text.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .id("github-comments")
+                .v_flex()
+                .gap_1()
+                .ml_2()
+                .max_h(px(180.))
+                .overflow_y_scrollbar()
+                .children(rows)
+                .into_any_element(),
+        )
     }
 }
 
@@ -5352,6 +5463,14 @@ impl Render for TaskDetails {
                         ),
                 );
                 details = details.child(header);
+                // The GitHub issue's details sit on one row directly under the
+                // title, with the comments it carries folding open beneath it.
+                if let Some(row) = self.github_row(&task, cx) {
+                    details = details.child(row);
+                }
+                if let Some(comments) = self.github_comments(&task) {
+                    details = details.child(comments);
+                }
                 if let Some(parent) = self.parent.clone() {
                     let parent_id = parent.id;
                     details = details.child(
@@ -5451,9 +5570,6 @@ impl Render for TaskDetails {
                     && !branch.is_empty()
                 {
                     details = details.child(field("Branch", branch.clone()));
-                }
-                if let Some(section) = self.github_section(&task) {
-                    details = details.child(section);
                 }
                 // A real subtask's own Spec block: its coverage state and the
                 // fix actions (decisions #6/#20/#22).
@@ -5852,6 +5968,49 @@ mod coding_tests {
         // The covered one contributes its title only: its detail is the
         // umbrella's job.
         assert!(prompt.contains("- Wire the callback URL (subtask #42)"), "{prompt}");
+    }
+
+    /// The GitHub row's age reads the way GitHub's header does, and widens its
+    /// unit as the span grows.
+    /// The transition line follows GitHub: the latest of the two dates, and
+    /// the close date only once the issue is actually closed.
+    #[test]
+    fn the_issue_transition_prefers_the_close_date() {
+        let now = 1_800_000_000i64;
+        let hours_ago = |hours: i64| now - hours * 3_600;
+        assert_eq!(
+            issue_transition("open", Some(hours_ago(3)), None, now),
+            Some("opened 3h ago".to_string())
+        );
+        assert_eq!(
+            issue_transition("closed", Some(hours_ago(72)), Some(hours_ago(2)), now),
+            Some("closed 2h ago".to_string())
+        );
+        // Closed without a close date (an older payload) falls back to the
+        // open date rather than showing nothing.
+        assert_eq!(
+            issue_transition("closed", Some(hours_ago(72)), None, now),
+            Some("opened 3d ago".to_string())
+        );
+        // Neither date known: no transition line at all.
+        assert_eq!(issue_transition("open", None, None, now), None);
+    }
+
+    #[test]
+    fn relative_ages_widen_with_the_span() {
+        let now = 1_800_000_000i64;
+        let at = |seconds_ago: i64| now - seconds_ago;
+        assert_eq!(relative_age(now, at(0)), "just now");
+        assert_eq!(relative_age(now, at(59)), "just now");
+        assert_eq!(relative_age(now, at(3 * 60)), "3m ago");
+        assert_eq!(relative_age(now, at(3 * 3_600)), "3h ago");
+        assert_eq!(relative_age(now, at(3 * 86_400)), "3d ago");
+        assert_eq!(relative_age(now, at(3 * 604_800)), "3w ago");
+        assert_eq!(relative_age(now, at(100 * 86_400)), "3mo ago");
+        assert_eq!(relative_age(now, at(800 * 86_400)), "2y ago");
+        // A clock skew that puts the issue in the future never reads as
+        // negative.
+        assert_eq!(relative_age(now, at(-60)), "just now");
     }
 
     #[test]

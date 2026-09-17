@@ -85,6 +85,16 @@ pub struct IssueFieldState {
     pub milestone: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
+    /// When the issue was opened, as epoch seconds, so the details pane can
+    /// read `opened 3h ago` the way GitHub's header does. Mirrored for display
+    /// only, like `author`: the app does not own it on GitHub.
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    /// When the issue was closed, as epoch seconds. GitHub's header shows the
+    /// latest transition (`closed 3h ago`), which is this date when the issue
+    /// is closed.
+    #[serde(default)]
+    pub closed_at: Option<i64>,
     #[serde(default)]
     pub url: Option<String>,
     /// The issue's own database id, recorded whenever a payload carries it so
@@ -141,6 +151,12 @@ pub struct RemoteIssue {
     /// being paired with the parent's repo (§5.9).
     pub repository: Option<String>,
     pub updated_at: Option<jiff::Timestamp>,
+    /// When the issue was opened, so the details pane can read the panel the
+    /// way GitHub's header does (`#3 · nmrshll opened 3h ago`).
+    pub created_at: Option<jiff::Timestamp>,
+    /// When the issue was closed; `None` while it is open and whenever the
+    /// payload omits it.
+    pub closed_at: Option<jiff::Timestamp>,
     /// How many sub-issues the issue has, from the listing's summary: the
     /// trigger for reading a parent's children (§5.5).
     pub sub_issue_total: u64,
@@ -1063,6 +1079,14 @@ pub fn remote_issue_from_json(value: &serde_json::Value) -> Option<RemoteIssue> 
             .map(str::to_owned),
         updated_at: value
             .get("updated_at")
+            .and_then(|at| at.as_str())
+            .and_then(|at| at.parse().ok()),
+        created_at: value
+            .get("created_at")
+            .and_then(|at| at.as_str())
+            .and_then(|at| at.parse().ok()),
+        closed_at: value
+            .get("closed_at")
             .and_then(|at| at.as_str())
             .and_then(|at| at.parse().ok()),
         sub_issue_total: value
@@ -2169,6 +2193,8 @@ fn issue_state_for(issue: &RemoteIssue) -> IssueFieldState {
         assignees: issue.assignees.clone(),
         milestone: issue.milestone.clone(),
         author: issue.author.clone(),
+        created_at: issue.created_at.map(|at| at.as_second()),
+        closed_at: issue.closed_at.map(|at| at.as_second()),
         url: issue.url.clone(),
         issue_id: (issue.id != 0).then_some(issue.id),
         ..Default::default()
@@ -3239,6 +3265,14 @@ impl TodoStore {
         state.assignees = issue.assignees.clone();
         state.milestone = issue.milestone.clone();
         state.author = issue.author.clone();
+        // A payload that omits the date (a partial patch response) leaves the
+        // known one in place rather than blanking the row.
+        if let Some(at) = issue.created_at {
+            state.created_at = Some(at.as_second());
+        }
+        // A reopened issue has no close date, so a `null` here clears the old
+        // one: the row must not keep saying `closed …` for an open issue.
+        state.closed_at = issue.closed_at.map(|at| at.as_second());
         state.url = issue.url.clone();
         // The relationship is GitHub's, so it is never touched here; only the
         // id is refreshed from the payload.
@@ -5113,6 +5147,8 @@ mod tests {
             "user": { "login": "author" },
             "html_url": "https://github.com/o/r/issues/4",
             "updated_at": "2026-09-14T10:00:00Z",
+            "created_at": "2026-09-01T08:30:00Z",
+            "closed_at": "2026-09-14T09:00:00Z",
         }))
         .expect("an issue");
         assert_eq!(issue.number, 4);
@@ -5120,6 +5156,22 @@ mod tests {
         assert_eq!(issue.assignees, vec!["me".to_string()]);
         assert_eq!(issue.state, "closed");
         assert!(issue.updated_at.is_some());
+        // When it was opened, so the pane can show `opened 3h ago` the way
+        // GitHub's header does.
+        assert_eq!(issue.author.as_deref(), Some("author"));
+        assert_eq!(
+            issue.created_at.map(|at| at.to_string()),
+            Some("2026-09-01T08:30:00Z".to_string())
+        );
+        assert_eq!(
+            issue.closed_at.map(|at| at.to_string()),
+            Some("2026-09-14T09:00:00Z".to_string())
+        );
+        // The link state mirrors the dates for display; they are never pushed.
+        let state = issue_state_for(&issue);
+        assert_eq!(state.created_at, issue.created_at.map(|at| at.as_second()));
+        assert_eq!(state.closed_at, issue.closed_at.map(|at| at.as_second()));
+        assert_eq!(state.author.as_deref(), Some("author"));
 
         // The issues endpoint also returns pull requests; they are not tasks.
         assert!(

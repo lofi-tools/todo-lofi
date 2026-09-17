@@ -3653,6 +3653,11 @@ mod tests {
         // the pending implement row is untouched, and the rewind is logged as
         // a rejection.
         store.reopen_coding_interview(run.id, "Scope changed").await?;
+        // The rewind turns the run back, it does not start another one.
+        assert_eq!(
+            store.get_task(feature_id).await?.workflow_run_id,
+            Some(run.id)
+        );
         let view = store.workflow_run_view(run.id).await?.expect("run view");
         let reopened = pending_step(&view, "interview");
         assert_eq!(reopened.task.id, interview);
