@@ -3045,6 +3045,89 @@ impl TaskDetails {
         }
     }
 
+    /// Branch and worktree on one line, both with Zed's icons: the task's
+    /// branch, then the run's chosen worktree (its directory name). The
+    /// worktree defaults to the branch name while the run has no worktree
+    /// on disk yet; a real worktree also gets a link button opening its
+    /// directory.
+    fn branch_row(&self, branch: &str) -> impl IntoElement {
+        let worktree_dir: Option<String> = self
+            .coding
+            .as_ref()
+            .map(|view| view.run.id)
+            .and_then(|run_id| {
+                self.run_worktrees.iter().find(|worktree| {
+                    worktree.run_id == run_id && worktree.removed_at.is_none()
+                })
+            })
+            .map(|worktree| worktree.worktree_path.clone())
+            .filter(|path| !path.is_empty());
+        let worktree = worktree_dir
+            .as_deref()
+            .and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| branch.to_string());
+        div()
+            .h_flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .id("details-branch")
+                    .h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new("branch").build(window, cx)
+                    })
+                    .child(
+                        svg()
+                            .data(GIT_BRANCH_ICON_SVG)
+                            .size(px(14.))
+                            .text_color(rgb(0x737373)),
+                    )
+                    .child(branch.to_string()),
+            )
+            .child(
+                div()
+                    .id("details-worktree")
+                    .h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new("worktree").build(window, cx)
+                    })
+                    .child(
+                        svg()
+                            .data(GIT_WORKTREE_ICON_SVG)
+                            .size(px(14.))
+                            .text_color(rgb(0x737373)),
+                    )
+                    .child(worktree),
+            )
+            .when_some(worktree_dir, |this, dir| {
+                this.child(
+                    Button::new("open-worktree-dir")
+                        .ghost()
+                        .compact()
+                        .cursor_pointer()
+                        .icon(IconName::ExternalLink)
+                        .tooltip("Open worktree directory")
+                        .on_click(move |_, _, _| {
+                            crate::todoist_auth::open_path(&dir);
+                        }),
+                )
+            })
+    }
+
     /// Deadline and repeats on one inline row. A set property renders as
     /// its icon plus the value (the deadline keeps its text in a hover
     /// tooltip); an unset one renders as a "+ …" button opening its picker.
@@ -3542,6 +3625,14 @@ const REFRESH_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" wid
 /// Deadline glyph (a calendar outline), same stroke technique as the repeat
 /// icon so it tints with the element's text color.
 const DEADLINE_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/deadline.svg");
+
+/// Zed's `git_branch` icon (Lucide, ISC — see Zed's `assets/icons/LICENSES`).
+/// Strokes converted to opaque black so GPUI's alpha-mask rendering tints it
+/// with the element's text color, like the other icons here.
+const GIT_BRANCH_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/git_branch.svg");
+
+/// Zed's `git_worktree` icon (Lucide, ISC), same opaque-stroke conversion.
+const GIT_WORKTREE_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/git_worktree.svg");
 
 /// Description placeholder mark: the `file-text` strokes without the file
 /// outline. The first two strokes are full width; the third is half width.
@@ -5795,7 +5886,7 @@ impl Render for TaskDetails {
                 if let Some(branch) = &task.branch_name
                     && !branch.is_empty()
                 {
-                    details = details.child(field("Branch", branch.clone()));
+                    details = details.child(self.branch_row(branch));
                 }
                 // A real subtask's own Spec block: its coverage state and the
                 // fix actions (decisions #6/#20/#22).

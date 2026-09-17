@@ -314,6 +314,20 @@ pub(crate) fn url_encode(raw: &str) -> String {
     out
 }
 
+/// Open a file or directory in the OS default handler (Finder, ...).
+/// Same mechanism as [`open_browser`], with its own log line.
+pub(crate) fn open_path(path: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", path])
+        .spawn();
+    tracing::info!("Opened path: {path}");
+}
+
 /// Open a URL in the user's browser. Shared with the GitHub device flow.
 pub(crate) fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
