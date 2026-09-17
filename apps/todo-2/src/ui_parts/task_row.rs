@@ -9,7 +9,7 @@ use gpui_component::Disableable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
-use crate::components::{Checkbox, MiniTaskItem, mini_task_list};
+use crate::components::{Checkbox, MiniTaskItem, mini_task_list, tag_chip};
 use crate::store::Store;
 use crate::theme::{APP_BG, HAIRLINE};
 
@@ -54,6 +54,10 @@ pub struct TaskRow {
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
+    /// Labels of the directory-backed tags (projects), so a tag chip can
+    /// show the folder icon instead of a hashtag. Owned by the list, which
+    /// fetches it once and pushes it to the rows it keeps.
+    project_tags: std::collections::HashSet<String>,
     selected: bool,
     editing: bool,
     /// True while a completed task is jumping to the bottom of the list;
@@ -87,6 +91,7 @@ impl TaskRow {
         store: Store,
         selected_path: Vec<String>,
         selected_labels: Vec<String>,
+        project_tags: std::collections::HashSet<String>,
         selected: bool,
         subtasks_expanded: bool,
         cx: &mut Context<Self>,
@@ -100,6 +105,7 @@ impl TaskRow {
             store,
             selected_path,
             selected_labels,
+            project_tags,
             selected,
             editing: false,
             locked: false,
@@ -223,6 +229,20 @@ impl TaskRow {
             task_id: self.task.id,
         });
         cx.notify();
+    }
+
+    /// Replace the set of directory-backed tag labels (projects) the row's
+    /// tag chips read: the list fetches it once and pushes it to the rows
+    /// it keeps.
+    pub fn set_project_tags(
+        &mut self,
+        project_tags: std::collections::HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_tags != project_tags {
+            self.project_tags = project_tags;
+            cx.notify();
+        }
     }
 
     /// The list view owns which row is expanded (only one at a time); this
@@ -652,14 +672,8 @@ impl Render for TaskRow {
                                 .items_center()
                                 .gap_1()
                                 .when_some(start_chip(&self.task), |this, chip| this.child(chip))
-                                .children(visible_tags.into_iter().map(|tag| {
-                                    div()
-                                        .text_size(px(10.))
-                                        .px(px(4.))
-                                        .rounded(px(2.))
-                                        .bg(rgb(0x2a2a2a))
-                                        .text_color(rgb(0xa3a3a3))
-                                        .child(format!("#{tag}"))
+                                .children(visible_tags.iter().map(|tag| {
+                                    tag_chip(tag, self.project_tags.contains(tag))
                                 }))
                                 .when(self.blocking.blocks.len() > 1, |this| {
                                     this.child(

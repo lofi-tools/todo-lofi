@@ -1,4 +1,5 @@
 use gpui::{AppContext, Task};
+use std::collections::HashSet;
 use std::sync::Arc;
 use storage::prelude::*;
 use storage::task::TaskCreate;
@@ -779,6 +780,26 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
             Ok(s.tag_tree_rows().await?)
+        })
+    }
+
+    /// Display labels of every tag that backs a local directory: a
+    /// `project:` tag or one with configured dirs. Views key off the label
+    /// because that is what `TaskWithMeta` carries (leaf tags, direct tags).
+    pub fn directory_backed_tag_labels(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<HashSet<String>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let directory_backed = s.directory_backed_tag_ids().await?;
+            Ok(s.list_tags()
+                .await?
+                .into_iter()
+                .filter(|tag| directory_backed.contains(&tag.id))
+                .map(|tag| tag.label())
+                .collect())
         })
     }
 

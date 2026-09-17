@@ -20,7 +20,7 @@ use storage::prelude::{
 
 use crate::components::Checkbox;
 use crate::components::{
-    DateTimePicker, DateTimePickerEvent, MiniTaskItem, mini_task_list,
+    DateTimePicker, DateTimePickerEvent, MiniTaskItem, mini_task_list, tag_chip,
 };
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE, PANEL_HOVER};
@@ -680,6 +680,10 @@ pub struct TaskDetails {
     _issue_fetch: Option<gpui::Task<()>>,
     /// The issue's imported comments are folded open under the GitHub row.
     github_comments_expanded: bool,
+    /// Labels of the directory-backed tags (projects), so a tag chip can show
+    /// the folder icon instead of a hashtag. Refreshed with each selection.
+    project_tags: std::collections::HashSet<String>,
+    _project_tags_fetch: Option<gpui::Task<()>>,
 }
 
 struct TimeEditInputs {
@@ -787,6 +791,8 @@ impl TaskDetails {
             issue: None,
             _issue_fetch: None,
             github_comments_expanded: false,
+            project_tags: std::collections::HashSet::new(),
+            _project_tags_fetch: None,
         }
     }
 
@@ -839,6 +845,20 @@ impl TaskDetails {
                 .ok();
             }
             Err(e) => tracing::error!("Failed to fetch the GitHub issue: {e}"),
+        }));
+        let project_tags_fetch = self.store.directory_backed_tag_labels(cx);
+        self._project_tags_fetch = Some(cx.spawn(async move |this, cx| {
+            match project_tags_fetch.await {
+                Ok(project_tags) => {
+                    this.update(cx, |this, cx| {
+                        this.project_tags = project_tags;
+                        this._project_tags_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => tracing::error!("Failed to fetch project tags: {e}"),
+            }
         }));
         self.close_coding_notes();
         self.close_coding_spec();
@@ -3309,14 +3329,7 @@ impl TaskDetails {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut section = div().v_flex().gap_2().mt_2().child(
-            div()
-                .text_base()
-                .font_bold()
-                .underline()
-                .text_color(rgb(0xe5e5e5))
-                .child("Linked to"),
-        );
+        let mut section = div().v_flex().gap_2().mt_2();
 
         // The lists stack in normal flow; the "+ subtask" / "+ follow-up"
         // buttons sit under them. Picker cards float from the
@@ -3520,7 +3533,7 @@ impl TaskDetails {
                             .text_color(if linked.done {
                                 rgb(0x666666)
                             } else {
-                                rgb(0xe5e5e5)
+                                rgb(0xa3a3a3)
                             })
                             .child(linked.title.clone())
                             .on_click(cx.listener(move |_this, _, _, cx| {
@@ -5474,18 +5487,6 @@ impl TaskDetails {
     }
 }
 
-/// A tag chip, used both in the read-only tag list and inside the tag editor.
-fn tag_chip(label: &str) -> Div {
-    div()
-        .text_size(px(10.))
-        .px(px(4.))
-        .py(px(1.))
-        .rounded(px(2.))
-        .bg(rgb(0x2a2a2a))
-        .text_color(rgb(0xa3a3a3))
-        .child(format!("#{label}"))
-}
-
 /// Small read-only pill for the metadata GitHub owns (state, author,
 /// assignee, milestone).
 fn metadata_chip(label: String, text: u32) -> Div {
@@ -5566,7 +5567,8 @@ impl Render for TaskDetails {
                                             .gap_1()
                                             .children(self.tag_draft.iter().enumerate().map(
                                                 |(idx, tag)| {
-                                                    tag_chip(tag)
+                                                    let is_project = self.project_tags.contains(tag);
+                                                    tag_chip(tag, is_project)
                                                         .id(("tag-chip", idx))
                                                         .h_flex()
                                                         .items_center()
@@ -5662,7 +5664,7 @@ impl Render for TaskDetails {
                             .flex_wrap()
                             .items_center()
                             .children(task.leaf_tags.iter().enumerate().map(|(index, tag)| {
-                                tag_chip(tag)
+                                tag_chip(tag, self.project_tags.contains(tag))
                                     .id(("details-tag", index))
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))

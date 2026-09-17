@@ -179,6 +179,11 @@ pub struct TaskListView {
     /// While a completed task is jumping to the bottom of the list, clicks
     /// are disabled: from shortly before the jump until just after it.
     locked_until: Option<std::time::Instant>,
+    /// Labels of the directory-backed tags (projects), so a task row's tag
+    /// chips can show the folder icon instead of a hashtag. Fetched once
+    /// per refresh and pushed to the rows, which the list reuses.
+    project_tags: std::collections::HashSet<String>,
+    _project_tags_fetch: Option<gpui::Task<()>>,
     _fetch_tasks: Option<gpui::Task<()>>,
     _fetch_sections: Option<gpui::Task<()>>,
     /// Periodic time-based re-sort: priority scores decay as deadlines
@@ -264,6 +269,8 @@ impl TaskListView {
             store,
             selected_path: Vec::new(),
             selected_labels: Vec::new(),
+            project_tags: std::collections::HashSet::new(),
+            _project_tags_fetch: None,
             selected: None,
             back: Vec::new(),
             forward: Vec::new(),
@@ -673,6 +680,30 @@ impl TaskListView {
         }));
     }
 
+    /// Load the labels of the directory-backed tags (projects) so tag chips
+    /// can show the folder icon, and hand them to the rows already built.
+    fn load_project_tags(&mut self, cx: &mut Context<Self>) {
+        let fetch = self.store.directory_backed_tag_labels(cx);
+        self._project_tags_fetch = Some(cx.spawn(async move |this, cx| {
+            match fetch.await {
+                Ok(project_tags) => {
+                    this.update(cx, |this, cx| {
+                        this.project_tags = project_tags.clone();
+                        let rows = this.task_views.clone();
+                        for row in rows {
+                            let project_tags = project_tags.clone();
+                            row.update(cx, |row, cx| row.set_project_tags(project_tags, cx));
+                        }
+                        this._project_tags_fetch = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(error) => tracing::error!("Failed to fetch project tags: {error}"),
+            }
+        }));
+    }
+
     /// Reload the current view (all tasks or the selected tag's tasks) from
     /// the DB, e.g. after a subtask was created from the details panel.
     /// Set the empty-list action label (e.g. "+ New trip" for managed
@@ -762,6 +793,7 @@ impl TaskListView {
             })
         };
         self._fetch_tasks = Some(fetch);
+        self.load_project_tags(cx);
     }
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
@@ -1031,6 +1063,7 @@ impl TaskListView {
                 self.store.clone(),
                 selected_path.to_vec(),
                 selected_labels.to_vec(),
+                self.project_tags.clone(),
                 is_selected,
                 subtasks_expanded,
                 cx,
@@ -1125,6 +1158,8 @@ impl TaskListView {
                 // the tasks that no longer nest in it.
                 Some(row) => {
                     row.update(cx, |row, cx| row.set_blocking(row_blocking(spec), cx));
+                    let project_tags = self.project_tags.clone();
+                    row.update(cx, |row, cx| row.set_project_tags(project_tags, cx));
                     views.push(row);
                 }
                 None => {
@@ -1176,6 +1211,7 @@ impl TaskListView {
             })
             .ok();
         }));
+        self.load_project_tags(cx);
     }
 
     /// Compute the visible rows from the task list plus the blocker and
