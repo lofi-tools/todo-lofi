@@ -23,6 +23,10 @@ pub enum TaskRowEvent {
     /// The row's N/M counter was clicked; the list decides which row (if
     /// any) stays expanded, since only one may be expanded at a time.
     SubtasksToggled { task_id: u64 },
+    /// The row's own content changed height (an expanded list opened or
+    /// closed, inline editing started or ended). The list measures rows
+    /// once, so it has to be told to measure this one again.
+    LayoutChanged { task_id: u64 },
 }
 
 /// One level of a "task blocks X (which blocks Y)" chain, rendered inline
@@ -201,11 +205,17 @@ impl TaskRow {
     /// row's chain and "blocks N" chip before the next reload.
     pub fn set_blocking(&mut self, blocking: RowBlocking, cx: &mut Context<Self>) {
         self.blocking = blocking;
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
         cx.notify();
     }
 
     pub fn toggle_blocks(&mut self, cx: &mut Context<Self>) {
         self.blocks_expanded = !self.blocks_expanded;
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
         cx.notify();
     }
 
@@ -214,6 +224,9 @@ impl TaskRow {
     pub fn set_subtasks_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         if self.subtasks_expanded != expanded {
             self.subtasks_expanded = expanded;
+            cx.emit(TaskRowEvent::LayoutChanged {
+                task_id: self.task.id,
+            });
             cx.notify();
         }
     }
@@ -244,6 +257,11 @@ impl TaskRow {
 
     pub fn set_task_data(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         self.task = task;
+        // Reloaded data can add or drop the metadata sub-row, so the row's
+        // height is no longer known to the list.
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
         cx.notify();
     }
 
@@ -266,6 +284,7 @@ impl TaskRow {
         self._edit_subscription = Some(subscription);
         self.editing = true;
         cx.emit(TaskRowEvent::EditStarted);
+        cx.emit(TaskRowEvent::LayoutChanged { task_id: self.task.id });
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
@@ -289,6 +308,7 @@ impl TaskRow {
         self._edit_subscription = None;
         self.store.rename_task(task_id, title.clone(), cx).detach();
         cx.emit(TaskRowEvent::TitleCommitted { task_id, title });
+        cx.emit(TaskRowEvent::LayoutChanged { task_id });
         cx.notify();
     }
 
@@ -300,6 +320,9 @@ impl TaskRow {
         self.edit_input = None;
         self._edit_subscription = None;
         cx.emit(TaskRowEvent::EditEnded);
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
         cx.notify();
     }
 }

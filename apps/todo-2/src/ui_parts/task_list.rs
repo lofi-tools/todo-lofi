@@ -1,13 +1,14 @@
 use gpui::{
-    AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    AnyElement, AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement,
+    IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, list,
     prelude::FluentBuilder, px, rgb,
 };
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{IconName, Sizable, Size};
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
-use gpui_component::scroll::ScrollableElement;
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
@@ -15,6 +16,7 @@ use super::navbar::{NavBar, NavBarEvent, NavDestination};
 use super::task_row::{RowBlocking, TaskRow, TaskRowEvent};
 use crate::store::Store;
 use crate::theme::HAIRLINE;
+use std::rc::Rc;
 
 #[derive(Clone)]
 pub enum TaskListEvent {
@@ -97,6 +99,22 @@ pub struct TaskListView {
     /// The task whose subtask list is expanded, or None. Only one row's
     /// subtasks can be expanded at a time.
     expanded_subtask: Option<u64>,
+    /// The list body's items in display order (section headers, insert
+    /// gaps, task rows), shared with the list element's render closure.
+    entries: Rc<Vec<ListEntry>>,
+    /// Which item each row sits at, so a row that changed its own height
+    /// can be measured again by index.
+    entry_index: std::collections::HashMap<u64, usize>,
+    /// Rows that reported a height change since the last frame. Collected
+    /// here because the report arrives per row, and the list rebuilds its
+    /// height index on every remeasure: one tick can touch several rows.
+    measure_rows: std::collections::HashSet<u64>,
+    /// gpui's virtualized list state (the zed pattern): it caches every
+    /// item's measured height and lays out and paints only the items on
+    /// screen, with some overdraw on either side. Scrolling therefore
+    /// costs the same for ten tasks and for ten thousand. It lives on the
+    /// view because the state has to outlive the element using it.
+    list_state: ListState,
     /// When the list is empty, show this labeled button where the rows
     /// would be (managed tags e.g. the travel checklists panel). Clicking
     /// it emits `EmptyActionRequested`.
@@ -194,6 +212,13 @@ impl TaskListView {
             show_all: false,
             _fetch_sections: None,
             expanded_subtask: None,
+            entries: Rc::new(Vec::new()),
+            entry_index: std::collections::HashMap::new(),
+            measure_rows: std::collections::HashSet::new(),
+            // The overdraw keeps a screenful of rows measured beyond each
+            // edge, so fast wheel scrolling never runs into unmeasured
+            // (and therefore unrendered) rows.
+            list_state: ListState::new(0, ListAlignment::Top, px(400.)),
             empty_action_label: None,
             travel_panel: None,
             input,
@@ -895,9 +920,37 @@ impl TaskListView {
             TaskRowEvent::SubtasksToggled { task_id } => {
                 this.toggle_subtask_expansion(*task_id, cx);
             }
+            TaskRowEvent::LayoutChanged { task_id } => {
+                this.measure_rows.insert(*task_id);
+                cx.notify();
+            }
         })
         .detach();
         row
+    }
+
+    /// Re-measure the rows that changed their own content height (an
+    /// expanded subtask or blocks list, inline editing, reloaded metadata).
+    /// The list caches measured heights, so those rows' cached heights are
+    /// dropped and the frame that paints the new content measures them
+    /// again. One call for all of them: the list rebuilds its height index
+    /// per call, and a single tick can move several rows at once.
+    fn flush_row_measurements(&mut self) {
+        if self.measure_rows.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.measure_rows);
+        let mut first = usize::MAX;
+        let mut last = 0;
+        for task_id in pending {
+            if let Some(index) = self.entry_index.get(&task_id).copied() {
+                first = first.min(index);
+                last = last.max(index + 1);
+            }
+        }
+        if first < last {
+            self.list_state.remeasure_items(first..last);
+        }
     }
 
     /// Re-derive the visible rows from the tasks already in hand, keeping
@@ -1132,6 +1185,109 @@ mod tests {
             managed_editable: false,
             user_modified: false,
         }
+    }
+
+    fn header(top: &str) -> ListEntry {
+        ListEntry::Header {
+            top: top.to_string(),
+            sub: None,
+            divided: false,
+            distant: None,
+            show_all: false,
+        }
+    }
+
+    fn gap(above: u64, below: u64) -> ListEntry {
+        ListEntry::Gap {
+            above: Some(above),
+            below: Some(below),
+            input: None,
+        }
+    }
+
+    /// The body draws the items the viewport reaches and takes its geometry
+    /// from the list state, instead of eagerly laying out the whole run: a
+    /// hundred items draw and scroll without panicking, and the scroll
+    /// position is the list's own item offset.
+    #[gpui::test]
+    fn test_virtualized_body_draws_and_scrolls(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        struct ListBody {
+            entries: Rc<Vec<ListEntry>>,
+            list_state: ListState,
+        }
+        impl Render for ListBody {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(200.)).child(
+                    ScrollableTaskList::new(
+                        self.entries.clone(),
+                        self.list_state.clone(),
+                        |entry, _window, _cx| match entry {
+                            ListEntry::Header { top, .. } => {
+                                div().child(top.clone()).into_any_element()
+                            }
+                            ListEntry::Gap { above, .. } => div()
+                                .id(format!("gap-{}", above.unwrap_or(0)))
+                                .h(px(16.))
+                                .into_any_element(),
+                            ListEntry::Row { task_id, .. } => div()
+                                .h(px(52.))
+                                .child(format!("row {task_id}"))
+                                .into_any_element(),
+                        },
+                    )
+                    .render_body(),
+                )
+            }
+        }
+        // Alternating headers and insert gaps: two item kinds, more of them
+        // than the 200px body can show.
+        let entries: Rc<Vec<ListEntry>> = Rc::new(
+            (0..100)
+                .map(|index| {
+                    if index % 2 == 0 {
+                        header(&format!("group {index}"))
+                    } else {
+                        gap(index, index + 1)
+                    }
+                })
+                .collect(),
+        );
+        let list_state = ListState::new(entries.len(), ListAlignment::Top, px(200.));
+        let (_view, cx) = cx.add_window_view(|_, _| ListBody {
+            entries: entries.clone(),
+            list_state: list_state.clone(),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(list_state.item_count(), entries.len());
+        assert_eq!(list_state.logical_scroll_top().item_ix, 0);
+        list_state.scroll_by(px(600.));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(list_state.logical_scroll_top().item_ix > 0);
+    }
+
+    #[test]
+    fn test_unchanged_prefix_only_remeasures_the_changed_tail() {
+        let old = vec![
+            header("Pack"),
+            gap(1, 2),
+            gap(2, 3),
+            header("Completed"),
+        ];
+        // A reload that reorders the tail re-measures from the first
+        // difference on; the items above it keep their cached heights.
+        let new = vec![
+            header("Pack"),
+            gap(1, 2),
+            gap(2, 4),
+            header("Completed"),
+        ];
+        assert_eq!(unchanged_prefix(&old, &new), 2);
+        // An identical run re-measures nothing at all.
+        assert_eq!(unchanged_prefix(&old, &old.clone()), old.len());
+        // A shorter list stops at its own end.
+        assert_eq!(unchanged_prefix(&old, &old[..2]), 2);
+        assert_eq!(unchanged_prefix(&[], &old), 0);
     }
 
     #[test]
@@ -1404,21 +1560,6 @@ mod tests {
 
 impl EventEmitter<TaskListEvent> for TaskListView {}
 
-/// One section of the task list: an optional header (section name,
-/// "Upcoming", "Completed", or `None` for an unlabelled run) plus the
-/// rows in it. Each row carries its top-level task, the tasks it blocks
-/// (dependent tasks: inline chain + blocks-N list), and its subtasks.
-/// `sub` is the one allowed sub-section level: `header` names the top
-/// section and `sub` the group below it (e.g. "Pack" / "food"), rendered
-/// with a grayed-out slash between them.
-pub struct TaskListSection {
-    pub header: Option<String>,
-    pub sub: Option<String>,
-    pub divided: bool,
-    pub header_extra: Option<gpui::AnyElement>,
-    pub rows: Vec<RowSpec>,
-}
-
 /// Split a section name into its top section and optional sub-section.
 /// Only one level is supported: the split happens at the first slash,
 /// so "Pack / food" becomes ("Pack", Some("food")) while "Pack" becomes
@@ -1438,78 +1579,268 @@ pub fn split_subsection(name: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Reusable scrollable task-list component. Takes sectioned data (each
-/// section with its tasks, dependent tasks, and subtasks) plus the live
-/// row views, and renders the scrollable list body. Used both by the
-/// main tag/project view (`TaskListView`) and by the travel checklist
-/// view (same `TaskListView` instance under the travel header).
+/// One item of the task-list body. The body is a flat run of these —
+/// section headers, the insert gaps between rows, and the rows themselves
+/// — handed to gpui's `list`, which measures each item once and only lays
+/// out and paints the ones on screen. Items are cheap to clone and to
+/// compare, so the view can build a fresh run every frame and have the
+/// list re-measure only the part that actually changed.
+#[derive(Clone, PartialEq)]
+pub enum ListEntry {
+    /// A section header ("Upcoming", "Completed", a tag's section, ...).
+    Header {
+        /// The top section name.
+        top: String,
+        /// One level of sub-section, rendered grayed out as "Top / sub".
+        sub: Option<String>,
+        /// Divider above the header, separating the trailing groups.
+        divided: bool,
+        /// How many far-future tasks the "show all" toggle would reveal;
+        /// `None` when there is nothing to reveal and so no toggle.
+        distant: Option<usize>,
+        /// Whether those tasks are currently revealed (the toggle's label).
+        show_all: bool,
+    },
+    /// The insert strip between two rows (`None` at the list's edges): a
+    /// hover-revealed + on a line, or the inline insert input when this gap
+    /// is being filled.
+    Gap {
+        above: Option<u64>,
+        below: Option<u64>,
+        input: Option<Entity<InputState>>,
+    },
+    /// A task row, rendering its own view.
+    Row {
+        task_id: u64,
+        view: Entity<TaskRow>,
+    },
+}
+
+/// Height hinted for items the list has not measured yet: about what a row
+/// plus its insert gap averages, so the scrollable range and the scrollbar
+/// thumb are in the right ballpark from the first frame instead of growing
+/// as the user scrolls. Measuring only ever replaces the hint with the real
+/// height, and erring high only overshoots the thumb, never the reachable
+/// end of the list.
+const ITEM_HEIGHT_HINT: f32 = 40.0;
+
+/// Reusable virtualized task-list body: the flat item run, the list state
+/// the view owns (it has to outlive the element), and how to render one
+/// item. Used by the main tag/project view and by the travel checklist view
+/// (the same `TaskListView` instance under the travel header).
 pub struct ScrollableTaskList {
-    sections: Vec<(TaskListSection, Vec<gpui::AnyElement>)>,
+    entries: Rc<Vec<ListEntry>>,
+    list_state: ListState,
+    render_item: Box<dyn Fn(&ListEntry, &mut Window, &mut gpui::App) -> AnyElement + 'static>,
 }
 
 impl ScrollableTaskList {
-    pub fn new(sections: Vec<(TaskListSection, Vec<gpui::AnyElement>)>) -> Self {
-        Self { sections }
+    pub fn new(
+        entries: Rc<Vec<ListEntry>>,
+        list_state: ListState,
+        render_item: impl Fn(&ListEntry, &mut Window, &mut gpui::App) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            entries,
+            list_state,
+            render_item: Box::new(render_item),
+        }
     }
 
-    pub fn render_body(self) -> gpui::AnyElement {
+    pub fn render_body(self) -> AnyElement {
+        let Self {
+            entries,
+            list_state,
+            render_item,
+        } = self;
         div()
             .flex_1()
             .min_h_0()
-            // Long lists scroll instead of growing past the window;
-            // the flex-1 body gives the scrollable a definite height.
-            .overflow_y_scrollbar()
-            .v_flex()
-            .gap_2()
-            .children(self.sections.into_iter().flat_map(|(section, rows)| {
-                let mut elements = Vec::new();
-                if let Some(header) = section.header {
-                    let mut header_el = if section.divided {
-                        div()
-                            .mt_4()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(rgb(0x333333))
-                            .h_flex()
-                            .items_center()
-                            .justify_between()
-                    } else {
-                        div().h_flex().items_center().justify_between().mt_2()
-                    };
-                    // A sub-section renders as "Top / sub" with the slash
-                    // and sub name grayed out next to the top section.
-                    let title = match &section.sub {
-                        Some(sub) => div()
-                            .h_flex()
-                            .items_baseline()
-                            .gap_1()
-                            .text_sm()
-                            .font_semibold()
-                            .child(div().text_color(rgb(0xa3a3a3)).child(header))
-                            .child(
-                                div()
-                                    .text_color(rgb(0x525252))
-                                    .child(format!("/ {sub}")),
-                            )
-                            .into_any_element(),
-                        None => div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(rgb(0xa3a3a3))
-                            .child(header)
-                            .into_any_element(),
-                    };
-                    header_el = header_el.child(title);
-                    if let Some(extra) = section.header_extra {
-                        header_el = header_el.child(extra);
+            .relative()
+            .child(
+                list(list_state.clone(), move |index, window, cx| {
+                    match entries.get(index) {
+                        Some(entry) => render_item(entry, window, cx),
+                        None => div().into_any_element(),
                     }
-                    elements.push(header_el.into_any_element());
-                }
-                elements.extend(rows);
-                elements
-            }))
+                })
+                .size_full(),
+            )
+            // The list paints no scrollbar of its own; this one drives the
+            // same state the wheel does, so dragging and the wheel agree.
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::vertical(&list_state)
+                        .id("task-list-scrollbar")
+                        .viewport_from_layout(),
+                ),
+            )
             .into_any_element()
     }
+}
+
+/// How many items at the front of the list `old` run are identical to the
+/// front of the new one. Everything from there on has to be measured again;
+/// before it, cached heights (and the scroll anchor's item index) hold.
+fn unchanged_prefix(old: &[ListEntry], new: &[ListEntry]) -> usize {
+    old.iter()
+        .zip(new.iter())
+        .take_while(|(old, new)| old == new)
+        .count()
+}
+
+/// Render one item of the task-list body. Headers and gaps are rebuilt from
+/// their data on demand (they carry live event handlers, so they cannot be
+/// shared between frames); rows render their own view.
+fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>) -> AnyElement {
+    match entry {
+        ListEntry::Header {
+            top,
+            sub,
+            divided,
+            distant,
+            show_all,
+        } => list_header(top, sub.as_deref(), *divided, *distant, *show_all, view).into_any_element(),
+        ListEntry::Gap {
+            above,
+            below,
+            input,
+        } => list_gap(*above, *below, input.clone(), view).into_any_element(),
+        // The row spans the full width, like it did as a flex child.
+        ListEntry::Row { view: row, .. } => div().w_full().child(row.clone()).into_any_element(),
+    }
+}
+
+/// One section header, with the "show all" toggle at its end when
+/// far-future tasks are hidden.
+fn list_header(
+    top: &str,
+    sub: Option<&str>,
+    divided: bool,
+    distant: Option<usize>,
+    show_all: bool,
+    view: &WeakEntity<TaskListView>,
+) -> impl IntoElement {
+    let mut header = if divided {
+        div()
+            .mt_4()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(0x333333))
+            .h_flex()
+            .items_center()
+            .justify_between()
+    } else {
+        div().h_flex().items_center().justify_between().mt_2()
+    };
+    // A sub-section renders as "Top / sub" with the slash and sub name
+    // grayed out next to the top section.
+    let title = match sub {
+        Some(sub) => div()
+            .h_flex()
+            .items_baseline()
+            .gap_1()
+            .text_sm()
+            .font_semibold()
+            .child(div().text_color(rgb(0xa3a3a3)).child(top.to_string()))
+            .child(div().text_color(rgb(0x525252)).child(format!("/ {sub}")))
+            .into_any_element(),
+        None => div()
+            .text_sm()
+            .font_semibold()
+            .text_color(rgb(0xa3a3a3))
+            .child(top.to_string())
+            .into_any_element(),
+    };
+    header = header.child(title);
+    if let Some(distant) = distant {
+        let view = view.clone();
+        header = header.child(
+            Button::new("show-all-tasks")
+                .ghost()
+                .compact()
+                // Sized and toned like the "Upcoming" header beside it, so
+                // the toggle reads as part of that label rather than a call
+                // to action.
+                .with_size(Size::Small)
+                .text_color(rgb(0xa3a3a3))
+                .label(if show_all {
+                    "Show less".to_string()
+                } else {
+                    format!("Show all ({distant})")
+                })
+                .tooltip("Reveal tasks starting more than 2 days out")
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| this.toggle_show_all(cx)).ok();
+                }),
+        );
+    }
+    header
+}
+
+/// One interstitial insert row: a hover-revealed + on a horizontal line,
+/// or the inline insert input when this gap is being filled. The strip is
+/// the spacing between two rows (its 24px content box is cancelled by a
+/// negative margin, leaving the vertical padding), so the "+" sits in the
+/// gap without adding height of its own.
+fn list_gap(
+    above: Option<u64>,
+    below: Option<u64>,
+    input: Option<Entity<InputState>>,
+    view: &WeakEntity<TaskListView>,
+) -> impl IntoElement {
+    let key = format!(
+        "insert-gap-{}-{}",
+        above.unwrap_or(0),
+        below.unwrap_or(0)
+    );
+    if let Some(input) = input {
+        // Align with row titles/tags: row px_3 (12) + checkbox (22) +
+        // title gap_3 (12) = 46px; right side matches the row px_3.
+        return div()
+            .id(key)
+            .py_2()
+            .pl(px(46.))
+            .pr_3()
+            .child(Input::new(&input).small().focus_bordered(false))
+            .into_any_element();
+    }
+    let view = view.clone();
+    div()
+        .id(key.clone())
+        .w_full()
+        .py_2()
+        .opacity(0.0)
+        .hover(|style| style.opacity(1.0))
+        .child(
+            div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .my_neg_3()
+                .child(
+                    div()
+                        .id(format!("{key}-plus"))
+                        .h_6()
+                        .w_6()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_lg()
+                        .text_color(rgb(0xa3a3a3))
+                        .cursor_pointer()
+                        .child("+")
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            view.update(cx, |this, cx| {
+                                this.begin_insert(above, below, window, cx)
+                            })
+                            .ok();
+                        }),
+                )
+                .child(div().h_px().flex_1().bg(rgb(0x333333))),
+        )
+        .into_any_element()
 }
 
 impl Render for TaskListView {
@@ -1596,14 +1927,19 @@ impl Render for TaskListView {
 }
 
 impl TaskListView {
-    /// The list body: the sectioned rows via the reusable scrollable
-    /// task-list component, or the empty-list action button centered
-    /// where the rows would be (managed tags only).
+    /// The list body: the rows via the reusable virtualized task-list
+    /// component, or the empty-list action button centered where the rows
+    /// would be (managed tags only).
     fn list_body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sections = self.sectioned_rows(cx);
-        // The section data (tasks + dependents + subtasks) is the source
-        // of truth for emptiness; the views mirror it one-to-one.
-        let empty = sections.iter().all(|(section, _)| section.rows.is_empty());
+        // Hand this frame's items to the list first: it keeps the scroll
+        // position and re-measures only the tail that changed. Then the
+        // rows whose own content changed height, whose item indices are
+        // fresh after that sync.
+        self.sync_list_state(self.list_entries());
+        self.flush_row_measurements();
+        // The row data (tasks + dependents + subtasks) is the source of
+        // truth for emptiness; the views mirror it one-to-one.
+        let empty = self.row_specs.is_empty();
         let empty_action = self.empty_action_label.clone();
         if empty
             && let Some(label) = empty_action
@@ -1635,16 +1971,76 @@ impl TaskListView {
                 )
                 .into_any_element();
         }
-        ScrollableTaskList::new(sections).render_body()
+        let view = cx.entity().downgrade();
+        ScrollableTaskList::new(
+            self.entries.clone(),
+            self.list_state.clone(),
+            move |entry, _window, _cx| list_entry(entry, &view),
+        )
+        .render_body()
     }
-    /// Rows for the list body: flat by default, grouped under section
+
+    /// Hand the freshly built items to the virtualized list. Only the items
+    /// from the first difference onwards are re-measured, so a reload keeps
+    /// both the scroll position and every unchanged item's measured height
+    /// (and, with it, the row views' own state).
+    fn sync_list_state(&mut self, entries: Vec<ListEntry>) {
+        let entries = Rc::new(entries);
+        if *entries == *self.entries {
+            return;
+        }
+        // Hold the reader's place: a reload reorders the rows around the
+        // one at the top of the viewport (completed tasks move down, the
+        // periodic re-sort by score, a task inserted above), and the splice
+        // below resets the scroll to the first changed item. Following the
+        // top row by task id keeps the viewport on it instead.
+        let anchor = self.scroll_anchor();
+        let unchanged = unchanged_prefix(&self.entries, &entries);
+        self.list_state
+            .splice(unchanged..self.entries.len(), entries.len() - unchanged);
+        self.list_state = self
+            .list_state
+            .clone()
+            .with_uniform_item_height(px(ITEM_HEIGHT_HINT));
+        self.entry_index = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                ListEntry::Row { task_id, .. } => Some((*task_id, index)),
+                _ => None,
+            })
+            .collect();
+        self.entries = entries;
+        if let Some((task_id, offset)) = anchor
+            && let Some(index) = self.entries.iter().position(|entry| {
+                matches!(entry, ListEntry::Row { task_id: id, .. } if *id == task_id)
+            })
+        {
+            self.list_state.scroll_to(ListOffset {
+                item_ix: index,
+                offset_in_item: offset,
+            });
+        }
+    }
+
+    /// The row at the top of the viewport as a task id, plus how far into
+    /// it the viewport starts. `None` when the top item is not a row (a
+    /// header or an insert gap), where the splice's own adjustment is as
+    /// good as any.
+    fn scroll_anchor(&self) -> Option<(u64, gpui::Pixels)> {
+        let scroll_top = self.list_state.logical_scroll_top();
+        match self.entries.get(scroll_top.item_ix) {
+            Some(ListEntry::Row { task_id, .. }) => Some((*task_id, scroll_top.offset_in_item)),
+            _ => None,
+        }
+    }
+    /// The list body's items: flat by default, grouped under section
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
-    /// tasks last under an "Upcoming" header. Tasks starting more than 2
-    /// days out only render when "show all" is on.
-    fn sectioned_rows(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
+    /// tasks last under an "Upcoming" header and completed ones under
+    /// "Completed". Tasks starting more than 2 days out only render when
+    /// "show all" is on. Every row is preceded by its insert gap, and the
+    /// list is closed by one trailing gap.
+    fn list_entries(&self) -> Vec<ListEntry> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1672,7 +2068,6 @@ impl TaskListView {
         if self.show_all {
             upcoming.extend(distant);
         }
-        let show_all = self.show_all;
         let current: Vec<usize> = current_pairs.into_iter().map(|(i, _)| i).collect();
         // No sections here: doable rows flat, then Upcoming, then Completed.
         if self.selected_path.is_empty() || self.section_order.is_empty() {
@@ -1686,7 +2081,7 @@ impl TaskListView {
             if !done.is_empty() {
                 chunks.push(RowChunk::Completed(done));
             }
-            return self.render_chunks(&chunks, distant_count, show_all, cx);
+            return self.entries_for_chunks(&chunks, distant_count);
         }
         let section_of: std::collections::HashMap<usize, String> = current
             .iter()
@@ -1703,260 +2098,96 @@ impl TaskListView {
         if !done.is_empty() {
             chunks.push(RowChunk::Completed(done));
         }
-        self.render_chunks(&chunks, distant_count, show_all, cx)
+        self.entries_for_chunks(&chunks, distant_count)
     }
 
-    /// Turn row chunks into task-list sections: plain runs, section
-    /// headers, and the divider-separated Upcoming/Completed groups. The
-    /// Upcoming header carries the "show all" toggle when far-future
-    /// tasks exist. Each section keeps its row specs (task + dependent
-    /// tasks + subtasks) alongside the live row views.
-    fn render_chunks(
-        &self,
-        chunks: &[RowChunk],
-        distant: usize,
-        show_all: bool,
-        cx: &mut Context<Self>,
-    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
-        let mut sections = Vec::new();
+    /// Turn row chunks into list items: the chunk's header (if it has one)
+    /// followed by each of its rows behind an insert gap. Gaps are placed
+    /// against the whole display order, so the gap above a section's first
+    /// row still sits between it and the section header.
+    fn entries_for_chunks(&self, chunks: &[RowChunk], distant: usize) -> Vec<ListEntry> {
+        let order: Vec<u64> = chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk
+                    .indices()
+                    .iter()
+                    .map(|index| self.row_specs[*index].task.id)
+            })
+            .collect();
+        let mut entries = Vec::new();
+        let mut position = 0;
         for chunk in chunks {
-            match chunk {
-                RowChunk::Rows(indices) => {
-                    let specs = indices
-                        .iter()
-                        .map(|i| self.row_specs[*i].clone())
-                        .collect::<Vec<_>>();
-                    let rows: Vec<(u64, gpui::AnyElement)> = indices
-                        .iter()
-                        .map(|index| {
-                            (
-                                self.row_specs[*index].task.id,
-                                self.task_views[*index].clone().into_any_element(),
-                            )
-                        })
-                        .collect();
-                    sections.push((
-                        TaskListSection {
-                            header: None,
-                            sub: None,
-                            divided: false,
-                            header_extra: None,
-                            rows: specs,
-                        },
-                        rows,
-                    ));
-                }
-                RowChunk::Section(name, indices) => {
-                    let specs = indices
-                        .iter()
-                        .map(|i| self.row_specs[*i].clone())
-                        .collect::<Vec<_>>();
-                    let rows: Vec<(u64, gpui::AnyElement)> = indices
-                        .iter()
-                        .map(|index| {
-                            (
-                                self.row_specs[*index].task.id,
-                                self.task_views[*index].clone().into_any_element(),
-                            )
-                        })
-                        .collect();
-                    let (top, sub) = split_subsection(name);
-                    sections.push((
-                        TaskListSection {
-                            header: Some(top.to_string()),
-                            sub,
-                            divided: false,
-                            header_extra: None,
-                            rows: specs,
-                        },
-                        rows,
-                    ));
-                }
-                RowChunk::Upcoming(indices) => {
-                    // Separated from the doable list above, like a
-                    // Todoist section with a divider; the toggle sits at
-                    // the end of the header row when far-future tasks
-                    // exist.
-                    let header_extra = (distant > 0).then(|| {
-                        Button::new("show-all-tasks")
-                            .ghost()
-                            .compact()
-                            // Sized and toned like the "Upcoming" header
-                            // beside it, so the toggle reads as part of that
-                            // label rather than a call to action.
-                            .with_size(Size::Small)
-                            .text_color(rgb(0xa3a3a3))
-                            .label(if show_all {
-                                "Show less".to_string()
-                            } else {
-                                format!("Show all ({distant})")
-                            })
-                            .tooltip("Reveal tasks starting more than 2 days out")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_show_all(cx);
-                            }))
-                            .into_any_element()
-                    });
-                    let specs = indices
-                        .iter()
-                        .map(|i| self.row_specs[*i].clone())
-                        .collect::<Vec<_>>();
-                    let rows: Vec<(u64, gpui::AnyElement)> = indices
-                        .iter()
-                        .map(|index| {
-                            (
-                                self.row_specs[*index].task.id,
-                                self.task_views[*index].clone().into_any_element(),
-                            )
-                        })
-                        .collect();
-                    sections.push((
-                        TaskListSection {
-                            header: Some("Upcoming".to_string()),
-                            sub: None,
-                            divided: true,
-                            header_extra,
-                            rows: specs,
-                        },
-                        rows,
-                    ));
-                }
-                RowChunk::Completed(indices) => {
-                    let specs = indices
-                        .iter()
-                        .map(|i| self.row_specs[*i].clone())
-                        .collect::<Vec<_>>();
-                    let rows: Vec<(u64, gpui::AnyElement)> = indices
-                        .iter()
-                        .map(|index| {
-                            (
-                                self.row_specs[*index].task.id,
-                                self.task_views[*index].clone().into_any_element(),
-                            )
-                        })
-                        .collect();
-                    sections.push((
-                        TaskListSection {
-                            header: Some("Completed".to_string()),
-                            sub: None,
-                            divided: true,
-                            header_extra: None,
-                            rows: specs,
-                        },
-                        rows,
-                    ));
-                }
+            if let Some(header) = self.chunk_header(chunk, distant) {
+                entries.push(header);
+            }
+            for &index in chunk.indices() {
+                let task_id = self.row_specs[index].task.id;
+                let above = (position > 0).then(|| order[position - 1]);
+                entries.push(ListEntry::Gap {
+                    above,
+                    below: Some(task_id),
+                    input: self.inserting_input(above, Some(task_id)),
+                });
+                entries.push(ListEntry::Row {
+                    task_id,
+                    view: self.task_views[index].clone(),
+                });
+                position += 1;
             }
         }
-        self.interleave_gaps(sections, cx)
-    }
-
-    /// Interleave interstitial insert gaps between the rows: one before
-    /// the first row and one after every row (the last gap is the
-    /// after-all one), following display order across section headers.
-    fn interleave_gaps(
-        &self,
-        sections: Vec<(TaskListSection, Vec<(u64, gpui::AnyElement)>)>,
-        cx: &mut Context<Self>,
-    ) -> Vec<(TaskListSection, Vec<gpui::AnyElement>)> {
-        let order: Vec<u64> = sections
-            .iter()
-            .flat_map(|(_, rows)| rows.iter().map(|(id, _)| *id))
-            .collect();
-        let mut position = 0;
-        sections
-            .into_iter()
-            .map(|(section, rows)| {
-                let mut elements = Vec::new();
-                for (id, view) in rows {
-                    let above = (position > 0).then(|| order[position - 1]);
-                    elements.push(self.insert_gap(above, Some(id), cx));
-                    elements.push(view);
-                    position += 1;
-                }
-                if position == order.len() && !order.is_empty() {
-                    elements.push(self.insert_gap(order.last().copied(), None, cx));
-                }
-                (section, elements)
-            })
-            .collect()
-    }
-
-    /// One interstitial row: a hover-revealed + on a horizontal line,
-    /// or the inline insert input when this gap is being filled. The row
-    /// is effectively zero height (vertical padding cancelled by negative
-    /// margins) so it never shifts the surrounding layout; the padded
-    /// strip is the hover zone.
-    fn insert_gap(
-        &self,
-        above_id: Option<u64>,
-        below_id: Option<u64>,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let key = format!(
-            "insert-gap-{}-{}",
-            above_id.unwrap_or(0),
-            below_id.unwrap_or(0)
-        );
-        if let Some(pending) = &self.inserting
-            && pending.above_id == above_id
-            && pending.below_id == below_id
-        {
-            let input = pending.input.clone();
-            // Align with row titles/tags: row px_3 (12) + checkbox (22) +
-            // title gap_3 (12) = 46px; right side matches the row px_3.
-            return div()
-                .id(key)
-                .py_2()
-                .pl(px(46.))
-                .pr_3()
-                .child(Input::new(&input).small().focus_bordered(false))
-                .into_any_element();
+        // One trailing gap, so a task can still be added after the last row.
+        if let Some(last) = order.last().copied() {
+            entries.push(ListEntry::Gap {
+                above: Some(last),
+                below: None,
+                input: self.inserting_input(Some(last), None),
+            });
         }
-        let line = || {
-            div()
-                .h_px()
-                .flex_1()
-                .bg(rgb(0x333333))
-                .into_any_element()
-        };
-        // Zero-height row: the 16px padded hover strip is cancelled by
-        // the outer negative margins, and the 24px content box by the
-        // inner one's, so surrounding rows never shift. The "+" sits left
-        // of the line.
-        div()
-            .id(key.clone())
-            .w_full()
-            .py_2()
-            .my_neg_2()
-            .opacity(0.0)
-            .hover(|style| style.opacity(1.0))
-            .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .my_neg_3()
-                    .child(
-                        div()
-                            .id(format!("{key}-plus"))
-                            .h_6()
-                            .w_6()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_lg()
-                            .text_color(rgb(0xa3a3a3))
-                            .cursor_pointer()
-                            .child("+")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.begin_insert(above_id, below_id, window, cx);
-                            })),
-                    )
-                    .child(line()),
-            )
-            .into_any_element()
+        entries
+    }
+
+    /// The header item of a chunk: a section name (top plus one sub level),
+    /// "Upcoming" with its show-all toggle, or "Completed". A plain run of
+    /// rows has no header.
+    fn chunk_header(&self, chunk: &RowChunk, distant: usize) -> Option<ListEntry> {
+        match chunk {
+            RowChunk::Rows(_) => None,
+            RowChunk::Section(name, _) => {
+                let (top, sub) = split_subsection(name);
+                Some(ListEntry::Header {
+                    top: top.to_string(),
+                    sub,
+                    divided: false,
+                    distant: None,
+                    show_all: false,
+                })
+            }
+            RowChunk::Upcoming(_) => Some(ListEntry::Header {
+                top: "Upcoming".to_string(),
+                sub: None,
+                divided: true,
+                // The toggle only shows when there is something to reveal.
+                distant: (distant > 0).then_some(distant),
+                show_all: self.show_all,
+            }),
+            RowChunk::Completed(_) => Some(ListEntry::Header {
+                top: "Completed".to_string(),
+                sub: None,
+                divided: true,
+                distant: None,
+                show_all: false,
+            }),
+        }
+    }
+
+    /// The inline insert input open in this gap, if this is the gap it was
+    /// opened in.
+    fn inserting_input(&self, above: Option<u64>, below: Option<u64>) -> Option<Entity<InputState>> {
+        self.inserting
+            .as_ref()
+            .filter(|pending| pending.above_id == above && pending.below_id == below)
+            .map(|pending| pending.input.clone())
     }
 }
 
@@ -2045,4 +2276,16 @@ enum RowChunk {
     Section(String, Vec<usize>),
     Upcoming(Vec<usize>),
     Completed(Vec<usize>),
+}
+
+impl RowChunk {
+    /// The row indices this chunk renders, in display order.
+    fn indices(&self) -> &[usize] {
+        match self {
+            RowChunk::Rows(indices)
+            | RowChunk::Section(_, indices)
+            | RowChunk::Upcoming(indices)
+            | RowChunk::Completed(indices) => indices,
+        }
+    }
 }
