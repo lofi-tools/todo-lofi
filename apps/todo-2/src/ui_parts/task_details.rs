@@ -417,6 +417,8 @@ pub enum TaskDetailsEvent {
     /// Stop the current phase's agent turn from the run's Workflow row
     /// (decision #27). The layout forwards it to the agent pane's stop-turn.
     CodingStopPhase,
+    /// The close button dismissed the pane: deselect the current task.
+    Deselected,
 }
 
 /// Something that should happen once the current field edits are resolved.
@@ -573,6 +575,10 @@ pub struct TaskDetails {
     /// button ignores a click within a short window so the capture-phase
     /// close and the bubble-phase toggle don't cancel out.
     until_outside_closed_at: Option<std::time::Instant>,
+    deadline_picker: Option<Entity<DateTimePicker>>,
+    _deadline_subscription: Option<Subscription>,
+    /// Same as `until_outside_closed_at`, for the deadline card.
+    deadline_outside_closed_at: Option<std::time::Instant>,
     time_edit: Option<TimeEditInputs>,
     focus_time_edit: bool,
     blocker_picker: Option<Entity<TaskPicker>>,
@@ -722,6 +728,9 @@ impl TaskDetails {
             until_picker: None,
             _until_picker_subscription: None,
             until_outside_closed_at: None,
+            deadline_picker: None,
+            _deadline_subscription: None,
+            deadline_outside_closed_at: None,
             time_edit: None,
             focus_time_edit: false,
             blocker_picker: None,
@@ -836,6 +845,7 @@ impl TaskDetails {
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         self.close_time_edit();
         self.abandon_subtask();
         self.abandon_follow_up();
@@ -1303,6 +1313,7 @@ impl TaskDetails {
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         match pending {
             PendingTarget::Select(task) => self.apply_selected(task, cx),
             PendingTarget::Deselect => self.clear(cx),
@@ -1362,6 +1373,7 @@ impl TaskDetails {
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         self.abandon_subtask();
         self.abandon_follow_up();
         self.cancel_editing(cx);
@@ -2295,6 +2307,7 @@ impl TaskDetails {
         self.until_outside_closed_at = None;
         self.blocker_outside_closed_at = None;
         self.after_outside_closed_at = None;
+        self.deadline_outside_closed_at = None;
         self.close_until_panel();
         self.close_blocker_picker();
         self.close_after_picker();
@@ -2445,6 +2458,116 @@ impl TaskDetails {
         closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
     }
 
+    fn close_deadline_picker(&mut self) {
+        self.deadline_picker = None;
+        self._deadline_subscription = None;
+    }
+
+    pub fn deadline_picker_open(&self) -> bool {
+        self.deadline_picker.is_some()
+    }
+
+    pub fn close_deadline_picker_and_notify(&mut self, cx: &mut Context<Self>) {
+        self.close_deadline_picker();
+        cx.notify();
+    }
+
+    /// True when the card was closed by an outside mousedown within the
+    /// ignore window, consuming the marker so only that closing click is
+    /// swallowed.
+    fn take_recent_deadline_outside_close(&mut self) -> bool {
+        let Some(closed_at) = self.deadline_outside_closed_at.take() else {
+            return false;
+        };
+        closed_at.elapsed() < OUTSIDE_CLOSE_IGNORE_WINDOW
+    }
+
+    fn open_deadline_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            return;
+        }
+        self.until_outside_closed_at = None;
+        self.blocker_outside_closed_at = None;
+        self.after_outside_closed_at = None;
+        self.repeat_outside_closed_at = None;
+        self.close_until_panel();
+        self.close_blocker_picker();
+        self.close_after_picker();
+        self.close_repeat_picker();
+        let picker = cx.new(|cx| DateTimePicker::new(window, cx));
+        let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
+            DateTimePickerEvent::Committed(deadline) => {
+                this.write_deadline(Some(*deadline), cx);
+            }
+        });
+        self.deadline_picker = Some(picker);
+        self._deadline_subscription = Some(subscription);
+        cx.notify();
+    }
+
+    fn clear_deadline(&mut self, cx: &mut Context<Self>) {
+        self.write_deadline(None, cx);
+    }
+
+    /// Optimistic local update, then persist and reload from the DB so both
+    /// this panel and the task list converge on stored truth.
+    fn write_deadline(&mut self, value: Option<u64>, cx: &mut Context<Self>) {
+        let Some(task) = &self.selected else {
+            return;
+        };
+        let task_id = task.id;
+        let store = self.store.clone();
+        if let Some(selected) = &mut self.selected {
+            selected.task.deadline = value;
+        }
+        self.close_deadline_picker();
+        let write = store.set_deadline(task_id, value, cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = write.await {
+                tracing::error!(?e, "Failed set_deadline");
+                return;
+            }
+            let reload = store.reload_task(task_id, cx);
+            match reload.await {
+                Ok(fresh) => {
+                    this.update(cx, |this, cx| {
+                        this.selected = Some(fresh.clone());
+                        cx.emit(TaskDetailsEvent::TaskRefreshed(fresh));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => {
+                    tracing::error!(?e, "Failed to reload task after deadline write");
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Floating card below the deadline property, mirroring `until_card`.
+    fn deadline_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(picker) = self.deadline_picker.clone() {
+            div()
+                .absolute()
+                .top(px(60.))
+                .left(px(0.))
+                .right(px(0.))
+                .bg(rgb(CARD_BG))
+                .border_1()
+                .border_color(rgb(HAIRLINE))
+                .rounded_md()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.deadline_outside_closed_at = Some(std::time::Instant::now());
+                    this.close_deadline_picker_and_notify(cx);
+                }))
+                .child(picker)
+        } else {
+            div()
+        }
+    }
+
     fn open_until_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_none() {
             return;
@@ -2452,9 +2575,11 @@ impl TaskDetails {
         self.blocker_outside_closed_at = None;
         self.after_outside_closed_at = None;
         self.repeat_outside_closed_at = None;
+        self.deadline_outside_closed_at = None;
         self.close_blocker_picker();
         self.close_after_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         let picker = cx.new(|cx| DateTimePicker::new(window, cx));
         let subscription = cx.subscribe(&picker, |this, _picker, event, cx| match event {
             DateTimePickerEvent::Committed(until) => {
@@ -2498,9 +2623,11 @@ impl TaskDetails {
         self.until_outside_closed_at = None;
         self.after_outside_closed_at = None;
         self.repeat_outside_closed_at = None;
+        self.deadline_outside_closed_at = None;
         self.close_until_panel();
         self.close_after_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
             TaskPickerEvent::Selected(blocker_id) => {
@@ -2582,9 +2709,11 @@ impl TaskDetails {
         self.until_outside_closed_at = None;
         self.blocker_outside_closed_at = None;
         self.repeat_outside_closed_at = None;
+        self.deadline_outside_closed_at = None;
         self.close_until_panel();
         self.close_blocker_picker();
         self.close_repeat_picker();
+        self.close_deadline_picker();
         self.link_error = None;
         let picker = cx.new(|cx| TaskPicker::new(Vec::new(), window, cx));
         let subscription = cx.subscribe(&picker, move |this, _picker, event, cx| match event {
@@ -2907,6 +3036,141 @@ impl TaskDetails {
         } else {
             div()
         }
+    }
+
+    /// Deadline and repeats on one inline row. A set property renders as
+    /// its icon plus the value (the deadline keeps its text in a hover
+    /// tooltip); an unset one renders as a "+ …" button opening its picker.
+    fn deadline_repeat_row(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let deadline = self.selected.as_ref().and_then(|task| task.deadline);
+        let repeat = self
+            .repeat_template
+            .as_ref()
+            .map(|template| repeat_label(template.interval_days, template.time_of_day));
+        let mut row = div().h_flex().items_center().gap_3();
+        row = match deadline {
+            Some(deadline) => {
+                let label = format_deadline(deadline);
+                let tooltip = format!("Deadline {label}");
+                let tooltip_for_hover = tooltip.clone();
+                let clear = Button::new("clear-deadline")
+                    .ghost()
+                    .compact()
+                    .cursor_pointer()
+                    .label("×")
+                    .tooltip("Clear deadline")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.clear_deadline(cx);
+                    }));
+                row.child(
+                    div()
+                        .id(("details-deadline", deadline))
+                        .h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_sm()
+                        .text_color(rgb(0xe5e5e5))
+                        .cursor_pointer()
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tooltip_for_hover.clone())
+                                .build(window, cx)
+                        })
+                        .child(
+                            svg()
+                                .data(DEADLINE_ICON_SVG)
+                                .size(px(14.))
+                                .text_color(rgb(0xa3a3a3)),
+                        )
+                        .child(label)
+                        .child(clear)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.deadline_picker_open() {
+                                this.close_deadline_picker_and_notify(cx);
+                            } else if this.take_recent_deadline_outside_close() {
+                                // The mousedown before this click already
+                                // closed the card; don't reopen it.
+                            } else {
+                                this.open_deadline_picker(window, cx);
+                            }
+                        })),
+                )
+            }
+            None => row.child(
+                relation_button("add-deadline", "+ deadline").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        if this.deadline_picker_open() {
+                            this.close_deadline_picker_and_notify(cx);
+                        } else if this.take_recent_deadline_outside_close() {
+                            // The mousedown before this click already closed
+                            // the card; don't reopen it.
+                        } else {
+                            this.open_deadline_picker(window, cx);
+                        }
+                    },
+                )),
+            ),
+        };
+        row = match repeat {
+            Some(label) => {
+                let label_for_hover = label.clone();
+                row.child(
+                    div()
+                    .id("details-repeat")
+                    .h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_sm()
+                    .text_color(rgb(0xe5e5e5))
+                    .cursor_pointer()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(format!(
+                            "Repeats {label_for_hover}"
+                        ))
+                        .build(window, cx)
+                    })
+                    .child(
+                        svg()
+                            .data(REFRESH_ICON_SVG)
+                            .size(px(14.))
+                            .text_color(rgb(0xa3a3a3)),
+                    )
+                    .child(label)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.repeat_picker_open() {
+                            this.close_repeat_picker_and_notify(cx);
+                        } else if this.take_recent_repeat_outside_close() {
+                            // The mousedown before this click already closed
+                            // the card; don't reopen it.
+                        } else {
+                            this.open_repeat_picker(window, cx);
+                        }
+                    })),
+                )
+            }
+            None => row.child(relation_button("add-repeat", "+ repeat").on_click(
+                cx.listener(|this, _, window, cx| {
+                    if this.repeat_picker_open() {
+                        this.close_repeat_picker_and_notify(cx);
+                    } else if this.take_recent_repeat_outside_close() {
+                        // The mousedown before this click already closed the
+                        // card; don't reopen it.
+                    } else {
+                        this.open_repeat_picker(window, cx);
+                    }
+                }),
+            )),
+        };
+        let _ = window;
+        div()
+            .relative()
+            .child(row)
+            .when(self.deadline_picker_open(), |this| {
+                this.child(self.deadline_card(cx))
+            })
     }
 
     fn relationships_section(
@@ -3303,6 +3567,10 @@ const DESCRIPTION_MAX_LINES: usize = 12;
 /// the element's text color, so the icon picks up the surrounding text
 /// color automatically.
 const REFRESH_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>"##;
+
+/// Deadline glyph (a calendar outline), same stroke technique as the repeat
+/// icon so it tints with the element's text color.
+const DEADLINE_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/deadline.svg");
 
 /// Description placeholder mark: the `file-text` strokes without the file
 /// outline. The first two strokes are full width; the third is half width.
@@ -5527,9 +5795,9 @@ impl Render for TaskDetails {
                             })),
                     );
                 }
-                if let Some(deadline) = task.deadline {
-                    details = details.child(field("Deadline", format_deadline(deadline)));
-                }
+                // Deadline and repeats sit together on one inline row: an
+                // icon plus the value when set, a "+ …" button when not.
+                details = details.child(self.deadline_repeat_row(window, cx));
                 // Overdue time blocks show nowhere: same gate as `until_row`.
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -5539,12 +5807,6 @@ impl Render for TaskDetails {
                     && until > now_secs
                 {
                     details = details.child(field("Blocked until", format_deadline(until)));
-                }
-                if let Some(template) = &self.repeat_template {
-                    details = details.child(field(
-                        "Repeats",
-                        repeat_label(template.interval_days, template.time_of_day),
-                    ));
                 }
                 if let Some(branch) = &task.branch_name
                     && !branch.is_empty()
@@ -5593,6 +5855,25 @@ impl Render for TaskDetails {
                     .pr(px(16.))
                     .overflow_y_scrollbar()
                     .child(body),
+            )
+            // Deselect the current task (closing the pane) from the top
+            // right, next to the scrollbar gutter.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(20.))
+                    .child(
+                        Button::new("details-close")
+                            .ghost()
+                            .compact()
+                            .cursor_pointer()
+                            .label("×")
+                            .tooltip("Close details")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(TaskDetailsEvent::Deselected);
+                            })),
+                    ),
             )
             .when(self.confirming, |this| {
                 this.child(

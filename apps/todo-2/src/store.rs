@@ -511,6 +511,20 @@ impl Store {
         })
     }
 
+    pub fn set_deadline(
+        &self,
+        task_id: u64,
+        deadline: Option<u64>,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<()>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            s.update_deadline(task_id, deadline).await?;
+            Ok(())
+        })
+    }
+
     pub fn set_blocked_until(
         &self,
         task_id: u64,

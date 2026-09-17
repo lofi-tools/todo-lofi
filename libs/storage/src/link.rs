@@ -493,6 +493,20 @@ impl TodoStore {
         Ok(())
     }
 
+    pub async fn update_deadline(
+        &mut self,
+        id: u64,
+        deadline: Option<u64>,
+    ) -> QueryResult<()> {
+        self.guard_and_mark_modified(id).await?;
+        crate::Task::update_by_id(id)
+            .deadline(deadline)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
+    }
+
     pub async fn update_blocked_until(
         &mut self,
         id: u64,

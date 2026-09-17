@@ -573,6 +573,16 @@ impl Layout {
                     let current = details_for_pending.read(cx).selected_task();
                     list_for_pending.update(cx, |list, cx| list.restore_selection(current, cx));
                 }
+                // The pane's close button: deselect the current task, which
+                // closes the pane. Defers while edits would be lost.
+                TaskDetailsEvent::Deselected => {
+                    let deferred =
+                        details_for_pending.update(cx, |details, cx| details.request_clear(cx));
+                    if !deferred {
+                        list_for_pending.update(cx, |list, cx| list.clear_selection(cx));
+                        cx.notify();
+                    }
+                }
                 TaskDetailsEvent::SelectTask { task_id } => {
                     list_for_pending.update(cx, |list, cx| list.select_task_by_id(*task_id, cx));
                 }

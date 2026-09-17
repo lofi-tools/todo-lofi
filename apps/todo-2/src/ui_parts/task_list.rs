@@ -1374,6 +1374,7 @@ mod tests {
                                 .child(format!("row {task_id}"))
                                 .into_any_element(),
                             ListEntry::BottomPad => div().h(px(24.)).into_any_element(),
+                            ListEntry::SectionPad => div().h(px(16.)).into_any_element(),
                         },
                     )
                     .render_body(),
@@ -1958,6 +1959,9 @@ pub enum ListEntry {
     /// Bottom breathing room inside the scroll area: in-flow, so it only
     /// appears when scrolled to the very bottom and never covers a task.
     BottomPad,
+    /// Vertical air below the normal section's last row, ahead of the
+    /// Upcoming/Completed header.
+    SectionPad,
 }
 
 /// The insert strip a task-list row leads with: the gap's neighbours (task
@@ -2141,6 +2145,9 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>, cx: &mut App) 
         ),
         // Plain breathing room: no hover affordance, no input.
         ListEntry::BottomPad => div().w_full().h(px(24.)).into_any_element(),
+        // Air below the normal section's last row, ahead of the
+        // Upcoming/Completed header.
+        ListEntry::SectionPad => div().w_full().h(px(16.)).into_any_element(),
     }
 }
 
@@ -2745,6 +2752,9 @@ impl TaskListView {
                     below: None,
                     input: self.inserting_input(above, None),
                 });
+                // Air below the normal section's last row, separating it
+                // from the Upcoming/Completed header that follows.
+                entries.push(ListEntry::SectionPad);
             }
         }
         // One trailing gap, so a task can still be added after the last row

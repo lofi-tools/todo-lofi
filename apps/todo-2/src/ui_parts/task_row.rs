@@ -67,6 +67,10 @@ pub struct TaskRow {
     /// renders inline on the title row, just right of the "N/M" counter,
     /// the rest behind that counter's expandable list.
     subtasks: Vec<TaskWithMeta>,
+    /// Inline subtask ids already completed and aged out: the inline slot
+    /// skips them and shows the next pending subtask instead.
+    inline_skipped: Vec<u64>,
+    _inline_tasks: Vec<gpui::Task<()>>,
     edit_input: Option<Entity<InputState>>,
     _edit_subscription: Option<Subscription>,
     /// The GitHub issue this task is synced from, when it is issue-backed:
@@ -102,6 +106,8 @@ impl TaskRow {
             blocks_expanded: false,
             subtasks_expanded,
             subtasks,
+            inline_skipped: Vec::new(),
+            _inline_tasks: Vec::new(),
             edit_input: None,
             _edit_subscription: None,
             issue: None,
@@ -233,7 +239,9 @@ impl TaskRow {
 
     /// Update the done flag of a subtask shown under this row (e.g. the
     /// subtask was completed in the details panel), keeping the N/M
-    /// counter fresh without a DB round-trip.
+    /// counter fresh without a DB round-trip. A completed inline subtask
+    /// stays in the inline slot briefly, then the slot moves on to the
+    /// next pending subtask.
     pub fn set_subtask_done(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
         let changed = self.subtasks.iter_mut().any(|task| {
             if task.id == task_id {
@@ -246,6 +254,50 @@ impl TaskRow {
         if changed {
             cx.notify();
         }
+        if !done || !self.is_inline_subtask(task_id) {
+            return;
+        }
+        self._inline_tasks.push(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            this.update(cx, |this: &mut Self, cx| {
+                this.advance_inline_subtask(task_id, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Whether this subtask currently fills the inline slot right of the
+    /// N/M counter.
+    fn is_inline_subtask(&self, task_id: u64) -> bool {
+        self.inline_subtask().is_some_and(|task| task.id == task_id)
+    }
+
+    /// The subtask rendered inline: the first pending one not already
+    /// aged out, falling back to the first subtask when none is pending.
+    fn inline_subtask(&self) -> Option<TaskWithMeta> {
+        self.subtasks
+            .iter()
+            .find(|task| !task.done && !self.inline_skipped.contains(&task.id))
+            .or_else(|| self.subtasks.first())
+            .cloned()
+    }
+
+    /// Move the inline slot past a completed subtask onto the next pending
+    /// one. A reopened subtask leaves the skip list so it can fill the
+    /// slot again.
+    fn advance_inline_subtask(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let still_done = self
+            .subtasks
+            .iter()
+            .any(|task| task.id == task_id && task.done);
+        if still_done && !self.inline_skipped.contains(&task_id) {
+            self.inline_skipped.push(task_id);
+        } else if !still_done {
+            self.inline_skipped.retain(|id| *id != task_id);
+        }
+        cx.notify();
     }
 
     pub fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
@@ -585,7 +637,7 @@ impl Render for TaskRow {
                                 .child(if self.subtasks_expanded { "▾" } else { "▸" }),
                         )
                     })
-                    .when_some(self.subtasks.first().cloned(), |this, task| {
+                    .when_some(self.inline_subtask(), |this, task| {
                         this.child(subtask_inline(task, &store, &entity))
                     })
             })
