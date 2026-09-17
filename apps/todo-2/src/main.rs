@@ -153,6 +153,9 @@ struct Layout {
     _project_subscription: Subscription,
     /// Subscription to the open project-picker modal, if one is open.
     _picker_subscription: Option<Subscription>,
+    /// Re-render when toasts come and go, so the notification layer below
+    /// is only mounted while one is actually showing.
+    _toast_layer_refresh: Option<Subscription>,
     /// Window-wide Escape observer (focus-independent deselect).
     _escape_observer: Subscription,
     /// The loopback MCP endpoint the coding agent attaches to, held for the
@@ -750,6 +753,7 @@ impl Layout {
             _projects: Vec::new(),
             _project_subscription: project_subscription,
             _picker_subscription: None,
+            _toast_layer_refresh: None,
             _escape_observer: escape_observer,
             _coding_mcp: coding_endpoint,
         }
@@ -1670,7 +1674,29 @@ impl Render for Layout {
         // The gpui-component Root only paints its main view; overlays like
         // dialogs and notification toasts must be layered on top by the app
         // (same composition as gpui-component's story app).
-        let notification_layer = gpui_component::Root::render_notification_layer(window, cx);
+        //
+        // The notification layer is a full-window transparent div, so it is
+        // only mounted while a toast is actually showing: otherwise it
+        // would sit above the app forever (e.g. blocking the GPUI
+        // inspector's element picker). The subscription re-renders this
+        // view on push and on auto-dismiss, so toasts still appear and
+        // vanish exactly as before.
+        if self._toast_layer_refresh.is_none()
+            && let Some(root) = window.root::<gpui_component::Root>().flatten()
+        {
+            let list = root.read(cx).notification.clone();
+            self._toast_layer_refresh = Some(cx.observe(&list, |_, _, cx| cx.notify()));
+        }
+        let notification_layer = window
+            .root::<gpui_component::Root>()
+            .flatten()
+            .and_then(|root| {
+                if root.read(cx).notification.read(cx).notifications().is_empty() {
+                    None
+                } else {
+                    gpui_component::Root::render_notification_layer(window, cx)
+                }
+            });
         let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
         let details_open =
             self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
