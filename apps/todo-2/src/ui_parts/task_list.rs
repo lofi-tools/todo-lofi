@@ -3,7 +3,7 @@ use gpui::{
     ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder, px, rgb,
 };
-use gpui_component::{IconName, Sizable};
+use gpui_component::{IconName, Sizable, Size};
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
@@ -12,7 +12,7 @@ use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
 use super::navbar::{NavBar, NavBarEvent, NavDestination};
-use super::task_row::{TaskRow, TaskRowEvent};
+use super::task_row::{RowBlocking, TaskRow, TaskRowEvent};
 use crate::store::Store;
 use crate::theme::HAIRLINE;
 
@@ -36,8 +36,8 @@ pub enum TaskListEvent {
 #[derive(Clone)]
 pub struct RowSpec {
     pub task: TaskWithMeta,
-    /// The single-task inline chain (arrow + grayed titles), when the task
-    /// blocks exactly one other task.
+    /// The single-task inline chain ("then" + grayed titles), when the
+    /// task blocks exactly one other task.
     pub blocked: Vec<super::task_row::ChainNode>,
     /// Every task this task exclusively blocks, used for the "blocks N"
     /// chip and its expandable list.
@@ -46,6 +46,15 @@ pub struct RowSpec {
     /// renders inline right of the title, the rest behind the expandable
     /// "N/M" counter.
     pub subtasks: Vec<TaskWithMeta>,
+}
+
+/// What one row shows about the tasks its task blocks: the inline chain and
+/// the "blocks N" chip.
+fn row_blocking(spec: &RowSpec) -> RowBlocking {
+    RowBlocking {
+        blocked: spec.blocked.clone(),
+        blocks: spec.blocks.clone(),
+    }
 }
 
 /// An inline insert input open in an interstitial gap: the input plus
@@ -63,6 +72,12 @@ pub struct TaskListView {
     /// blocks), kept so done-toggles can update blocked flags locally
     /// before the delayed re-sort refetches.
     row_specs: Vec<RowSpec>,
+    /// The view's tasks in list order, kept so a done-toggle can re-derive
+    /// the visible rows without a database round-trip. A just-ticked task
+    /// keeps its old done state here on purpose: its row sits in place
+    /// until the completed task's delayed jump, so a re-derivation must not
+    /// move it to the completed group early.
+    tasks: Vec<TaskWithMeta>,
     /// task_id -> its blockers (with meta). Used to decide which tasks are
     /// hidden into a blocker's chain and to unblock dependants locally.
     blockers_map: std::collections::HashMap<u64, Vec<TaskWithMeta>>,
@@ -170,6 +185,7 @@ impl TaskListView {
         Self {
             task_views: Vec::new(),
             row_specs: Vec::new(),
+            tasks: Vec::new(),
             blockers_map: std::collections::HashMap::new(),
             blocking_map: std::collections::HashMap::new(),
             subtasks_map: std::collections::HashMap::new(),
@@ -394,6 +410,22 @@ impl TaskListView {
                 changed.push((dependant.id, still_blocked));
             }
         }
+        // The dependants' flags on the list's own copies of the tasks, and
+        // on the "what I block" copies that feed a row's chain and blocks
+        // chip: re-deriving the rows below reads those instead of the
+        // database. The toggled task keeps its old done state here — its
+        // row is told directly below, and the layout must not move it to
+        // the completed group until the delayed reload.
+        for task in self.tasks.iter_mut() {
+            if let Some((_, blocked)) = changed.iter().find(|(id, _)| *id == task.id) {
+                task.blocked = *blocked;
+            }
+        }
+        for blocked_task in self.blocking_map.values_mut().flat_map(|map| map.iter_mut()) {
+            if let Some((_, blocked)) = changed.iter().find(|(id, _)| *id == blocked_task.id) {
+                blocked_task.blocked = *blocked;
+            }
+        }
 
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| {
@@ -405,9 +437,18 @@ impl TaskListView {
                 row.set_subtask_done(task_id, done, cx);
                 for (id, blocked) in &changed {
                     row.set_chain_blocked(*id, *blocked, cx);
+                    // A dependant with its own row stops being grayed out
+                    // (and its checkbox becomes tickable) right away.
+                    if row.task_id() == *id {
+                        row.set_blocked(*blocked, cx);
+                    }
                 }
             });
         }
+        // A tick can free an exclusively blocked dependant, which then gets
+        // its own row (and its checkbox) right away rather than only once
+        // the completed task's delayed reload lands.
+        self.sync_visible_rows(cx);
         let delay = if done {
             // 10s in place, then jump to the bottom.
             std::time::Duration::from_secs(10)
@@ -790,64 +831,118 @@ impl TaskListView {
         self.blockers_map = blockers_map;
         self.blocking_map = blocking_map;
         self.subtasks_map = subtasks;
+        self.tasks = tasks;
         let row_specs = Self::compute_row_specs(
-            &tasks,
+            &self.tasks,
             &self.blockers_map,
             &self.blocking_map,
             &self.subtasks_map,
         );
         self.row_specs = row_specs;
-        let selected_task_id = self.selected.as_ref().map(|task| task.id);
-        self.task_views = self
+        let views: Vec<Entity<TaskRow>> = self
             .row_specs
             .iter()
-            .map(|spec| {
-                let is_selected = Some(spec.task.id) == selected_task_id;
-                let subtasks_expanded = self.expanded_subtask == Some(spec.task.id);
-                let row = cx.new(|cx| {
-                    TaskRow::new(
-                        spec.task.clone(),
-                        super::task_row::RowBlocking {
-                            blocked: spec.blocked.clone(),
-                            blocks: spec.blocks.clone(),
-                        },
-                        spec.subtasks.clone(),
-                        self.store.clone(),
-                        selected_path.to_vec(),
-                        selected_labels.to_vec(),
-                        is_selected,
-                        subtasks_expanded,
-                        cx,
-                    )
-                });
-                cx.subscribe(&row, |this, _row, event, cx| match event {
-                    TaskRowEvent::Selected(task) => {
-                        this.select(task.clone(), true, cx);
-                    }
-                    TaskRowEvent::EditStarted => {
-                        this.editing = true;
-                    }
-                    TaskRowEvent::EditEnded => {
-                        this.editing = false;
-                    }
-                    TaskRowEvent::TitleCommitted { task_id, title } => {
-                        this.editing = false;
-                        cx.emit(TaskListEvent::TitleCommitted {
-                            task_id: *task_id,
-                            title: title.clone(),
-                        });
-                    }
-                    TaskRowEvent::DoneToggled { task_id, done } => {
-                        this.on_task_done_toggled(*task_id, *done, cx);
-                    }
-                    TaskRowEvent::SubtasksToggled { task_id } => {
-                        this.toggle_subtask_expansion(*task_id, cx);
-                    }
-                })
-                .detach();
-                row
-            })
+            .map(|spec| self.build_row(spec, selected_path, selected_labels, cx))
             .collect();
+        self.task_views = views;
+    }
+
+    /// Build the row (and subscribe to its events) for one spec. Rows are
+    /// kept across a local re-derivation of the list, so this is only
+    /// called for a spec that has no row yet.
+    fn build_row(
+        &self,
+        spec: &RowSpec,
+        selected_path: &[String],
+        selected_labels: &[String],
+        cx: &mut Context<Self>,
+    ) -> Entity<TaskRow> {
+        let is_selected = Some(spec.task.id) == self.selected.as_ref().map(|task| task.id);
+        let subtasks_expanded = self.expanded_subtask == Some(spec.task.id);
+        let row = cx.new(|cx| {
+            TaskRow::new(
+                spec.task.clone(),
+                row_blocking(spec),
+                spec.subtasks.clone(),
+                self.store.clone(),
+                selected_path.to_vec(),
+                selected_labels.to_vec(),
+                is_selected,
+                subtasks_expanded,
+                cx,
+            )
+        });
+        cx.subscribe(&row, |this, _row, event, cx| match event {
+            TaskRowEvent::Selected(task) => {
+                this.select(task.clone(), true, cx);
+            }
+            TaskRowEvent::EditStarted => {
+                this.editing = true;
+            }
+            TaskRowEvent::EditEnded => {
+                this.editing = false;
+            }
+            TaskRowEvent::TitleCommitted { task_id, title } => {
+                this.editing = false;
+                cx.emit(TaskListEvent::TitleCommitted {
+                    task_id: *task_id,
+                    title: title.clone(),
+                });
+            }
+            TaskRowEvent::DoneToggled { task_id, done } => {
+                this.on_task_done_toggled(*task_id, *done, cx);
+            }
+            TaskRowEvent::SubtasksToggled { task_id } => {
+                this.toggle_subtask_expansion(*task_id, cx);
+            }
+        })
+        .detach();
+        row
+    }
+
+    /// Re-derive the visible rows from the tasks already in hand, keeping
+    /// the rows that stay put (an open editor, an expanded list) and only
+    /// building the ones that just appeared. A done-toggle that frees an
+    /// exclusively blocked dependant calls this so the next task in a chain
+    /// shows its row — and its checkbox — at once, instead of only once the
+    /// completed task's delayed jump to the bottom reloads the list.
+    fn sync_visible_rows(&mut self, cx: &mut Context<Self>) {
+        let row_specs = Self::compute_row_specs(
+            &self.tasks,
+            &self.blockers_map,
+            &self.blocking_map,
+            &self.subtasks_map,
+        );
+        let same_rows = row_specs
+            .iter()
+            .map(|spec| spec.task.id)
+            .eq(self.row_specs.iter().map(|spec| spec.task.id));
+        if same_rows {
+            return;
+        }
+        self.row_specs = row_specs;
+        let mut views: Vec<Entity<TaskRow>> = Vec::with_capacity(self.row_specs.len());
+        for spec in &self.row_specs {
+            let existing = self
+                .task_views
+                .iter()
+                .find(|row| row.read(cx).task_id() == spec.task.id)
+                .cloned();
+            match existing {
+                // A row that survives the change keeps its state, but sheds
+                // the tasks that no longer nest in it.
+                Some(row) => {
+                    row.update(cx, |row, cx| row.set_blocking(row_blocking(spec), cx));
+                    views.push(row);
+                }
+                None => {
+                    let row = self.build_row(spec, &self.selected_path, &self.selected_labels, cx);
+                    views.push(row);
+                }
+            }
+        }
+        self.task_views = views;
+        cx.notify();
     }
 
     /// Toggle which row's subtask list is expanded. Only one row is
@@ -1153,6 +1248,43 @@ mod tests {
         assert!(done_spec.blocks.is_empty());
         let free_spec = specs.iter().find(|spec| spec.task.id == b.id).unwrap();
         assert!(!free_spec.task.blocked);
+    }
+
+    #[test]
+    fn test_done_toggle_hands_the_chain_over_to_the_next_task() {
+        let a = meta(1, "a");
+        let mut b = meta(2, "b");
+        b.blocked = true;
+        let tasks = vec![a.clone(), b.clone()];
+
+        let mut blockers_map = std::collections::HashMap::new();
+        let mut blocking_map = std::collections::HashMap::new();
+        // a blocks b exactly: b collapses into a's chain.
+        blockers_map.insert(b.id, vec![a.clone()]);
+        blocking_map.insert(a.id, vec![b.clone()]);
+
+        let subtasks_map = std::collections::HashMap::new();
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].blocked[0].task.id, b.id);
+
+        // Ticking `a` patches the local copies the way `on_task_done_toggled`
+        // does before re-deriving the rows: `b` gets its own row right after
+        // `a` with its blocked flag cleared, and `a` hands the chain over.
+        blockers_map.get_mut(&b.id).unwrap()[0].task.done = true;
+        let mut tasks = tasks;
+        tasks[1].blocked = false;
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
+        let ids: Vec<u64> = specs.iter().map(|spec| spec.task.id).collect();
+        assert_eq!(ids, vec![a.id, b.id]);
+        assert!(specs[0].blocked.is_empty());
+        assert!(specs[0].blocks.is_empty());
+        assert!(!specs[1].task.blocked);
+        // The ticked task still reads pending in the layout: its row greys
+        // out in place, and only the delayed reload moves it to the bottom.
+        assert!(!specs[0].task.done);
     }
 
     #[test]
@@ -1649,6 +1781,11 @@ impl TaskListView {
                         Button::new("show-all-tasks")
                             .ghost()
                             .compact()
+                            // Sized and toned like the "Upcoming" header
+                            // beside it, so the toggle reads as part of that
+                            // label rather than a call to action.
+                            .with_size(Size::Small)
+                            .text_color(rgb(0xa3a3a3))
                             .label(if show_all {
                                 "Show less".to_string()
                             } else {

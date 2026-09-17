@@ -1,10 +1,12 @@
 use gpui::{
     Anchor, AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
     IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px, rgb,
+    StatefulInteractiveElement, Styled, Subscription, Svg, Transformation, Window, div,
+    prelude::FluentBuilder, px, radians, rgb, svg,
 };
 use gpui_component::WindowExt;
 use gpui_component::StyledExt;
+use gpui_component::ActiveTheme;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::input::*;
 use gpui_component::scroll::ScrollableElement;
@@ -1672,6 +1674,8 @@ impl Render for Layout {
         let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
         let details_open =
             self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
+        let can_go_back = self.task_list.read(cx).can_go_back();
+        let can_go_forward = self.task_list.read(cx).can_go_forward();
 
         // The app's own column: title bar, content, footer. It is the only
         // in-flow child of the frame below, so the overlaid layers cannot move
@@ -1689,8 +1693,14 @@ impl Render for Layout {
                             Button::new("history-back")
                                 .ghost()
                                 .compact()
-                                .label("<")
-                                .disabled(!self.task_list.read(cx).can_go_back())
+                                // The one arrow glyph, turned around for
+                                // "back".
+                                .child(
+                                    history_arrow(can_go_back, cx).with_transformation(
+                                        Transformation::rotate(radians(std::f32::consts::PI)),
+                                    ),
+                                )
+                                .disabled(!can_go_back)
                                 .tooltip("Previous task")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.task_list.update(cx, |list, cx| list.go_back(cx));
@@ -1700,8 +1710,8 @@ impl Render for Layout {
                             Button::new("history-forward")
                                 .ghost()
                                 .compact()
-                                .label(">")
-                                .disabled(!self.task_list.read(cx).can_go_forward())
+                                .child(history_arrow(can_go_forward, cx))
+                                .disabled(!can_go_forward)
                                 .tooltip("Next task")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.task_list.update(cx, |list, cx| list.go_forward(cx));
@@ -1922,6 +1932,22 @@ impl Render for Layout {
                 )
             })
     }
+}
+
+/// The app header's history arrow: the task row's arrow glyph, tinted like
+/// the ghost button that holds it. An alpha-mask SVG only paints with a
+/// text color of its own, so the button's foreground — including the
+/// dimmer tone it takes once navigation that way is impossible — has to be
+/// repeated on the icon.
+fn history_arrow(enabled: bool, cx: &App) -> Svg {
+    svg()
+        .size(px(14.))
+        .data(ui_parts::task_row::ARROW_SVG)
+        .text_color(if enabled {
+            cx.theme().secondary_foreground
+        } else {
+            cx.theme().muted_foreground.opacity(0.5)
+        })
 }
 
 fn main() {

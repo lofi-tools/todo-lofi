@@ -19,7 +19,9 @@ use storage::prelude::{
 };
 
 use crate::components::Checkbox;
-use crate::components::{DateTimePicker, DateTimePickerEvent};
+use crate::components::{
+    DateTimePicker, DateTimePickerEvent, MiniTaskItem, mini_task_list,
+};
 use crate::store::Store;
 use crate::theme::{APP_BG, CARD_BG, HAIRLINE, PANEL_HOVER};
 
@@ -3086,39 +3088,17 @@ impl TaskDetails {
             .into_iter()
             .map(|subtask| {
                 let subtask_id = subtask.id;
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id(("subtask-title", subtask_id))
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .cursor_pointer()
-                            .text_color(if subtask.done {
-                                rgb(0x666666)
-                            } else {
-                                rgb(0xe5e5e5)
-                            })
-                            .child(subtask.title.clone())
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                cx.emit(TaskDetailsEvent::SelectTask {
-                                    task_id: subtask_id,
-                                });
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x737373))
-                            .child(if subtask.done { "done" } else { "" }.to_string()),
-                    )
+                MiniTaskItem::new(subtask_id, subtask.title.clone(), subtask.done).on_select(
+                    cx.listener(move |_this, _: &ClickEvent, _window, cx| {
+                        cx.emit(TaskDetailsEvent::SelectTask {
+                            task_id: subtask_id,
+                        });
+                    }),
+                )
             })
             .collect::<Vec<_>>();
         if !subtask_rows.is_empty() {
-            lists = lists.child(div().v_flex().gap_1().ml_2().children(subtask_rows));
+            lists = lists.child(mini_task_list(subtask_rows).ml_2());
         }
 
         // Tasks blocked by this task, grouped with its follow-ups (which
