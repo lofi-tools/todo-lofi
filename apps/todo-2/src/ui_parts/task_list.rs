@@ -1,5 +1,5 @@
 use gpui::{
-    AnyElement, AppContext, AsyncApp, Context, Entity, EventEmitter, InteractiveElement,
+    AnyElement, App, AppContext, AsyncApp, Context, Div, Entity, EventEmitter, InteractiveElement,
     IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, list,
     prelude::FluentBuilder, px, rgb,
@@ -137,6 +137,12 @@ pub struct TaskListView {
     /// An inline insert input open in an interstitial gap, if any: the ids
     /// of the rows above/below the gap (`None` at the list edges).
     inserting: Option<PendingInsert>,
+    /// The gap currently under the mouse, if any: its "+ row" renders
+    /// revealed and clickable over the row boundary. Tracked (rather than
+    /// pure `:hover` styling) so the whole band can take clicks only while
+    /// hovered — an invisible always-clickable band would swallow row
+    /// clicks at every boundary.
+    hovered_gap: Option<(Option<u64>, Option<u64>)>,
     /// While a completed task is jumping to the bottom of the list, clicks
     /// are disabled: from shortly before the jump until just after it.
     locked_until: Option<std::time::Instant>,
@@ -231,6 +237,7 @@ impl TaskListView {
             editing: false,
             input_needs_clear: false,
             inserting: None,
+            hovered_gap: None,
             locked_until: None,
             _fetch_tasks: None,
             _reorder_timer: {
@@ -726,6 +733,35 @@ impl TaskListView {
 
     fn insert_task(&mut self, title: String, cx: &mut Context<Self>) {
         self.insert_task_with_factors(title, 1.0, 1.0, cx);
+    }
+
+    /// Whether the gap between two rows is the one under the mouse.
+    fn is_gap_hovered(&self, above: Option<u64>, below: Option<u64>) -> bool {
+        self.hovered_gap == Some((above, below))
+    }
+
+    /// Track the gap under the mouse so its "+ row" can render revealed
+    /// and clickable. A leave for a gap that is no longer current is
+    /// ignored, so a racing leave cannot hide the newly hovered gap.
+    fn set_gap_hovered(
+        &mut self,
+        above: Option<u64>,
+        below: Option<u64>,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = Some((above, below));
+        let next = if hovered {
+            key
+        } else if self.hovered_gap == key {
+            None
+        } else {
+            return;
+        };
+        if self.hovered_gap != next {
+            self.hovered_gap = next;
+            cx.notify();
+        }
     }
 
     /// Open an inline input in the gap between two rows (`None` at the
@@ -1267,6 +1303,143 @@ mod tests {
         assert!(list_state.logical_scroll_top().item_ix > 0);
     }
 
+    /// The geometry one task-list row rests on: the strip takes no height in
+    /// the layout, the task item sits exactly `ROW_GAP` below the item's own
+    /// top edge (the previous task item's bottom border), and the strip's
+    /// drawing is centred on that border — its lower half hanging over the
+    /// next task item's top edge by more than the gap pulls it back, since
+    /// the drawing is painted last and is not hidden under that item.
+    #[gpui::test]
+    fn test_row_item_geometry(cx: &mut gpui::TestAppContext) {
+        struct RowBody;
+        impl Render for RowBody {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let strip = GapStrip {
+                    hit_zone: gap_band()
+                        .id("strip")
+                        .debug_selector(|| "strip".to_string())
+                        .into_any_element(),
+                    drawing: Some(
+                        gap_overlay(false)
+                            .id("strip-overlay")
+                            .debug_selector(|| "overlay".to_string())
+                            .into_any_element(),
+                    ),
+                };
+                let task_item = div()
+                    .id("task-item-inner")
+                    .debug_selector(|| "task-item".to_string())
+                    .h(px(52.))
+                    .into_any_element();
+                // Auto-height box, so the assertions below see the row item's
+                // own size rather than the whole window's; pushed down so the
+                // band's upper half stays inside the window like it does in
+                // the list, which pads its top by the same amount.
+                div().v_flex().w(px(400.)).pt(px(GAP_BAND_HEIGHT / 2.)).child(
+                    div()
+                        .id("row-item-box")
+                        .debug_selector(|| "row-item".to_string())
+                        .v_flex()
+                        .w_full()
+                        .child(list_row(Some(strip), task_item)),
+                )
+            }
+        }
+        let (_view, cx) = cx.add_window_view(|_, _| RowBody);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let item = cx.debug_bounds("row-item").expect("row item measured");
+        let strip = cx.debug_bounds("strip").expect("strip measured");
+        let overlay = cx.debug_bounds("overlay").expect("overlay measured");
+        let task_item = cx.debug_bounds("task-item").expect("task item measured");
+        // The strip contributes no height: the item is the task item plus
+        // the one small gap between consecutive task items.
+        assert_eq!(item.size.height, px(52. + ROW_GAP));
+        // The task item starts exactly the gap below the item's top edge,
+        // which is the previous task item's bottom border.
+        assert_eq!(task_item.top() - item.top(), px(ROW_GAP));
+        // The hit zone spans the whole band, and the drawing is centred on
+        // that border: it starts half a band above the item, and its lower
+        // edge is drawn past the next task item's top edge.
+        assert_eq!(strip.size.height, px(GAP_BAND_HEIGHT));
+        assert_eq!(strip.top() - item.top(), px(-(GAP_BAND_HEIGHT / 2.)));
+        assert_eq!(overlay.size.height, px(GAP_BAND_HEIGHT));
+        assert_eq!(overlay.top() - item.top(), px(-(GAP_BAND_HEIGHT / 2.)));
+        assert_eq!(
+            overlay.bottom() - task_item.top(),
+            px(GAP_BAND_HEIGHT / 2. - ROW_GAP)
+        );
+    }
+
+    /// Where the band reaches over the next task item, the item keeps the
+    /// click: the strip's hit zone is painted before the task item, so its
+    /// own click handler only ever sees the part of the band no task item
+    /// covers. Otherwise a click near the top of a row would insert a task
+    /// instead of selecting the row.
+    #[gpui::test]
+    fn test_clicks_under_the_band_belong_to_the_task_item(cx: &mut gpui::TestAppContext) {
+        let inserted = Rc::new(std::cell::Cell::new(false));
+        let selected = Rc::new(std::cell::Cell::new(false));
+        struct RowBody {
+            inserted: Rc<std::cell::Cell<bool>>,
+            selected: Rc<std::cell::Cell<bool>>,
+        }
+        impl Render for RowBody {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let inserted = self.inserted.clone();
+                let selected = self.selected.clone();
+                let strip = GapStrip {
+                    hit_zone: gap_band()
+                        .id("strip")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            inserted.set(true);
+                        })
+                        .into_any_element(),
+                    drawing: Some(gap_overlay(true).into_any_element()),
+                };
+                let task_item = div()
+                    .id("task-item-inner")
+                    .debug_selector(|| "task-item".to_string())
+                    .h(px(52.))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        selected.set(true);
+                    })
+                    .into_any_element();
+                div().v_flex().w(px(400.)).pt(px(GAP_BAND_HEIGHT)).child(
+                    div()
+                        .id("row-item-box")
+                        .debug_selector(|| "row-item".to_string())
+                        .v_flex()
+                        .w_full()
+                        .child(list_row(Some(strip), task_item)),
+                )
+            }
+        }
+        let (_view, cx) = cx.add_window_view(|_, _| RowBody {
+            inserted: inserted.clone(),
+            selected: selected.clone(),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let item = cx.debug_bounds("row-item").expect("row item measured");
+        let task_item = cx.debug_bounds("task-item").expect("task item measured");
+
+        // Inside the task item, a few pixels below its top edge: the band
+        // covers it, but the item is painted after the band's hit zone.
+        let over_the_item = gpui::point(task_item.left() + px(40.), task_item.top() + px(2.));
+        cx.simulate_click(over_the_item, gpui::Modifiers::none());
+        assert!(selected.get(), "the task item takes the click it is under");
+        assert!(!inserted.get(), "the band must not insert over the item");
+
+        // Above the task item, in the band's own half (the previous task
+        // item's border): the band takes the click.
+        selected.set(false);
+        let on_the_band = gpui::point(task_item.left() + px(40.), item.top() - px(4.));
+        cx.simulate_click(on_the_band, gpui::Modifiers::none());
+        assert!(inserted.get(), "the band takes the click it owns");
+        assert!(!selected.get());
+    }
+
     #[test]
     fn test_unchanged_prefix_only_remeasures_the_changed_tail() {
         let old = vec![
@@ -1581,11 +1754,12 @@ pub fn split_subsection(name: &str) -> (&str, Option<String>) {
 }
 
 /// One item of the task-list body. The body is a flat run of these —
-/// section headers, the insert gaps between rows, and the rows themselves
-/// — handed to gpui's `list`, which measures each item once and only lays
-/// out and paints the ones on screen. Items are cheap to clone and to
-/// compare, so the view can build a fresh run every frame and have the
-/// list re-measure only the part that actually changed.
+/// section headers, the rows (each leading with its own insert strip), the
+/// strips that lead no row, and the bottom padding — handed to gpui's
+/// `list`, which measures each item once and only lays out and paints the
+/// ones on screen. Items are cheap to clone and to compare, so the view can
+/// build a fresh run every frame and have the list re-measure only the part
+/// that actually changed.
 #[derive(Clone, PartialEq)]
 pub enum ListEntry {
     /// A section header ("Upcoming", "Completed", a tag's section, ...).
@@ -1602,7 +1776,9 @@ pub enum ListEntry {
         /// Whether those tasks are currently revealed (the toggle's label).
         show_all: bool,
     },
-    /// The insert strip between two rows (`None` at the list's edges): a
+    /// A strip that leads no task row: the one closing the normal section
+    /// (ahead of the Upcoming header) and the one trailing the last row.
+    /// Every other strip is part of the row it leads, see `Row::gap`. A
     /// hover-revealed + on a line, or the inline insert input when this gap
     /// is being filled.
     Gap {
@@ -1610,14 +1786,32 @@ pub enum ListEntry {
         below: Option<u64>,
         input: Option<Entity<InputState>>,
     },
-    /// A task row, rendering its own view.
+    /// One task-list row: the insert strip that leads it, then the task
+    /// item. Both live in one item so the strip is anchored to the item's
+    /// own top edge — exactly the previous task item's bottom border, the
+    /// line its rule lands on — and so the row it belongs to paints after
+    /// the item above it, never under it.
     Row {
         task_id: u64,
+        /// The strip above this row, or `None` inside Upcoming, which takes
+        /// no inserts: new tasks are added in the normal section and move
+        /// there on their own.
+        gap: Option<RowGap>,
         view: Entity<TaskRow>,
     },
     /// Bottom breathing room inside the scroll area: in-flow, so it only
     /// appears when scrolled to the very bottom and never covers a task.
     BottomPad,
+}
+
+/// The insert strip a task-list row leads with: the gap's neighbours (task
+/// ids, `None` at the list's edges) and the inline input when this is the
+/// gap being filled.
+#[derive(Clone, PartialEq)]
+pub struct RowGap {
+    above: Option<u64>,
+    below: Option<u64>,
+    input: Option<Entity<InputState>>,
 }
 
 /// Height hinted for items the list has not measured yet: about what a row
@@ -1626,7 +1820,24 @@ pub enum ListEntry {
 /// as the user scrolls. Measuring only ever replaces the hint with the real
 /// height, and erring high only overshoots the thumb, never the reachable
 /// end of the list.
-const ITEM_HEIGHT_HINT: f32 = 40.0;
+const ITEM_HEIGHT_HINT: f32 = 48.0;
+
+/// Visual height of one interstitial insert strip (the "+ row"): the band
+/// holding the + and the rule that appears on hover. The strip is laid out
+/// with negative vertical margins that cancel this height, so it takes up
+/// no room between two task items — the number describes the *reveal*: how
+/// tall the strip looks and how much of a target the pointer gets. The
+/// strip is centred on the boundary it inserts at, so half of the band
+/// reaches into the box of the task item above it and half below it.
+const GAP_BAND_HEIGHT: f32 = 24.0;
+
+/// The gap the layout leaves between two task items. The strip is centred on
+/// the previous item's border, so the gap is exactly how much of the strip's
+/// lower half the next task item takes back: it stays a fraction of the band
+/// so the strip — its rule and the + with it — reaches over that item's top
+/// edge instead of floating above it, while still leaving the two task
+/// items' own backgrounds a hairline apart.
+const ROW_GAP: f32 = GAP_BAND_HEIGHT / 6.0;
 
 /// Reusable virtualized task-list body: the flat item run, the list state
 /// the view owns (it has to outlive the element), and how to render one
@@ -1668,7 +1879,12 @@ impl ScrollableTaskList {
                         None => div().into_any_element(),
                     }
                 })
-                .size_full(),
+                .size_full()
+                // Half an insert band: a row's strip is centred on the row's
+                // own top edge, so the first row needs this much room above
+                // it for the strip's upper half to fall inside the viewport
+                // the list clips to, instead of being cut off at the top.
+                .pt(px(GAP_BAND_HEIGHT / 2.)),
             )
             // The list paints no scrollbar of its own; this one drives the
             // same state the wheel does, so dragging and the wheel agree.
@@ -1693,10 +1909,10 @@ fn unchanged_prefix(old: &[ListEntry], new: &[ListEntry]) -> usize {
         .count()
 }
 
-/// Render one item of the task-list body. Headers and gaps are rebuilt from
-/// their data on demand (they carry live event handlers, so they cannot be
-/// shared between frames); rows render their own view.
-fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>) -> AnyElement {
+/// Render one item of the task-list body. Headers and strips are rebuilt
+/// from their data on demand (they carry live event handlers, so they
+/// cannot be shared between frames); rows render their own view.
+fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>, cx: &mut App) -> AnyElement {
     match entry {
         ListEntry::Header {
             top,
@@ -1705,22 +1921,69 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>) -> AnyElement 
             distant,
             show_all,
         } => list_header(top, sub.as_deref(), *divided, *distant, *show_all, view).into_any_element(),
+        // A strip that leads no row: its hit zone is the only in-flow child
+        // of a zero-height item, so the items it sits between keep their
+        // own spacing, and its drawing is painted over them.
         ListEntry::Gap {
             above,
             below,
             input,
-        } => list_gap(*above, *below, input.clone(), view).into_any_element(),
-        // The row spans the full width, like it did as a flex child; the
-        // negative vertical margin cancels the gap strip's own height so
-        // rows pack tight and only the padding shows.
-        ListEntry::Row { view: row, .. } => div()
-            .w_full()
-            .my(px(-4.))
-            .child(row.clone())
-            .into_any_element(),
+        } => {
+            let strip = gap_strip(*above, *below, input.clone(), view, cx);
+            div()
+                .w_full()
+                .h(px(0.))
+                .child(strip.hit_zone)
+                .children(strip.drawing)
+                .into_any_element()
+        }
+        // One task-list row.
+        ListEntry::Row { gap, view: row, .. } => list_row(
+            gap.as_ref().map(|gap| {
+                gap_strip(gap.above, gap.below, gap.input.clone(), view, cx)
+            }),
+            row.clone().into_any_element(),
+        ),
         // Plain breathing room: no hover affordance, no input.
         ListEntry::BottomPad => div().w_full().h(px(24.)).into_any_element(),
     }
+}
+
+/// One task-list row: the insert strip that leads it (when it has one),
+/// then the task item itself, `ROW_GAP` below. Because the strip takes no
+/// height in the layout, the item's top edge is where the previous task
+/// item ended — the border the strip is centred on — and the gap is all
+/// the room the two task items have between them.
+///
+/// The strip's two layers sit either side of the task item: its hit zone
+/// in front, so whatever the band reaches over inside the item keeps its
+/// own clicks, and its drawing behind it, so the band is painted over the
+/// item instead of under it.
+fn list_row(strip: Option<GapStrip>, row: AnyElement) -> AnyElement {
+    let task_item = div().w_full().mt(px(ROW_GAP)).child(row);
+    let Some(strip) = strip else {
+        return div().w_full().v_flex().child(task_item).into_any_element();
+    };
+    div()
+        .w_full()
+        .v_flex()
+        .child(strip.hit_zone)
+        .child(task_item)
+        .children(strip.drawing)
+        .into_any_element()
+}
+
+/// Whether the strip at this boundary is the one under the mouse: the
+/// hovered one reveals itself and takes clicks, the others stay invisible
+/// and out of the way of the task items they sit on.
+fn gap_hovered(
+    view: &WeakEntity<TaskListView>,
+    above: Option<u64>,
+    below: Option<u64>,
+    cx: &App,
+) -> bool {
+    view.upgrade()
+        .is_some_and(|view| view.read(cx).is_gap_hovered(above, below))
 }
 
 /// One section header, with the "show all" toggle at its end when
@@ -1807,18 +2070,82 @@ fn list_header(
     header
 }
 
-/// One interstitial insert row: a hover-revealed + on a horizontal line,
-/// or the inline insert input when this gap is being filled. The strip is
-/// explicitly zero-height with visibly overflowing content, so adjacent
-/// row headers touch each other: the inner content keeps its 24px hitbox
-/// (centered on the boundary by its negative margin) and carries the
-/// hover reveal, since the zero-height strip itself is not hoverable.
-fn list_gap(
+/// The strip's hit zone: a full-width, `GAP_BAND_HEIGHT`-tall band, centred
+/// on the boundary it straddles. Its negative vertical margins cancel its
+/// own height, taking it back out of the layout calc, while the band (and
+/// so the hitbox) keeps its full size: a zero-height strip would be
+/// unhoverable. It draws nothing — the reveal is the strip's drawing — so
+/// it can be painted under the task item it overlaps and still be the
+/// pointer's target for the whole band.
+fn gap_band() -> Div {
+    div()
+        .w_full()
+        .h(px(GAP_BAND_HEIGHT))
+        .my(px(-(GAP_BAND_HEIGHT / 2.)))
+}
+
+/// The strip's drawing: the + and the rule, out of flow and centred on the
+/// boundary the strip straddles. It is painted *after* the task item it
+/// leads, so the band is drawn over that item (and over the one above it,
+/// whose item painted earlier) instead of being hidden under it — the rule
+/// lands on the previous task item's bottom border and the band's lower
+/// half reaches across the small gap and over the next item's top edge. It
+/// carries no id and so no hitbox: the clicks stay with the hit zone, which
+/// a task item the band overlaps outranks.
+fn gap_overlay(hovered: bool) -> Div {
+    div()
+        .absolute()
+        .top(px(-(GAP_BAND_HEIGHT / 2.)))
+        .left_0()
+        .right_0()
+        .h(px(GAP_BAND_HEIGHT))
+        .h_flex()
+        .items_center()
+        .gap_2()
+        .opacity(if hovered { 1.0 } else { 0.0 })
+        .child(
+            div()
+                .h_6()
+                .w_6()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_lg()
+                .text_color(rgb(0xa3a3a3))
+                .child("+"),
+        )
+        // Vertically centred in the band, so the rule sits on the boundary
+        // itself: the previous task item's bottom border.
+        .child(div().h_px().flex_1().bg(rgb(0x333333)))
+}
+
+/// The two layers of one insert strip. They are handed back separately
+/// rather than as one subtree because they sit on opposite sides of the
+/// task item the strip overlaps: the hit zone before it, the drawing after
+/// it. Anything else would either hide the band under that item or let a
+/// band that only reaches over the item's top edge take the clicks from
+/// inside it.
+struct GapStrip {
+    /// In flow and zero-height: the band that takes the hover and the
+    /// click. While this gap is being filled it is the inline input
+    /// instead, which draws its own visible height.
+    hit_zone: AnyElement,
+    /// Out of flow and painted last: the + and the rule. `None` while the
+    /// inline input is open, since the input draws itself.
+    drawing: Option<AnyElement>,
+}
+
+/// The insert strip at one boundary — a hover-revealed + on a horizontal
+/// rule, or the inline insert input when this gap is being filled — in its
+/// two layers. The strip belongs to the row it leads, so it straddles that
+/// row's own top edge: the previous task item's bottom border.
+fn gap_strip(
     above: Option<u64>,
     below: Option<u64>,
     input: Option<Entity<InputState>>,
     view: &WeakEntity<TaskListView>,
-) -> impl IntoElement {
+    cx: &App,
+) -> GapStrip {
     let key = format!(
         "insert-gap-{}-{}",
         above.unwrap_or(0),
@@ -1827,50 +2154,46 @@ fn list_gap(
     if let Some(input) = input {
         // Align with row titles/tags: row px_3 (12) + checkbox (22) +
         // title gap_3 (12) = 46px; right side matches the row px_3.
-        return div()
-            .id(key)
-            .py_2()
-            .pl(px(46.))
-            .pr_3()
-            .child(Input::new(&input).small().focus_bordered(false))
-            .into_any_element();
+        return GapStrip {
+            hit_zone: div()
+                .id(key)
+                .py_2()
+                .pl(px(46.))
+                .pr_3()
+                .child(Input::new(&input).small().focus_bordered(false))
+                .into_any_element(),
+            drawing: None,
+        };
     }
-    let view = view.clone();
-    div()
-        .id(key.clone())
-        .w_full()
-        .h(px(0.))
-        .child(
-            div()
-                .h_flex()
-                .items_center()
-                .gap_2()
-                .my_neg_3()
-                .opacity(0.0)
-                .hover(|style| style.opacity(1.0))
-                .child(
-                    div()
-                        .id(format!("{key}-plus"))
-                        .h_6()
-                        .w_6()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_lg()
-                        .text_color(rgb(0xa3a3a3))
-                        .cursor_pointer()
-                        .child("+")
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            view.update(cx, |this, cx| {
-                                this.begin_insert(above, below, window, cx)
-                            })
-                            .ok();
-                        }),
-                )
-                .child(div().h_px().flex_1().bg(rgb(0x333333))),
-        )
-        .into_any_element()
+    let hovered = gap_hovered(view, above, below, cx);
+    let view_for_hover = view.clone();
+    let view_for_click = view.clone();
+    GapStrip {
+        hit_zone: gap_band()
+            .id(key)
+            .on_hover(move |is_hovered, _, cx| {
+                view_for_hover
+                    .update(cx, |this, cx| {
+                        this.set_gap_hovered(above, below, *is_hovered, cx)
+                    })
+                    .ok();
+            })
+            // The whole band inserts, but only while hovered: an invisible
+            // always-clickable band would swallow row clicks at every
+            // boundary.
+            .when(hovered, move |this| {
+                this.cursor_pointer().on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    view_for_click
+                        .update(cx, |this, cx| {
+                            this.begin_insert(above, below, window, cx)
+                        })
+                        .ok();
+                })
+            })
+            .into_any_element(),
+        drawing: Some(gap_overlay(hovered).into_any_element()),
+    }
 }
 
 impl Render for TaskListView {
@@ -2010,7 +2333,7 @@ impl TaskListView {
         ScrollableTaskList::new(
             self.entries.clone(),
             self.list_state.clone(),
-            move |entry, _window, _cx| list_entry(entry, &view),
+            move |entry, _window, cx| list_entry(entry, &view, cx),
         )
         .render_body()
     }
@@ -2073,10 +2396,10 @@ impl TaskListView {
     /// headers for sectioned tags (Todoist-style), with not-yet-doable
     /// tasks last under an "Upcoming" header and completed ones under
     /// "Completed". Tasks starting more than 2 days out only render when
-    /// "show all" is on. Every row outside Upcoming is preceded by its
-    /// insert gap, the normal section is closed by one trailing gap, and
-    /// then the list is closed by one trailing gap (unless it ends inside
-    /// Upcoming, which takes no inserts).
+    /// "show all" is on. Every row outside Upcoming leads with its own
+    /// insert strip; the normal section is closed by one more strip that
+    /// leads no row, and the list is closed by a trailing strip (unless it
+    /// ends inside Upcoming, which takes no inserts).
     fn list_entries(&self) -> Vec<ListEntry> {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2139,9 +2462,10 @@ impl TaskListView {
     }
 
     /// Turn row chunks into list items: the chunk's header (if it has one)
-    /// followed by each of its rows behind an insert gap. Gaps are placed
-    /// against the whole display order, so the gap above a section's first
-    /// row still sits between it and the section header.
+    /// followed by each of its rows, each row leading with its own insert
+    /// strip. Strips are addressed against the whole display order, so the
+    /// strip above a section's first row still sits between it and the
+    /// section header.
     ///
     /// The Upcoming chunk is a query, not a place: no insert gap is
     /// rendered above (or between) its rows — new tasks are always added
@@ -2178,16 +2502,17 @@ impl TaskListView {
                 let task_id = self.row_specs[index].task.id;
                 // No "+ row" inside Upcoming: adding happens in the normal
                 // section, and the task moves here on its own.
-                if !upcoming_ids.contains(&task_id) {
+                let gap = (!upcoming_ids.contains(&task_id)).then(|| {
                     let above = (position > 0).then(|| order[position - 1]);
-                    entries.push(ListEntry::Gap {
+                    RowGap {
                         above,
                         below: Some(task_id),
                         input: self.inserting_input(above, Some(task_id)),
-                    });
-                }
+                    }
+                });
                 entries.push(ListEntry::Row {
                     task_id,
+                    gap,
                     view: self.task_views[index].clone(),
                 });
                 position += 1;
