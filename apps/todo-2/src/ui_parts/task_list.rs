@@ -1459,6 +1459,11 @@ mod tests {
                     hit_zone: gap_band()
                         .id("strip")
                         .debug_selector(|| "strip".to_string())
+                        .child(
+                            gap_click_zone()
+                                .id("strip-click")
+                                .debug_selector(|| "strip-click".to_string()),
+                        )
                         .into_any_element(),
                     drawing: Some(
                         gap_overlay(false)
@@ -1490,6 +1495,9 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let item = cx.debug_bounds("row-item").expect("row item measured");
         let strip = cx.debug_bounds("strip").expect("strip measured");
+        let zone = cx
+            .debug_bounds("strip-click")
+            .expect("click zone measured");
         let overlay = cx.debug_bounds("overlay").expect("overlay measured");
         let task_item = cx.debug_bounds("task-item").expect("task item measured");
         // The strip contributes no height: the item is the task item plus
@@ -1514,15 +1522,21 @@ mod tests {
             overlay.center().y - item.top(),
             task_item.top() - overlay.center().y
         );
+        // The click target starts at the row's left edge — the + square — and
+        // reaches `GAP_CLICK_WIDTH` past it, keeping the band's own height so
+        // the + stays aimable at any point along it.
+        assert_eq!(zone.left(), item.left());
+        assert_eq!(zone.size.width, px(GAP_PLUS_SIZE + GAP_CLICK_WIDTH));
+        assert_eq!(zone.size.height, px(GAP_BAND_HEIGHT));
     }
 
-    /// Where the band reaches over the next task item, the item keeps the
-    /// click: the strip's hit zone is painted before the task item, so its
-    /// own click handler only ever sees the part of the band no task item
-    /// covers. Otherwise a click near the top of a row would insert a task
-    /// instead of selecting the row.
+    /// The strip only inserts from the zone around its +: the rest of the band
+    /// hovers but takes no clicks, and where the band reaches over the next
+    /// task item, that item keeps the click — its hitbox is painted after the
+    /// strip's, so it outranks it. Otherwise a click near the top of a row
+    /// would insert a task instead of selecting the row.
     #[gpui::test]
-    fn test_clicks_under_the_band_belong_to_the_task_item(cx: &mut gpui::TestAppContext) {
+    fn test_only_the_zone_around_the_plus_inserts(cx: &mut gpui::TestAppContext) {
         let inserted = Rc::new(std::cell::Cell::new(false));
         let selected = Rc::new(std::cell::Cell::new(false));
         struct RowBody {
@@ -1536,10 +1550,12 @@ mod tests {
                 let strip = GapStrip {
                     hit_zone: gap_band()
                         .id("strip")
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            inserted.set(true);
-                        })
+                        .child(
+                            gap_click_zone().id("strip-click").on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                inserted.set(true);
+                            }),
+                        )
                         .into_any_element(),
                     drawing: Some(gap_overlay(true).into_any_element()),
                 };
@@ -1570,20 +1586,40 @@ mod tests {
         let item = cx.debug_bounds("row-item").expect("row item measured");
         let task_item = cx.debug_bounds("task-item").expect("task item measured");
 
-        // Inside the task item, a few pixels below its top edge: the band
-        // covers it, but the item is painted after the band's hit zone.
-        let over_the_item = gpui::point(task_item.left() + px(40.), task_item.top() + px(2.));
+        // Above the task item, in the band's own half (the previous task
+        // item's bottom border): the + square and the band right of it both
+        // insert.
+        for (label, x) in [
+            ("the + square", GAP_PLUS_SIZE / 2.),
+            ("the band right of the +", GAP_PLUS_SIZE + GAP_CLICK_WIDTH / 2.),
+        ] {
+            inserted.set(false);
+            let in_the_zone = gpui::point(task_item.left() + px(x), item.top() - px(4.));
+            cx.simulate_click(in_the_zone, gpui::Modifiers::none());
+            assert!(inserted.get(), "{label} inserts");
+            assert!(!selected.get(), "nothing under the band was selected");
+        }
+
+        // Past the zone: the rest of the band hovers only, so the click is
+        // not an insert.
+        inserted.set(false);
+        let past_the_zone = gpui::point(
+            task_item.left() + px(GAP_PLUS_SIZE + GAP_CLICK_WIDTH + 40.),
+            item.top() - px(4.),
+        );
+        cx.simulate_click(past_the_zone, gpui::Modifiers::none());
+        assert!(!inserted.get(), "the band past the zone must not insert");
+
+        // Inside the task item, a few pixels below its top edge and inside
+        // the click zone: the item is painted after the strip, so it takes
+        // the click it is under.
+        inserted.set(false);
+        selected.set(false);
+        let over_the_item =
+            gpui::point(task_item.left() + px(GAP_PLUS_SIZE / 2.), task_item.top() + px(2.));
         cx.simulate_click(over_the_item, gpui::Modifiers::none());
         assert!(selected.get(), "the task item takes the click it is under");
-        assert!(!inserted.get(), "the band must not insert over the item");
-
-        // Above the task item, in the band's own half (the previous task
-        // item's border): the band takes the click.
-        selected.set(false);
-        let on_the_band = gpui::point(task_item.left() + px(40.), item.top() - px(4.));
-        cx.simulate_click(on_the_band, gpui::Modifiers::none());
-        assert!(inserted.get(), "the band takes the click it owns");
-        assert!(!selected.get());
+        assert!(!inserted.get(), "the strip must not insert over the item");
     }
 
     #[test]
@@ -2028,6 +2064,15 @@ const ITEM_HEIGHT_HINT: f32 = 48.0;
 /// are visible over those items.
 const GAP_BAND_HEIGHT: f32 = 24.0;
 
+/// The + square's side. The strip's drawing and its click target share it, so
+/// the target cannot drift away from the + the pointer is aiming at.
+const GAP_PLUS_SIZE: f32 = 24.0;
+
+/// How far the strip's click target reaches past the + square's right edge:
+/// enough of the rule to aim at, small enough to leave the rest of the band to
+/// the rows it reaches over.
+const GAP_CLICK_WIDTH: f32 = 20.0;
+
 /// The gap the layout leaves between two task items: room for the strip's
 /// rule (1px) and the same clearance above it as below, so the strip can sit
 /// centred in the gap and hold itself off both task items the same way. It
@@ -2309,14 +2354,15 @@ fn list_header(
     header
 }
 
-/// The strip's hit zone: a full-width, `GAP_BAND_HEIGHT`-tall band, reaching
-/// `GAP_BAND_RISE` above the row item's top edge and the rest of the band
-/// below it, so it straddles the gap between the two task items. Its
+/// The strip's hover zone: a full-width, `GAP_BAND_HEIGHT`-tall band,
+/// reaching `GAP_BAND_RISE` above the row item's top edge and the rest of the
+/// band below it, so it straddles the gap between the two task items. Its
 /// negative vertical margins cancel its own height, taking it back out of
 /// the layout calc, while the band (and so the hitbox) keeps its full size:
 /// a zero-height strip would be unhoverable. It draws nothing — the reveal
 /// is the strip's drawing — so it can be painted under the task item it
-/// reaches over and still be the pointer's target for the whole band.
+/// reaches over and still reveal the strip from anywhere along the band. Its
+/// clicks belong to the small zone holding the + (`gap_click_zone`).
 fn gap_band() -> Div {
     div()
         .w_full()
@@ -2346,8 +2392,8 @@ fn gap_overlay(hovered: bool) -> Div {
         .opacity(if hovered { 1.0 } else { 0.0 })
         .child(
             div()
-                .h_6()
-                .w_6()
+                .h(px(GAP_PLUS_SIZE))
+                .w(px(GAP_PLUS_SIZE))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2360,6 +2406,16 @@ fn gap_overlay(hovered: bool) -> Div {
         .child(div().h_px().flex_1().bg(rgb(0x333333)))
 }
 
+/// The strip's click target: the + square, the rule's start next to it, and
+/// no more of the band. The band around it only hovers, so a click anywhere
+/// else falls through to whatever is under the pointer — the task item the
+/// band reaches over, or the row above whose bottom border it covers.
+fn gap_click_zone() -> Div {
+    div()
+        .w(px(GAP_PLUS_SIZE + GAP_CLICK_WIDTH))
+        .h(px(GAP_BAND_HEIGHT))
+}
+
 /// The two layers of one insert strip. They are handed back separately
 /// rather than as one subtree because they sit on opposite sides of the
 /// task item the strip overlaps: the hit zone before it, the drawing after
@@ -2367,9 +2423,9 @@ fn gap_overlay(hovered: bool) -> Div {
 /// band that only reaches over the item's top edge take the clicks from
 /// inside it.
 struct GapStrip {
-    /// In flow and zero-height: the band that takes the hover and the
-    /// click. While this gap is being filled it is the inline input
-    /// instead, which draws its own visible height.
+    /// In flow and zero-height: the band that takes the hover, with the
+    /// click zone around its +. While this gap is being filled it is the
+    /// inline input instead, which draws its own visible height.
     hit_zone: AnyElement,
     /// Out of flow and painted last: the + and the rule. `None` while the
     /// inline input is open, since the input draws itself.
@@ -2409,6 +2465,8 @@ fn gap_strip(
     let hovered = gap_hovered(view, above, below, cx);
     let view_for_hover = view.clone();
     let view_for_click = view.clone();
+    // Built before `key` is moved into the band's own id.
+    let click_key = format!("{key}-click");
     GapStrip {
         hit_zone: gap_band()
             .id(key)
@@ -2419,19 +2477,24 @@ fn gap_strip(
                     })
                     .ok();
             })
-            // The whole band inserts, but only while hovered: an invisible
-            // always-clickable band would swallow row clicks at every
-            // boundary.
-            .when(hovered, move |this| {
-                this.cursor_pointer().on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    view_for_click
-                        .update(cx, |this, cx| {
-                            this.begin_insert(above, below, window, cx)
+            // Only the zone around the + inserts, and only while hovered:
+            // the band reaches over the row below it and over the previous
+            // row's bottom border, and a click in either belongs to the row
+            // it is on.
+            .child(
+                gap_click_zone()
+                    .id(click_key)
+                    .when(hovered, move |this| {
+                        this.cursor_pointer().on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            view_for_click
+                                .update(cx, |this, cx| {
+                                    this.begin_insert(above, below, window, cx)
+                                })
+                                .ok();
                         })
-                        .ok();
-                })
-            })
+                    }),
+            )
             .into_any_element(),
         drawing: Some(gap_overlay(hovered).into_any_element()),
     }
