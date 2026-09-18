@@ -322,6 +322,22 @@ fn token_expiry(body: &serde_json::Value, field: &str) -> Option<i64> {
     now_epoch().checked_add(i64::try_from(seconds).ok()?)
 }
 
+/// GitHub's refusal of a grant or a refresh, read out of the response body.
+/// A rejected refresh token (`bad_refresh_token`) comes back in the body of a
+/// 200, so the status alone does not tell a refusal from a grant.
+fn token_error(body: &serde_json::Value) -> Option<String> {
+    let code = body.get("error")?.as_str()?;
+    if code.is_empty() {
+        return None;
+    }
+    Some(
+        match body.get("error_description").and_then(|value| value.as_str()) {
+            Some(description) if !description.is_empty() => format!("{code}: {description}"),
+            _ => code.to_string(),
+        },
+    )
+}
+
 /// Parse an OAuth token response that must carry a new access token. A
 /// missing refresh token means the grant cannot renew itself later.
 fn parse_token_grant(
@@ -688,6 +704,29 @@ fn access_token_expired(expires_at: Option<i64>) -> bool {
     expires_at.is_some_and(|expires_at| expires_at <= now_epoch() + 60)
 }
 
+/// Serializes token refreshes process-wide. A GitHub refresh token is
+/// single-use — using it retires the pair it came with — so two callers
+/// refreshing at once would send the same token twice, and the loser's
+/// rejection must not cost the connection the winner just renewed.
+static REFRESH_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    REFRESH_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// The stored access token to hand back instead of refreshing: one that
+/// replaced the token an attempt set out to renew while that attempt waited
+/// for [`refresh_lock`]. Sending a refresh token another attempt already
+/// rotated earns a `bad_refresh_token`, so a waiting attempt takes the fresh
+/// pair that landed instead.
+fn superseding_access_token(file: &GithubFile, replacing: Option<&str>) -> Option<String> {
+    let stored = file.access_token.clone().filter(|token| !token.is_empty())?;
+    if Some(stored.as_str()) == replacing || access_token_expired(file.access_token_expires_at) {
+        return None;
+    }
+    Some(stored)
+}
+
 /// Renew the stored OAuth access token with its refresh token, persisting
 /// the rotated pair. A refresh the server rejects clears the OAuth tokens so
 /// later calls fail as “connect first” instead of retrying a dead secret.
@@ -704,14 +743,30 @@ async fn refresh_oauth_token_at(path: &std::path::Path) -> anyhow::Result<String
     }
 }
 
+/// The refresh itself, serialized against every other attempt: a caller that
+/// waited for one already in flight is answered with the pair that landed,
+/// so the rotated refresh token is spent exactly once.
 async fn try_refresh_oauth_token_at(
     path: &std::path::Path,
 ) -> Result<String, AttemptError> {
+    let replacing = load_at(path)
+        .map_err(AttemptError::permanent)?
+        .and_then(|file| file.access_token)
+        .filter(|token| !token.is_empty());
+    // Only one refresh runs at a time, so the refresh token read below is
+    // still unspent by the time it is sent.
+    let _refresh = refresh_lock().lock().await;
+    // The wait may have been for a refresh that already landed: when the
+    // stored pair is no longer the one this attempt set out to renew, that
+    // refresh has nothing left to do.
     let Some(file) = load_at(path).map_err(AttemptError::permanent)? else {
         return Err(AttemptError::permanent(anyhow::anyhow!(
             "Connect GitHub first"
         )));
     };
+    if let Some(token) = superseding_access_token(&file, replacing.as_deref()) {
+        return Ok(token);
+    }
     let Some(refresh_token) = file.refresh_token.clone().filter(|token| !token.is_empty())
     else {
         return Err(AttemptError::permanent(anyhow::anyhow!(
@@ -775,6 +830,11 @@ async fn refresh_request(
         }
         return Err(AttemptError::permanent(error));
     }
+    if let Some(error) = token_error(&body) {
+        return Err(AttemptError::permanent(anyhow::anyhow!(
+            "GitHub refused the refresh token ({error}); reconnect GitHub"
+        )));
+    }
     parse_token_grant(&body, status).map_err(AttemptError::permanent)
 }
 
@@ -822,9 +882,13 @@ async fn recover_from_rejected_token_at(
             }
         };
     }
-    Err(anyhow::anyhow!(
-        "GitHub rejected the stored token; reconnect GitHub"
-    ))
+    // The rejected secret is no longer the one on file: a refresh, or a new
+    // personal token, landed while this request was in flight. The caller
+    // retries with the current credential instead of being told to
+    // reconnect a connection that is alive.
+    active_credential_at(path)
+        .await
+        .map(|credential| credential.token)
 }
 
 fn invalidate_token_at(
@@ -1395,6 +1459,32 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn a_rejection_of_a_rotated_token_hands_back_the_current_one() {
+        // The request that got the 401 used a token another refresh has
+        // since replaced. The connection is alive, so recovery returns the
+        // current credential for the retry rather than a reconnect prompt.
+        let dir =
+            std::env::temp_dir().join(format!("todo2-github-rotated-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("github.json");
+        let mut file = token_file_fixture();
+        file.personal_token = None;
+        file.access_token = Some("gho_fresh".to_string());
+        file.access_token_expires_at = Some(now_epoch() + 3_600);
+        save_at(&path, &file).unwrap();
+
+        let token = block_on(recover_from_rejected_token_at(&path, "gho_stale")).unwrap();
+        assert_eq!(token, "gho_fresh");
+
+        let file = load_at(&path).unwrap().expect("the live pair is untouched");
+        assert_eq!(file.access_token.as_deref(), Some("gho_fresh"));
+        assert!(file.refresh_token.is_some());
+        assert!(has_usable_credentials_at(&path));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The whole file lifecycle, against an explicit path so it never has to
     /// mutate the process-wide config dir.
     #[test]
@@ -1558,5 +1648,55 @@ mod tests {
         assert_eq!(poll_interval_at(&path), Some(0), "manual syncing is kept");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_waiting_refresh_takes_the_pair_a_concurrent_one_stored() {
+        // The stored token is still the one this attempt set out to replace:
+        // that is the refresh itself, which has to run.
+        let mut file = token_file_fixture();
+        file.access_token = Some("gho_old".to_string());
+        file.access_token_expires_at = Some(now_epoch() + 3_600);
+        assert_eq!(superseding_access_token(&file, Some("gho_old")), None);
+
+        // A pair another refresh stored while this one waited is the answer,
+        // so the rotated refresh token is never spent a second time.
+        file.access_token = Some("gho_new".to_string());
+        assert_eq!(
+            superseding_access_token(&file, Some("gho_old")).as_deref(),
+            Some("gho_new")
+        );
+        assert_eq!(
+            superseding_access_token(&file, None).as_deref(),
+            Some("gho_new")
+        );
+
+        // An expired token is never reused, and a file holding none (a race
+        // with a reconnect, or with the token being cleared) has nothing to
+        // hand back.
+        file.access_token_expires_at = Some(1);
+        assert_eq!(superseding_access_token(&file, Some("gho_old")), None);
+        file.access_token = None;
+        assert_eq!(superseding_access_token(&file, Some("gho_old")), None);
+    }
+
+    #[test]
+    fn a_refusal_in_a_200_body_names_the_cause() {
+        assert_eq!(
+            token_error(&json!({
+                "error": "bad_refresh_token",
+                "error_description": "The refresh token is invalid",
+            }))
+            .as_deref(),
+            Some("bad_refresh_token: The refresh token is invalid")
+        );
+        assert_eq!(
+            token_error(&json!({ "error": "bad_refresh_token" })).as_deref(),
+            Some("bad_refresh_token")
+        );
+        // A grant carries no error, and a shapeless one is not an error.
+        assert!(token_error(&json!({ "access_token": "gho_token" })).is_none());
+        assert!(token_error(&json!({ "error": 42 })).is_none());
+        assert!(token_error(&json!({ "error": "" })).is_none());
     }
 }
