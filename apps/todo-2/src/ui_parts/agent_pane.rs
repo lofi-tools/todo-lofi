@@ -403,6 +403,9 @@ pub struct AgentPane {
     overlay_list: ListState,
     /// Highlighted row of the open dropdown.
     overlay_cursor: usize,
+    /// Up/Down, taken before the keymap so the open dropdown's arrows move
+    /// its highlight even while the model filter field has focus.
+    _arrow_interceptor: Subscription,
 }
 
 impl AgentPane {
@@ -436,6 +439,15 @@ impl AgentPane {
                 this.on_overlay_query_event(event, window, cx);
             },
         );
+        let pane = cx.weak_entity();
+        let _arrow_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+            let handled = pane
+                .update(cx, |pane, cx| pane.on_arrow_key(&event.keystroke, cx))
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        });
         Self {
             session_store,
             agent: Arc::new(OpenCodeAgent),
@@ -457,6 +469,7 @@ impl AgentPane {
                 px(OVERLAY_ROW_HEIGHT * OVERLAY_MAX_ROWS as f32),
             ),
             overlay_cursor: 0,
+            _arrow_interceptor,
         }
     }
 
@@ -1643,6 +1656,25 @@ impl AgentPane {
                 }
             }
         }
+    }
+
+    /// Handle an intercepted Up/Down: while a dropdown is open the arrows
+    /// move its highlight, wherever focus is. The model dropdown focuses its
+    /// filter field, and a focused `Input` binds `up`/`down` to its own caret
+    /// actions, which outrank anything the pane could bind on an ancestor —
+    /// so the key is caught here, ahead of the keymap. Returns whether the key
+    /// was taken.
+    fn on_arrow_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+        if self.overlay.is_none() || keystroke.modifiers.modified() {
+            return false;
+        }
+        let delta = match keystroke.key.as_str() {
+            "up" => -1,
+            "down" => 1,
+            _ => return false,
+        };
+        self.move_overlay_cursor(delta, cx);
+        true
     }
 
     fn move_overlay_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -3801,6 +3833,79 @@ mod tests {
             list_state.bounds_for_item(values.len() - 1).is_none(),
             "a row past the viewport is not built"
         );
+    }
+
+    /// The model dropdown's arrows move its highlight while its filter field
+    /// has focus. A focused `Input` binds `up`/`down` to its own caret
+    /// actions, which outrank anything the pane could bind on an ancestor, so
+    /// the pane has to take the key ahead of the keymap: without that the
+    /// arrows never reach the dropdown and it can only be typed into.
+    #[gpui::test]
+    fn the_model_picker_moves_its_highlight_with_the_arrows(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let store = SessionStore::new(std::env::temp_dir().join(format!(
+            "todo2-agent-pane-model-picker-{}.json",
+            std::process::id()
+        )));
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(store, window, cx);
+            let model: SessionConfigOption = serde_json::from_value(serde_json::json!({
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "b",
+                "options": [
+                    {"value": "a", "name": "A"},
+                    {"value": "b", "name": "B"},
+                    {"value": "c", "name": "C"}
+                ]
+            }))
+            .expect("model option");
+            let mut entry = ProjectEntry::new(
+                AgentProject {
+                    tag_id: 7,
+                    tag_name: "project:repo".to_string(),
+                    label: "repo".to_string(),
+                    candidates: Vec::new(),
+                    checkout: None,
+                },
+                ToolPermissions::default(),
+            );
+            entry.transcript.seed_controls(None, vec![model]);
+            pane.projects.insert("project:repo".to_string(), entry);
+            pane.active = Some("project:repo".to_string());
+            pane.overlay = Some(Overlay::Model);
+            // The picker opens with its filter focused, as `open_overlay`
+            // leaves it: the arrows have to survive that field.
+            pane.overlay_query
+                .update(cx, |state, cx| state.focus(window, cx));
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let cursor = cx.update(|_, cx| pane.read(cx).overlay_cursor);
+        assert_eq!(cursor, 0, "the picker opens on its first row");
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(cx.update(|_, cx| pane.read(cx).overlay_cursor), 1);
+        cx.simulate_keystrokes("down");
+        assert_eq!(cx.update(|_, cx| pane.read(cx).overlay_cursor), 2);
+        cx.simulate_keystrokes("up");
+        assert_eq!(cx.update(|_, cx| pane.read(cx).overlay_cursor), 1);
+        // The end of the list wraps around rather than sticking, as the
+        // slash-command list does.
+        cx.simulate_keystrokes("down");
+        cx.simulate_keystrokes("down");
+        assert_eq!(cx.update(|_, cx| pane.read(cx).overlay_cursor), 0);
+
+        // The filter field never saw the arrows: it kept its text and the
+        // focus it was given.
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.overlay_query.read(cx).value().to_string(), "");
+            assert!(pane.overlay_query.read(cx).focus_handle(cx).is_focused(window));
+        });
     }
 
     /// A scratch tree with a repo, a sibling directory, and a worktree inside
