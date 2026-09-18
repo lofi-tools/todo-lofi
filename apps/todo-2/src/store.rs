@@ -8,10 +8,63 @@ use crate::coding_git;
 use crate::ui_parts::agent_pane::RunCheckout;
 
 #[derive(Clone)]
-pub struct Store(pub(crate) Arc<tokio::sync::Mutex<TodoStore>>);
+pub struct Store(pub(crate) Arc<StoreLock>);
+
+/// The app's one store lock, plus a count of the callers queued for it.
+///
+/// Everything that touches the database serializes here, so a background pass
+/// that holds the lock across network work makes every click wait for it. The
+/// count lets such a pass see a queued caller and hand the lock back early
+/// instead (`Store::pressed`).
+pub(crate) struct StoreLock {
+    inner: tokio::sync::Mutex<TodoStore>,
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+impl StoreLock {
+    fn new(store: TodoStore) -> Self {
+        Self {
+            inner: tokio::sync::Mutex::new(store),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Acquire the store, counting this caller as queued for as long as it
+    /// waits.
+    pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, TodoStore> {
+        self.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The count is released by a drop guard rather than by a line after the
+        // await, so a caller cancelled while queued cannot leave the count
+        // behind and make every later pass yield on sight.
+        let _queued = StoreWait(self);
+        self.inner.lock().await
+    }
+
+    /// Whether somebody is queued for the store right now.
+    pub(crate) fn pressed(&self) -> bool {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
+/// Releases a queued caller's place when it stops waiting, whether it got the
+/// store or was cancelled first.
+struct StoreWait<'a>(&'a StoreLock);
+
+impl Drop for StoreWait<'_> {
+    fn drop(&mut self) {
+        self.0
+            .waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// One try plus three retries for a transient GitHub failure (decision 22).
 const GITHUB_SYNC_ATTEMPTS: u32 = 4;
+/// How long a background pass may hold the store once a caller is queued for
+/// it. The wait sees a click through within this, and the pass still gets work
+/// done before handing the lock back, so a stream of clicks cannot starve it.
+const SYNC_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 /// Ceiling on the retry backoff, so a long rate-limit reset still surfaces.
 const GITHUB_SYNC_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -73,10 +126,7 @@ async fn push_github_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Res
 /// caller's task, so the UI never waits on the provider round trip (or on the
 /// token refresh it may need). The local task already exists, so a failure is
 /// only logged and the task stays local.
-fn push_captured_task_in_background(
-    store: &Arc<tokio::sync::Mutex<TodoStore>>,
-    task_id: u64,
-) {
+fn push_captured_task_in_background(store: &Arc<StoreLock>, task_id: u64) {
     let store = store.clone();
     tokio::spawn(async move {
         let mut s = store.lock().await;
@@ -87,10 +137,7 @@ fn push_captured_task_in_background(
 /// The same, for GitHub alone. A subtask is mirrored as a sub-issue of its
 /// parent's issue (§5.5); pushing it to Todoist as well would land it there as
 /// a top-level item, so that provider is left out.
-fn push_github_capture_in_background(
-    store: &Arc<tokio::sync::Mutex<TodoStore>>,
-    task_id: u64,
-) {
+fn push_github_capture_in_background(store: &Arc<StoreLock>, task_id: u64) {
     let store = store.clone();
     tokio::spawn(async move {
         let mut s = store.lock().await;
@@ -136,7 +183,7 @@ async fn push_patch(
 
 impl Store {
     pub fn new(store: TodoStore) -> Self {
-        Store(Arc::new(tokio::sync::Mutex::new(store)))
+        Store(Arc::new(StoreLock::new(store)))
     }
 
     /// Create a task and return its id plus the task list for the view the
@@ -1942,17 +1989,18 @@ impl Store {
     ) -> Task<anyhow::Result<usize>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            let mut s = store.lock().await;
-            let ids: Vec<u64> = s
-                .list_integrations()
-                .await?
-                .into_iter()
-                .filter(|integration| integration.provider == "github")
-                .map(|integration| integration.id)
-                .collect();
+            let ids: Vec<u64> = {
+                let mut s = store.lock().await;
+                s.list_integrations()
+                    .await?
+                    .into_iter()
+                    .filter(|integration| integration.provider == "github")
+                    .map(|integration| integration.id)
+                    .collect()
+            };
             let mut bound = 0;
             for id in ids {
-                bound += Self::bind_detected_repos(&mut s, id).await?;
+                bound += Self::bind_detected_repos(&store, id).await?;
             }
             Ok(bound)
         })
@@ -1972,46 +2020,54 @@ impl Store {
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let token = crate::github_auth::access_token().await?;
             let client = storage::GithubHttpClient::new(token.clone());
-            let result = {
-                let mut sync_store = store.lock().await;
-                Self::sync_all_github_integrations(&mut sync_store, &client, full).await
-            };
+            let result = Self::sync_all_github_integrations(&store, &client, full).await;
             match result {
                 Err(error) if Self::is_github_unauthorized(&error) => {
                     let token = crate::github_auth::recover_from_rejected_token(&token).await?;
                     let client = storage::GithubHttpClient::new(token);
-                    let mut sync_store = store.lock().await;
-                    Self::sync_all_github_integrations(&mut sync_store, &client, full).await
+                    Self::sync_all_github_integrations(&store, &client, full).await
                 }
                 result => result,
             }
         })
     }
 
+    /// The store is locked only around database work, and the pass hands the
+    /// lock back to a queued caller within `SYNC_LOCK_BUDGET`: the pass is
+    /// mostly network, the app has a single store lock, and a click waiting
+    /// for the run it just created must not sit behind a whole sync.
     async fn sync_all_github_integrations(
-        store: &mut TodoStore,
+        store: &StoreLock,
         client: &storage::GithubHttpClient,
         full: bool,
     ) -> anyhow::Result<storage::GithubSyncSummary> {
-        let ids: Vec<u64> = store
-            .list_integrations()
-            .await?
-            .into_iter()
-            .filter(|integration| integration.provider == "github")
-            .map(|integration| integration.id)
-            .collect();
+        let ids: Vec<u64> = {
+            let mut s = store.lock().await;
+            s.list_integrations()
+                .await?
+                .into_iter()
+                .filter(|integration| integration.provider == "github")
+                .map(|integration| integration.id)
+                .collect()
+        };
         let mut total = storage::GithubSyncSummary::default();
         for id in ids {
-            let disabled = store
-                .app_for_integration(id)
-                .await?
-                .is_some_and(|app| !app.enabled);
+            let disabled = {
+                let mut s = store.lock().await;
+                s.app_for_integration(id)
+                    .await?
+                    .is_some_and(|app| !app.enabled)
+            };
             if disabled {
                 continue;
             }
             Self::bind_detected_repos(store, id).await?;
-            let summary = Self::sync_github_with_retry(store, client, id, full).await?;
-            total.absorb(&summary);
+            let outcome =
+                Self::sync_github_with_retry(store, client, id, full, &|| store.pressed()).await?;
+            total.absorb(&outcome.summary);
+            if outcome.aborted {
+                break;
+            }
         }
         Ok(total)
     }
@@ -2214,52 +2270,97 @@ impl Store {
     }
 
     /// Bind tags whose directories resolve a GitHub remote but carry no sync
-    /// target yet. Remote resolution shells out to git, so it stays off the
-    /// async runtime.
+    /// target yet. Remote resolution shells out to git per tag, so the store
+    /// lock is taken twice around it — read the candidates, then record what
+    /// git found — and never held while git runs, which would freeze every
+    /// other store caller for the length of the pass.
     async fn bind_detected_repos(
-        store: &mut TodoStore,
+        store: &StoreLock,
         integration_id: u64,
     ) -> anyhow::Result<usize> {
+        let candidates = {
+            let mut s = store.lock().await;
+            Self::unbound_repo_tag_dirs(&mut s).await?
+        };
+        let resolved = Self::resolve_repo_tag_dirs(candidates).await?;
+        if resolved.is_empty() {
+            return Ok(0);
+        }
+        let mut s = store.lock().await;
         let mut bound = 0;
-        for tag in store.list_tags().await? {
-            let settings = store.tag_settings(tag.id).await?;
-            if settings.sync_target.is_some() || settings.dirs.is_empty() {
-                continue;
-            }
-            let dirs = settings.dirs.clone();
-            let detected = tokio::task::spawn_blocking(move || {
-                dirs.iter()
-                    .map(std::path::PathBuf::from)
-                    .filter(|dir| dir.is_dir())
-                    .find_map(|dir| coding_git::resolve_remote(&dir))
-            })
-            .await?;
-            let Some(remote) = detected else {
-                continue;
-            };
-            store
-                .bind_repo_tag(tag.id, integration_id, &remote.owner, &remote.repo)
+        for (tag_id, remote) in resolved {
+            s.bind_repo_tag(tag_id, integration_id, &remote.owner, &remote.repo)
                 .await?;
             bound += 1;
         }
         Ok(bound)
     }
 
+    /// The tags that might resolve a remote, as (tag id, configured
+    /// directories). Nothing is shelled out here: this is the part that needs
+    /// the store.
+    async fn unbound_repo_tag_dirs(
+        store: &mut TodoStore,
+    ) -> anyhow::Result<Vec<(u64, Vec<String>)>> {
+        let mut candidates = Vec::new();
+        for tag in store.list_tags().await? {
+            let settings = store.tag_settings(tag.id).await?;
+            if settings.sync_target.is_some() || settings.dirs.is_empty() {
+                continue;
+            }
+            candidates.push((tag.id, settings.dirs));
+        }
+        Ok(candidates)
+    }
+
+    /// Resolve each candidate's first directory that exists to a GitHub remote,
+    /// on the blocking pool, with no store lock held.
+    async fn resolve_repo_tag_dirs(
+        candidates: Vec<(u64, Vec<String>)>,
+    ) -> anyhow::Result<Vec<(u64, coding_git::RemoteRef)>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter_map(|(tag_id, dirs)| {
+                    dirs.iter()
+                        .map(std::path::PathBuf::from)
+                        .filter(|dir| dir.is_dir())
+                        .find_map(|dir| coding_git::resolve_remote(&dir))
+                        .map(|remote| (tag_id, remote))
+                })
+                .collect()
+        })
+        .await?)
+    }
+
     /// Auto-retry transient failures (network, 5xx, rate limit) with backoff
     /// and surface permanent ones straight away (decision 22).
     async fn sync_github_with_retry(
-        store: &mut TodoStore,
+        store: &StoreLock,
         client: &storage::GithubHttpClient,
         integration_id: u64,
         full: bool,
-    ) -> anyhow::Result<storage::GithubSyncSummary> {
+        should_yield: storage::SyncYield<'_>,
+    ) -> anyhow::Result<storage::GithubSyncOutcome> {
         let mut attempt = 0;
         loop {
-            match store
-                .sync_github_integration(client, integration_id, full)
+            let outcome = {
+                let mut s = store.lock().await;
+                // Timed from the moment the lock is held, so waiting for it
+                // never eats the budget and the pass always makes progress.
+                let held = std::time::Instant::now();
+                s.sync_github_integration_yielding(client, integration_id, full, &|| {
+                    held.elapsed() >= SYNC_LOCK_BUDGET && should_yield()
+                })
                 .await
-            {
-                Ok(summary) => return Ok(summary),
+            };
+            match outcome {
+                // A yielded pass is not a failure: everything it applied stays,
+                // and the next tick resumes from where it stopped.
+                Ok(outcome) => return Ok(outcome),
                 Err(error) => {
                     let failure = error.downcast_ref::<storage::SyncFailure>();
                     let transient = failure.is_some_and(storage::SyncFailure::is_transient);
@@ -2270,6 +2371,8 @@ impl Store {
                     let wait = failure
                         .and_then(storage::SyncFailure::retry_after)
                         .unwrap_or_else(|| std::time::Duration::from_secs(1 << attempt));
+                    // A rate-limit reset can be minutes away: back off with the
+                    // lock released, so the app keeps answering in the meantime.
                     tokio::time::sleep(wait.min(GITHUB_SYNC_MAX_BACKOFF)).await;
                 }
             }
@@ -2743,16 +2846,26 @@ impl Store {
                 return Ok(0);
             }
             let token = crate::github_auth::access_token().await?;
-            let client = storage::GithubHttpClient::new(token.clone());
+            let client = storage::GithubHttpClient::new(token);
+            // The poll runs every few seconds while a run is pending, so the
+            // requests are made with no store lock held: every answer is
+            // collected first and applied in one short pass below.
+            let open = {
+                let mut s = store.lock().await;
+                s.open_run_pull_requests().await?
+            };
+            let mut fetched = Vec::with_capacity(open.len());
+            for pull_request in open {
+                let outcome = client
+                    .get_pull_request(&pull_request.owner, &pull_request.repo, pull_request.number)
+                    .await;
+                fetched.push((pull_request, outcome));
+            }
             let mut s = store.lock().await;
-            let open = s.open_run_pull_requests().await?;
             let mut resolved_runs: std::collections::HashSet<u64> = std::collections::HashSet::new();
             let mut changed = 0;
-            for pull_request in open {
-                match client
-                    .get_pull_request(&pull_request.owner, &pull_request.repo, pull_request.number)
-                    .await
-                {
+            for (pull_request, outcome) in fetched {
+                match outcome {
                     Ok(remote) => {
                         let state = remote.local_state();
                         if state != pull_request.state || remote.draft != pull_request.draft {

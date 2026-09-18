@@ -1534,6 +1534,13 @@ const MAX_ISSUE_PAGES: usize = 20;
 /// Pages of 100 followed when listing the account's repos: 10 pages is 1000
 /// repos, past which a picker is no longer a picker.
 const MAX_REPO_PAGES: usize = 10;
+/// How long a request may take before it fails as transient. The default
+/// (no timeout) lets a half-open connection stall for as long as the OS
+/// retransmits, and callers here can be holding the app's store lock.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long to wait for the connection itself, so an unreachable host fails
+/// fast instead of hanging a sync pass.
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The real GitHub client. Tokens are API-only (decision 30): pushing uses
 /// the user's own git credentials and never this token.
@@ -1550,10 +1557,18 @@ impl GithubHttpClient {
 
     /// A client against another base URL (a proxy, or a test server).
     pub fn with_base(token: impl Into<String>, base: impl Into<String>) -> Self {
+        // A stalled request must fail (and be retried) rather than hang: the
+        // sync path holds the store lock only around database work, but a
+        // request that never returns still stalls the pass it belongs to.
+        let agent = reqwest::Client::builder()
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             token: token.into(),
             base: base.into().trim_end_matches('/').to_string(),
-            agent: reqwest::Client::new(),
+            agent,
         }
     }
 
@@ -2125,6 +2140,27 @@ pub struct TaskIssue {
     pub issue: IssueRef,
     pub state: IssueFieldState,
     pub external_updated_at: Option<jiff::Timestamp>,
+}
+
+/// Asked before each unit of sync work. `true` stops the pass at the next safe
+/// boundary: every issue applied so far stays committed (each one records its
+/// own snapshot), the repo's cursor is left unrecorded, and the next pass
+/// resumes the same window. Used by callers that hold a lock a user action may
+/// be queued behind, so that lock is never held for a whole pass.
+pub type SyncYield<'a> = &'a (dyn Fn() -> bool + Send + Sync);
+
+/// A pass that never stops early, for callers with no one to defer to.
+fn never_yield() -> bool {
+    false
+}
+
+/// What one pass did, and whether it stopped early because it was asked to.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GithubSyncOutcome {
+    pub summary: GithubSyncSummary,
+    /// The pass yielded: the rest of the window is still to sync, so the
+    /// caller should not treat the pass as failed and should come back.
+    pub aborted: bool,
 }
 
 /// What one sync pass did, for the integration card.
@@ -2775,11 +2811,27 @@ impl TodoStore {
         integration_id: u64,
         full: bool,
     ) -> anyhow::Result<GithubSyncSummary> {
+        Ok(self
+            .sync_github_integration_yielding(client, integration_id, full, &never_yield)
+            .await?
+            .summary)
+    }
+
+    /// The same pass, stopping at a safe boundary when `should_yield` asks.
+    pub async fn sync_github_integration_yielding<C: GithubClient>(
+        &mut self,
+        client: &C,
+        integration_id: u64,
+        full: bool,
+        should_yield: SyncYield<'_>,
+    ) -> anyhow::Result<GithubSyncOutcome> {
         let repos = self.bound_repos(integration_id).await?;
         let mut summary = GithubSyncSummary::default();
+        let mut aborted = false;
         for bound in &repos {
             let mut repo_summary = GithubSyncSummary::default();
-            self.sync_github_repo(client, bound, full, &mut repo_summary)
+            let completed = self
+                .sync_github_repo(client, bound, full, &mut repo_summary, should_yield)
                 .await
                 .map_err(|e| match e.downcast::<SyncFailure>() {
                     Ok(failure) => anyhow::Error::new(failure),
@@ -2789,18 +2841,29 @@ impl TodoStore {
                     ),
                 })?;
             summary.absorb(&repo_summary);
+            if !completed {
+                aborted = true;
+                break;
+            }
             summary.repos += 1;
         }
-        Ok(summary)
+        Ok(GithubSyncOutcome { summary, aborted })
     }
 
+    /// Sync one repo. Returns whether it ran to the end: `false` means the
+    /// caller asked for the lock back and this pass stopped between units of
+    /// work, with the cursor left for the next pass to resume from.
     async fn sync_github_repo<C: GithubClient>(
         &mut self,
         client: &C,
         bound: &BoundRepo,
         full: bool,
         summary: &mut GithubSyncSummary,
-    ) -> anyhow::Result<()> {
+        should_yield: SyncYield<'_>,
+    ) -> anyhow::Result<bool> {
+        if should_yield() {
+            return Ok(false);
+        }
         let external_id = bound.external_id();
         let cursor = self
             .sync_cursor(bound.integration_id, &external_id)
@@ -2826,6 +2889,12 @@ impl TodoStore {
             }
         }
         for issue in page.issues {
+            // Between issues is a safe stopping point: an applied issue has
+            // already recorded its own snapshot, so the next pass re-reads the
+            // page, finds nothing to do for it, and carries on from here.
+            if should_yield() {
+                return Ok(false);
+            }
             self.sync_github_issue(client, bound, &issue, summary).await?;
         }
 
@@ -2849,6 +2918,9 @@ impl TodoStore {
             }
         }
         for (parent_external_id, parent_number) in parents {
+            if should_yield() {
+                return Ok(false);
+            }
             self.sync_github_sub_issues(
                 client,
                 bound,
@@ -2905,7 +2977,7 @@ impl TodoStore {
             },
         )
         .await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn sync_github_issue<C: GithubClient>(
@@ -4320,6 +4392,42 @@ mod tests {
             .sync_github_integration(&fake, integration.id, true)
             .await?;
         assert!(storage.get_task(task.id).await?.done);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_yielded_pass_stops_between_issues_and_leaves_the_rest_for_next_time()
+    -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default()
+            .with_issue("o/r", remote(1, "First", "open", 100))
+            .with_issue("o/r", remote(2, "Second", "open", 110));
+
+        // Asked to stop once the first issue has been applied: the pass ends
+        // there rather than sync the second, which the next pass picks up.
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let pull_back = || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
+        let outcome = storage
+            .sync_github_integration_yielding(&fake, integration.id, false, &pull_back)
+            .await?;
+        assert!(outcome.aborted, "the pass stopped early");
+        assert_eq!(outcome.summary.imported, 1);
+        assert!(storage.issue_link(integration.id, "o/r#1").await?.is_some());
+        assert!(
+            storage.issue_link(integration.id, "o/r#2").await?.is_none(),
+            "the yield stopped the pass before the second issue"
+        );
+        // No cursor: resuming re-reads this window instead of skipping it.
+        assert!(storage.sync_cursor(integration.id, "o/r").await?.is_none());
+
+        let uninterrupted = || false;
+        let outcome = storage
+            .sync_github_integration_yielding(&fake, integration.id, false, &uninterrupted)
+            .await?;
+        assert!(!outcome.aborted);
+        assert_eq!(outcome.summary.imported, 1);
+        assert!(storage.issue_link(integration.id, "o/r#2").await?.is_some());
+        assert!(storage.sync_cursor(integration.id, "o/r").await?.is_some());
         Ok(())
     }
 
