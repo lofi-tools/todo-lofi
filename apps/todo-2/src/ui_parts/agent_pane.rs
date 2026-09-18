@@ -1213,17 +1213,21 @@ impl AgentPane {
         let Some(entry) = self.projects.get_mut(tag_name) else {
             return;
         };
-        let mut appended = false;
-        let mut last_changed: Option<usize> = None;
+        // A batch is one read of the event stream, so it can append several
+        // rows (a thought, then a tool call, then a message) and change
+        // several more. Every one of them is reported to the scroller below:
+        // a row the list never hears about is a row it never renders or
+        // measures, which is what leaves the pane frozen — and never
+        // scrolling — behind the agent's stream.
+        let mut changed: Vec<usize> = Vec::new();
         let mut exited = false;
         for event in events {
             match event {
                 AcpEvent::SessionUpdate(notification) => {
                     let delta = entry.transcript.apply(&notification);
-                    if delta.appended {
-                        appended = true;
+                    if let Some(index) = delta.changed {
+                        changed.push(index);
                     }
-                    last_changed = delta.changed.or(last_changed);
                 }
                 AcpEvent::PermissionRequested {
                     tool_call,
@@ -1237,18 +1241,15 @@ impl AgentPane {
                     entry
                         .permission_tools
                         .insert(entry_id, acp_client::tool_key(&tool_call));
-                    appended = true;
                 }
                 AcpEvent::PermissionAutoDecided { tool_call, choice } => {
                     let entry_id = entry
                         .transcript
                         .push_permission(permission_title(&tool_call), vec![choice.clone()]);
                     let record = PermissionRecord::from_choice(&choice, true);
-                    last_changed = entry
-                        .transcript
-                        .resolve_permission(entry_id, record)
-                        .or(last_changed);
-                    appended = true;
+                    if let Some(index) = entry.transcript.resolve_permission(entry_id, record) {
+                        changed.push(index);
+                    }
                 }
                 AcpEvent::TerminalOutput {
                     terminal_id,
@@ -1260,7 +1261,7 @@ impl AgentPane {
                     row.output.push_str(&chunk);
                     row.truncated = truncated;
                     cap_lines(&mut row.output, TERMINAL_MAX_LINES);
-                    last_changed = index.or(last_changed);
+                    changed.extend(index);
                 }
                 AcpEvent::TerminalExited {
                     terminal_id,
@@ -1270,7 +1271,7 @@ impl AgentPane {
                     let index = entry.transcript.index_of_terminal(&terminal_id);
                     let row = entry.terminals.entry(terminal_id).or_default();
                     row.exit_code = Some(exit_code);
-                    last_changed = index.or(last_changed);
+                    changed.extend(index);
                 }
                 AcpEvent::Stderr(line) => {
                     tracing::debug!("agent stderr: {line}");
@@ -1292,27 +1293,44 @@ impl AgentPane {
                 }
             }
         }
-        // `entry` borrows `projects` while the scroller is a sibling field,
-        // so the two can be used together without a second self borrow.
-        if appended {
-            self.row_count = entry.transcript.len();
-            self.scroller.update(cx, |state, cx| {
-                state.append(1, cx);
-            });
-        }
-        if let Some(index) = last_changed {
-            self.scroller.update(cx, |state, cx| {
-                state.remeasure_items(index..index + 1, cx);
-            });
-        }
+        // A mode change the transcript has not reported yet is a notice row
+        // like any other, so it is pushed before the scroller hears about the
+        // batch.
         if let Some((_previous, current)) = entry.mode_notice() {
             entry
                 .transcript
                 .push_notice(NoticeLevel::Info, format!("Mode changed to {current}"));
-            self.row_count = entry.transcript.len();
-            self.scroller.update(cx, |state, cx| {
-                state.append(1, cx);
-            });
+        }
+        let is_active = self.active.as_deref() == Some(tag_name);
+        let count = entry.transcript.len();
+        // `entry` borrows `projects` while the scroller is a sibling field, so
+        // the two can be used together without a second self borrow.
+        //
+        // A background project streams on, but its rows belong to a transcript
+        // the pane is not showing, and counting them here would leave the
+        // visible list short. Switching to it re-syncs the scroller.
+        if is_active {
+            let known = self.scroller.read(cx).item_count();
+            if count > known {
+                // The delta, not one row: a batch that appended three rows
+                // told the list about one would leave it short of the tail the
+                // agent is streaming into.
+                self.scroller.update(cx, |state, cx| {
+                    state.append(count - known, cx);
+                });
+            } else if count < known {
+                // A transcript that lost rows (a restarted session) needs its
+                // list rebuilt.
+                self.scroller.update(cx, |state, cx| {
+                    state.reset(count, cx);
+                });
+            }
+            self.row_count = count;
+            changed.sort_unstable();
+            changed.dedup();
+            for index in changed {
+                self.remeasure(index, cx);
+            }
         }
         if exited {
             self.set_busy(tag_name, false, cx);
@@ -2107,7 +2125,13 @@ impl AgentPane {
                 )
                 .into_any_element(),
             EntryKind::AgentText { text } => {
-                let mut element = div().w_full().flex().flex_col().gap_1().py_1();
+                let mut element = div()
+                    .debug_selector(|| "agent-text-row".to_string())
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .py_1();
                 if is_first_agent_message(&entry.transcript, index) {
                     element = element.child(
                         div()
@@ -2501,6 +2525,7 @@ impl AgentPane {
             PaneState::Failed { title, detail } => div()
                 .flex_1()
                 .min_h_0()
+                .h_full()
                 .flex()
                 .flex_col()
                 .child(render_error(&weak, title, detail, true))
@@ -3639,6 +3664,70 @@ impl Render for AgentPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp_client::schema::{
+        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent, ToolCall,
+    };
+
+    /// The tag name the pane fixtures key their project under, and the one the
+    /// pane is pointed at.
+    const PROJECT: &str = "project:repo";
+
+    /// A session store for a pane that never starts a session, so nothing is
+    /// ever written to it.
+    fn test_store(name: &str) -> SessionStore {
+        SessionStore::new(std::env::temp_dir().join(format!(
+            "todo2-agent-pane-{name}-{}.json",
+            std::process::id()
+        )))
+    }
+
+    /// A project entry with no session, for the tests that drive one by hand.
+    fn project_entry(tag_name: &str) -> ProjectEntry {
+        ProjectEntry::new(
+            AgentProject {
+                tag_id: 7,
+                tag_name: tag_name.to_string(),
+                label: tag_name.to_string(),
+                candidates: Vec::new(),
+                checkout: None,
+            },
+            ToolPermissions::default(),
+        )
+    }
+
+    /// One `session/update` event, as the connection forwards it.
+    fn session_update(update: SessionUpdate) -> AcpEvent {
+        AcpEvent::SessionUpdate(Box::new(SessionNotification::new(
+            SessionId::new("test-session"),
+            update,
+        )))
+    }
+
+    fn text_chunk<F>(wrap: F, text: &str) -> AcpEvent
+    where
+        F: FnOnce(ContentChunk) -> SessionUpdate,
+    {
+        session_update(wrap(ContentChunk::new(ContentBlock::Text(
+            TextContent::new(text.to_string()),
+        ))))
+    }
+
+    /// A streamed thought, the agent's reasoning as it arrives.
+    fn thinking(text: &str) -> AcpEvent {
+        text_chunk(SessionUpdate::AgentThoughtChunk, text)
+    }
+
+    /// A streamed answer, the message the agent writes.
+    fn answering(text: &str) -> AcpEvent {
+        text_chunk(SessionUpdate::AgentMessageChunk, text)
+    }
+
+    fn calling_tool(id: &str, title: &str) -> AcpEvent {
+        session_update(SessionUpdate::ToolCall(ToolCall::new(
+            id.to_string(),
+            title.to_string(),
+        )))
+    }
 
     #[test]
     fn task_context_includes_title_and_description() {
@@ -3835,6 +3924,157 @@ mod tests {
         );
     }
 
+    /// A batch is one read of the event stream, so one batch can append
+    /// several rows (a thought, a tool call, a message). The scroller has to
+    /// hear about every one of them: a row the list is never told about is a
+    /// row it never renders, which is what leaves the pane frozen — and never
+    /// scrolling — behind the agent's stream.
+    #[gpui::test]
+    fn a_batch_appends_every_row_it_added(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("batch-append"), window, cx);
+            pane.projects.insert(PROJECT.to_string(), project_entry(PROJECT));
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_agent_events(
+                    PROJECT,
+                    vec![
+                        thinking("Considering options"),
+                        calling_tool("tool-1", "Read src/main.rs"),
+                        answering("Here is the answer"),
+                    ],
+                    cx,
+                );
+            });
+        });
+
+        let (rows, listed, following) = cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            (
+                pane.active_entry().map(|entry| entry.transcript.len()),
+                pane.scroller.read(cx).item_count(),
+                pane.scroller.read(cx).is_following_tail(),
+            )
+        });
+        assert_eq!(rows, Some(3), "the batch appended three rows");
+        assert_eq!(listed, 3, "the scroller knows about every one of them");
+        assert!(following, "the list keeps following the tail it just grew");
+    }
+
+    /// A background project keeps streaming while another is on screen, but
+    /// its rows belong to a transcript the pane is not showing: counting them
+    /// into the visible list would leave it short of the one it does show.
+    #[gpui::test]
+    fn a_background_projects_rows_stay_out_of_the_visible_list(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("background"), window, cx);
+            pane.projects.insert(PROJECT.to_string(), project_entry(PROJECT));
+            pane.projects
+                .insert("project:other".to_string(), project_entry("project:other"));
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_agent_events(
+                    "project:other",
+                    vec![answering("Streaming somewhere else")],
+                    cx,
+                );
+            });
+        });
+
+        let (background, listed) = cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            (
+                pane.projects
+                    .get("project:other")
+                    .map(|entry| entry.transcript.len()),
+                pane.scroller.read(cx).item_count(),
+            )
+        });
+        assert_eq!(background, Some(1), "the background project streamed on");
+        assert_eq!(listed, 0, "the shown transcript did not gain its row");
+    }
+
+    /// While the agent streams, the newest row stays on screen: the list is
+    /// told about every row the batch added, so its tail is the row being
+    /// written and it scrolls to keep that row in view. A transcript taller
+    /// than the window shows the row only because the list followed it down.
+    #[gpui::test]
+    fn the_streamed_row_stays_on_screen(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("streaming"), window, cx);
+            let mut entry = project_entry(PROJECT);
+            // Taller than the window below: only a list that scrolls with its
+            // tail can show the row being streamed.
+            for index in 0..12 {
+                entry
+                    .transcript
+                    .push_user_message(format!("Filler {index}"));
+            }
+            // `Failed` is the one hand-buildable state that renders the
+            // transcript: `Ready` needs a live agent connection.
+            entry.state = PaneState::Failed {
+                title: "Agent exited".to_string(),
+                detail: String::new(),
+            };
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane.sync_scroller(cx);
+            pane
+        });
+        // A window shorter than the transcript, so only a list that scrolls
+        // with its tail can show the row being streamed.
+        cx.simulate_resize(gpui::Size {
+            width: px(360.),
+            height: px(700.),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_agent_events(
+                    PROJECT,
+                    vec![thinking("Considering"), answering("The answer")],
+                    cx,
+                );
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let (rows, listed, following) = cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            (
+                pane.active_entry().map(|entry| entry.transcript.len()),
+                pane.scroller.read(cx).item_count(),
+                pane.scroller.read(cx).is_following_tail(),
+            )
+        });
+        assert_eq!(rows, Some(14), "the batch added the thought and the answer");
+        assert_eq!(listed, 14, "the list was told about every row of it");
+        assert!(following, "the list follows the tail it just grew");
+
+        let answer = cx
+            .debug_bounds("agent-text-row")
+            .expect("the streamed row is rendered at the tail the list follows");
+        let window = cx.update(|window, _| window.bounds());
+        assert!(
+            answer.top() >= window.top() && answer.bottom() <= window.bottom(),
+            "the streamed row is off screen at {answer:?} in {window:?}"
+        );
+    }
+
     /// The model dropdown's arrows move its highlight while its filter field
     /// has focus. A focused `Input` binds `up`/`down` to its own caret
     /// actions, which outrank anything the pane could bind on an ancestor, so
@@ -3843,12 +4083,8 @@ mod tests {
     #[gpui::test]
     fn the_model_picker_moves_its_highlight_with_the_arrows(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let store = SessionStore::new(std::env::temp_dir().join(format!(
-            "todo2-agent-pane-model-picker-{}.json",
-            std::process::id()
-        )));
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            let mut pane = AgentPane::new(store, window, cx);
+            let mut pane = AgentPane::new(test_store("model-picker"), window, cx);
             let model: SessionConfigOption = serde_json::from_value(serde_json::json!({
                 "id": "model",
                 "name": "Model",
@@ -3862,19 +4098,10 @@ mod tests {
                 ]
             }))
             .expect("model option");
-            let mut entry = ProjectEntry::new(
-                AgentProject {
-                    tag_id: 7,
-                    tag_name: "project:repo".to_string(),
-                    label: "repo".to_string(),
-                    candidates: Vec::new(),
-                    checkout: None,
-                },
-                ToolPermissions::default(),
-            );
+            let mut entry = project_entry(PROJECT);
             entry.transcript.seed_controls(None, vec![model]);
-            pane.projects.insert("project:repo".to_string(), entry);
-            pane.active = Some("project:repo".to_string());
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
             pane.overlay = Some(Overlay::Model);
             // The picker opens with its filter focused, as `open_overlay`
             // leaves it: the arrows have to survive that field.

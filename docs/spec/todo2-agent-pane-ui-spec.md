@@ -199,7 +199,9 @@ Wiring rules:
 
 - `MessageScrollerState::new(entry_count, cx)` is created with the pane; one **row per
   transcript entry**, indexed by position in the transcript model.
-- New entry → `state.append(1, cx)`.
+- New entries → `state.append(added, cx)` where `added` is every row the batch just added. One
+  batch can add several rows (thought, tool call, message), and a row the list is never told
+  about is never rendered — which is what freezes the pane behind the agent's stream.
 - Streaming growth of an existing entry → `state.remeasure_items(ix..ix + 1, cx)`; do not
   append a row per chunk.
 - **Auto-follow only when `is_following_tail()`** — if the user scrolled up, new output must not
@@ -284,7 +286,7 @@ Rules:
   and `cx.notify()` at most once per frame using `window.on_next_frame` (precedent: the
   project picker's deferred autofocus in `main.rs`). Do not notify once per token.
 - On flush: append/merge text into the current entry, `remeasure_items` that row if it grew, and
-  `append` only when a new entry is created.
+  `append` (for the count of new entries) only when the batch created one or more.
 - Turn start/end must notify the **navbar** so the busy dot goes on and off — emit an event from
   the pane and have `Layout` subscribe, mirroring `IntegrationsEvent::Changed` →
   `refresh_tags` (main spec §8).
