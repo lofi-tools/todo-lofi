@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use acp_client::schema::{
@@ -24,14 +25,14 @@ use acp_client::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, actions, div, px,
-    rgb, prelude::FluentBuilder,
+    InteractiveElement, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window,
+    actions, div, list, px, rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_component::scroll::{ScrollableElement, ScrollbarAxis};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
@@ -46,10 +47,14 @@ const AGENT_PANE_CONTEXT: &str = "AgentPane";
 /// swallowed instead of reopening the dropdown.
 const OVERLAY_OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(300);
-/// Height cap for a dropdown's scrolling row list. Only the rows scroll: the
-/// card keeps its absolute placement, so its title and filter stay pinned
-/// while the rows below them scroll independently.
-const OVERLAY_MAX_HEIGHT: f32 = 320.;
+/// A dropdown row is one fixed height: the list hands the same height to every
+/// row it has not measured yet, so the card's own height and the scrollbar
+/// thumb are right on the first frame instead of settling over a few frames.
+const OVERLAY_ROW_HEIGHT: f32 = 20.;
+/// How many rows a dropdown shows before its list scrolls. Only the rows
+/// scroll: the card keeps its absolute placement, so its title and filter stay
+/// pinned while the rows below them scroll independently.
+const OVERLAY_MAX_ROWS: usize = 16;
 /// Queued prompts are in-memory and session-scoped; beyond this, Send waits.
 const QUEUE_CAP: usize = 10;
 /// Lines of terminal output shown before the row needs expanding.
@@ -387,8 +392,9 @@ pub struct AgentPane {
     /// Fuzzy-filter input for the model dropdown.
     overlay_query: Entity<InputState>,
     _overlay_query_events: Subscription,
-    /// Scroll position of the open dropdown's row list.
-    overlay_scroll: ScrollHandle,
+    /// The open dropdown's row list, virtualized the way the task list is:
+    /// only the rows the viewport reaches are built and laid out.
+    overlay_list: ListState,
     /// Highlighted row of the open dropdown.
     overlay_cursor: usize,
 }
@@ -439,7 +445,11 @@ impl AgentPane {
             overlay_outside_closed: None,
             overlay_query,
             _overlay_query_events,
-            overlay_scroll: ScrollHandle::new(),
+            overlay_list: ListState::new(
+                0,
+                ListAlignment::Top,
+                px(OVERLAY_ROW_HEIGHT * OVERLAY_MAX_ROWS as f32),
+            ),
             overlay_cursor: 0,
         }
     }
@@ -1479,7 +1489,10 @@ impl AgentPane {
         let focus_filter = matches!(self.overlay, Some(Overlay::Model));
         if self.overlay.is_some() {
             // A freshly opened dropdown starts at the top of its list.
-            self.overlay_scroll.scroll_to_item(0);
+            self.overlay_list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
             self.overlay_query.update(cx, |state, cx| {
                 state.set_value("", window, cx);
                 if focus_filter {
@@ -1510,7 +1523,10 @@ impl AgentPane {
             InputEvent::Change => {
                 self.overlay_cursor = 0;
                 // A new filter means a new list: show its first row.
-                self.overlay_scroll.scroll_to_item(0);
+                self.overlay_list.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
                 cx.notify();
             }
             // Enter picks the first visible row, then returns focus to the
@@ -1637,7 +1653,7 @@ impl AgentPane {
             return;
         }
         self.overlay_cursor = (self.overlay_cursor as isize + delta).rem_euclid(count) as usize;
-        self.overlay_scroll.scroll_to_item(self.overlay_cursor);
+        self.overlay_list.scroll_to_reveal_item(self.overlay_cursor);
         cx.notify();
     }
 
@@ -2819,7 +2835,7 @@ impl AgentPane {
         let cursor = self.overlay_cursor.min(values.len().saturating_sub(1));
         let show_filter = overlay == Overlay::Model;
 
-        let mut list = div()
+        let mut panel = div()
             .absolute()
             .bottom(px(168.))
             .left(px(8.))
@@ -2849,7 +2865,7 @@ impl AgentPane {
                     .child(title),
             );
         if show_filter {
-            list = list.child(
+            panel = panel.child(
                 div()
                     .px_1()
                     .pb_1()
@@ -2859,47 +2875,85 @@ impl AgentPane {
         // Only the rows scroll: the card keeps its absolute placement (and
         // its title/filter), while a long model list scrolls underneath it
         // instead of being truncated behind a "keep typing" hint.
-        let mut rows = div()
-            .id("agent-overlay-rows")
-            .max_h(px(OVERLAY_MAX_HEIGHT))
-            .relative()
-            .track_scroll(&self.overlay_scroll)
-            .overflow_y_scroll()
-            .v_flex()
-            .gap_0();
-        if values.is_empty() {
-            rows = rows.child(
+        let view = cx.entity().downgrade();
+        panel
+            .child(overlay_row_list(
+                &self.overlay_list,
+                Rc::new(values),
+                current,
+                cursor,
+                move |value, window, cx| {
+                    // Clicks select immediately; the row's overlay value is
+                    // fixed at render time.
+                    view.update(cx, |pane, cx| {
+                        let overlay = pane.overlay.clone();
+                        if let Some(overlay) = overlay {
+                            pane.select_overlay_value(overlay, value.clone(), cx);
+                            pane.focus_prompt(window, cx);
+                        }
+                    })
+                    .ok();
+                },
+            ))
+            .into_any_element()
+    }
+}
+
+/// The rows of an open dropdown, drawn by the same virtualized list the task
+/// list uses, for the same reason: opencode ships hundreds of models, and
+/// shaping every row on every frame is what makes scrolling a long list
+/// stutter. Only the rows the viewport reaches are built, from the uniform
+/// height every row is given, so the card's own height is known up front
+/// instead of settling once the rows have been measured.
+fn overlay_row_list(
+    list_state: &ListState,
+    values: Rc<Vec<(String, String)>>,
+    current: String,
+    cursor: usize,
+    on_pick: impl Fn(String, &mut Window, &mut App) + Clone + 'static,
+) -> AnyElement {
+    let row_count = values.len();
+    if list_state.item_count() != row_count {
+        list_state.reset_with_uniform_height(row_count, px(OVERLAY_ROW_HEIGHT));
+    }
+    let state = list_state.clone();
+    div()
+        .id("agent-overlay-rows")
+        .debug_selector(|| "agent-overlay-rows".to_string())
+        .relative()
+        .h(overlay_rows_height(row_count))
+        .when(row_count == 0, |this| {
+            this.child(
                 div()
                     .px_2()
-                    .py_1()
+                    .py_0p5()
                     .text_xs()
                     .text_color(rgb(TEXT_FAINT))
                     .child("No matches"),
-            );
-        }
-        for (index, (value, label)) in values.into_iter().enumerate() {
-            let selected = value == current;
-            let highlighted = index == cursor;
-            rows = rows.child(
+            )
+        })
+        .child(
+            list(state.clone(), move |index, _window, _cx| {
+                let Some((value, label)) = values.get(index) else {
+                    return div().into_any_element();
+                };
+                let selected = *value == current;
+                let highlighted = index == cursor;
+                let picked = value.clone();
+                let on_pick = on_pick.clone();
                 div()
                     .id(SharedString::from(format!("agent-option-{value}")))
+                    .h(px(OVERLAY_ROW_HEIGHT))
                     .flex()
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py_0p5()
                     .rounded_md()
                     .when(highlighted, |this| this.bg(rgb(PANEL_HOVER)))
                     .hover(|this| this.bg(rgb(PANEL_HOVER)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // Clicks select immediately; the row's overlay value
-                        // is fixed at render time.
-                        let overlay = this.overlay.clone();
-                        if let Some(overlay) = overlay {
-                            this.select_overlay_value(overlay, value.clone(), cx);
-                            this.focus_prompt(window, cx);
-                        }
-                    }))
+                    .on_click(move |_, window, cx: &mut App| {
+                        on_pick(picked.clone(), window, cx);
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2907,14 +2961,31 @@ impl AgentPane {
                             .truncate()
                             .text_xs()
                             .text_color(rgb(TEXT_STRONG))
-                            .child(label),
+                            .child(label.clone()),
                     )
-                    .when(selected, |this| this.child(icon(IconName::Check, SUCCESS))),
-            );
-        }
-        list.child(rows.scrollbar(&self.overlay_scroll, ScrollbarAxis::Vertical))
-            .into_any_element()
-    }
+                    .when(selected, |this| this.child(icon(IconName::Check, SUCCESS)))
+                    .into_any_element()
+            })
+            .size_full(),
+        )
+        .when(row_count > 0, |this| {
+            // The list paints no scrollbar of its own; this one drives the
+            // same state the wheel does, so dragging and the wheel agree.
+            this.child(
+                div().absolute().inset_0().child(
+                    Scrollbar::vertical(&state)
+                        .id("agent-overlay-scrollbar")
+                        .viewport_from_layout(),
+                ),
+            )
+        })
+        .into_any_element()
+}
+
+/// How tall a dropdown's row list is: one row per value, up to the cap, and
+/// never zero, so the "No matches" hint has a row to sit in.
+fn overlay_rows_height(row_count: usize) -> gpui::Pixels {
+    px(OVERLAY_ROW_HEIGHT * row_count.clamp(1, OVERLAY_MAX_ROWS) as f32)
 }
 
 /// Subsequence fuzzy match with a simple rank: consecutive prefix matches
@@ -3652,6 +3723,68 @@ mod tests {
             notice.size.height > px(48.),
             "the error wrapped to a single line: {:#?}",
             notice
+        );
+    }
+
+    /// The dropdown's row list is virtualized the way the task list is: the
+    /// card is exactly as tall as the rows it shows (never the whole list),
+    /// every row is the one height the list was told, and a row past the
+    /// viewport is never built — which is what keeps scrolling a
+    /// few-hundred-model list cheap.
+    #[gpui::test]
+    fn the_dropdown_builds_only_the_rows_in_view(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        struct RowsView {
+            list_state: ListState,
+            values: Rc<Vec<(String, String)>>,
+        }
+        impl Render for RowsView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(240.)).child(overlay_row_list(
+                    &self.list_state,
+                    self.values.clone(),
+                    "1".to_string(),
+                    0,
+                    |_, _, _| {},
+                ))
+            }
+        }
+        let values: Rc<Vec<(String, String)>> = Rc::new(
+            (0..100)
+                .map(|index| (index.to_string(), format!("Model {index}")))
+                .collect(),
+        );
+        let scroll = px(OVERLAY_ROW_HEIGHT * OVERLAY_MAX_ROWS as f32);
+        let list_state = ListState::new(0, ListAlignment::Top, scroll);
+        let (_view, cx) = cx.add_window_view(|_, _| RowsView {
+            list_state: list_state.clone(),
+            values: values.clone(),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // The card is the capped list's height, not a hundred rows'.
+        let rows = cx
+            .debug_bounds("agent-overlay-rows")
+            .expect("the row list measured");
+        assert_eq!(rows.size.width, px(240.));
+        assert_eq!(rows.size.height, overlay_rows_height(100));
+        assert_eq!(rows.size.height, px(320.));
+
+        // The rows it does draw are the height the list was told up front.
+        let first = list_state
+            .bounds_for_item(0)
+            .expect("the first row is drawn");
+        assert_eq!(first.size.height, px(OVERLAY_ROW_HEIGHT));
+        assert!(
+            list_state.bounds_for_item(OVERLAY_MAX_ROWS - 1).is_some(),
+            "every row in view is drawn"
+        );
+
+        // Nothing past the window was ever laid out: the whole point.
+        assert_eq!(list_state.item_count(), values.len());
+        assert!(
+            list_state.bounds_for_item(values.len() - 1).is_none(),
+            "a row past the viewport is not built"
         );
     }
 
