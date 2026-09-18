@@ -1319,8 +1319,8 @@ impl Store {
 
     /// ─── Coding workflow ──────────────────────────────────────────────────
     /// Start the `coding-task` run whose root is `task_id` (the feature task).
-    /// Returns the new run id. Fails when the task or its project already has
-    /// an active run.
+    /// Returns the new run id. Fails when the task already has an active run;
+    /// runs on other feature tasks of the same project are allowed.
     pub fn start_coding_run(&self, task_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<u64>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {

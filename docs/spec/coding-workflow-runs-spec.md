@@ -52,7 +52,7 @@ phases?**
 | 16 | Failure UX | **Block the phase with an inline reason** and a fix affordance (Configure agent / Set project directory / Resolve conflict). |
 | 17 | Recipe availability | **Seeded built-in** (idempotently ensured), available to every project. |
 | 18 | Phase completion | **Mixed**: interview and spec auto-complete from agent signals; implement requires a user confirmation; review requires an explicit approve/reject. |
-| 19 | Concurrency | **One active coding run per project**; nested runs are exempt; no cycle counter in v1. |
+| 19 | Concurrency | **One active coding run per task**; runs on different tasks of one project coexist and share that project's single agent-pane AI session; no cycle counter in v1. |
 | 20 | MCP gating | The MCP server is **always attached** to the agent launch; tools take explicit task/run ids. |
 | 21 | Cancel | Tombstone the steps but **keep the run visible with its branch name** so the branch is cleaned up deliberately. |
 | 22 | No diff surface | **No diff component in v1.** Review is the agent transcript plus a free-text annotation box. |
@@ -900,9 +900,11 @@ storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
   Reject… / Mark implemented / Ask for a summary), plus the `Round N` + branch
   chips, `Cancel run`, inline blocked reason, round log grouped by cycle, and the
   expandable spec. Phase steps are excluded from the panel's own `Subtasks (N)`
-  list, and the `Start coding workflow` affordance shows on a top-level feature
-  task with no run. Phase prompt templates (`interview` in raw slash form,
-  `implement`, `review`) are pure functions with unit tests.
+  list. A top-level feature task with no run renders the phases as **predicted
+  rows** (the same roadmap the run previews, with the interview's `Start` on the
+  first row); that click opens the run and composes the interview prompt into
+  the agent pane — inserted, never sent. Phase prompt templates (`interview` in
+  raw slash form, `implement`, `review`) are pure functions with unit tests.
 - `src/ui_parts/workflows.rs`: phased recipes hidden from the start row, phase
   chip (`Round 2 · Implement`) on coding run cards, **Branches to clean up**
   section with delete/keep.

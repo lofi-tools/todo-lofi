@@ -651,9 +651,6 @@ pub struct TaskDetails {
     /// Inline reason a coding action could not run (missing directory, dirty
     /// tree, merge conflict, …).
     coding_error: Option<String>,
-    /// Whether the run was already auto-started for the current selection, so
-    /// selecting a feature task starts its coding run exactly once.
-    coding_auto_started: bool,
     /// Whether the selected task sits in a directory-backed project (a
     /// `project:` tag or a tag with a configured directory). Only those
     /// tasks get a coding workflow at all.
@@ -777,7 +774,6 @@ impl TaskDetails {
             coding_dirty: Vec::new(),
             _coding_fetch: None,
             coding_error: None,
-            coding_auto_started: false,
             coding_directory_backed: false,
             coding_notes_open: false,
             coding_notes_step: None,
@@ -803,7 +799,10 @@ impl TaskDetails {
     fn apply_selected(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
         let parent_id = task.parent_id;
         let task_id = task.id;
-        let auto_start = task.node_id.is_none() && task.parent_id.is_none() && !task.done;
+        // Only a top-level, open task can own a run, so only such a task has a
+        // workflow to resolve: the project it would run in, and the phases it
+        // will have. Opening the run stays the user's click.
+        let resolve_workflow = task.node_id.is_none() && task.parent_id.is_none() && !task.done;
         let fetch = self.store.list_blockers(task.id, cx);
         let after_fetch = self.store.list_after(task.id, cx);
         let subtasks_fetch = self.store.list_subtasks(task.id, cx);
@@ -828,7 +827,6 @@ impl TaskDetails {
         self.run_pull_requests = Vec::new();
         self.coding_dirty = Vec::new();
         self.coding_error = None;
-        self.coding_auto_started = false;
         self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
         self.coding_subtask_spec_expanded = None;
@@ -953,7 +951,7 @@ impl TaskDetails {
                     tracing::error!("Failed to fetch repeat template: {e}");
                 }
             }));
-        self.load_coding(task_id, auto_start, cx);
+        self.load_coding(task_id, resolve_workflow, cx);
         cx.notify();
     }
 
@@ -968,9 +966,10 @@ impl TaskDetails {
 
     /// Fetch the coding run for `task_id` together with the sub-tasks hanging
     /// off each of its phase steps, so the step rows can nest them. When
-    /// `auto_start` is set and the task has no run at all, start it first so
-    /// the select of a feature task lands on its already-active interview.
-    fn load_coding(&mut self, task_id: u64, auto_start: bool, cx: &mut Context<Self>) {
+    /// `resolve_workflow` is set and the task has no run at all, resolve
+    /// whether it sits in a directory-backed project, so the pane knows whether
+    /// to show the workflow at all. Nothing is started here.
+    fn load_coding(&mut self, task_id: u64, resolve_workflow: bool, cx: &mut Context<Self>) {
         let store = self.store.clone();
         // The selected task's parent, so a real subtask can show its own Spec
         // block against the parent's run.
@@ -996,11 +995,11 @@ impl TaskDetails {
                     return;
                 }
             };
-            let mut view = view;
-            if view.is_none() && auto_start {
-                // Auto-start is for directory-backed projects only: a travel
-                // checklist or any other non-project tag's task has no repo
-                // to run in, so it never gets an interview or other steps.
+            if view.is_none() && resolve_workflow {
+                // The workflow needs a project to run in: a travel checklist or
+                // any other non-project tag's task has no repo, so it never
+                // gets phases at all. Whether the run exists is separate — it
+                // is opened by the user's click on the first phase's action.
                 let directory_backed = store.coding_directory(task_id, cx).await.unwrap_or(false);
                 this.update(cx, |this, cx| {
                     if this.selected.as_ref().map(|task| task.id) == Some(task_id) {
@@ -1014,35 +1013,6 @@ impl TaskDetails {
                 .ok();
                 if !directory_backed {
                     return;
-                }
-                let claimed = this
-                    .update(cx, |this, _| {
-                        if this.coding_auto_started || this.coding_error.is_some() {
-                            return false;
-                        }
-                        this.coding_auto_started = true;
-                        true
-                    })
-                    .unwrap_or(false);
-                if claimed {
-                    match store.start_coding_run(task_id, cx).await {
-                        Ok(_run_id) => {
-                            view = store.coding_run_for_task(task_id, cx).await.ok().flatten();
-                        }
-                        Err(error) => {
-                            tracing::error!("Auto-start of the coding run failed: {error}");
-                            this.update(cx, |this, cx| {
-                                if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
-                                    return;
-                                }
-                                this.coding_error = Some(error.to_string());
-                                this._coding_fetch = None;
-                                cx.notify();
-                            })
-                            .ok();
-                            return;
-                        }
-                    }
                 }
             }
             let step_ids: Vec<u64> = view
@@ -1073,7 +1043,6 @@ impl TaskDetails {
                 },
                 None => None,
             };
-            let auto_started = view.is_some() && auto_start;
             let has_run = view.is_some();
             this.update(cx, |this, cx| {
                 if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
@@ -1088,10 +1057,6 @@ impl TaskDetails {
                 this._coding_fetch = None;
                 if has_run {
                     this.coding_directory_backed = true;
-                }
-                if auto_started {
-                    this.coding_error = None;
-                    cx.emit(TaskDetailsEvent::CodingChanged);
                 }
                 cx.notify();
             })
@@ -3969,11 +3934,76 @@ impl TaskDetails {
         self.run_coding_action(action, cx);
     }
 
+    /// The workflow's first action: compose the interview prompt into the
+    /// agent pane and open the run on this feature task. The prompt is
+    /// composed from the task on screen right here on the click — title and
+    /// description included — rather than once the run has loaded, so the
+    /// click that opens the run is the click that fills the box. It is
+    /// inserted, never sent, so the AI session runs nothing until the user
+    /// sends it.
     fn start_coding_run(&mut self, task_id: u64, cx: &mut Context<Self>) {
+        let Some(task) = self.selected.clone().filter(|task| task.id == task_id) else {
+            return;
+        };
+        self.launch_phase(&task, None, "interview", cx);
         let store = self.store.clone();
-        let action =
-            cx.spawn(async move |_, cx| store.start_coding_run(task_id, cx).await.map(|_| ()));
-        self.run_coding_action(action, cx);
+        self._coding_fetch = Some(cx.spawn(async move |this, cx| {
+            if let Err(error) = store.start_coding_run(task_id, cx).await {
+                tracing::error!("Starting the coding run failed: {error}");
+                this.update(cx, |this, cx| {
+                    if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                        return;
+                    }
+                    this.coding_error = Some(error.to_string());
+                    this._coding_fetch = None;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            let view = store.coding_run_for_task(task_id, cx).await.ok().flatten();
+            let Some(view) = view else {
+                // The run exists but its view did not load: reload the panel
+                // rather than compose a prompt against nothing.
+                this.update(cx, |this, cx| {
+                    this._coding_fetch = None;
+                    this.refresh_coding(cx);
+                })
+                .ok();
+                return;
+            };
+            let step_ids: Vec<u64> = view.steps.iter().map(|step| step.task.id).collect();
+            let (step_subtasks, run_worktrees, run_pull_requests) =
+                load_run_extras(&store, Some(view.run.id), step_ids, cx).await;
+            let subtasks = match store.run_subtasks(task_id, cx).await {
+                Ok(subtasks) => subtasks,
+                Err(error) => {
+                    tracing::error!("Failed to fetch run subtasks: {error}");
+                    Vec::new()
+                }
+            };
+            this.update(cx, |this, cx| {
+                if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                    return;
+                }
+                this.coding = Some(view.clone());
+                this.coding_subtasks = subtasks;
+                this.step_subtasks = step_subtasks;
+                this.run_worktrees = run_worktrees;
+                this.run_pull_requests = run_pull_requests;
+                this.coding_dirty = Vec::new();
+                this._coding_fetch = None;
+                this.coding_error = None;
+                this.coding_directory_backed = true;
+                // The steps are real rows now: the task list and the run cards
+                // reload, and the agent pane follows the run's checkout. The
+                // interview prompt is already in the pane: this same click
+                // composed it, so nothing is pushed twice here.
+                cx.emit(TaskDetailsEvent::CodingChanged);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn complete_coding_step(
@@ -4122,19 +4152,23 @@ impl TaskDetails {
     }
 
     /// Compose a phase prompt and hand it to the layout, which inserts it into
-    /// the agent pane and switches to it.
+    /// the agent pane and switches to it. `view` is the run's state the prompt
+    /// draws on (round notes, branch); the interview is also composed before
+    /// any run exists, which is the `None` case.
     fn launch_phase(
         &mut self,
         task: &TaskWithMeta,
-        view: &RunView,
+        view: Option<&RunView>,
         phase: &str,
         cx: &mut Context<Self>,
     ) {
-        let notes = run_notes(&view.run.step_results.0);
+        let notes = view
+            .map(|view| run_notes(&view.run.step_results.0))
+            .unwrap_or_default();
         let prompt = phase_prompt(
             task,
             &notes,
-            view.run.branch.as_deref(),
+            view.and_then(|view| view.run.branch.as_deref()),
             phase,
             &self.coding_subtasks,
         );
@@ -4165,9 +4199,8 @@ impl TaskDetails {
             if !self.coding_directory_backed {
                 return div().into_any_element();
             }
-            // The run auto-starts on selection, so while the fetch is in
-            // flight there is nothing to act on yet; a quiet row beats the
-            // start button flashing in and out.
+            // The run fetch is still in flight: a quiet row beats the
+            // predicted steps flashing in and out.
             if self._coding_fetch.is_some() {
                 return div()
                     .mt_2()
@@ -4178,18 +4211,24 @@ impl TaskDetails {
                         div()
                             .text_xs()
                             .text_color(rgb(0x737373))
-                            .child("Preparing the interview…"),
+                            .child("Loading the workflow…"),
                     )
                     .into_any_element();
             }
-            // The auto-start failed: surface the reason and offer the start
-            // button as the retry affordance.
-            let mut fallback = div().v_flex().gap_2();
+            // No run yet: the phases it would have are already on screen, and
+            // the first one's action opens the run. Nothing is created or
+            // pushed to the agent until that click.
+            let mut predicted = div()
+                .id(("coding-section", task.id))
+                .v_flex()
+                .gap_2()
+                .mt_2()
+                .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("Workflow"));
             if let Some(error) = self.coding_error.clone() {
-                fallback = fallback.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
+                predicted = predicted.child(div().text_xs().text_color(rgb(0xf87171)).child(error));
             }
-            return fallback
-                .child(self.coding_start_card(task, cx))
+            return predicted
+                .child(self.coding_predicted_steps(task, cx))
                 .into_any_element();
         };
         let run_id = view.run.id;
@@ -4271,28 +4310,76 @@ impl TaskDetails {
         section.into_any_element()
     }
 
-    /// The fallback affordance on a feature task whose run could not be
-    /// auto-started: the start button, at the bottom of the panel where the
-    /// step list will go once the run exists.
-    fn coding_start_card(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) -> AnyElement {
+    /// The phases a run would have, before it exists: one predicted row per
+    /// coding phase, in run order, with the first phase's action on its own row.
+    /// The rows read like the steps they stand in for, so the click that opens
+    /// the run does not move anything.
+    fn coding_predicted_steps(
+        &mut self,
+        task: &TaskWithMeta,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let task_id = task.id;
-        div()
-            .h_flex()
-            .items_center()
-            .gap_2()
-            .mt_2()
-            .ml_2()
-            .child(
-                Button::new(format!("coding-start-{task_id}"))
-                    .compact()
-                    .label("Start coding workflow")
-                    .tooltip(
-                        "Turn this task into an interview → spec → implement → review → merge run",
+        let rows: Vec<AnyElement> = CODING_PHASES
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| {
+                // The first phase is the one the run opens on, so it carries the
+                // action and the active tone; the rest stay pending previews
+                // until the phase before them completes.
+                let starts = index == 0;
+                let title = match *phase {
+                    // The shortened form its real step row shows
+                    // (`step_row_title`), so the row survives the click as it is.
+                    "interview" => "Interview & spec",
+                    other => phase_roadmap_title(other),
+                };
+                let mut row = div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded_md()
+                    .when(starts, |this| this.bg(rgb(PANEL_HOVER)))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if starts { rgb(0xd4d4d4) } else { rgb(0x4f4f4f) })
+                            .child(if starts { "◐" } else { "☐" }),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_coding_run(task_id, cx);
-                    })),
-            )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(if starts { rgb(0xe5e5e5) } else { rgb(0x7a7a7a) })
+                            .child(title),
+                    );
+                if starts {
+                    row = row.child(
+                        Button::new(format!("coding-start-{task_id}"))
+                            .compact()
+                            .with_size(gpui_component::Size::Small)
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .label("Start")
+                            .tooltip(
+                                "Open the run and compose the interview prompt in the agent pane",
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_coding_run(task_id, cx);
+                            })),
+                    );
+                }
+                row.into_any_element()
+            })
+            .collect();
+        div()
+            .v_flex()
+            .gap_1()
+            .ml_2()
+            .children(rows)
             .into_any_element()
     }
 
@@ -4647,10 +4734,10 @@ impl TaskDetails {
                 .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| match node_id.as_str() {
                     "interview" => {
-                        this.launch_phase(&task_for_prompt, &view_for_prompt, "interview", cx)
+                        this.launch_phase(&task_for_prompt, Some(&view_for_prompt), "interview", cx)
                     }
                     "implement" => {
-                        this.launch_phase(&task_for_prompt, &view_for_prompt, "implement", cx)
+                        this.launch_phase(&task_for_prompt, Some(&view_for_prompt), "implement", cx)
                     }
                     "spec" => this.approve_coding_spec(task_id, cx),
                     "review" => this.complete_coding_step(
@@ -4815,7 +4902,12 @@ impl TaskDetails {
                             .label("Ask for a summary")
                             .tooltip("Compose a summary request in the agent pane")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.launch_phase(&task_for_prompt, &view_for_prompt, "review", cx);
+                                this.launch_phase(
+                                    &task_for_prompt,
+                                    Some(&view_for_prompt),
+                                    "review",
+                                    cx,
+                                );
                             })),
                     )
                     .child(
@@ -6464,6 +6556,79 @@ mod coding_tests {
         assert_eq!(
             current_step(&steps).map(|step| step.node.id.as_str()),
             Some("review")
+        );
+    }
+
+    /// A place to record the pane's events from a test: the subscription lives
+    /// in the entity, the log is read from the outside.
+    struct PromptLog;
+
+    /// The click that opens the run is the click that fills the agent pane's
+    /// prompt box. It composes the interview prompt from the task on screen
+    /// with no run state behind it, so the prompt carries that task's current
+    /// title and description and does not wait on the run the click creates.
+    #[gpui::test]
+    fn the_interview_click_pushes_the_task_into_the_prompt(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // The pane's actions reach the store through Tokio, which the test
+        // scheduler cannot pump off-thread: the store the pane is built with
+        // comes from a runtime local to the test, and the phase prompt below
+        // is composed without touching the store at all.
+        let store = {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("the test's Tokio runtime");
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            runtime.block_on(async {
+                let store = storage::TodoStore::new(&config)
+                    .await
+                    .expect("the in-memory store");
+                Store::new(store)
+            })
+        };
+
+        let details = cx.update(|cx| cx.new(|cx| TaskDetails::new(store, cx)));
+        let logged: Rc<RefCell<Vec<TaskDetailsEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = logged.clone();
+        // The entity is held for the test's length: releasing it would drop the
+        // subscription with it.
+        let _log = cx.update(|cx| {
+            cx.new(|cx| {
+                cx.subscribe(
+                    &details,
+                    move |_: &mut PromptLog, _: Entity<TaskDetails>, event, _| {
+                        log.borrow_mut().push(event.clone());
+                    },
+                )
+                .detach();
+                PromptLog
+            })
+        });
+
+        let task = feature("Add OAuth", Some("Sign in with Google."));
+        details.update(cx, |details, cx| {
+            details.launch_phase(&task, None, "interview", cx)
+        });
+
+        let launched = logged.borrow().iter().find_map(|event| match event {
+            TaskDetailsEvent::CodingLaunch { phase, prompt } => {
+                Some((phase.clone(), prompt.clone()))
+            }
+            _ => None,
+        });
+        let (phase, prompt) = launched.expect("the phase action pushes the interview prompt");
+        assert_eq!(phase, "interview");
+        assert!(
+            prompt.contains("Request to interview: Add OAuth"),
+            "the prompt names the task on screen: {prompt}"
+        );
+        assert!(
+            prompt.contains("Sign in with Google."),
+            "the prompt carries the task's description: {prompt}"
         );
     }
 }

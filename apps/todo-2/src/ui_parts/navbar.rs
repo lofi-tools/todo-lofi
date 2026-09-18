@@ -518,7 +518,11 @@ fn nav_footer_row(
         .items_center()
         .gap_1p5()
         .px_2()
-        .py_1()
+        // Top padding only, and the full old 4px moved up here: the rows sit
+        // inside the navbar's own `p_4`, so a bottom padding of their own would
+        // stack onto that edge, while the top padding is what holds the
+        // footer's separator above them.
+        .pt_2()
         .rounded_md()
         .text_color(rgb(TEXT_MUTED))
         .bg(if active { rgb(PANEL_HOVER) } else { rgb(PANEL_BG) })

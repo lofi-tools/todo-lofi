@@ -72,6 +72,22 @@ enum RightPane {
     #[default]
     Details,
     Agent,
+    /// The details pane with the agent docked inside it, at the right: the
+    /// shape a launched coding phase takes, so the run's steps and the
+    /// agent's transcript are read side by side.
+    DetailsAndAgent,
+}
+
+/// An in-progress right-pane resize drag: where the pointer grabbed, and the
+/// width the dragged edge controls.
+#[derive(Clone, Copy)]
+enum PaneDrag {
+    /// The details column's left edge: the column's own width, which covers
+    /// the details pane alone or the details pane with the agent dock.
+    Column(Pixels, Pixels),
+    /// The divider between the details pane and the docked agent: the agent
+    /// pane's width.
+    AgentDock(Pixels, Pixels),
 }
 
 /// Details pane geometry: 1.2x the original 560px default, at most 60% of
@@ -80,6 +96,16 @@ const DETAILS_PANE_WIDTH: f32 = 672.;
 const DETAILS_PANE_MIN_WIDTH: f32 = 320.;
 const DETAILS_PANE_MAX_FRACTION: f32 = 0.60;
 const SPLIT_RIGHT_PANE_MAX_WIDTH: f32 = 1500.;
+
+/// Details pane share of the app width while a run split is open: the pane
+/// carries the agent dock as well as its own fields, so a launched phase
+/// expands it past the details pane's own maximum.
+const RUN_PANE_MAX_FRACTION: f32 = 0.70;
+
+/// The agent dock's width inside a run split, and its floor, so widening the
+/// details pane can never squeeze the transcript away.
+const RUN_AGENT_PANE_WIDTH: f32 = 460.;
+const RUN_AGENT_PANE_MIN_WIDTH: f32 = 320.;
 
 /// Height of the window-wide footer strip. The notifications pane anchors
 /// its own top edge to the footer's, so both share the number.
@@ -121,9 +147,11 @@ struct Layout {
     /// also work; holding it makes the type nameable and keeps the width for
     /// the app run without writing anything to disk.
     split_state: Entity<ResizableState>,
-    /// Current details overlay width and an in-progress left-edge drag, if any.
+    /// Current details column width and an in-progress edge drag, if any.
     right_pane_width: Pixels,
-    details_resize_grab: Option<(Pixels, Pixels)>,
+    pane_drag: Option<PaneDrag>,
+    /// Width of the agent pane docked inside a run split.
+    run_agent_width: Pixels,
     _agent_events: Subscription,
     /// Special panel for the managed tag in `managed_tag`, if any.
     travel_panel: Entity<TravelPanel>,
@@ -603,13 +631,14 @@ impl Layout {
                     this.sync_agent_checkout_for_selection(cx);
                 }
                 // A phase prompt is ready: drop it into the agent pane and
-                // show the pane. Sending stays manual so it can be edited.
+                // dock that pane inside the details pane, widened to its run
+                // maximum. Sending stays manual so it can be edited.
                 TaskDetailsEvent::CodingLaunch { phase, prompt } => {
                     tracing::info!(phase, "coding phase prompt ready in the agent pane");
                     let prompt = prompt.clone();
                     this.agent_pane
                         .update(cx, |pane, cx| pane.insert_prompt_text(prompt, window, cx));
-                    this.show_right_pane(RightPane::Agent, window, cx);
+                    this.show_run_split(window, cx);
                 }
                 // Stop on a run step delegates to the agent pane's stop-turn:
                 // the step stays open and the branch keeps what the turn wrote
@@ -636,10 +665,12 @@ impl Layout {
                     }
                     // An open dropdown in the agent pane swallows the first
                     // Escape; the next one deselects as usual.
-                    if layout.right_pane == RightPane::Agent
-                        && layout
-                            .agent_pane
-                            .update(cx, |pane, cx| pane.dismiss_overlay(cx))
+                    if matches!(
+                        layout.right_pane,
+                        RightPane::Agent | RightPane::DetailsAndAgent
+                    ) && layout
+                        .agent_pane
+                        .update(cx, |pane, cx| pane.dismiss_overlay(cx))
                     {
                         return;
                     }
@@ -747,7 +778,8 @@ impl Layout {
             agent_available: false,
             split_state,
             right_pane_width: px(DETAILS_PANE_WIDTH),
-            details_resize_grab: None,
+            pane_drag: None,
+            run_agent_width: px(RUN_AGENT_PANE_WIDTH),
             _agent_events,
             travel_panel,
             tag_settings,
@@ -863,9 +895,32 @@ async fn lookup_managed_tag(
         .detach();
     }
 
-    /// Details pane maximum width, tracking the live app width.
-    fn details_max_width(window: &Window) -> Pixels {
-        (window.viewport_size().width * DETAILS_PANE_MAX_FRACTION).max(px(DETAILS_PANE_MIN_WIDTH))
+    /// The details column's share of the app width in the given right-pane
+    /// shape. A run split is wider than the details pane alone, because the
+    /// agent dock shares the column.
+    fn details_max_fraction(pane: RightPane) -> f32 {
+        match pane {
+            RightPane::DetailsAndAgent => RUN_PANE_MAX_FRACTION,
+            RightPane::Details | RightPane::Agent => DETAILS_PANE_MAX_FRACTION,
+        }
+    }
+
+    /// The details column's maximum width in the given right-pane shape,
+    /// tracking the live app width.
+    fn details_max_width(pane: RightPane, window: &Window) -> Pixels {
+        (window.viewport_size().width * Self::details_max_fraction(pane))
+            .max(px(DETAILS_PANE_MIN_WIDTH))
+    }
+
+    /// The width a launched phase expands a run split to.
+    fn run_split_width(window: &Window) -> Pixels {
+        Self::details_max_width(RightPane::DetailsAndAgent, window)
+    }
+
+    /// The agent dock's widest setting for a column of `column_width`: the
+    /// details pane keeps its own minimum beside it.
+    fn agent_dock_max_width(column_width: Pixels) -> Pixels {
+        (column_width - px(DETAILS_PANE_MIN_WIDTH)).max(px(RUN_AGENT_PANE_MIN_WIDTH))
     }
 
     /// Notifications pane height, tracking the live app height.
@@ -874,30 +929,73 @@ async fn lookup_managed_tag(
         px(available_height.max(0.) * NOTIFICATION_PANE_HEIGHT_FRACTION)
     }
 
-    /// Begin a left-edge details resize drag.
-    fn begin_details_resize(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        self.details_resize_grab = Some((x, self.right_pane_width));
+    /// Begin a right-pane resize drag.
+    fn begin_pane_drag(&mut self, drag: PaneDrag, cx: &mut Context<Self>) {
+        self.pane_drag = Some(drag);
         cx.notify();
     }
 
-    /// Continue a left-edge details resize drag, clamped to the pane limits.
-    fn update_details_resize(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
-        if let Some((grab_x, grab_width)) = self.details_resize_grab {
-            let width = (grab_width + (grab_x - x)).as_f32().clamp(
-                DETAILS_PANE_MIN_WIDTH,
-                Self::details_max_width(window).as_f32(),
-            );
-            self.right_pane_width = px(width);
+    /// Continue a right-pane resize drag, clamped to the pane limits.
+    fn update_pane_drag(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        match self.pane_drag {
+            // Both edges are dragged to the left to grow their pane: the
+            // column is right-anchored, and the dock sits at its right end.
+            Some(PaneDrag::Column(grab_x, grab_width)) => {
+                let width = (grab_width + (grab_x - x)).as_f32().clamp(
+                    DETAILS_PANE_MIN_WIDTH,
+                    Self::details_max_width(self.right_pane, window).as_f32(),
+                );
+                self.right_pane_width = px(width);
+            }
+            Some(PaneDrag::AgentDock(grab_x, grab_width)) => {
+                let width = (grab_width + (grab_x - x)).as_f32().clamp(
+                    RUN_AGENT_PANE_MIN_WIDTH,
+                    Self::agent_dock_max_width(self.right_pane_width).as_f32(),
+                );
+                self.run_agent_width = px(width);
+            }
+            None => return,
+        }
+        cx.notify();
+    }
+
+    /// End a right-pane resize drag.
+    fn end_pane_drag(&mut self, cx: &mut Context<Self>) {
+        if self.pane_drag.is_some() {
+            self.pane_drag = None;
             cx.notify();
         }
     }
 
-    /// End a left-edge details resize drag.
-    fn end_details_resize(&mut self, cx: &mut Context<Self>) {
-        if self.details_resize_grab.is_some() {
-            self.details_resize_grab = None;
-            cx.notify();
-        }
+    /// One right-pane drag target: a transparent strip centred on the edge it
+    /// moves. It only captures the grab; the window-root capture layer carries
+    /// the movement, so the drag survives the pointer leaving the pane.
+    fn pane_drag_handle(
+        id: &'static str,
+        grab: impl Fn(&Layout, Pixels) -> PaneDrag + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-4.))
+            .w(px(8.))
+            .cursor_col_resize()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    let drag = grab(this, event.position.x);
+                    this.begin_pane_drag(drag, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
+            .into_any_element()
     }
 
     /// Task list at full row width, used when the details pane overlays it.
@@ -927,35 +1025,101 @@ async fn lookup_managed_tag(
             .bottom_0()
             .w(self.right_pane_width)
             .min_w(px(DETAILS_PANE_MIN_WIDTH))
-            .max_w(Self::details_max_width(window))
+            .max_w(Self::details_max_width(self.right_pane, window))
             .child(self.details.clone())
-            .child(
-                div()
-                    .id("details-resize-handle")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(-4.))
-                    .w(px(8.))
-                    .cursor_col_resize()
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                            this.begin_details_resize(event.position.x, cx);
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.stop_propagation();
-                    })),
-            )
+            .child(Self::pane_drag_handle(
+                "details-resize-handle",
+                |layout, x| PaneDrag::Column(x, layout.right_pane_width),
+                cx,
+            ))
             .into_any_element()
     }
 
-    /// Show one of the two right-hand panes and focus the agent when it is
+    /// The run split: the details pane on the left, the agent docked inside
+    /// the column at the right, and a divider between them that drags. It is
+    /// the shape a launched coding phase takes — the run's steps and the
+    /// agent's transcript in one column.
+    fn render_run_split(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("run-split")
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(self.right_pane_width)
+            .min_w(px(DETAILS_PANE_MIN_WIDTH))
+            .flex()
+            .flex_row()
+            .min_h_0()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.details.clone()),
+            )
+            .child(
+                // The agent pane draws its own left hairline, so the dock only
+                // carries the drag target: a wider hit area than the line,
+                // centred on it.
+                div()
+                    .id("agent-dock")
+                    .relative()
+                    .flex_none()
+                    .w(self.run_agent_width)
+                    .min_w(px(RUN_AGENT_PANE_MIN_WIDTH))
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.agent_pane.clone())
+                    .child(Self::pane_drag_handle(
+                        "agent-dock-handle",
+                        |layout, x| PaneDrag::AgentDock(x, layout.run_agent_width),
+                        cx,
+                    )),
+            )
+            // The column's own left edge drags too, so the run can widen
+            // without touching the dock's share.
+            .child(Self::pane_drag_handle(
+                "run-split-resize-handle",
+                |layout, x| PaneDrag::Column(x, layout.right_pane_width),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The shape a launched phase takes: the details pane keeps the run's
+    /// steps, the agent dock opens inside it at the right, and the column
+    /// widens to its run maximum so both fit.
+    fn show_run_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.right_pane = RightPane::DetailsAndAgent;
+        self.right_pane_width = Self::run_split_width(window);
+        // A dock wider than the column would leave the steps nothing; the
+        // drag clamps to the same floor.
+        self.run_agent_width = self
+            .run_agent_width
+            .min(Self::agent_dock_max_width(self.right_pane_width));
+        // The prompt box is not in the focus tree until the dock has
+        // rendered, so defer the focus one frame.
+        let agent_pane = self.agent_pane.clone();
+        window.on_next_frame(move |window, cx| {
+            agent_pane.update(cx, |pane, cx| pane.focus_prompt(window, cx));
+        });
+        cx.notify();
+    }
+
+    /// Show one of the right-hand panes and focus the agent when it is
     /// the one being opened.
     fn show_right_pane(&mut self, pane: RightPane, window: &mut Window, cx: &mut Context<Self>) {
+        // A run split leaves the column wider than the details pane alone may
+        // be, so clamp it back on the way out.
+        if pane != RightPane::DetailsAndAgent {
+            self.right_pane_width = self
+                .right_pane_width
+                .min(Self::details_max_width(pane, window));
+        }
         self.right_pane = pane;
         if pane == RightPane::Agent {
             // The prompt box is not in the focus tree until the pane has
@@ -968,10 +1132,19 @@ async fn lookup_managed_tag(
         cx.notify();
     }
 
+    /// Whether the agent pane has the right column to itself: the dedicated
+    /// agent view, or a run split whose details pane lost its selection
+    /// (there is nothing left to split, so the transcript takes the column).
+    fn agent_alone(&self, cx: &App) -> bool {
+        self.right_pane == RightPane::Agent
+            || (self.right_pane == RightPane::DetailsAndAgent
+                && !self.details.read(cx).has_selection())
+    }
+
     /// Whether the right-hand panel needs to be laid out: the details pane
-    /// has something to show, or the agent pane is the active one.
+    /// has something to show, or the agent pane has the column.
     fn right_pane_open(&self, cx: &App) -> bool {
-        self.right_pane == RightPane::Agent || self.details.read(cx).has_selection()
+        self.agent_alone(cx) || self.details.read(cx).has_selection()
     }
 
     /// Resolve the selected tag's launch directories and hand them to the
@@ -1034,7 +1207,12 @@ async fn lookup_managed_tag(
                 layout
                     .update(cx, |layout, cx| {
                         layout.agent_available = directory_backed;
-                        if !directory_backed && layout.right_pane == RightPane::Agent {
+                        if !directory_backed
+                            && matches!(
+                                layout.right_pane,
+                                RightPane::Agent | RightPane::DetailsAndAgent
+                            )
+                        {
                             layout.right_pane = RightPane::Details;
                         }
                         cx.notify();
@@ -1081,14 +1259,18 @@ async fn lookup_managed_tag(
             .map(|task| build_task_context(&task))
     }
 
-    /// The right-hand pane's contents. Switching panes does not tear a
-    /// session down: the agent pane simply stops being rendered, and its
-    /// tasks live in its own fields.
+    /// The right panel's contents while the agent pane has it. Switching
+    /// panes does not tear a session down: the agent pane simply stops being
+    /// rendered, and its tasks live in its own fields.
     fn render_right_pane(&self, cx: &App) -> AnyElement {
         let _ = cx;
         match self.right_pane {
             RightPane::Details => self.details.clone().into_any_element(),
-            RightPane::Agent => self.agent_pane.clone().into_any_element(),
+            // A run split without a selection collapses to the agent pane, so
+            // the panel carries the transcript on its own.
+            RightPane::Agent | RightPane::DetailsAndAgent => {
+                self.agent_pane.clone().into_any_element()
+            }
         }
     }
 
@@ -1115,7 +1297,12 @@ async fn lookup_managed_tag(
                     .ghost()
                     .compact()
                     .icon(IconName::PanelRight)
-                    .toggled(self.right_pane == RightPane::Details)
+                    // A run split shows the details pane too, so its switcher
+                    // reads as on; pressing it drops the agent dock.
+                    .toggled(matches!(
+                        self.right_pane,
+                        RightPane::Details | RightPane::DetailsAndAgent
+                    ))
                     .tooltip("Show details pane")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.show_right_pane(RightPane::Details, window, cx)
@@ -1126,7 +1313,12 @@ async fn lookup_managed_tag(
                     .ghost()
                     .compact()
                     .icon(IconName::Bot)
-                    .toggled(self.right_pane == RightPane::Agent)
+                    // A run split shows the agent too, so its switcher reads as
+                    // on; pressing it collapses back to the pane alone.
+                    .toggled(matches!(
+                        self.right_pane,
+                        RightPane::Agent | RightPane::DetailsAndAgent
+                    ))
                     .disabled(!agent_enabled)
                     .tooltip(if agent_enabled {
                         "Show agent pane".to_string()
@@ -1710,6 +1902,10 @@ impl Render for Layout {
         let dialog_layer = gpui_component::Root::render_dialog_layer(window, cx);
         let details_open =
             self.right_pane == RightPane::Details && self.details.read(cx).has_selection();
+        // The run split needs the details pane; without a selection it
+        // collapses to the agent pane alone, so it is not an overlay then.
+        let run_split_open =
+            self.right_pane == RightPane::DetailsAndAgent && self.details.read(cx).has_selection();
         let can_go_back = self.task_list.read(cx).can_go_back();
         let can_go_forward = self.task_list.read(cx).can_go_forward();
 
@@ -1781,7 +1977,7 @@ impl Render for Layout {
                             // "+ New trip" button at its end. The split
                             // docks the details pane on the right so a
                             // clicked checklist row opens it like any other.
-                            .child(if self.right_pane == RightPane::Agent {
+                            .child(if self.agent_alone(cx) {
                                 h_resizable(ElementId::Name("tasks-split".into()))
                                     .with_state(&self.split_state)
                                     .child(
@@ -1812,6 +2008,12 @@ impl Render for Layout {
                             })
                             .when(details_open, |this| {
                                 this.child(self.render_details_overlay(window, cx))
+                            })
+                            // A launched phase docks the agent inside the
+                            // details pane: the same right-anchored column,
+                            // holding both.
+                            .when(run_split_open, |this| {
+                                this.child(self.render_run_split(cx))
                             })
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
@@ -1849,7 +2051,7 @@ impl Render for Layout {
                             // Always two panels: the right one collapses with
                             // `.visible(false)` so the group's keyed state stays
                             // coherent (and the width survives pane switching).
-                            .child(if self.right_pane == RightPane::Agent {
+                            .child(if self.agent_alone(cx) {
                                 h_resizable(ElementId::Name("tasks-split".into()))
                                     .with_state(&self.split_state)
                                     .child(
@@ -1880,6 +2082,12 @@ impl Render for Layout {
                             })
                             .when(details_open, |this| {
                                 this.child(self.render_details_overlay(window, cx))
+                            })
+                            // A launched phase docks the agent inside the
+                            // details pane: the same right-anchored column,
+                            // holding both.
+                            .when(run_split_open, |this| {
+                                this.child(self.render_run_split(cx))
                             })
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
@@ -1943,10 +2151,10 @@ impl Render for Layout {
             // layer last so it paints above everything.
             .children(notification_layer)
             .children(dialog_layer)
-            .when(self.details_resize_grab.is_some(), |this| {
+            .when(self.pane_drag.is_some(), |this| {
                 this.child(
                     div()
-                        .id("details-resize-capture")
+                        .id("pane-resize-capture")
                         .absolute()
                         .top_0()
                         .right_0()
@@ -1954,12 +2162,12 @@ impl Render for Layout {
                         .left_0()
                         .cursor_col_resize()
                         .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                            this.update_details_resize(event.position.x, window, cx);
+                            this.update_pane_drag(event.position.x, window, cx);
                         }))
                         .on_mouse_up(
                             gpui::MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
-                                this.end_details_resize(cx);
+                                this.end_pane_drag(cx);
                             }),
                         )
                         .on_click(cx.listener(|_, _, _, cx| {
@@ -2147,5 +2355,39 @@ mod layout_tests {
         cx.update(gpui_component::init);
         let (_, cx) = cx.add_window_view(|_, _| NoticeFilterPills);
         cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// A launched phase widens the right column past the details pane's own
+    /// share: the run split carries the agent dock as well.
+    #[test]
+    fn run_split_is_wider_than_the_details_pane_alone() {
+        assert_eq!(
+            Layout::details_max_fraction(RightPane::DetailsAndAgent),
+            RUN_PANE_MAX_FRACTION
+        );
+        assert!(RUN_PANE_MAX_FRACTION > DETAILS_PANE_MAX_FRACTION);
+        assert_eq!(
+            Layout::details_max_fraction(RightPane::Details),
+            DETAILS_PANE_MAX_FRACTION
+        );
+        assert_eq!(
+            Layout::details_max_fraction(RightPane::Agent),
+            DETAILS_PANE_MAX_FRACTION
+        );
+    }
+
+    /// The dock's width can never eat the details pane: it stops one details
+    /// pane-width short of the column, and its own floor is the last word in
+    /// a column too narrow to honour both.
+    #[test]
+    fn agent_dock_leaves_the_details_pane_its_minimum() {
+        assert_eq!(
+            Layout::agent_dock_max_width(px(1200.)),
+            px(1200. - DETAILS_PANE_MIN_WIDTH)
+        );
+        assert_eq!(
+            Layout::agent_dock_max_width(px(DETAILS_PANE_MIN_WIDTH)),
+            px(RUN_AGENT_PANE_MIN_WIDTH)
+        );
     }
 }

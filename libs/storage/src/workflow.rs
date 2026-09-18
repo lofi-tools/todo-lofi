@@ -1998,8 +1998,8 @@ impl TodoStore {
 
     /// Start a coding run for an existing feature task: the task becomes the
     /// run root, phase steps materialize as its subtasks, and completing it
-    /// completes the run. Rejects a second active run on the same task, or on
-    /// the same project (nested runs are exempt from the project guard).
+    /// completes the run. Rejects a second active run on the same task; runs
+    /// on different feature tasks of one project coexist.
     pub async fn create_task_run(
         &mut self,
         task_id: u64,
@@ -2016,11 +2016,6 @@ impl TodoStore {
             return Err(invalid(format!(
                 "task {task_id} already has an active coding run"
             )));
-        }
-        if self.project_has_active_coding_run(&task).await? {
-            return Err(invalid(
-                "another coding run is already active for this project".to_string(),
-            ));
         }
         let (run, recipe) = self
             .insert_run_row(recipe_id, params, None, Some(task_id))
@@ -2232,44 +2227,6 @@ impl TodoStore {
         Ok(rows.first().and_then(parse_run_row))
     }
 
-    /// Whether another top-level coding run is active for the project `task`
-    /// belongs to. A task that is itself a subtask is a nested run and is
-    /// exempt, as are nested runs on the other side of the comparison.
-    async fn project_has_active_coding_run(&mut self, task: &crate::Task) -> QueryResult<bool> {
-        if task.parent_id.is_some() {
-            return Ok(false);
-        }
-        let ours: HashSet<u64> = self
-            .get_direct_task_tags(task.id)
-            .await?
-            .into_iter()
-            .map(|tag| tag.id)
-            .collect();
-        if ours.is_empty() {
-            return Ok(false);
-        }
-        for run in self.list_workflow_runs().await? {
-            if run.status != "active" || run.root_task_id == Some(task.id) {
-                continue;
-            }
-            let Some(root) = run.root_task_id else {
-                continue;
-            };
-            if self.get_task(root).await?.parent_id.is_some() {
-                continue;
-            }
-            let theirs: HashSet<u64> = self
-                .get_direct_task_tags(root)
-                .await?
-                .into_iter()
-                .map(|tag| tag.id)
-                .collect();
-            if !ours.is_disjoint(&theirs) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
 }
 
 impl TodoStore {
@@ -3289,7 +3246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_one_coding_run_per_project() -> anyhow::Result<()> {
+    async fn test_coding_runs_coexist_but_not_on_one_task() -> anyhow::Result<()> {
         let mut store = TodoStore::for_test().await?;
         let recipe_id = coding_recipe_id(&mut store).await;
         let tag = store.create_tag("managed:oauth").await?;
@@ -3305,10 +3262,17 @@ mod tests {
         store
             .create_task_run(first.id, recipe_id, serde_json::json!({}))
             .await?;
-        let blocked = store
+        // Two features of one project drive their own runs: they share the
+        // project's single agent session at the pane level, which is not the
+        // store's business.
+        store
             .create_task_run(second.id, recipe_id, serde_json::json!({}))
+            .await?;
+        // One task, though, owns one active run.
+        let blocked = store
+            .create_task_run(first.id, recipe_id, serde_json::json!({}))
             .await;
-        assert!(blocked.is_err(), "a second run on the project is blocked");
+        assert!(blocked.is_err(), "a second run on one task is blocked");
         Ok(())
     }
 

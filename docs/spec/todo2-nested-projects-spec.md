@@ -720,7 +720,7 @@ directory, which the dirs picker reaches through the session key.
 | `apps/todo-2/src/store.rs:1355-1385` (`project_dir`) | Walks the ancestor chain: first `strip_prefix("project:")` + `path.is_dir()`, then `tag_settings.dirs` + `path.is_dir()` | Both branches exist, but the name branch is **preferred order**, so a stale name outranks a configured dir |
 | `apps/todo-2/src/store.rs:1072-1085` (`coding_directory`) | Doc: "carries a `project:` tag, or a tag with a configured directory"; delegates to `project_dir` | Comment adopts the dirs-based phrasing; behavior follows `project_dir` |
 | `apps/todo-2/src/ui_parts/agent_pane.rs:78-95` (`AgentProject::candidates`, `resolve`) | Doc: "the path encoded in the tag name first, then `tag_settings.dirs`" | Decide whether name-first ordering survives once dirs are the source of truth |
-| `apps/todo-2/src/ui_parts/task_details.rs:449-452, 717` | `coding_directory_backed` gates the coding workflow and auto-start | No direct prefix test — follows `coding_directory`; keep in sync |
+| `apps/todo-2/src/ui_parts/task_details.rs:449-452, 717` | `coding_directory_backed` gates the coding workflow section | No direct prefix test — follows `coding_directory`; keep in sync |
 
 ### D. Seeds, tests, migrations (no behavior change expected)
 
