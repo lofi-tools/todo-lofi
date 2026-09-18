@@ -2291,18 +2291,21 @@ impl AgentPane {
                 options,
                 decision,
             } => render_permission(weak, entry_id, title, options, decision.as_ref()),
-            EntryKind::Notice { level, text } => div()
-                .w_full()
-                .py_1()
-                .flex()
-                .justify_center()
-                .text_xs()
-                .text_color(rgb(match level {
-                    NoticeLevel::Info => TEXT_MUTED,
-                    NoticeLevel::Error => DANGER,
-                }))
-                .child(text.clone())
-                .into_any_element(),
+            // Neither notice is centred with `justify_center`: a flex item
+            // holding text cannot shrink below its unwrapped width, so a long
+            // message spills past both edges of the pane instead of wrapping.
+            // A full-width block makes the text wrap to the conversation.
+            EntryKind::Notice { level, text } => match level {
+                NoticeLevel::Info => div()
+                    .w_full()
+                    .py_1()
+                    .text_center()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(text.clone())
+                    .into_any_element(),
+                NoticeLevel::Error => render_error_notice(entry_id, text),
+            },
             EntryKind::Error { title, detail } => {
                 render_error(weak, title, detail, true)
             }
@@ -3305,6 +3308,33 @@ fn render_error(
     card(children)
 }
 
+/// An error that arrives mid-conversation. It is laid out like an agent reply
+/// — full width, wrapped to the conversation — on a quieter surface than a
+/// card, so a long message reads as part of the transcript instead of pushing
+/// the pane wider than its own column. The danger colour goes on the text
+/// view: it overrides its own foreground, so a colour on the wrapper is
+/// ignored.
+fn render_error_notice(entry_id: u64, text: &str) -> AnyElement {
+    div()
+        .w_full()
+        .py_1()
+        .child(
+            div()
+                .id(SharedString::from(format!("agent-error-notice-{entry_id}")))
+                .debug_selector(|| "agent-error-notice".to_string())
+                .w_full()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(PANEL_BG))
+                .child(
+                    TextView::markdown(format!("agent-error-notice-{entry_id}"), text.to_string())
+                        .text_color(rgb(DANGER))
+                        .selectable(true),
+                ),
+        )
+        .into_any_element()
+}
+
 /// The error payload as a selectable, mono block so it can be copy-pasted. The
 /// text view handles selection and double/triple-click; the row's copy button
 /// copies the full (untruncated) detail.
@@ -3592,6 +3622,37 @@ mod tests {
             .join("\n");
         let tail = tail_lines(&text, 2);
         assert_eq!(tail, "498\n499");
+    }
+
+    /// An error in the conversation is a wrapped block the width of the row,
+    /// not a centred one-liner: a flex item holding text cannot shrink below
+    /// its unwrapped width, so a long message would spill past both edges of
+    /// the pane instead of growing downwards.
+    #[gpui::test]
+    fn an_error_notice_wraps_to_the_conversation_width(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        struct ErrorRow;
+        impl Render for ErrorRow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(300.)).child(render_error_notice(
+                    0,
+                    &"could not reach the agent ".repeat(20),
+                ))
+            }
+        }
+        let (_view, cx) = cx.add_window_view(|_, _| ErrorRow);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let notice = cx
+            .debug_bounds("agent-error-notice")
+            .expect("the error notice measured");
+        assert_eq!(notice.size.width, px(300.));
+        // One line plus the block's own padding is ~32px: anything taller is
+        // the message wrapping inside the row.
+        assert!(
+            notice.size.height > px(48.),
+            "the error wrapped to a single line: {:#?}",
+            notice
+        );
     }
 
     /// A scratch tree with a repo, a sibling directory, and a worktree inside
