@@ -68,6 +68,12 @@ const TOOL_MAX_LINES: usize = 1_000;
 /// Lines of captured stderr shown inside an error card.
 const ERROR_TAIL_LINES: usize = 20;
 const MONO_FONT: &str = "ui-monospace";
+/// Conversation text sizes, mirroring Zed's agent panel: the prompt bubble
+/// takes its smaller `agent_buffer_font_size` step, replies and tool-call
+/// titles the larger `agent_ui_font_size`/tool-name step.
+const PROMPT_FONT_SIZE: f32 = 12.;
+const REPLY_FONT_SIZE: f32 = 13.;
+const TOOL_CALL_FONT_SIZE: f32 = 13.;
 
 actions!(agent_pane, [SlashUp, SlashDown, DismissOverlay]);
 
@@ -2059,8 +2065,13 @@ impl AgentPane {
                         .px_3()
                         .py_2()
                         .bg(rgb(CARD_BG))
+                        .border_1()
+                        .border_color(rgb(HAIRLINE))
                         .rounded_lg()
-                        .child(TextView::markdown(format!("user-{entry_id}"), text.clone())),
+                        .child(
+                            TextView::markdown(format!("user-{entry_id}"), text.clone())
+                                .text_size(px(PROMPT_FONT_SIZE)),
+                        ),
                 )
                 .into_any_element(),
             EntryKind::AgentText { text } => {
@@ -2083,7 +2094,10 @@ impl AgentPane {
                     .child(
                         div()
                             .w_full()
-                            .child(TextView::markdown(format!("agent-{entry_id}"), text.clone())),
+                            .child(
+                                TextView::markdown(format!("agent-{entry_id}"), text.clone())
+                                    .text_size(px(REPLY_FONT_SIZE)),
+                            ),
                     )
                     .into_any_element()
             }
@@ -2208,7 +2222,7 @@ impl AgentPane {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_sm()
+                                    .text_size(px(TOOL_CALL_FONT_SIZE))
                                     .text_color(rgb(TEXT_STRONG))
                                     .truncate()
                                     .child(if title.trim().is_empty() {
@@ -3400,6 +3414,7 @@ fn render_error_notice(entry_id: u64, text: &str) -> AnyElement {
                 .child(
                     TextView::markdown(format!("agent-error-notice-{entry_id}"), text.to_string())
                         .text_color(rgb(DANGER))
+                        .text_size(px(REPLY_FONT_SIZE))
                         .selectable(true),
                 ),
         )
