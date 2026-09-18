@@ -24,13 +24,14 @@ use acp_client::{
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window, actions, div, px,
     rgb, prelude::FluentBuilder,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
+use gpui_component::scroll::{ScrollableElement, ScrollbarAxis};
 use gpui_component::text::TextView;
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
@@ -45,11 +46,10 @@ const AGENT_PANE_CONTEXT: &str = "AgentPane";
 /// swallowed instead of reopening the dropdown.
 const OVERLAY_OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(300);
-/// Rows shown in a dropdown; the rest is reachable by typing. The card never
-/// scrolls: a scrollable wrapper would take the card out of the floating
-/// context (its styles don't transfer to the wrapper), so the list is
-/// bounded by construction instead.
-const OVERLAY_MAX_ROWS: usize = 12;
+/// Height cap for a dropdown's scrolling row list. Only the rows scroll: the
+/// card keeps its absolute placement, so its title and filter stay pinned
+/// while the rows below them scroll independently.
+const OVERLAY_MAX_HEIGHT: f32 = 320.;
 /// Queued prompts are in-memory and session-scoped; beyond this, Send waits.
 const QUEUE_CAP: usize = 10;
 /// Lines of terminal output shown before the row needs expanding.
@@ -387,6 +387,8 @@ pub struct AgentPane {
     /// Fuzzy-filter input for the model dropdown.
     overlay_query: Entity<InputState>,
     _overlay_query_events: Subscription,
+    /// Scroll position of the open dropdown's row list.
+    overlay_scroll: ScrollHandle,
     /// Highlighted row of the open dropdown.
     overlay_cursor: usize,
 }
@@ -437,6 +439,7 @@ impl AgentPane {
             overlay_outside_closed: None,
             overlay_query,
             _overlay_query_events,
+            overlay_scroll: ScrollHandle::new(),
             overlay_cursor: 0,
         }
     }
@@ -1475,6 +1478,8 @@ impl AgentPane {
         self.overlay_cursor = 0;
         let focus_filter = matches!(self.overlay, Some(Overlay::Model));
         if self.overlay.is_some() {
+            // A freshly opened dropdown starts at the top of its list.
+            self.overlay_scroll.scroll_to_item(0);
             self.overlay_query.update(cx, |state, cx| {
                 state.set_value("", window, cx);
                 if focus_filter {
@@ -1504,6 +1509,8 @@ impl AgentPane {
         match event {
             InputEvent::Change => {
                 self.overlay_cursor = 0;
+                // A new filter means a new list: show its first row.
+                self.overlay_scroll.scroll_to_item(0);
                 cx.notify();
             }
             // Enter picks the first visible row, then returns focus to the
@@ -1584,12 +1591,8 @@ impl AgentPane {
         let Some((_, values, _)) = self.overlay_rows(&overlay, cx) else {
             return;
         };
-        let visible = values.len().min(OVERLAY_MAX_ROWS);
-        let Some((value, _)) = values
-            .into_iter()
-            .take(visible)
-            .nth(self.overlay_cursor.min(visible.saturating_sub(1)))
-        else {
+        let cursor = self.overlay_cursor.min(values.len().saturating_sub(1));
+        let Some((value, _)) = values.into_iter().nth(cursor) else {
             return;
         };
         self.select_overlay_value(overlay, value, cx);
@@ -1624,15 +1627,17 @@ impl AgentPane {
         let Some(overlay) = self.overlay.clone() else {
             return;
         };
-        // The cursor only travels the visible (capped) rows.
+        // The cursor travels every (filtered) row; the list scrolls to keep
+        // the highlighted one in view.
         let count = self
             .overlay_rows(&overlay, cx)
-            .map(|(_, values, _)| values.len().min(OVERLAY_MAX_ROWS))
+            .map(|(_, values, _)| values.len())
             .unwrap_or(0) as isize;
         if count == 0 {
             return;
         }
         self.overlay_cursor = (self.overlay_cursor as isize + delta).rem_euclid(count) as usize;
+        self.overlay_scroll.scroll_to_item(self.overlay_cursor);
         cx.notify();
     }
 
@@ -2339,6 +2344,11 @@ impl AgentPane {
             .map(|entry| entry.has_session())
             .unwrap_or(false);
         let busy = self.is_busy();
+        // A launch has no session yet, so nothing else in the header signals
+        // that the agent process is still booting.
+        let launching = self
+            .active_entry()
+            .is_some_and(|entry| matches!(&entry.state, PaneState::Launching { .. }));
         div()
             .flex_none()
             .h(px(40.))
@@ -2376,6 +2386,24 @@ impl AgentPane {
                         .text_color(rgb(TEXT_FAINT))
                         .truncate()
                         .child(model),
+                )
+            })
+            .when(launching, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            gpui_component::spinner::Spinner::new().color(rgb(TEXT_FAINT).into()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_FAINT))
+                                .child("Starting…"),
+                        ),
                 )
             })
             .child(
@@ -2782,15 +2810,10 @@ impl AgentPane {
     /// gap 8 + prompt box 88 + its border 2 + gap 8 + controls row 32 = 168,
     /// plus a tiny margin. Closes on outside click or Escape.
     fn render_overlay(&self, overlay: Overlay, cx: &mut Context<Self>) -> AnyElement {
-        let Some((title, all_values, current)) = self.overlay_rows(&overlay, cx) else {
+        let Some((title, values, current)) = self.overlay_rows(&overlay, cx) else {
             return div().into_any_element();
         };
-        let hidden = all_values.len().saturating_sub(OVERLAY_MAX_ROWS);
-        let values: Vec<(String, String)> =
-            all_values.into_iter().take(OVERLAY_MAX_ROWS).collect();
-        let cursor = self
-            .overlay_cursor
-            .min(values.len().saturating_sub(1));
+        let cursor = self.overlay_cursor.min(values.len().saturating_sub(1));
         let show_filter = overlay == Overlay::Model;
 
         let mut list = div()
@@ -2830,8 +2853,19 @@ impl AgentPane {
                     .child(Input::new(&self.overlay_query).with_size(gpui_component::Size::Small)),
             );
         }
+        // Only the rows scroll: the card keeps its absolute placement (and
+        // its title/filter), while a long model list scrolls underneath it
+        // instead of being truncated behind a "keep typing" hint.
+        let mut rows = div()
+            .id("agent-overlay-rows")
+            .max_h(px(OVERLAY_MAX_HEIGHT))
+            .relative()
+            .track_scroll(&self.overlay_scroll)
+            .overflow_y_scroll()
+            .v_flex()
+            .gap_0();
         if values.is_empty() {
-            list = list.child(
+            rows = rows.child(
                 div()
                     .px_2()
                     .py_1()
@@ -2843,7 +2877,7 @@ impl AgentPane {
         for (index, (value, label)) in values.into_iter().enumerate() {
             let selected = value == current;
             let highlighted = index == cursor;
-            list = list.child(
+            rows = rows.child(
                 div()
                     .id(SharedString::from(format!("agent-option-{value}")))
                     .flex()
@@ -2875,17 +2909,8 @@ impl AgentPane {
                     .when(selected, |this| this.child(icon(IconName::Check, SUCCESS))),
             );
         }
-        if hidden > 0 {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_0p5()
-                    .text_xs()
-                    .text_color(rgb(TEXT_FAINT))
-                    .child(format!("{hidden} more — keep typing to narrow")),
-            );
-        }
-        list.into_any_element()
+        list.child(rows.scrollbar(&self.overlay_scroll, ScrollbarAxis::Vertical))
+            .into_any_element()
     }
 }
 
@@ -3436,6 +3461,7 @@ impl Render for AgentPane {
         let body = self.render_body(cx);
         let prompt = self.render_prompt(window, cx);
         div()
+            .id("agent-pane")
             .size_full()
             .min_h_0()
             .flex()
@@ -3444,6 +3470,12 @@ impl Render for AgentPane {
             .bg(rgb(APP_BG))
             .border_l_1()
             .border_color(rgb(HAIRLINE))
+            // When the pane floats over the task list (the run split), a
+            // click on the pane's own surface must not fall through to the
+            // task row underneath and select it.
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.stop_propagation();
+            }))
             .child(header)
             .child(div().flex_1().min_h_0().child(body))
             .child(prompt)

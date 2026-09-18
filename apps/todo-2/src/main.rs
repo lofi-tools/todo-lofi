@@ -1019,6 +1019,9 @@ async fn lookup_managed_tag(
     ) -> AnyElement {
         div()
             .id("details-overlay")
+            // Floating over the task list: block mouse events and hover for
+            // the rows underneath (they must not highlight or select).
+            .occlude()
             .absolute()
             .top_0()
             .right_0()
@@ -1042,6 +1045,10 @@ async fn lookup_managed_tag(
     fn render_run_split(&mut self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("run-split")
+            // The column floats over the task list: details and agent panes
+            // occlude the rows underneath so hovering the panes never
+            // highlights a hidden task.
+            .occlude()
             .absolute()
             .top_0()
             .right_0()
