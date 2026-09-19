@@ -15,7 +15,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 <!--- **Nix reproducible dev environment** — `nix develop` gives you every tool, every time.-->
 - **2-way sync with your current Todo-list app** — 
   - Todoist
-  - Github issues & projects
+  - Github issues & projects — `preview`
 - **Integrated mini-apps (extensions)** — 
   - Travel checklist templates
   - Message follow-ups & birthday wishes — `coming soon`
