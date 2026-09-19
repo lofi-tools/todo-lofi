@@ -2,7 +2,7 @@
 
 A local-first task manager for macOS and Linux, built on [GPUI](https://github.com/nmrshll/gpui). Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow—all running offline.
 
-![Screenshot](docs/img/Screenshot%202026-09-14%20at%2011.24.37.png)
+![Screenshot](docs/img/Screenshot%202026-09-19%20at%2021.20.15.png)
 
 ## Features
 
