@@ -77,6 +77,9 @@ const TOOL_CALL_FONT_SIZE: f32 = 13.;
 /// How long the first Escape keeps the cancel hint up. Cancelling drops the
 /// queue, so it takes a second, deliberate press.
 const ESC_CANCEL_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+/// The hover group a message row and its copy control share: the control is
+/// invisible until the row is hovered, so the transcript stays uncluttered.
+const MESSAGE_GROUP: &str = "agent-message";
 
 actions!(agent_pane, [SlashUp, SlashDown]);
 
@@ -94,22 +97,48 @@ pub fn init(cx: &mut App) {
 }
 
 /// The markdown style a transcript message renders with: the row's own body
-/// size, with headings a single step above it. The renderer's default scales
-/// headings from a 14px base, so an H1 lands at 28px — more than twice the
-/// message it belongs to.
+/// size for everything the style can reach, with a heading one step above it.
+/// The renderer's default scales headings from a 14px base, so an H1 lands at
+/// 28px — more than twice the message it belongs to — and a message mixing
+/// headings, lists and code reads as three documents rather than one.
 fn message_markdown_style(body_size: f32) -> TextViewStyle {
     TextViewStyle::default()
         .heading_font_size(move |level, _| match level {
-            1 => px(body_size + 3.),
-            2 => px(body_size + 2.),
-            3 => px(body_size + 1.),
-            // H4-H6 already read as emphasis: keeping them at the body size is
-            // what makes a bulleted or bold message uniform.
-            _ => px(body_size),
+            1 => px(body_size + 2.),
+            // Every heading below the top is one step up: a section break in a
+            // message is a step, not a headline.
+            _ => px(body_size + 1.),
         })
         // A fenced block starts from the theme's 13px mono step, which is a
         // third size again next to a 12px message; it reads as body text.
         .code_block(gpui::StyleRefinement::default().text_size(px(body_size)))
+}
+
+/// The text of a prompt bubble: the same markdown, with its code spans
+/// flattened into the sentence around them.
+///
+/// The renderer draws inline code at 0.875× the body size in a mono family
+/// with its own pill, and that scale is not reachable from [`TextViewStyle`].
+/// In a 12px prompt — the interview template is a page of headings, lists and
+/// `./docs/spec/<slug>-spec.md` spans — that third size is what makes the
+/// bubble look uneven. Fenced blocks keep their markers: a whole block of code
+/// is not a mid-sentence size change. The agent's own replies are untouched and
+/// keep their code styling, where a mono pill on a path earns its keep.
+fn prompt_bubble_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            out.push_str(line);
+        } else if fenced {
+            out.push_str(line);
+        } else {
+            out.extend(line.chars().filter(|character| *character != '`'));
+        }
+    }
+    out
 }
 
 /// The checkout an active coding run works in, as the pane points at it: the
@@ -2187,6 +2216,34 @@ fn card(children: Vec<AnyElement>) -> AnyElement {
     element.into_any_element()
 }
 
+/// The copy control a message row reveals on hover.
+///
+/// A message's text is *not* selectable (see `render_row`), so this is how a
+/// reply or a prompt is taken out of the conversation: the whole message, as
+/// the Markdown source it was sent as. `id` names the button (one per row, so
+/// it must be unique); `selector` is the fixed name tests look the control up
+/// by, since a debug selector has to be a `'static` string.
+fn copy_message_button(
+    id: String,
+    selector: &'static str,
+    tooltip: &str,
+    text: &str,
+) -> AnyElement {
+    let text = text.to_string();
+    div()
+        .debug_selector(move || selector.to_string())
+        .rounded_md()
+        .bg(rgb(APP_BG))
+        .opacity(0.0)
+        .group_hover(MESSAGE_GROUP, |style| style.opacity(1.0))
+        .child(
+            icon_button(id, IconName::Copy, tooltip).on_click(move |_, _, cx: &mut App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+            }),
+        )
+        .into_any_element()
+}
+
 /// A small ghost icon button, matching the navbar's footer rows.
 fn icon_button(id: impl Into<ElementId>, icon: IconName, tooltip: &str) -> Button {
     Button::new(id)
@@ -2229,10 +2286,20 @@ impl AgentPane {
         let expanded = entry.expanded.contains(&entry_id);
         match &row.kind {
             EntryKind::UserMessage { text } => div()
+                .debug_selector(|| "user-message-row".to_string())
+                .group(MESSAGE_GROUP)
                 .w_full()
                 .flex()
+                .items_center()
                 .justify_end()
+                .gap_2()
                 .py_1()
+                .child(copy_message_button(
+                    format!("user-copy-{entry_id}"),
+                    "agent-prompt-copy",
+                    "Copy the prompt",
+                    text,
+                ))
                 .child(
                     div()
                         .max_w(px(320.))
@@ -2243,15 +2310,21 @@ impl AgentPane {
                         .border_color(rgb(HAIRLINE))
                         .rounded_lg()
                         .child(
-                            TextView::markdown(format!("user-{entry_id}"), text.clone())
-                                .text_size(px(PROMPT_FONT_SIZE))
-                                .style(message_markdown_style(PROMPT_FONT_SIZE)),
+                            TextView::markdown(
+                                format!("user-{entry_id}"),
+                                prompt_bubble_text(text),
+                            )
+                            .selectable(false)
+                            .text_size(px(PROMPT_FONT_SIZE))
+                            .style(message_markdown_style(PROMPT_FONT_SIZE)),
                         ),
                 )
                 .into_any_element(),
             EntryKind::AgentText { text } => {
                 let mut element = div()
                     .debug_selector(|| "agent-text-row".to_string())
+                    .group(MESSAGE_GROUP)
+                    .relative()
                     .w_full()
                     .flex()
                     .flex_col()
@@ -2277,9 +2350,25 @@ impl AgentPane {
                             .w_full()
                             .child(
                                 TextView::markdown(format!("agent-{entry_id}"), text.clone())
+                                    .selectable(false)
                                     .text_size(px(REPLY_FONT_SIZE))
                                     .style(message_markdown_style(REPLY_FONT_SIZE)),
                             ),
+                    )
+                    // Last child, and absolutely placed: it paints over the
+                    // first line's tail, which its own surface hides, instead
+                    // of taking a column the reply would wrap around.
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .child(copy_message_button(
+                                format!("agent-copy-{entry_id}"),
+                                "agent-reply-copy",
+                                "Copy the reply",
+                                text,
+                            )),
                     )
                     .into_any_element()
             }
@@ -2358,6 +2447,7 @@ impl AgentPane {
                                     format!("thought-{entry_id}"),
                                     text.clone(),
                                 )
+                                .selectable(false)
                                 .style(message_markdown_style(PROMPT_FONT_SIZE)),
                             ),
                     );
@@ -3926,9 +4016,9 @@ mod tests {
         );
     }
 
-    /// A message renders at one size: headings take a single step above the
-    /// body, and fenced code blocks are body text rather than the theme's 13px
-    /// mono step.
+    /// A message renders at one size: a heading is one step above the body and
+    /// nothing else moves, and fenced code blocks are body text rather than the
+    /// theme's 13px mono step.
     #[test]
     fn message_markdown_keeps_its_sizes_at_the_body_step() {
         let style = message_markdown_style(PROMPT_FONT_SIZE);
@@ -3939,12 +4029,89 @@ mod tests {
         let sizes: Vec<f32> = (1..=6)
             .map(|level| f32::from(heading(level, px(14.))))
             .collect();
-        assert_eq!(sizes, vec![15., 14., 13., 12., 12., 12.]);
+        assert_eq!(sizes, vec![14., 13., 13., 13., 13., 13.]);
         assert_eq!(
             style.code_block.text.font_size,
             Some(gpui::AbsoluteLength::Pixels(px(PROMPT_FONT_SIZE))),
             "a fenced block renders at the message's own size"
         );
+    }
+
+    /// A message row's copy control puts the message on the clipboard: the
+    /// Markdown source, so a reply's code spans and fences survive the trip.
+    /// It is the affordance that replaced drag-select in the transcript.
+    #[gpui::test]
+    fn a_message_rows_copy_control_copies_the_message(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let prompt = "## Process\n\n1. Write the spec to `./docs/spec/x-spec.md`.";
+        let reply = "Wrote spec to ./docs/spec/x-spec.md\n\n```rust\nlet x = 1;\n```";
+        let (pane, cx) = cx.add_window_view({
+            let prompt = prompt.to_string();
+            move |window, cx| {
+                let mut pane = AgentPane::new(test_store("copy-message"), window, cx);
+                let mut entry = project_entry(PROJECT);
+                entry.transcript.push_user_message(prompt.clone());
+                // `Failed` is the one hand-buildable state that renders the
+                // transcript: `Ready` needs a live agent connection.
+                entry.state = PaneState::Failed {
+                    title: "Agent exited".to_string(),
+                    detail: String::new(),
+                };
+                pane.projects.insert(PROJECT.to_string(), entry);
+                pane.active = Some(PROJECT.to_string());
+                pane.sync_scroller(cx);
+                pane
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_agent_events(PROJECT, vec![answering(reply)], cx);
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let copy = cx
+            .debug_bounds("agent-prompt-copy")
+            .expect("the prompt row carries a copy control");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(prompt.to_string()),
+            "the prompt's whole Markdown source is copied"
+        );
+
+        let copy = cx
+            .debug_bounds("agent-reply-copy")
+            .expect("the reply row carries a copy control");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(reply.to_string()),
+            "the reply's whole Markdown source is copied"
+        );
+    }
+
+    /// A prompt bubble drops its code-span markers, so the one text size runs
+    /// the whole way through it; a fenced block keeps its own.
+    #[test]
+    fn a_prompt_bubble_flattens_code_spans_but_not_code_blocks() {
+        let prompt = "## Process\n\n1. Write the spec to `./docs/spec/<slug>-spec.md` where `<slug>` \
+                      is derived from the request.\n\n```rust\nlet `tick` = x;\n```\n\n\
+                      - Also `save_spec`.\n";
+
+        let flattened = prompt_bubble_text(prompt);
+
+        assert!(
+            flattened.contains("1. Write the spec to ./docs/spec/<slug>-spec.md where <slug>"),
+            "{flattened}"
+        );
+        assert!(flattened.contains("- Also save_spec."), "{flattened}");
+        assert!(
+            flattened.contains("let `tick` = x;"),
+            "a fenced block is code, not a mid-sentence size change: {flattened}"
+        );
+        assert_eq!(flattened.lines().count(), prompt.lines().count());
     }
 
     /// A pane entry with a running turn and one queued message: stopping it is

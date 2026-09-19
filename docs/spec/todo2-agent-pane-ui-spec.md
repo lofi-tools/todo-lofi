@@ -390,18 +390,32 @@ input — the same technique `main.rs` already documents for the travel popover.
   prompt box, `HAIRLINE` for every 1px border.
 - Spacing: pane padding `p_3`; transcript row gap `12px`; tool-call card padding `p_2`;
   radius `rounded_md` for rows, `rounded_lg` for cards and the prompt box.
-- Markdown inside a message renders with `message_markdown_style(body)`: headings are resolved
-  from the row's own body size (H1 = body + 3px, H2 = +2px, H3 = +1px, H4–H6 = body) instead of
-  the component default's 14px base, which puts an H1 at 28px next to 12px body text. Bullets,
-  emphasis and links inherit the body size already, and the `code_block` refinement pins fenced
-  blocks to it too (the theme's mono step is 13px, a third size next to a 12px message). Inline
-  code keeps the renderer's 0.875× mono scale, which is not configurable from the style.
+- Markdown inside a message renders at **one size**: `message_markdown_style(body)` resolves
+  headings from the row's own body size (H1 = body + 2px, every other level = body + 1px) instead
+  of the component default's 14px base, which puts an H1 at 28px next to 12px body text, and the
+  `code_block` refinement pins fenced blocks to the body too (the theme's mono step is 13px, a
+  third size next to a 12px message). Bullets, emphasis and links inherit the body size already.
+- Inline code is the one size the style API cannot reach — the renderer draws it at 0.875× the
+  body in a mono family with its own background. **Prompt bubbles** therefore render
+  `prompt_bubble_text(text)`: the code-span markers are dropped so the spans read as the sentence
+  around them (the interview template is a page of headings, lists and `./docs/spec/<slug>-spec.md`
+  spans, and that third size is what made the bubble uneven). Fenced blocks keep their markers —
+  a whole block of code is not a mid-sentence size change — and the agent's own replies keep their
+  code styling, where a mono pill on a path earns its keep. The prompt *sent* to the agent is
+  unchanged: only the bubble's rendering is flattened.
 - Typography: markdown/agent text at the gpui-component default size; mono (`ui-monospace`,
   `SF Mono`, `Menlo`, `monospace`) for arguments, diffs and terminal output at a size one step
   smaller; notices `text_xs`.
 - Long content: every code/diff/terminal block scrolls horizontally inside its own container
   rather than widening the pane.
-- Markdown code blocks get the panel surface (`PANEL_BG`) with a `Copy` button on hover.
+- Markdown code blocks get the panel surface (`PANEL_BG`). Copying is per **message**, not per
+  code block: the message row's own `Copy` control (§9) is the affordance, and it takes the
+  Markdown source — fences and all — so a code block comes out with the rest of the reply.
+- A message row reveals that control on hover (`MESSAGE_GROUP`), like the task row's ownership
+  marker: `opacity(0.0)` + `.group_hover(MESSAGE_GROUP, |s| s.opacity(1.0))` over the row's own
+  surface (`APP_BG`), so it hides the text it floats over instead of stacking a new shade on it.
+  In the prompt row it sits in the free space to the left of the right-aligned bubble; in the
+  reply row it is pinned to the row's top-right corner.
 
 ---
 
@@ -423,6 +437,11 @@ input — the same technique `main.rs` already documents for the travel popover.
   the pane's keystroke interceptor, ahead of the prompt box's own Ctrl-C → copy. It falls through
   while no turn is running, and also while the prompt box holds the focus *with a selection in it*
   — a selection is there to be copied, so the platform meaning of the key wins.
+- A message row's text is **not selectable** and carries a `Copy` control that copies the whole
+  message as the Markdown it was sent as (`Copy the prompt` / `Copy the reply`). See §10 for why
+  the trade is worth it: registering selection quads is the single most expensive thing the
+  transcript does per frame. Bounded rows — notices, tool cards, terminal output, error text —
+  keep their normal selection.
 - Every icon-only control needs a tooltip **and** an accessible label (`.aria_label(…)`, which
   `Textarea` and `Button` both support).
 - Hover states: `bg(rgb(PANEL_HOVER))` on interactive rows, matching `nav_footer_row`; cursor
@@ -437,6 +456,17 @@ input — the same technique `main.rs` already documents for the travel popover.
 ## 10. Performance
 
 - One row per entry, virtualization by `MessageScroller`; entries are only rendered when visible.
+- **A message row's text is not selectable.** The markdown renderer registers selection quads by
+  walking every character of every inline on **every paint** (`Inline::text_line_bounds`), two
+  glyph lookups per character, so a long message costs its length on each frame — measured at
+  ~390ms per frame for a 6.7KB message against ~1.8ms with selection off (release is smaller by
+  the usual factor, but it is the same shape). Every visible row is re-laid out on every frame,
+  scroll frames included, so with selection on, scrolling a conversation of real messages runs at
+  a few frames per second. Selectable bounded rows (notices, tool cards, error text) cost the
+  same per frame but stay short, which is why the rule is drawn at the message rows.
+- The `Copy` control on a message row (§8/§9) is what selection used to provide: the whole
+  message, as Markdown. Adding a *partial* copy affordance must not reintroduce selection on the
+  message rows without addressing the per-frame walk.
 - Chunk coalescing per frame (§6) — the single most important rule for streaming smoothness.
 - Terminal output and tool-call results are capped (200 lines visible, expandable) so a single
   row can never hold unbounded content.
