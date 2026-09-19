@@ -1,0 +1,101 @@
+---
+import { css } from '../../../../styled-system/css'
+import type { TimelineRow } from './types'
+
+interface Props {
+  months: string[]
+  rows: TimelineRow[]
+}
+
+const { months, rows } = Astro.props
+const total = months.length
+---
+
+<div
+  class={css({
+    p: '4',
+    bg: 'canvas',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4',
+  })}
+>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: `140px repeat(${total}, minmax(0, 1fr))`,
+      gap: '2',
+      fontSize: '2xs',
+      color: 'fg.subtle',
+      textTransform: 'uppercase',
+      letterSpacing: 'wider',
+    })}
+  >
+    <span />
+    {months.map((month) => <span class={css({ textAlign: 'center' })}>{month}</span>)}
+  </div>
+
+  <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+    {
+      rows.map((row) => (
+        <div
+          class={css({
+            display: 'grid',
+            gridTemplateColumns: `140px repeat(${total}, minmax(0, 1fr))`,
+            gap: '2',
+            alignItems: 'center',
+          })}
+        >
+          <span
+            class={css({
+              fontSize: 'xs',
+              color: 'fg.muted',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            })}
+          >
+            {row.title}
+          </span>
+          {months.map((_, index) => (
+            <span
+              class={css({
+                h: '6',
+                borderRadius: 'sm',
+                bg: 'surface.subtle',
+                borderWidth: 'hairline',
+                borderStyle: 'solid',
+                borderColor: 'border',
+                position: 'relative',
+              })}
+            >
+              {index + 1 === row.start && (
+                <span
+                  class={css({
+                    position: 'absolute',
+                    inset: '0',
+                    width: `calc(${row.span * 100}% + ${(row.span - 1) * 0.5}rem)`,
+                    borderRadius: 'sm',
+                    bg: 'accent.subtle',
+                    borderWidth: 'hairline',
+                    borderStyle: 'solid',
+                    borderColor: 'accent',
+                    display: 'flex',
+                    alignItems: 'center',
+                    px: '2',
+                    fontSize: '2xs',
+                    color: 'accent.text',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                  })}
+                >
+                  {row.status}
+                </span>
+              )}
+            </span>
+          ))}
+        </div>
+      ))
+    }
+  </div>
+</div>

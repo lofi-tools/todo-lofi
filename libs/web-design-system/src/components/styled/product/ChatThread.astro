@@ -1,0 +1,64 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Sparkles, User } from '../../../icons'
+import type { ChatMessage } from './types'
+
+interface Props {
+  messages: ChatMessage[]
+}
+
+const { messages } = Astro.props
+---
+
+<div class={css({ display: 'flex', flexDirection: 'column', gap: '3', p: '4', bg: 'canvas' })}>
+  {
+    messages.map((message) => (
+      <div
+        class={css({
+          display: 'flex',
+          gap: '3',
+          alignItems: 'flex-start',
+          flexDirection: message.role === 'user' ? 'row' : 'row',
+        })}
+      >
+        <span
+          class={css({
+            display: 'grid',
+            placeItems: 'center',
+            w: '7',
+            h: '7',
+            borderRadius: 'md',
+            flexShrink: '0',
+            bg: message.role === 'agent' ? 'accent.subtle' : 'surface.hover',
+            color: message.role === 'agent' ? 'accent' : 'fg.muted',
+          })}
+        >
+          {message.role === 'agent' ? <Sparkles size={13} /> : <User size={13} />}
+        </span>
+        <div class={css({ minW: '0' })}>
+          <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '1' })}>
+            <span class={css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })}>
+              {message.author}
+            </span>
+            {message.meta && <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>{message.meta}</span>}
+          </div>
+          <p
+            class={css({
+              fontSize: 'sm',
+              color: 'fg.muted',
+              lineHeight: 'relaxed',
+              bg: 'surface.subtle',
+              borderWidth: 'hairline',
+              borderStyle: 'solid',
+              borderColor: 'border',
+              borderRadius: 'md',
+              p: '3',
+            })}
+          >
+            {message.text}
+          </p>
+        </div>
+      </div>
+    ))
+  }
+</div>

@@ -43,6 +43,14 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 #### Testing
 - `ccheck` — cargo check all workspace packages (todo-2, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)
+#### Web design system
+- `pnpm install` — install the pnpm workspace (`libs/web-design-system`, `demos/design-system-showcase`)
+- `pnpm dev` — run the design-system showcase with auto-rebuilds
+- `pnpm build` — Panda codegen + static build of the showcase
+- `pnpm typecheck` / `pnpm test` — typecheck both JS packages / run the Vitest suite
+- `pnpm test:e2e` — Playwright smoke, theming, and WCAG 2.1 AA checks (uses local Chrome)
+
+See `docs/spec/web-design-system-spec.md` and `libs/web-design-system/DESIGN.md`.
 #### Contributions
 - `mig <args>` — run a storage migration (`cargo run --bin migrate -- migration ...`)
 - `clone-patch <crate>` — clone a crate's repo into `patched/` to vendor a fork
@@ -55,11 +63,14 @@ todo-lofi/
 │   └── todo-2/        # Desktop GPUI application
 
 ├── libs/
-│   ├── storage/       # SQLite-backed persistence layer
-│   ├── gpui-tokio/    # GPUI ↔ Tokio bridge
-│   ├── ai_providers/  # LLM provider abstraction
-│   ├── acp-client/    # Agent Control Protocol client
+│   ├── storage/          # SQLite-backed persistence layer
+│   ├── web-design-system/ # Linear-style web design system (Astro/Solid/Panda/Ark UI)
+│   ├── gpui-tokio/       # GPUI ↔ Tokio bridge
+│   ├── ai_providers/     # LLM provider abstraction
+│   ├── acp-client/       # Agent Control Protocol client
 │   └── ...
+├── demos/
+│   └── design-system-showcase/ # Astro showcase of the web design system
 ├── patched/           # Vendored upstream patches
 ├── docs/              # Specs and agent skills
 └── flake.nix          # Nix flake

@@ -1,0 +1,130 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import SectionHeading from 'web-design-system/astro/marketing/SectionHeading.astro'
+import AnnouncementPill from 'web-design-system/astro/marketing/AnnouncementPill.astro'
+import Hero from 'web-design-system/astro/marketing/Hero.astro'
+import LogoCloud from 'web-design-system/astro/marketing/LogoCloud.astro'
+import FeatureSection from 'web-design-system/astro/marketing/FeatureSection.astro'
+import StatsBand from 'web-design-system/astro/marketing/StatsBand.astro'
+import ChangelogCard from 'web-design-system/astro/marketing/ChangelogCard.astro'
+import TestimonialCard from 'web-design-system/astro/marketing/TestimonialCard.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import PricingCard from 'web-design-system/astro/marketing/PricingCard.astro'
+import PricingComparisonTable from 'web-design-system/astro/marketing/PricingComparisonTable.astro'
+import CustomerStoryCard from 'web-design-system/astro/marketing/CustomerStoryCard.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import Prose from 'web-design-system/astro/marketing/Prose.astro'
+import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
+import Timeline from 'web-design-system/astro/product/Timeline.astro'
+import { kanban, timelineRows, timelineMonths, logos, changelog, testimonials, customers, pricingPlans, comparisonColumns, comparisonSections } from '../data/placeholder'
+---
+
+<Gallery
+  title="Marketing"
+  description="Static Astro sections with placeholder content. No client runtime: hover and focus states are CSS-only."
+>
+  <Demo title="AnnouncementPill" layer="astro" importPath="web-design-system/astro/marketing/AnnouncementPill.astro">
+    <AnnouncementPill label="Loops for product management" />
+  </Demo>
+
+  <Demo title="SectionHeading" layer="astro" importPath="web-design-system/astro/marketing/SectionHeading.astro">
+    <SectionHeading
+      eyebrow="Features"
+      title="A new species of product tool"
+      description="Purpose-built for modern teams, with agent workflows at its core."
+    />
+  </Demo>
+
+  <Demo title="Hero" layer="astro" importPath="web-design-system/astro/marketing/Hero.astro">
+    <Hero
+      title="The product development system for teams and agents"
+      subtitle="Purpose-built for planning and building products. All copy here is placeholder text."
+    >
+      <AnnouncementPill slot="pill" label="Loops for product management" />
+      <div class={css({ maxW: '920px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <KanbanBoard columns={kanban} compact />
+      </div>
+    </Hero>
+  </Demo>
+
+  <Demo title="LogoCloud" layer="astro" importPath="web-design-system/astro/marketing/LogoCloud.astro">
+    <LogoCloud title="Powering the companies building the future" logos={logos} />
+  </Demo>
+
+  <Demo title="FeatureSection" layer="astro" importPath="web-design-system/astro/marketing/FeatureSection.astro" notes="reverse toggles the column order">
+    <FeatureSection
+      eyebrow="Planning and monitoring"
+      title="Plan and navigate from idea to launch"
+      description="Align your team with initiatives, roadmaps, and clear specifications that stay close to the work."
+      href="/replicas/features"
+    >
+      <Timeline months={timelineMonths} rows={timelineRows} />
+    </FeatureSection>
+  </Demo>
+
+  <Demo title="StatsBand" layer="astro" importPath="web-design-system/astro/marketing/StatsBand.astro">
+    <StatsBand
+      value="40,000+"
+      label="placeholder product teams, from ambitious startups to major enterprises."
+      linkLabel="Customer stories"
+    />
+  </Demo>
+
+  <Demo title="ChangelogCard" layer="astro" importPath="web-design-system/astro/marketing/ChangelogCard.astro">
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4' })}>
+      {changelog.map((entry) => <ChangelogCard {...entry} />)}
+    </div>
+  </Demo>
+
+  <Demo title="TestimonialCard" layer="astro" importPath="web-design-system/astro/marketing/TestimonialCard.astro">
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(3, 1fr)' }, gap: '4' })}>
+      {testimonials.map((entry) => <TestimonialCard {...entry} />)}
+    </div>
+  </Demo>
+
+  <Demo title="CustomerStoryCard" layer="astro" importPath="web-design-system/astro/marketing/CustomerStoryCard.astro">
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(3, 1fr)' }, gap: '4' })}>
+      {customers.map((entry) => <CustomerStoryCard {...entry} />)}
+    </div>
+  </Demo>
+
+  <Demo title="PricingCard" layer="astro" importPath="web-design-system/astro/marketing/PricingCard.astro">
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: '4' })}>
+      {pricingPlans.map((plan) => <PricingCard {...plan} />)}
+    </div>
+  </Demo>
+
+  <Demo title="PricingComparisonTable" layer="astro" importPath="web-design-system/astro/marketing/PricingComparisonTable.astro">
+    <PricingComparisonTable columns={comparisonColumns} sections={comparisonSections} />
+  </Demo>
+
+  <Demo title="Callout" layer="astro" importPath="web-design-system/astro/marketing/Callout.astro">
+    <div>
+      <Callout tone="note" title="Note">A neutral note for documentation pages.</Callout>
+      <Callout tone="tip" title="Tip">A helpful aside that links to more detail.</Callout>
+      <Callout tone="warning" title="Warning">Something that can go wrong.</Callout>
+    </div>
+  </Demo>
+
+  <Demo title="Prose" layer="astro" importPath="web-design-system/astro/marketing/Prose.astro" notes="long-form documentation typography">
+    <Prose>
+      <h1>Documentation prose</h1>
+      <p>
+        Prose styles headings, paragraphs, lists, and <code>inline code</code> so long-form pages look
+        intentional without per-element classes.
+      </p>
+      <h2>A section</h2>
+      <ul>
+        <li>Lists are spaced automatically.</li>
+        <li>Links use the accent color.</li>
+      </ul>
+      <Callout tone="tip" title="Tip">Callouts nest inside prose.</Callout>
+    </Prose>
+  </Demo>
+
+  <Demo title="CTASection" layer="astro" importPath="web-design-system/astro/marketing/CTASection.astro">
+    <CTASection title="Built for the future. Available today." />
+  </Demo>
+</Gallery>

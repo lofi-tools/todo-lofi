@@ -1,0 +1,210 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import { colors, semanticColors, fontSizes, radii, shadows, durations } from 'web-design-system'
+
+type Swatch = { name: string; value: string }
+
+const rawPalettes = Object.entries(colors).map(([name, scale]) => ({
+  name,
+  steps: Object.entries(scale as Record<string, { value: string }>).map(([step, token]) => ({
+    name: `${name}.${step}`,
+    value: token.value,
+  })),
+}))
+
+const semantic = Object.entries(semanticColors).map(([name, token]) => {
+  const value = (token as { value: { base: string; _light?: string } }).value
+  return { name, dark: value.base, light: value._light ?? value.base }
+})
+
+const resolve = (value: string) =>
+  value.replace(/\{colors\.([\w.]+)\}/g, (_, path) =>
+    path.split('.').reduce((node: Record<string, any>, key: string) => node?.[key], colors as any)
+      ?.value ?? value,
+  )
+
+const spacingSteps = [
+  { step: '1', className: css({ w: '1' }) },
+  { step: '2', className: css({ w: '2' }) },
+  { step: '3', className: css({ w: '3' }) },
+  { step: '4', className: css({ w: '4' }) },
+  { step: '6', className: css({ w: '6' }) },
+  { step: '8', className: css({ w: '8' }) },
+  { step: '12', className: css({ w: '12' }) },
+  { step: '16', className: css({ w: '16' }) },
+  { step: '24', className: css({ w: '24' }) },
+]
+
+// Static classes: Panda extracts text styles at build time, so each one must
+// appear as a literal.
+const typeScale = [
+  { token: 'display', sample: 'Aa', className: css({ textStyle: 'display' }) },
+  { token: 'h1', sample: 'Heading one', className: css({ textStyle: 'h1' }) },
+  { token: 'h2', sample: 'Heading two', className: css({ textStyle: 'h2' }) },
+  { token: 'h3', sample: 'Heading three', className: css({ textStyle: 'h3' }) },
+  { token: 'h4', sample: 'Heading four', className: css({ textStyle: 'h4' }) },
+  { token: 'body.lg', sample: 'Body large — the quick brown fox', className: css({ textStyle: 'body.lg' }) },
+  { token: 'body', sample: 'Body — the quick brown fox jumps over the lazy dog', className: css({ textStyle: 'body' }) },
+  { token: 'caption', sample: 'Caption — supporting detail', className: css({ textStyle: 'caption' }) },
+  { token: 'micro', sample: 'MICRO LABEL', className: css({ textStyle: 'micro' }) },
+  { token: 'code', sample: 'const answer = 42', className: css({ textStyle: 'code' }) },
+]
+---
+
+<Gallery
+  title="Foundations"
+  description="The token layer: raw palette, semantic roles, type scale, spacing, radii, shadows, and motion. Dark values are the base; light overrides are shown beside them."
+>
+  <Demo title="Raw palette" layer="styled" importPath="web-design-system → colors" notes="Values extracted from linear.app">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '6' })}>
+      {
+        rawPalettes.map((palette) => (
+          <div>
+            <h3 class={css({ fontSize: 'sm', fontWeight: 'semibold', color: 'fg.default', mb: '2' })}>
+              {palette.name}
+            </h3>
+            <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '2' })}>
+              {palette.steps.map((swatch) => (
+                <div class={css({ width: '72px' })}>
+                  <div
+                    class={css({ h: '10', borderRadius: 'sm', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border' })}
+                    style={`background:${swatch.value}`}
+                  />
+                  <div class={css({ fontSize: '2xs', color: 'fg.subtle', mt: '1' })}>{swatch.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Semantic roles" layer="styled" importPath="web-design-system → semanticColors" notes="Dark base / light override">
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '3' })}>
+      {
+        semantic.map((token) => (
+          <div
+            class={css({
+              display: 'flex',
+              alignItems: 'center',
+              gap: '3',
+              p: '3',
+              borderRadius: 'md',
+              borderWidth: 'hairline',
+              borderStyle: 'solid',
+              borderColor: 'border',
+            })}
+          >
+            <span class={css({ display: 'flex', flexShrink: '0' })}>
+              <span
+                class={css({ w: '8', h: '8', borderRadius: 'sm', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border' })}
+                style={`background:${resolve(token.dark)}`}
+              />
+              <span
+                class={css({ w: '8', h: '8', borderRadius: 'sm', ml: '-2', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border' })}
+                style={`background:${resolve(token.light)}`}
+              />
+            </span>
+            <span class={css({ minW: '0' })}>
+              <div class={css({ fontFamily: 'mono', fontSize: 'xs', color: 'fg.default' })}>{token.name}</div>
+              <div class={css({ fontSize: '2xs', color: 'fg.subtle', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>
+                {token.dark} / {token.light}
+              </div>
+            </span>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Type scale" layer="styled" importPath="web-design-system → fontSizes + textStyles" notes="Inter Variable, self-hosted">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '5' })}>
+      {
+        typeScale.map((item) => (
+          <div class={css({ display: 'flex', alignItems: 'baseline', gap: '5' })}>
+            <code class={css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle', width: '90px', flexShrink: '0' })}>
+              {item.token}
+            </code>
+            <span class={`${item.className} ${css({ color: 'fg.default' })}`}>
+              {item.sample}
+            </span>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Spacing" layer="styled" importPath="web-design-system → spacing (Panda scale)">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '2' })}>
+      {
+        spacingSteps.map((item) => (
+          <div class={css({ display: 'flex', alignItems: 'center', gap: '4' })}>
+            <code class={css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle', width: '40px' })}>{item.step}</code>
+            <span class={`${css({ h: '3', bg: 'accent', borderRadius: 'xs' })} ${item.className}`} />
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Radii" layer="styled" importPath="web-design-system → radii">
+    <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '4' })}>
+      {
+        Object.entries(radii).map(([name, token]) => (
+          <div class={css({ textAlign: 'center' })}>
+            <div
+              class={css({ w: '20', h: '20', bg: 'surface.elevated', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'accent' })}
+              style={`border-radius:${token.value}`}
+            />
+            <div class={css({ fontSize: '2xs', color: 'fg.subtle', mt: '2' })}>{name}</div>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Shadows" layer="styled" importPath="web-design-system → shadows">
+    <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '6' })}>
+      {
+        Object.entries(shadows).map(([name, token]) => (
+          <div class={css({ textAlign: 'center' })}>
+            <div
+              class={css({ w: '28', h: '20', bg: 'surface.elevated', borderRadius: 'md' })}
+              style={`box-shadow:${token.value}`}
+            />
+            <div class={css({ fontSize: '2xs', color: 'fg.subtle', mt: '3' })}>{name}</div>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Motion" layer="styled" importPath="web-design-system → durations" notes="Collapses under prefers-reduced-motion">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+      {
+        Object.entries(durations).map(([name, token]) => (
+          <div class={css({ display: 'flex', alignItems: 'center', gap: '4' })}>
+            <code class={css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle', width: '80px' })}>{name}</code>
+            <span class={css({ fontSize: 'xs', color: 'fg.muted', width: '60px' })}>{token.value}</span>
+            <span class={css({ display: 'inline-block', w: '3', h: '3', borderRadius: 'full', bg: 'accent' })} />
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+
+  <Demo title="Font sizes (raw)" layer="styled" importPath="web-design-system → fontSizes">
+    <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '4' })}>
+      {
+        Object.entries(fontSizes).map(([name, token]) => (
+          <div class={css({ fontFamily: 'mono', fontSize: 'xs', color: 'fg.muted' })}>
+            {name} <span class={css({ color: 'fg.subtle' })}>{token.value}</span>
+          </div>
+        ))
+      }
+    </div>
+  </Demo>
+</Gallery>

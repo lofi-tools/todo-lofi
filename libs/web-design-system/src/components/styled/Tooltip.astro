@@ -1,0 +1,13 @@
+---
+import { Tooltip } from './overlays'
+
+interface Props {
+  label: string
+  trigger?: string
+  class?: string
+}
+
+const { label, trigger, class: className } = Astro.props
+---
+
+<Tooltip label={label} trigger={trigger} class={className} client:only="solid" />

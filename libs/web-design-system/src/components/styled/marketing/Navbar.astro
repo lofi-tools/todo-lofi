@@ -1,0 +1,160 @@
+---
+import { css } from '../../../../styled-system/css'
+import { LogoMark, Search, ChevronDown } from '../../../icons'
+import ThemeToggle from '../ThemeToggle.astro'
+
+const links = [
+  { label: 'Product', href: '/replicas/home' },
+  { label: 'Features', href: '/replicas/features' },
+  { label: 'Pricing', href: '/replicas/pricing' },
+  { label: 'Customers', href: '/replicas/customers' },
+  { label: 'Changelog', href: '/replicas/changelog' },
+  { label: 'Docs', href: '/replicas/docs' },
+]
+
+const navItem = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1',
+  px: '3',
+  h: '8',
+  borderRadius: 'sm',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  transitionProperty: 'color, background-color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default', bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+---
+
+<header
+  class={css({
+    position: 'sticky',
+    top: '0',
+    zIndex: 'sticky',
+    w: 'full',
+    borderBottomWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    bg: 'canvas',
+    backdropFilter: 'blur(12px)',
+    backgroundColor: 'rgba(8, 9, 10, 0.72)',
+    _light: { backgroundColor: 'rgba(255, 255, 255, 0.78)' },
+  })}
+>
+  <nav
+    aria-label="Main"
+    class={css({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6',
+      h: '14',
+      w: '100%',
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+    })}
+  >
+    <a
+      href="/"
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+        fontWeight: 'semibold',
+        fontSize: 'lg',
+        letterSpacing: 'tight',
+        color: 'fg.default',
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+    >
+      <LogoMark size={18} />
+      <span>Placeholder</span>
+    </a>
+
+    <ul
+      class={css({
+        display: { base: 'none', lg: 'flex' },
+        alignItems: 'center',
+        gap: '1',
+        listStyle: 'none',
+        m: '0',
+        p: '0',
+      })}
+    >
+      {
+        links.map((link) => (
+          <li>
+            <a class={navItem} href={link.href}>
+              {link.label}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+
+    <div class={css({ flex: '1' })} />
+
+    <button
+      type="button"
+      aria-label="Search"
+      class={css({
+        display: { base: 'none', md: 'inline-flex' },
+        alignItems: 'center',
+        gap: '2',
+        h: '8',
+        px: '3',
+        borderRadius: 'sm',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border',
+        bg: 'surface.subtle',
+        color: 'fg.subtle',
+        fontSize: 'sm',
+        cursor: 'pointer',
+        transitionProperty: 'border-color, color',
+        transitionDuration: 'fast',
+        _hover: { borderColor: 'border.strong', color: 'fg.muted' },
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+    >
+      <Search size={14} />
+      <span>Search</span>
+      <kbd
+        class={css({
+          fontFamily: 'mono',
+          fontSize: '2xs',
+          color: 'fg.subtle',
+          borderWidth: 'hairline',
+          borderStyle: 'solid',
+          borderColor: 'border',
+          borderRadius: 'xs',
+          px: '1',
+        })}>⌘K</kbd
+      >
+    </button>
+
+    <ThemeToggle />
+
+    <a href="/replicas/home" class={navItem}>Log in</a>
+    <a
+      href="/replicas/pricing"
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        h: '8',
+        px: '4',
+        borderRadius: 'sm',
+        bg: 'accent',
+        color: 'fg.onAccent',
+        fontSize: 'sm',
+        fontWeight: 'medium',
+        transitionProperty: 'background-color',
+        transitionDuration: 'fast',
+        _hover: { bg: 'accent.hover' },
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}>Get started</a
+    >
+  </nav>
+</header>

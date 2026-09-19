@@ -1,0 +1,64 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import { Box, HStack, VStack, Grid, Container, Separator } from 'web-design-system/components'
+
+const cell = css({
+  display: 'grid',
+  placeItems: 'center',
+  minH: '12',
+  borderRadius: 'sm',
+  bg: 'accent.subtle',
+  color: 'accent.text',
+  fontSize: 'xs',
+  fontWeight: 'medium',
+})
+---
+
+<Gallery
+  title="Layout"
+  description="Box, Stack, Grid, Container, and Separator — Panda pattern-based primitives used to assemble every page in the system."
+>
+  <Demo title="Box" layer="styled" importPath="web-design-system/components → Box">
+    <Box class={css({ p: '6', borderRadius: 'md', bg: 'surface.elevated', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', color: 'fg.muted' })}>
+      A bare styled element. Box is the escape hatch for one-off layout.
+    </Box>
+  </Demo>
+
+  <Demo title="HStack / VStack" layer="styled" importPath="web-design-system/components → HStack, VStack">
+    <VStack gap="5">
+      <HStack gap="3" class={css({ flexWrap: 'wrap' })}>
+        <span class={cell}>HStack 1</span>
+        <span class={cell}>HStack 2</span>
+        <span class={cell}>HStack 3</span>
+      </HStack>
+      <VStack gap="2" align="stretch" class={css({ maxW: '240px' })}>
+        <span class={cell}>VStack 1</span>
+        <span class={cell}>VStack 2</span>
+      </VStack>
+    </VStack>
+  </Demo>
+
+  <Demo title="Grid" layer="styled" importPath="web-design-system/components → Grid">
+    <Grid minChildWidth="140px" gap="4">
+      {[1, 2, 3, 4, 5, 6].map((n) => <span class={cell}>Cell {n}</span>)}
+    </Grid>
+  </Demo>
+
+  <Demo title="Container" layer="styled" importPath="web-design-system/components → Container" notes="sizes: sm / md / lg / xl">
+    <Container size="sm" class={css({ bg: 'surface.elevated', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', borderRadius: 'md', py: '6' })}>
+      <p class={css({ textAlign: 'center', fontSize: 'sm', color: 'fg.muted' })}>
+        Container caps content width and centers it.
+      </p>
+    </Container>
+  </Demo>
+
+  <Demo title="Separator" layer="styled" importPath="web-design-system/components → Separator">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '4' })}>
+      <span class={css({ fontSize: 'sm', color: 'fg.muted' })}>Above</span>
+      <Separator />
+      <span class={css({ fontSize: 'sm', color: 'fg.muted' })}>Below</span>
+    </div>
+  </Demo>
+</Gallery>

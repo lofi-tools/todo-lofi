@@ -1,0 +1,44 @@
+---
+import { css } from '../../../../styled-system/css'
+import { AlertCircle, Zap } from '../../../icons'
+
+interface Props {
+  tone?: 'note' | 'warning' | 'tip'
+  title?: string
+}
+
+const { tone = 'note', title } = Astro.props
+
+const tones = {
+  note: { bg: 'surface.subtle', border: 'border', color: 'fg.muted' },
+  warning: { bg: 'warning.subtle', border: 'warning', color: 'warning' },
+  tip: { bg: 'accent.subtle', border: 'accent', color: 'accent.text' },
+} as const
+
+const style = tones[tone]
+---
+
+<div
+  class={css({
+    display: 'flex',
+    gap: '3',
+    p: '4',
+    my: '6',
+    borderRadius: 'md',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: style.border,
+    bg: style.bg,
+    fontSize: 'sm',
+    color: 'fg.muted',
+    lineHeight: 'relaxed',
+  })}
+>
+  <span class={css({ color: style.color, mt: '0.5', flexShrink: '0' })}>
+    {tone === 'tip' ? <Zap size={15} /> : <AlertCircle size={15} />}
+  </span>
+  <div>
+    {title && <div class={css({ fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>{title}</div>}
+    <slot />
+  </div>
+</div>

@@ -1,0 +1,70 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Check, X } from '../../../icons'
+
+interface Props {
+  title: string
+  body?: string
+  time?: string
+}
+
+const { title, body, time } = Astro.props
+---
+
+<div
+  role="status"
+  class={css({
+    display: 'flex',
+    gap: '3',
+    p: '3',
+    minW: '280px',
+    maxW: '360px',
+    borderRadius: 'md',
+    bg: 'surface.elevated',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    boxShadow: 'lg',
+  })}
+>
+  <span
+    class={css({
+      display: 'grid',
+      placeItems: 'center',
+      w: '5',
+      h: '5',
+      borderRadius: 'full',
+      bg: 'success.subtle',
+      color: 'success',
+      flexShrink: '0',
+    })}
+  >
+    <Check size={12} />
+  </span>
+  <div class={css({ flex: '1', minW: '0' })}>
+    <div class={css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })}>{title}</div>
+    {body && <div class={css({ fontSize: 'xs', color: 'fg.muted', mt: '0.5' })}>{body}</div>}
+  </div>
+  {
+    time && (
+      <span class={css({ fontSize: '2xs', color: 'fg.subtle', flexShrink: '0' })}>{time}</span>
+    )
+  }
+  <button
+    type="button"
+    aria-label="Dismiss"
+    class={css({
+      display: 'grid',
+      placeItems: 'center',
+      w: '5',
+      h: '5',
+      borderRadius: 'sm',
+      color: 'fg.subtle',
+      cursor: 'pointer',
+      _hover: { color: 'fg.default', bg: 'surface.hover' },
+      _focusVisible: { outline: 'none', boxShadow: 'focus' },
+    })}
+  >
+    <X size={12} />
+  </button>
+</div>

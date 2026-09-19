@@ -1,0 +1,39 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../../layouts/Base.astro'
+import CustomerStoryCard from 'web-design-system/astro/marketing/CustomerStoryCard.astro'
+import TestimonialCard from 'web-design-system/astro/marketing/TestimonialCard.astro'
+import LogoCloud from 'web-design-system/astro/marketing/LogoCloud.astro'
+import StatsBand from 'web-design-system/astro/marketing/StatsBand.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import { customers, testimonials, logos } from '../../data/placeholder'
+---
+
+<Base title="Customers" description="A Linear-style customers replica with placeholder content.">
+  <section class={css({ pt: { base: '16', md: '20' }, pb: { base: '8', md: '10' } })}>
+    <div class={css({ maxW: '760px', mx: 'auto', px: { base: '5', md: '8' }, textAlign: 'center' })}>
+      <h1 class={css({ textStyle: 'display', color: 'fg.default' })}>Customer stories</h1>
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '4' })}>
+        Placeholder teams around the world plan and build with this workflow.
+      </p>
+    </div>
+  </section>
+
+  <section class={css({ py: { base: '8', md: '12' } })}>
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(3, 1fr)' }, gap: '4', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      {customers.map((story) => <CustomerStoryCard {...story} />)}
+    </div>
+  </section>
+
+  <LogoCloud title="Trusted by more than 40,000 placeholder companies" logos={logos} />
+
+  <section class={css({ py: { base: '12', md: '16' } })}>
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(3, 1fr)' }, gap: '4', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      {testimonials.map((quote) => <TestimonialCard {...quote} />)}
+    </div>
+  </section>
+
+  <StatsBand value="40,000+" label="placeholder product teams build with this workflow." />
+
+  <CTASection title="Join them today" />
+</Base>

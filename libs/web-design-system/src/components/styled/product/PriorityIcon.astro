@@ -1,0 +1,51 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  priority: 'urgent' | 'high' | 'medium' | 'low' | 'none'
+}
+
+const { priority } = Astro.props
+
+const labels = {
+  urgent: 'Urgent',
+  high: 'High',
+  medium: 'Medium',
+  low: 'Low',
+  none: 'No priority',
+}
+
+const tone = {
+  urgent: 'danger',
+  high: 'warning',
+  medium: 'fg.muted',
+  low: 'fg.subtle',
+  none: 'fg.subtle',
+} as const
+
+// Bars fill left-to-right as priority rises, the way a board reads at a glance.
+const filled = {
+  urgent: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+  none: 0,
+}[priority]
+---
+
+<span
+  role="img"
+  aria-label={labels[priority]}
+  class={css({ display: 'inline-flex', alignItems: 'flex-end', gap: '0.5', h: '3.5', color: tone[priority] })}
+>
+  {
+    [4, 7, 10, 13].map((height, index) => (
+      <span
+        aria-hidden="true"
+        style={`height:${height}px;background:${
+          index < filled ? 'currentColor' : 'var(--colors-border-strong)'
+        };width:3px;border-radius:1px;display:inline-block`}
+      />
+    ))
+  }
+</span>

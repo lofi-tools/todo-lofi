@@ -1,0 +1,69 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../../layouts/Base.astro'
+import DocSidebar from 'web-design-system/astro/marketing/DocSidebar.astro'
+import DocTOC from 'web-design-system/astro/marketing/DocTOC.astro'
+import Prose from 'web-design-system/astro/marketing/Prose.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import { docsGroups, docsToc, sampleCode } from '../../data/placeholder'
+---
+
+<Base title="Docs" description="A Linear-style documentation replica with placeholder content.">
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', lg: '220px minmax(0, 1fr) 180px' },
+      gap: { base: '8', lg: '12' },
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: { base: '10', md: '14' },
+      alignItems: 'start',
+    })}
+  >
+    <aside class={css({ display: { base: 'none', lg: 'block' }, position: 'sticky', top: '20' })}>
+      <DocSidebar groups={docsGroups} />
+    </aside>
+
+    <article class={css({ minW: '0' })}>
+      <Prose>
+        <h1 id="introduction">Introduction</h1>
+        <p>
+          This is a placeholder documentation page. It demonstrates the docs chrome: a sidebar,
+          table of contents, long-form prose, callouts, and code blocks.
+        </p>
+        <Callout tone="note" title="Note">
+          All content on this page is invented for the showcase.
+        </Callout>
+
+        <h2 id="quickstart">Quickstart</h2>
+        <p>Install the package and import a component from the design system.</p>
+        <CodeBlock filename="example.tsx" code={sampleCode} />
+
+        <h2 id="concepts">Core concepts</h2>
+        <ul>
+          <li>Tokens are the single source of truth for color, type, and spacing.</li>
+          <li>Recipes compose those tokens into components.</li>
+          <li>Headless primitives own behavior and accessibility.</li>
+        </ul>
+
+        <h2 id="shortcuts">Keyboard shortcuts</h2>
+        <table>
+          <thead>
+            <tr><th>Shortcut</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>⌘K</code></td><td>Open the command menu</td></tr>
+            <tr><td><code>C</code></td><td>Create a new issue</td></tr>
+            <tr><td><code>/</code></td><td>Search</td></tr>
+          </tbody>
+        </table>
+      </Prose>
+    </article>
+
+    <aside class={css({ display: { base: 'none', lg: 'block' }, position: 'sticky', top: '20' })}>
+      <DocTOC items={docsToc} />
+    </aside>
+  </div>
+</Base>

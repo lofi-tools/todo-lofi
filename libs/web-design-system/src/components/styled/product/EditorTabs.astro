@@ -1,0 +1,47 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  files: string[]
+  active?: string
+}
+
+const { files, active = files[0] } = Astro.props
+---
+
+<div
+  tabindex="0"
+  role="group"
+  aria-label="Open files"
+  class={css({
+    display: 'flex',
+    alignItems: 'stretch',
+    gap: '0',
+    borderBottomWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.elevated',
+    overflowX: 'auto',
+  })}
+>
+  {
+    files.map((file) => (
+      <span
+        class={css({
+          px: '3',
+          py: '2',
+          fontFamily: 'mono',
+          fontSize: 'xs',
+          whiteSpace: 'nowrap',
+          color: file === active ? 'fg.default' : 'fg.subtle',
+          bg: file === active ? 'surface.subtle' : 'transparent',
+          borderBottomWidth: '2px',
+          borderStyle: 'solid',
+          borderColor: file === active ? 'accent' : 'transparent',
+        })}
+      >
+        {file.split('/').pop()}
+      </span>
+    ))
+  }
+</div>

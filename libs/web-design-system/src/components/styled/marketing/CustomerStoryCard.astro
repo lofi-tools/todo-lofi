@@ -1,0 +1,59 @@
+---
+import { css } from '../../../../styled-system/css'
+import { ArrowUpRight } from '../../../icons'
+
+interface Props {
+  company: string
+  quote: string
+  name: string
+  role: string
+  metricValue?: string
+  metricLabel?: string
+  href?: string
+}
+
+const { company, quote, name, role, metricValue, metricLabel, href = '/replicas/customers' } = Astro.props
+---
+
+<a
+  href={href}
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    gap: '6',
+    p: '6',
+    borderRadius: 'lg',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.subtle',
+    height: 'full',
+    transitionProperty: 'background-color, border-color',
+    transitionDuration: 'fast',
+    _hover: { bg: 'surface.elevated', borderColor: 'border.strong' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })}
+>
+  <div class={css({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' })}>
+    <span class={css({ fontSize: 'lg', fontWeight: 'semibold', color: 'fg.default' })}>{company}</span>
+    <span class={css({ color: 'fg.subtle' })}><ArrowUpRight size={15} /></span>
+  </div>
+
+  {
+    metricValue && (
+      <div>
+        <div class={css({ fontSize: '4xl', fontWeight: 'semibold', color: 'accent.text' })}>{metricValue}</div>
+        <div class={css({ fontSize: 'xs', color: 'fg.subtle', mt: '1' })}>{metricLabel}</div>
+      </div>
+    )
+  }
+
+  <blockquote class={css({ fontSize: 'md', color: 'fg.muted', lineHeight: 'relaxed' })}>
+    “{quote}”
+  </blockquote>
+
+  <div class={css({ fontSize: 'xs', color: 'fg.subtle' })}>
+    <span class={css({ color: 'fg.muted' })}>{name}</span> · {role}
+  </div>
+</a>

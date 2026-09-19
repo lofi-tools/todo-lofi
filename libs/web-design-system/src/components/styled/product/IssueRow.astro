@@ -1,0 +1,106 @@
+---
+import { css } from '../../../../styled-system/css'
+import LabelChip from './LabelChip.astro'
+import PriorityIcon from './PriorityIcon.astro'
+import type { Issue } from './types'
+
+interface Props {
+  issue: Issue
+}
+
+const { issue } = Astro.props
+---
+
+<article
+  class={css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '3',
+    px: '3',
+    py: '2',
+    borderRadius: 'sm',
+    bg: 'surface.elevated',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    transitionProperty: 'background-color, border-color',
+    transitionDuration: 'fast',
+    _hover: { bg: 'surface.hover', borderColor: 'border.strong' },
+  })}
+>
+  {
+    issue.priority && (
+      <span class={css({ flexShrink: '0' })}>
+        <PriorityIcon priority={issue.priority} />
+      </span>
+    )
+  }
+
+  <span
+    class={css({
+      fontFamily: 'mono',
+      fontSize: '2xs',
+      color: 'fg.subtle',
+      flexShrink: '0',
+      minW: '56px',
+    })}>{issue.id}</span
+  >
+
+  <span
+    class={css({
+      flex: '1',
+      minW: '0',
+      fontSize: 'sm',
+      color: 'fg.default',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    })}>{issue.title}</span
+  >
+
+  {
+    issue.labels && issue.labels.length > 0 && (
+      <span class={css({ display: { base: 'none', sm: 'inline-flex' }, gap: '1.5', flexShrink: '0' })}>
+        {issue.labels.map((label) => (
+          <LabelChip label={label} />
+        ))}
+      </span>
+    )
+  }
+
+  {
+    issue.meta && (
+      <span class={css({ fontSize: '2xs', color: 'fg.subtle', flexShrink: '0' })}>{issue.meta}</span>
+    )
+  }
+
+  {
+    issue.assignees && issue.assignees.length > 0 && (
+      <span class={css({ display: 'flex', alignItems: 'center', flexShrink: '0' })}>
+        {issue.assignees.slice(0, 3).map((name, index) => (
+          <span
+            aria-hidden="true"
+            title={name}
+            class={css({
+              display: 'grid',
+              placeItems: 'center',
+              w: '6',
+              h: '6',
+              borderRadius: 'full',
+              bg: 'accent.subtle',
+              color: 'accent.text',
+              fontSize: '2xs',
+              fontWeight: 'semibold',
+              borderWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'surface.elevated',
+              ml: index === 0 ? '0' : '-1.5',
+            })}
+          >
+            {name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
+          </span>
+        ))}
+      </span>
+    )
+  }
+</article>

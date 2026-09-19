@@ -1,0 +1,105 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../../layouts/Base.astro'
+import Hero from 'web-design-system/astro/marketing/Hero.astro'
+import AnnouncementPill from 'web-design-system/astro/marketing/AnnouncementPill.astro'
+import LogoCloud from 'web-design-system/astro/marketing/LogoCloud.astro'
+import FeatureSection from 'web-design-system/astro/marketing/FeatureSection.astro'
+import StatsBand from 'web-design-system/astro/marketing/StatsBand.astro'
+import ChangelogCard from 'web-design-system/astro/marketing/ChangelogCard.astro'
+import TestimonialCard from 'web-design-system/astro/marketing/TestimonialCard.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import SectionHeading from 'web-design-system/astro/marketing/SectionHeading.astro'
+import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
+import Timeline from 'web-design-system/astro/product/Timeline.astro'
+import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
+import DiffViewer from 'web-design-system/astro/product/DiffViewer.astro'
+import AgentActivityFeed from 'web-design-system/astro/product/AgentActivityFeed.astro'
+import {
+  kanban,
+  timelineRows,
+  timelineMonths,
+  logos,
+  changelog,
+  testimonials,
+  chat,
+  diffBefore,
+  diffAfter,
+  activity,
+} from '../../data/placeholder'
+---
+
+<Base title="Home" description="A Linear-style homepage replica with placeholder content.">
+  <Hero
+    title="The product development system for teams and agents"
+    subtitle="Purpose-built for planning and building products. Every word on this page is placeholder text."
+  >
+    <AnnouncementPill slot="pill" label="Loops for product management" />
+    <div class={css({ maxW: '980px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      <KanbanBoard columns={kanban} />
+    </div>
+  </Hero>
+
+  <LogoCloud title="Powering the companies building the future" logos={logos} />
+
+  <FeatureSection
+    eyebrow="Intake and integrations"
+    title="Turn conversations and feedback into actionable issues"
+    description="Automatically turn conversations and customer feedback into issues that are routed, labeled, and prioritized for the right team."
+    href="/replicas/features"
+  >
+    <AgentActivityFeed items={activity} />
+  </FeatureSection>
+
+  <FeatureSection
+    eyebrow="Planning and monitoring"
+    title="Plan and navigate from idea to launch"
+    description="Align your team with initiatives, strategic roadmaps, and clear, up-to-date specifications."
+    href="/replicas/features"
+    reverse
+  >
+    <Timeline months={timelineMonths} rows={timelineRows} />
+  </FeatureSection>
+
+  <FeatureSection
+    eyebrow="AI and automations"
+    title="Build and deploy agents that work alongside you"
+    description="Work on complex tasks together or delegate entire issues end-to-end, with an activity trail you can review."
+    href="/replicas/features"
+  >
+    <ChatThread messages={chat} />
+  </FeatureSection>
+
+  <FeatureSection
+    eyebrow="Build, review, and ship"
+    title="Streamline code reviews with clear diffs"
+    description="Keep changes moving with better context and fewer back-and-forth comments."
+    href="/replicas/features"
+    reverse
+  >
+    <DiffViewer filename="src/screens/HomeScreen.tsx" before={diffBefore} after={diffAfter} />
+  </FeatureSection>
+
+  <div class={css({ mt: '20', pt: '16', borderTopWidth: 'hairline', borderStyle: 'solid', borderColor: 'border.subtle' })}>
+    <div class={css({ maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' }, mb: '8' })}>
+      <SectionHeading eyebrow="Changelog" title="What's new" align="left" />
+    </div>
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      {changelog.map((entry) => <ChangelogCard {...entry} />)}
+    </div>
+  </div>
+
+  <section class={css({ py: { base: '16', md: '24' } })}>
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(3, 1fr)' }, gap: '4', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      {testimonials.map((entry) => <TestimonialCard {...entry} />)}
+    </div>
+  </section>
+
+  <StatsBand
+    value="40,000+"
+    label="placeholder product teams, from ambitious startups to major enterprises."
+    linkLabel="Customer stories"
+  />
+
+  <CTASection title="Built for the future. Available today." />
+</Base>

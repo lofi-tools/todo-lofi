@@ -1,0 +1,59 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Group {
+  heading: string
+  items: { label: string; href: string; active?: boolean }[]
+}
+
+interface Props {
+  groups: Group[]
+}
+
+const { groups } = Astro.props
+---
+
+<nav aria-label="Documentation" class={css({ display: 'flex', flexDirection: 'column', gap: '7' })}>
+  {
+    groups.map((group) => (
+      <div>
+        <h2
+          class={css({
+            fontSize: '2xs',
+            fontWeight: 'semibold',
+            letterSpacing: 'wider',
+            textTransform: 'uppercase',
+            color: 'fg.subtle',
+            mb: '2',
+          })}
+        >
+          {group.heading}
+        </h2>
+        <ul class={css({ display: 'flex', flexDirection: 'column', gap: '0.5', listStyle: 'none', p: '0', m: '0' })}>
+          {group.items.map((item) => (
+            <li>
+              <a
+                href={item.href}
+                aria-current={item.active ? 'page' : undefined}
+                class={css({
+                  display: 'block',
+                  px: '2',
+                  py: '1.5',
+                  borderRadius: 'sm',
+                  fontSize: 'sm',
+                  color: item.active ? 'fg.default' : 'fg.muted',
+                  bg: item.active ? 'surface.hover' : 'transparent',
+                  fontWeight: item.active ? 'medium' : 'normal',
+                  _hover: { color: 'fg.default', bg: 'surface.hover' },
+                  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+                })}
+              >
+                {item.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))
+  }
+</nav>

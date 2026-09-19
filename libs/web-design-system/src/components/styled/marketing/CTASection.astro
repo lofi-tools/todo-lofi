@@ -1,0 +1,95 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  title: string
+  primaryCta?: { label: string; href: string }
+  secondaryCta?: { label: string; href: string }
+}
+
+const {
+  title,
+  primaryCta = { label: 'Get started', href: '/replicas/pricing' },
+  secondaryCta = { label: 'Contact sales', href: '/replicas/pricing' },
+} = Astro.props
+---
+
+<section class={css({ position: 'relative', overflow: 'hidden', py: { base: '16', md: '24' } })}>
+  <div
+    aria-hidden="true"
+    class={css({
+      position: 'absolute',
+      bottom: '-260px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      w: '760px',
+      h: '420px',
+      borderRadius: 'full',
+      background: 'radial-gradient(closest-side, rgba(94, 106, 210, 0.22), rgba(94, 106, 210, 0))',
+      filter: 'blur(24px)',
+      pointerEvents: 'none',
+    })}
+  >
+  </div>
+  <div
+    class={css({
+      position: 'relative',
+      zIndex: 'raised',
+      w: '100%',
+      maxW: '720px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      textAlign: 'center',
+    })}
+  >
+    <h2 class={css({ textStyle: 'h1', color: 'fg.default' })}>{title}</h2>
+    <div
+      class={css({
+        display: 'flex',
+        flexWrap: 'wrap',
+        justifyContent: 'center',
+        gap: '3',
+        mt: '8',
+      })}
+    >
+      <a
+        href={primaryCta.href}
+        class={css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          h: '10',
+          px: '5',
+          borderRadius: 'sm',
+          bg: 'accent',
+          color: 'fg.onAccent',
+          fontSize: 'md',
+          fontWeight: 'medium',
+          _hover: { bg: 'accent.hover' },
+          _focusVisible: { outline: 'none', boxShadow: 'focus' },
+        })}
+      >
+        {primaryCta.label}
+      </a>
+      <a
+        href={secondaryCta.href}
+        class={css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          h: '10',
+          px: '5',
+          borderRadius: 'sm',
+          borderWidth: 'hairline',
+          borderStyle: 'solid',
+          borderColor: 'border',
+          color: 'fg.default',
+          fontSize: 'md',
+          fontWeight: 'medium',
+          _hover: { bg: 'surface.hover' },
+          _focusVisible: { outline: 'none', boxShadow: 'focus' },
+        })}
+      >
+        {secondaryCta.label}
+      </a>
+    </div>
+  </div>
+</section>

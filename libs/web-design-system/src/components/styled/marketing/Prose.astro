@@ -1,0 +1,57 @@
+---
+import { css } from '../../../../styled-system/css'
+---
+
+<div
+  class={css({
+    color: 'fg.muted',
+    fontSize: 'md',
+    lineHeight: 'relaxed',
+    maxW: '68ch',
+    '& h1': { textStyle: 'h1', color: 'fg.default', mt: '0', mb: '5' },
+    '& h2': { textStyle: 'h2', color: 'fg.default', mt: '10', mb: '4' },
+    '& h3': { textStyle: 'h3', color: 'fg.default', mt: '8', mb: '3' },
+    '& p': { my: '4' },
+    '& ul, & ol': { my: '4', pl: '5', display: 'flex', flexDirection: 'column', gap: '2' },
+    '& a': { color: 'accent.text', textDecoration: 'underline', textUnderlineOffset: '2px' },
+    '& a:hover': { color: 'accent.hover' },
+    '& code': {
+      fontFamily: 'mono',
+      fontSize: 'sm',
+      bg: 'surface.subtle',
+      borderWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+      borderRadius: 'xs',
+      px: '1.5',
+      py: '0.5',
+    },
+    '& pre': {
+      fontFamily: 'mono',
+      fontSize: 'sm',
+      bg: 'surface.subtle',
+      borderWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+      borderRadius: 'md',
+      p: '4',
+      my: '6',
+      overflowX: 'auto',
+    },
+    '& pre code': { bg: 'transparent', border: 'none', p: '0' },
+    '& strong': { color: 'fg.default', fontWeight: 'semibold' },
+    '& hr': { borderColor: 'border', my: '8' },
+    '& table': { w: 'full', borderCollapse: 'collapse', my: '6', fontSize: 'sm' },
+    '& th, & td': {
+      textAlign: 'left',
+      px: '3',
+      py: '2',
+      borderBottomWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+    },
+    '& th': { color: 'fg.default', fontWeight: 'semibold' },
+  })}
+>
+  <slot />
+</div>

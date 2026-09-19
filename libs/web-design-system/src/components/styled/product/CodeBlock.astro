@@ -1,0 +1,58 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  filename?: string
+  code: string
+  showLineNumbers?: boolean
+}
+
+const { filename, code, showLineNumbers = true } = Astro.props
+const lines = code.replace(/\n$/, '').split('\n')
+---
+
+<figure
+  class={css({
+    m: '0',
+    bg: 'surface.subtle',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    borderRadius: 'md',
+    overflow: 'hidden',
+  })}
+>
+  {
+    filename && (
+      <figcaption
+        class={css({
+          px: '4',
+          py: '2',
+          borderBottomWidth: 'hairline',
+          borderStyle: 'solid',
+          borderColor: 'border',
+          fontFamily: 'mono',
+          fontSize: 'xs',
+          color: 'fg.muted',
+          bg: 'surface.elevated',
+        })}
+      >
+        {filename}
+      </figcaption>
+    )
+  }
+  <pre
+    tabindex="0"
+    class={css({
+      m: '0',
+      p: '4',
+      overflowX: 'auto',
+      fontFamily: 'mono',
+      fontSize: 'sm',
+      lineHeight: 'relaxed',
+      color: 'fg.default',
+    })}
+  ><code>{lines.map((line, index) => (showLineNumbers
+      ? `${String(index + 1).padStart(2, ' ')}  ${line}`
+      : line)).join('\n')}</code></pre>
+</figure>

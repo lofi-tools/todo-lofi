@@ -1,0 +1,49 @@
+---
+// Order matters: the generated Panda stylesheet declares the cascade layer
+// order and the utility classes; the design system's own stylesheet then
+// slots its reset/base into those layers.
+import 'styled-system/styles.css'
+import 'web-design-system/styles.css'
+import Navbar from 'web-design-system/astro/marketing/Navbar.astro'
+import Footer from 'web-design-system/astro/marketing/Footer.astro'
+
+interface Props {
+  title: string
+  description?: string
+}
+
+const { title, description } = Astro.props
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>{title} · Placeholder Design System</title>
+    {
+      description && <meta name="description" content={description} />
+    }
+    <!-- Set the theme before first paint so there is no flash (spec §4.4). -->
+    <script is:inline>
+      ;(function () {
+        try {
+          var stored = localStorage.getItem('wds-theme')
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.dataset.theme = stored
+          }
+        } catch (error) {
+          /* storage unavailable: keep the dark default */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <Navbar />
+    <main>
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

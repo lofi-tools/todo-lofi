@@ -1,0 +1,99 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface DiffLine {
+  content: string
+  kind: 'context' | 'added' | 'removed'
+}
+
+interface Props {
+  before: DiffLine[]
+  after: DiffLine[]
+  filename?: string
+}
+
+const { before, after, filename } = Astro.props
+
+const kindStyle = {
+  context: { bg: 'transparent', color: 'fg.muted' },
+  added: { bg: 'success.subtle', color: 'success' },
+  removed: { bg: 'danger.subtle', color: 'danger' },
+} as const
+---
+
+<div
+  class={css({
+    bg: 'surface.subtle',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    borderRadius: 'md',
+    overflow: 'hidden',
+  })}
+>
+  {
+    filename && (
+      <div
+        class={css({
+          px: '4',
+          py: '2',
+          borderBottomWidth: 'hairline',
+          borderStyle: 'solid',
+          borderColor: 'border',
+          fontFamily: 'mono',
+          fontSize: 'xs',
+          color: 'fg.muted',
+          bg: 'surface.elevated',
+        })}
+      >
+        {filename}
+      </div>
+    )
+  }
+  <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' } })}>
+    <pre
+      tabindex="0"
+      class={css({
+        m: '0',
+        p: '4',
+        overflowX: 'auto',
+        fontFamily: 'mono',
+        fontSize: 'xs',
+        lineHeight: 'relaxed',
+        borderRightWidth: { base: '0', md: 'hairline' },
+        borderBottomWidth: { base: 'hairline', md: '0' },
+        borderStyle: 'solid',
+        borderColor: 'border',
+      })}
+    ><code>{before.map((line) => (
+        <span
+          class={css({
+            display: 'block',
+            px: '2',
+            bg: kindStyle[line.kind].bg,
+            color: kindStyle[line.kind].color,
+          })}
+        >{line.kind === 'added' ? '+ ' : line.kind === 'removed' ? '- ' : '  '}{line.content}</span>
+      ))}</code></pre>
+    <pre
+      tabindex="0"
+      class={css({
+        m: '0',
+        p: '4',
+        overflowX: 'auto',
+        fontFamily: 'mono',
+        fontSize: 'xs',
+        lineHeight: 'relaxed',
+      })}
+    ><code>{after.map((line) => (
+        <span
+          class={css({
+            display: 'block',
+            px: '2',
+            bg: kindStyle[line.kind].bg,
+            color: kindStyle[line.kind].color,
+          })}
+        >{line.kind === 'added' ? '+ ' : line.kind === 'removed' ? '- ' : '  '}{line.content}</span>
+      ))}</code></pre>
+  </div>
+</div>

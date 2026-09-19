@@ -1,0 +1,85 @@
+---
+import { css } from 'styled-system/css'
+
+interface Props {
+  title: string
+  layer: 'headless' | 'styled' | 'astro'
+  importPath: string
+  hydration?: string
+  notes?: string
+}
+
+const { title, layer, importPath, hydration, notes } = Astro.props
+
+const layerTone = {
+  headless: { fg: 'badge.warning', bg: 'warning.subtle' },
+  styled: { fg: 'accent.text', bg: 'accent.subtle' },
+  astro: { fg: 'badge.success', bg: 'success.subtle' },
+} as const
+
+const tone = layerTone[layer]
+---
+
+<section
+  class={css({
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    borderRadius: 'lg',
+    bg: 'surface.subtle',
+    overflow: 'hidden',
+    mb: '6',
+  })}
+>
+  <header
+    class={css({
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: '3',
+      px: '4',
+      py: '3',
+      borderBottomWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+    })}
+  >
+    <h3 class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>{title}</h3>
+    <span
+      class={css({
+        fontSize: '2xs',
+        fontWeight: 'medium',
+        px: '2',
+        h: '5',
+        display: 'inline-flex',
+        alignItems: 'center',
+        borderRadius: 'full',
+        color: tone.fg,
+        bg: tone.bg,
+      })}
+    >
+      {layer}
+    </span>
+    <code
+      class={css({
+        fontFamily: 'mono',
+        fontSize: '2xs',
+        color: 'fg.subtle',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      })}
+    >
+      {importPath}
+    </code>
+    {
+      hydration && (
+        <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>hydrate: {hydration}</span>
+      )
+    }
+    <div class={css({ flex: '1' })} />
+    {notes && <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>{notes}</span>}
+  </header>
+  <div class={css({ p: '6', bg: 'canvas' })}>
+    <slot />
+  </div>
+</section>

@@ -1,0 +1,19 @@
+---
+import { Tabs } from './interactive'
+
+interface TabItem {
+  value: string
+  label: string
+  content?: string
+}
+
+interface Props {
+  tabs: TabItem[]
+  defaultValue?: string
+  class?: string
+}
+
+const { tabs, defaultValue, class: className } = Astro.props
+---
+
+<Tabs tabs={tabs} defaultValue={defaultValue} class={className} client:only="solid" />

@@ -1,0 +1,66 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Sparkles } from '../../../icons'
+import type { ActivityItem } from './types'
+
+interface Props {
+  items: ActivityItem[]
+}
+
+const { items } = Astro.props
+---
+
+<ul
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0',
+    listStyle: 'none',
+    m: '0',
+    p: '4',
+    bg: 'canvas',
+  })}
+>
+  {
+    items.map((item, index) => (
+      <li
+        class={css({
+          display: 'flex',
+          gap: '3',
+          py: '2',
+          position: 'relative',
+        })}
+      >
+        <span class={css({ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' })}>
+          <span
+            class={css({
+              display: 'grid',
+              placeItems: 'center',
+              w: '6',
+              h: '6',
+              borderRadius: 'full',
+              bg: 'accent.subtle',
+              color: 'accent.text',
+              flexShrink: '0',
+            })}
+          >
+            <Sparkles size={12} />
+          </span>
+          {index < items.length - 1 && (
+            <span
+              aria-hidden="true"
+              class={css({ flex: '1', w: '1px', bg: 'border', my: '1' })}
+            />
+          )}
+        </span>
+        <span class={css({ display: 'flex', flexDirection: 'column', gap: '0.5', pb: '2' })}>
+          <span class={css({ fontSize: 'sm', color: 'fg.default' })}>
+            {item.actor} <span class={css({ color: 'fg.muted' })}>{item.action}</span>
+            {item.target && <span class={css({ color: 'fg.default', fontWeight: 'medium' })}> {item.target}</span>}
+          </span>
+          <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>{item.time}</span>
+        </span>
+      </li>
+    ))
+  }
+</ul>

@@ -26,7 +26,9 @@
             pkgs.pkg-config
           ];
 
-          devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch ];
+          # Node + pnpm supply the web design system under libs/ and its Astro
+          # showcase under demos/ (see docs/spec/web-design-system-spec.md).
+          devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch pkgs.nodejs_22 pkgs.pnpm ];
 
           lsRegister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
@@ -188,6 +190,8 @@
                 mkdir -p "$(dirname "$target")";  cp "$f" "$target"
               done
             '';
+
+            web = ''pnpm install; pnpm dev'';
           };
 
           env = {

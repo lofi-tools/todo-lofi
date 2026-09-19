@@ -1,0 +1,130 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  title: string
+  subtitle?: string
+  primaryCta?: { label: string; href: string }
+  secondaryCta?: { label: string; href: string }
+}
+
+const {
+  title,
+  subtitle,
+  primaryCta = { label: 'Get started', href: '/replicas/pricing' },
+  secondaryCta = { label: 'Contact sales', href: '/replicas/pricing' },
+} = Astro.props
+
+const ctaBase = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  h: '10',
+  px: '5',
+  borderRadius: 'sm',
+  fontSize: 'md',
+  fontWeight: 'medium',
+  transitionProperty: 'background-color, border-color, color',
+  transitionDuration: 'fast',
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const ctaPrimary = css({
+  bg: 'accent',
+  color: 'fg.onAccent',
+  _hover: { bg: 'accent.hover' },
+})
+
+const ctaSecondary = css({
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  color: 'fg.default',
+  _hover: { bg: 'surface.hover' },
+})
+---
+
+<section
+  class={css({
+    position: 'relative',
+    overflow: 'hidden',
+    pt: { base: '16', md: '24' },
+    pb: { base: '12', md: '20' },
+  })}
+>
+  <!-- Decorative accent glow, hidden from assistive tech. -->
+  <div
+    aria-hidden="true"
+    class={css({
+      position: 'absolute',
+      top: '-220px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      w: '900px',
+      h: '520px',
+      borderRadius: 'full',
+      background:
+        'radial-gradient(closest-side, rgba(94, 106, 210, 0.28), rgba(94, 106, 210, 0))',
+      filter: 'blur(24px)',
+      pointerEvents: 'none',
+    })}
+  >
+  </div>
+
+  <div
+    class={css({
+      position: 'relative',
+      zIndex: 'raised',
+      w: '100%',
+      maxW: '900px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      textAlign: 'center',
+    })}
+  >
+    <slot name="pill" />
+    <h1
+      class={css({
+        textStyle: 'display',
+        color: 'fg.default',
+        mt: '5',
+        textWrap: 'balance',
+      })}
+    >
+      {title}
+    </h1>
+    {
+      subtitle && (
+        <p
+          class={css({
+            textStyle: 'body.lg',
+            color: 'fg.muted',
+            mt: '5',
+            maxW: '620px',
+            mx: 'auto',
+            textWrap: 'pretty',
+          })}
+        >
+          {subtitle}
+        </p>
+      )
+    }
+    <div
+      class={css({
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '3',
+        mt: '8',
+      })}
+    >
+      <a href={primaryCta.href} class={`${ctaBase} ${ctaPrimary}`}>{primaryCta.label}</a>
+      <a href={secondaryCta.href} class={`${ctaBase} ${ctaSecondary}`}>{secondaryCta.label}</a>
+    </div>
+  </div>
+
+  <div class={css({ mt: { base: '12', md: '16' } })}>
+    <slot />
+  </div>
+</section>

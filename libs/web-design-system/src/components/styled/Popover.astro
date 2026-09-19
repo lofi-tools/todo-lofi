@@ -1,0 +1,13 @@
+---
+import { Popover } from './overlays'
+
+interface Props {
+  trigger: string
+  body?: string
+  class?: string
+}
+
+const { trigger, body, class: className } = Astro.props
+---
+
+<Popover trigger={trigger} body={body} class={className} client:only="solid" />

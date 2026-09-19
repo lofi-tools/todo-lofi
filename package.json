@@ -1,0 +1,16 @@
+{
+  "name": "todo-lofi-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "codegen": "pnpm --dir libs/web-design-system run codegen",
+    "dev": "pnpm --dir demos/design-system-showcase run dev",
+    "build": "pnpm run codegen && pnpm --dir demos/design-system-showcase run build",
+    "preview": "pnpm --dir demos/design-system-showcase run preview",
+    "typecheck": "pnpm --dir libs/web-design-system run typecheck && pnpm --dir demos/design-system-showcase run typecheck",
+    "test": "pnpm --dir libs/web-design-system run test",
+    "test:e2e": "pnpm --dir demos/design-system-showcase run test:e2e"
+  }
+}

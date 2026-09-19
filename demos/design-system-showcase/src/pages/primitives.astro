@@ -1,0 +1,193 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import {
+  Button,
+  Badge,
+  Avatar,
+  AvatarGroup,
+  Input,
+  Field,
+  Kbd,
+  StatusDot,
+  Spinner,
+  Skeleton,
+  Alert,
+} from 'web-design-system/components'
+import ButtonAstro from 'web-design-system/astro/Button.astro'
+import TabsAstro from 'web-design-system/astro/Tabs.astro'
+import AccordionAstro from 'web-design-system/astro/Accordion.astro'
+import SwitchAstro from 'web-design-system/astro/Switch.astro'
+import CheckboxAstro from 'web-design-system/astro/Checkbox.astro'
+import DialogAstro from 'web-design-system/astro/Dialog.astro'
+import PopoverAstro from 'web-design-system/astro/Popover.astro'
+import TooltipAstro from 'web-design-system/astro/Tooltip.astro'
+import MenuAstro from 'web-design-system/astro/Menu.astro'
+import { Users } from 'web-design-system/icons'
+
+const row = css({ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '3' })
+---
+
+<Gallery
+  title="Primitives"
+  description="The headless behavior layer (Ark UI) wrapped by Panda-styled Solid components, with .astro wrappers for pages. Interactive primitives are hydrated islands."
+>
+  <Demo title="Button" layer="astro" importPath="web-design-system/astro/Button.astro" hydration="static" notes="variants × sizes">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '5' })}>
+      <div class={row}>
+        <Button variant="primary">Primary</Button>
+        <Button variant="secondary">Secondary</Button>
+        <Button variant="ghost">Ghost</Button>
+        <Button variant="subtle">Subtle</Button>
+        <Button variant="danger">Danger</Button>
+        <Button variant="secondary" disabled>Disabled</Button>
+      </div>
+      <div class={row}>
+        <Button size="xs">Extra small</Button>
+        <Button size="sm">Small</Button>
+        <Button size="md">Medium</Button>
+        <Button size="lg">Large</Button>
+      </div>
+    </div>
+  </Demo>
+
+  <Demo title="Badge" layer="styled" importPath="web-design-system/components → Badge">
+    <div class={row}>
+      <Badge tone="neutral">Neutral</Badge>
+      <Badge tone="accent">Accent</Badge>
+      <Badge tone="success">Success</Badge>
+      <Badge tone="warning">Warning</Badge>
+      <Badge tone="danger">Danger</Badge>
+      <Badge tone="info">Info</Badge>
+      <Badge variant="solid">Solid</Badge>
+      <Badge variant="outline">Outline</Badge>
+    </div>
+  </Demo>
+
+  <Demo title="Avatar / AvatarGroup" layer="styled" importPath="web-design-system/components → Avatar, AvatarGroup">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '4' })}>
+      <div class={row}>
+        <Avatar name="Ada Lovelace" size="xs" />
+        <Avatar name="Grace Hopper" size="sm" />
+        <Avatar name="Alan Turing" size="md" />
+        <Avatar name="Katherine Johnson" size="lg" />
+      </div>
+      <AvatarGroup names={['Ada Lovelace', 'Grace Hopper', 'Alan Turing', 'Katherine Johnson', 'Margaret Hamilton']} />
+    </div>
+  </Demo>
+
+  <Demo title="Input / Field" layer="styled" importPath="web-design-system/components → Input, Field">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '5', maxW: '360px' })}>
+      <Field label="Email" description="We will never share it." required>
+        <Input type="email" placeholder="you@example.com" />
+      </Field>
+      <Field label="Workspace" error="That name is already taken.">
+        <Input invalid placeholder="acme" value="acme" />
+      </Field>
+      <Input size="sm" placeholder="Small input" />
+    </div>
+  </Demo>
+
+  <Demo title="Kbd / StatusDot / Spinner / Skeleton" layer="styled" importPath="web-design-system/components → feedback">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '5' })}>
+      <div class={row}>
+        <span class={css({ fontSize: 'sm', color: 'fg.muted' })}>Open search</span>
+        <Kbd>⌘</Kbd>
+        <Kbd>K</Kbd>
+      </div>
+      <div class={row}>
+        <StatusDot tone="success" />
+        <StatusDot tone="warning" />
+        <StatusDot tone="danger" />
+        <StatusDot tone="accent" pulse />
+        <Spinner size="sm" />
+        <Spinner size="md" />
+      </div>
+      <div class={css({ display: 'grid', gap: '2', maxW: '320px' })}>
+        <Skeleton height="0.75rem" width="60%" />
+        <Skeleton height="0.75rem" />
+        <Skeleton height="0.75rem" width="40%" />
+      </div>
+    </div>
+  </Demo>
+
+  <Demo title="Alert" layer="styled" importPath="web-design-system/components → Alert">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+      <Alert tone="info" title="Heads up" icon={<Users size={15} />}>
+        This is an informational note with a supporting icon.
+      </Alert>
+      <Alert tone="warning" title="Careful">Something needs your attention.</Alert>
+      <Alert tone="danger" title="Blocked">Two merge paths for one project is how a workflow stops being legible.</Alert>
+    </div>
+  </Demo>
+
+  <Demo title="Switch" layer="astro" importPath="web-design-system/astro/Switch.astro" hydration="client:only">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+      <SwitchAstro label="Enable background sync" defaultChecked />
+      <SwitchAstro label="Send me changelog emails" />
+      <SwitchAstro label="Disabled option" disabled />
+    </div>
+  </Demo>
+
+  <Demo title="Checkbox" layer="astro" importPath="web-design-system/astro/Checkbox.astro" hydration="client:only">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+      <CheckboxAstro label="Issues" defaultChecked />
+      <CheckboxAstro label="Projects" />
+      <CheckboxAstro label="Disabled option" disabled />
+    </div>
+  </Demo>
+
+  <Demo title="Tabs" layer="astro" importPath="web-design-system/astro/Tabs.astro" hydration="client:only">
+    <TabsAstro
+      tabs={[
+        { value: 'general', label: 'General', content: 'General settings live here.' },
+        { value: 'members', label: 'Members', content: 'Invite and manage members.' },
+        { value: 'billing', label: 'Billing', content: 'Plan and invoices.' },
+      ]}
+    />
+  </Demo>
+
+  <Demo title="Accordion" layer="astro" importPath="web-design-system/astro/Accordion.astro" hydration="client:only">
+    <AccordionAstro
+      items={[
+        { value: 'a', trigger: 'Is there a free plan?', content: 'Yes — unlimited members, two teams, and 250 issues.' },
+        { value: 'b', trigger: 'Can I change plans later?', content: 'Plans can be changed at any time from billing settings.' },
+        { value: 'c', trigger: 'How does billing work?', content: 'Basic and Business are billed per user, per month.' },
+      ]}
+    />
+  </Demo>
+
+  <Demo title="Dialog" layer="astro" importPath="web-design-system/astro/Dialog.astro" hydration="client:only">
+    <DialogAstro
+      trigger="Open dialog"
+      title="Delete this project?"
+      description="This action cannot be undone."
+      body="Everything inside the project will be removed."
+    />
+  </Demo>
+
+  <Demo title="Popover" layer="astro" importPath="web-design-system/astro/Popover.astro" hydration="client:only">
+    <PopoverAstro trigger="Show details" body="A small floating panel anchored to its trigger." />
+  </Demo>
+
+  <Demo title="Tooltip" layer="astro" importPath="web-design-system/astro/Tooltip.astro" hydration="client:only">
+    <TooltipAstro label="Opens the command menu" trigger="Hover me" />
+  </Demo>
+
+  <Demo title="Menu" layer="astro" importPath="web-design-system/astro/Menu.astro" hydration="client:only">
+    <MenuAstro
+      trigger="Open menu"
+      items={[
+        { value: 'edit', label: 'Edit' },
+        { value: 'duplicate', label: 'Duplicate' },
+        { value: 'archive', label: 'Archive' },
+        { value: 'delete', label: 'Delete', disabled: true },
+      ]}
+    />
+  </Demo>
+
+  <Demo title="Button via .astro wrapper" layer="astro" importPath="web-design-system/astro/Button.astro" hydration="static">
+    <ButtonAstro variant="primary">Wrapped button</ButtonAstro>
+  </Demo>
+</Gallery>

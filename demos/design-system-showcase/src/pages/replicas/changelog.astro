@@ -1,0 +1,26 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../../layouts/Base.astro'
+import ChangelogCard from 'web-design-system/astro/marketing/ChangelogCard.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import { changelog } from '../../data/placeholder'
+---
+
+<Base title="Changelog" description="A Linear-style changelog replica with placeholder content.">
+  <section class={css({ pt: { base: '16', md: '20' }, pb: { base: '8', md: '10' } })}>
+    <div class={css({ maxW: '760px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      <h1 class={css({ textStyle: 'display', color: 'fg.default' })}>Changelog</h1>
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '4' })}>
+        Product updates, one entry at a time. All entries are placeholder text.
+      </p>
+    </div>
+  </section>
+
+  <section class={css({ pb: { base: '12', md: '16' } })}>
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '4', maxW: '760px', mx: 'auto', px: { base: '5', md: '8' } })}>
+      {changelog.map((entry) => <ChangelogCard {...entry} />)}
+    </div>
+  </section>
+
+  <CTASection title="Built for the future. Available today." />
+</Base>

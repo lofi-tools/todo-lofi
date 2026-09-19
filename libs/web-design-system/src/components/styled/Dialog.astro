@@ -1,0 +1,22 @@
+---
+import { Dialog } from './overlays'
+
+interface Props {
+  trigger: string
+  title: string
+  description?: string
+  body?: string
+  class?: string
+}
+
+const { trigger, title, description, body, class: className } = Astro.props
+---
+
+<Dialog
+  trigger={trigger}
+  title={title}
+  description={description}
+  body={body}
+  class={className}
+  client:only="solid"
+/>

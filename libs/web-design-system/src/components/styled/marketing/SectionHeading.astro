@@ -1,0 +1,48 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  eyebrow?: string
+  title: string
+  description?: string
+  align?: 'left' | 'center'
+}
+
+const { eyebrow, title, description, align = 'center' } = Astro.props
+---
+
+<div
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3',
+    textAlign: align,
+    alignItems: align === 'center' ? 'center' : 'flex-start',
+    maxW: align === 'center' ? '720px' : 'none',
+    mx: align === 'center' ? 'auto' : '0',
+  })}
+>
+  {
+    eyebrow && (
+      <span
+        class={css({
+          fontSize: '2xs',
+          fontWeight: 'semibold',
+          letterSpacing: 'wider',
+          textTransform: 'uppercase',
+          color: 'accent.text',
+        })}
+      >
+        {eyebrow}
+      </span>
+    )
+  }
+  <h2 class={css({ textStyle: 'h2', color: 'fg.default' })}>{title}</h2>
+  {
+    description && (
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', maxW: '640px' })}>
+        {description}
+      </p>
+    )
+  }
+</div>

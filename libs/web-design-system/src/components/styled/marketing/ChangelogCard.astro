@@ -1,0 +1,56 @@
+---
+import { css } from '../../../../styled-system/css'
+import { ArrowRight } from '../../../icons'
+
+interface Props {
+  title: string
+  date: string
+  excerpt: string
+  featured?: boolean
+}
+
+const { title, date, excerpt, featured = false } = Astro.props
+---
+
+<article
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3',
+    p: featured ? '6' : '5',
+    borderRadius: 'lg',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.subtle',
+    gridColumn: featured ? { base: 'auto', md: 'span 2' } : 'auto',
+    transitionProperty: 'background-color, border-color',
+    transitionDuration: 'fast',
+    _hover: { bg: 'surface.elevated', borderColor: 'border.strong' },
+  })}
+>
+  <div class={css({ display: 'flex', alignItems: 'center', gap: '2' })}>
+    <span class={css({ fontSize: '2xs', color: 'fg.subtle', textTransform: 'uppercase', letterSpacing: 'wider' })}>
+      Changelog
+    </span>
+    <span aria-hidden="true" class={css({ color: 'fg.subtle' })}>·</span>
+    <time class={css({ fontSize: '2xs', color: 'fg.subtle' })}>{date}</time>
+  </div>
+  <h3 class={css({ fontSize: featured ? '3xl' : 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
+    {title}
+  </h3>
+  <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>{excerpt}</p>
+  <span
+    class={css({
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '1.5',
+      mt: '1',
+      fontSize: 'sm',
+      color: 'accent.text',
+    })}
+  >
+    Read more
+    <ArrowRight size={14} />
+  </span>
+</article>

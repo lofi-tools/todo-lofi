@@ -1,0 +1,61 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  items: { label: string; href: string }[]
+}
+
+const { items } = Astro.props
+---
+
+<nav aria-label="On this page" class={css({ display: 'flex', flexDirection: 'column', gap: '2' })}>
+  <h2
+    class={css({
+      fontSize: '2xs',
+      fontWeight: 'semibold',
+      letterSpacing: 'wider',
+      textTransform: 'uppercase',
+      color: 'fg.subtle',
+    })}
+  >
+    On this page
+  </h2>
+  <ul
+    class={css({
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '1',
+      listStyle: 'none',
+      p: '0',
+      m: '0',
+      borderLeftWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+    })}
+  >
+    {
+      items.map((item) => (
+        <li>
+          <a
+            href={item.href}
+            class={css({
+              display: 'block',
+              pl: '3',
+              py: '1',
+              fontSize: 'xs',
+              color: 'fg.muted',
+              borderLeftWidth: '2px',
+              borderStyle: 'solid',
+              borderColor: 'transparent',
+              ml: '-1px',
+              _hover: { color: 'fg.default', borderColor: 'border.strong' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+            })}
+          >
+            {item.label}
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</nav>

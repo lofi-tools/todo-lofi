@@ -1,0 +1,82 @@
+---
+import { css } from '../../../../styled-system/css'
+import { ArrowRight } from '../../../icons'
+
+interface Props {
+  eyebrow: string
+  title: string
+  description: string
+  href?: string
+  linkLabel?: string
+  reverse?: boolean
+}
+
+const { eyebrow, title, description, href, linkLabel = 'Learn more', reverse = false } = Astro.props
+---
+
+<section class={css({ py: { base: '12', md: '20' } })}>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+      gap: { base: '10', lg: '16' },
+      alignItems: 'center',
+      w: '100%',
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+    })}
+  >
+    <div class={css({ order: reverse ? { base: '0', lg: '2' } : '0' })}>
+      <span
+        class={css({
+          fontSize: '2xs',
+          fontWeight: 'semibold',
+          letterSpacing: 'wider',
+          textTransform: 'uppercase',
+          color: 'accent.text',
+        })}>{eyebrow}</span
+      >
+      <h2 class={css({ textStyle: 'h2', color: 'fg.default', mt: '3' })}>{title}</h2>
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '4', maxW: '520px' })}>
+        {description}
+      </p>
+      {
+        href && (
+          <a
+            href={href}
+            class={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '1.5',
+              mt: '5',
+              fontSize: 'sm',
+              fontWeight: 'medium',
+              color: 'accent.text',
+              _hover: { color: 'accent.hover' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+            })}
+          >
+            {linkLabel}
+            <ArrowRight size={14} />
+          </a>
+        )
+      }
+    </div>
+
+    <div
+      class={css({
+        order: reverse ? { base: '0', lg: '1' } : '0',
+        borderRadius: 'lg',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border',
+        bg: 'surface.subtle',
+        overflow: 'hidden',
+        minW: '0',
+      })}
+    >
+      <slot />
+    </div>
+  </div>
+</section>

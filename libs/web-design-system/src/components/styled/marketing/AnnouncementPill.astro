@@ -1,0 +1,45 @@
+---
+import { css } from '../../../../styled-system/css'
+import { ArrowRight } from '../../../icons'
+
+interface Props {
+  label: string
+  href?: string
+}
+
+const { label, href = '/replicas/changelog' } = Astro.props
+---
+
+<a
+  href={href}
+  class={css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '2',
+    h: '8',
+    px: '3',
+    borderRadius: 'full',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.subtle',
+    fontSize: 'sm',
+    color: 'fg.muted',
+    transitionProperty: 'border-color, color, background-color',
+    transitionDuration: 'fast',
+    _hover: { color: 'fg.default', borderColor: 'border.strong', bg: 'surface.elevated' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })}
+>
+  <span
+    class={css({
+      fontSize: '2xs',
+      fontWeight: 'semibold',
+      color: 'accent.text',
+      textTransform: 'uppercase',
+      letterSpacing: 'wider',
+    })}>New</span
+  >
+  <span>{label}</span>
+  <ArrowRight size={13} />
+</a>

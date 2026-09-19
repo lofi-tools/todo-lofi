@@ -1,0 +1,94 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import IssueRow from 'web-design-system/astro/product/IssueRow.astro'
+import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
+import Timeline from 'web-design-system/astro/product/Timeline.astro'
+import AgentActivityFeed from 'web-design-system/astro/product/AgentActivityFeed.astro'
+import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import DiffViewer from 'web-design-system/astro/product/DiffViewer.astro'
+import EditorTabs from 'web-design-system/astro/product/EditorTabs.astro'
+import NotificationToast from 'web-design-system/astro/product/NotificationToast.astro'
+import LabelChip from 'web-design-system/astro/product/LabelChip.astro'
+import PriorityIcon from 'web-design-system/astro/product/PriorityIcon.astro'
+import {
+  kanban,
+  issueList,
+  timelineRows,
+  timelineMonths,
+  activity,
+  chat,
+  sampleCode,
+  diffBefore,
+  diffAfter,
+} from '../data/placeholder'
+---
+
+<Gallery
+  title="Product UI"
+  description="Static mock product surfaces: issue rows and boards, timeline, agent activity, chat, code, and diffs. All data is invented."
+>
+  <Demo title="PriorityIcon" layer="astro" importPath="web-design-system/astro/product/PriorityIcon.astro">
+    <div class={css({ display: 'flex', alignItems: 'center', gap: '5' })}>
+      <PriorityIcon priority="urgent" />
+      <PriorityIcon priority="high" />
+      <PriorityIcon priority="medium" />
+      <PriorityIcon priority="low" />
+      <PriorityIcon priority="none" />
+    </div>
+  </Demo>
+
+  <Demo title="LabelChip" layer="astro" importPath="web-design-system/astro/product/LabelChip.astro">
+    <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '2' })}>
+      <LabelChip label="Bug" />
+      <LabelChip label="Feature" />
+      <LabelChip label="Improvement" />
+      <LabelChip label="Design" />
+      <LabelChip label="Performance" />
+      <LabelChip label="AI" />
+      <LabelChip label="Other" />
+    </div>
+  </Demo>
+
+  <Demo title="IssueRow" layer="astro" importPath="web-design-system/astro/product/IssueRow.astro">
+    <div class={css({ display: 'flex', flexDirection: 'column', gap: '2' })}>
+      {issueList.map((issue) => <IssueRow issue={issue} />)}
+    </div>
+  </Demo>
+
+  <Demo title="KanbanBoard" layer="astro" importPath="web-design-system/astro/product/KanbanBoard.astro" notes="columns are a prop">
+    <KanbanBoard columns={kanban} />
+  </Demo>
+
+  <Demo title="Timeline" layer="astro" importPath="web-design-system/astro/product/Timeline.astro">
+    <Timeline months={timelineMonths} rows={timelineRows} />
+  </Demo>
+
+  <Demo title="AgentActivityFeed" layer="astro" importPath="web-design-system/astro/product/AgentActivityFeed.astro">
+    <AgentActivityFeed items={activity} />
+  </Demo>
+
+  <Demo title="ChatThread" layer="astro" importPath="web-design-system/astro/product/ChatThread.astro">
+    <ChatThread messages={chat} />
+  </Demo>
+
+  <Demo title="EditorTabs" layer="astro" importPath="web-design-system/astro/product/EditorTabs.astro">
+    <div class={css({ borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', borderRadius: 'md', overflow: 'hidden' })}>
+      <EditorTabs files={['src/screens/HomeScreen.tsx', 'src/hooks/useVehicleState.ts', 'src/components/Dashboard.tsx']} />
+    </div>
+  </Demo>
+
+  <Demo title="CodeBlock" layer="astro" importPath="web-design-system/astro/product/CodeBlock.astro">
+    <CodeBlock filename="src/settings.tsx" code={sampleCode} />
+  </Demo>
+
+  <Demo title="DiffViewer" layer="astro" importPath="web-design-system/astro/product/DiffViewer.astro" notes="side-by-side above md">
+    <DiffViewer filename="src/screens/HomeScreen.tsx" before={diffBefore} after={diffAfter} />
+  </Demo>
+
+  <Demo title="NotificationToast" layer="astro" importPath="web-design-system/astro/product/NotificationToast.astro">
+    <NotificationToast title="Draft pull request opened" body="#412 is ready for review." time="just now" />
+  </Demo>
+</Gallery>

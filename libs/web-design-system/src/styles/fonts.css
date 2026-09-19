@@ -1,0 +1,5 @@
+/**
+ * Inter Variable, self-hosted via the Fontsource package so no request ever
+ * leaves for a CDN (decision #20). Fontsource ships the woff2 files locally.
+ */
+@import '@fontsource-variable/inter/index.css';

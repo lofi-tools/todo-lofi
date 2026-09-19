@@ -1,0 +1,19 @@
+---
+import { Menu } from './overlays'
+
+interface MenuItem {
+  value: string
+  label: string
+  disabled?: boolean
+}
+
+interface Props {
+  trigger: string
+  items: MenuItem[]
+  class?: string
+}
+
+const { trigger, items, class: className } = Astro.props
+---
+
+<Menu trigger={trigger} items={items} class={className} client:only="solid" />

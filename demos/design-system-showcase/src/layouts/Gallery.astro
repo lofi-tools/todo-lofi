@@ -1,0 +1,107 @@
+---
+import { css } from 'styled-system/css'
+import Base from './Base.astro'
+
+interface Props {
+  title: string
+  description?: string
+}
+
+const { title, description } = Astro.props
+const path = Astro.url.pathname
+
+const groups = [
+  {
+    heading: 'Gallery',
+    items: [
+      { label: 'Overview', href: '/' },
+      { label: 'Foundations', href: '/foundations' },
+      { label: 'Layout', href: '/layout' },
+      { label: 'Primitives', href: '/primitives' },
+      { label: 'Marketing', href: '/marketing' },
+      { label: 'Product UI', href: '/product-ui' },
+    ],
+  },
+  {
+    heading: 'Replicas',
+    items: [
+      { label: 'Home', href: '/replicas/home' },
+      { label: 'Pricing', href: '/replicas/pricing' },
+      { label: 'Features', href: '/replicas/features' },
+      { label: 'Customers', href: '/replicas/customers' },
+      { label: 'Changelog', href: '/replicas/changelog' },
+      { label: 'Docs', href: '/replicas/docs' },
+    ],
+  },
+]
+
+const linkClass = (active: boolean) =>
+  css({
+    display: 'block',
+    px: '2',
+    py: '1.5',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
+---
+
+<Base title={title}>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', lg: '240px minmax(0, 1fr)' },
+      gap: { base: '8', lg: '12' },
+      w: '100%',
+      maxW: '1400px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: { base: '8', md: '12' },
+      alignItems: 'start',
+    })}
+  >
+    <aside class={css({ position: { lg: 'sticky' }, top: '20', display: { base: 'none', lg: 'block' } })}>
+      <nav aria-label="Showcase" class={css({ display: 'flex', flexDirection: 'column', gap: '6' })}>
+        {
+          groups.map((group) => (
+            <div>
+              <h2
+                class={css({
+                  fontSize: '2xs',
+                  fontWeight: 'semibold',
+                  letterSpacing: 'wider',
+                  textTransform: 'uppercase',
+                  color: 'fg.subtle',
+                  mb: '2',
+                })}
+              >
+                {group.heading}
+              </h2>
+              <ul class={css({ listStyle: 'none', p: '0', m: '0', display: 'flex', flexDirection: 'column', gap: '0.5' })}>
+                {group.items.map((item) => (
+                  <li>
+                    <a class={linkClass(path === item.href)} href={item.href}>
+                      {item.label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        }
+      </nav>
+    </aside>
+
+    <div class={css({ minW: '0' })}>
+      <header class={css({ mb: '10' })}>
+        <h1 class={css({ textStyle: 'h1', color: 'fg.default' })}>{title}</h1>
+        {description && <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '3' })}>{description}</p>}
+      </header>
+      <slot />
+    </div>
+  </div>
+</Base>

@@ -1,5 +1,14 @@
-**/.intent**
-**/.beads**
-**/.poolside**
+**/.intent
+**/.beads
+**/.poolside
 **/.agents/
 .freebuff/
+
+# Web design system + Astro showcase (docs/spec/web-design-system-spec.md)
+node_modules/
+.astro/
+dist/
+styled-system/
+.panda/
+playwright-report/
+test-results/

@@ -1,0 +1,65 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  value: string
+  label: string
+  linkLabel?: string
+  linkHref?: string
+}
+
+const { value, label, linkLabel, linkHref = '/replicas/customers' } = Astro.props
+---
+
+<section class={css({ py: { base: '12', md: '20' } })}>
+  <div
+    class={css({
+      display: 'flex',
+      flexDirection: { base: 'column', md: 'row' },
+      alignItems: { base: 'flex-start', md: 'center' },
+      justifyContent: 'space-between',
+      gap: '6',
+      w: '100%',
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: { base: '10', md: '12' },
+      borderRadius: 'xl',
+      borderWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+      bg: 'surface.subtle',
+    })}
+  >
+    <div>
+      <div class={css({ textStyle: 'display.lg', color: 'fg.default' })}>{value}</div>
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '2', maxW: '520px' })}>
+        {label}
+      </p>
+    </div>
+    {
+      linkLabel && (
+        <a
+          href={linkHref}
+          class={css({
+            display: 'inline-flex',
+            alignItems: 'center',
+            h: '10',
+            px: '5',
+            borderRadius: 'sm',
+            borderWidth: 'hairline',
+            borderStyle: 'solid',
+            borderColor: 'border',
+            fontSize: 'md',
+            color: 'fg.default',
+            whiteSpace: 'nowrap',
+            _hover: { bg: 'surface.hover' },
+            _focusVisible: { outline: 'none', boxShadow: 'focus' },
+          })}
+        >
+          {linkLabel}
+        </a>
+      )
+    }
+  </div>
+</section>

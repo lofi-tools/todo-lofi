@@ -1,0 +1,106 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Check } from '../../../icons'
+
+interface Row {
+  label: string
+  values: string[]
+}
+
+interface Section {
+  heading: string
+  rows: Row[]
+}
+
+interface Props {
+  columns: string[]
+  sections: Section[]
+}
+
+const { columns, sections } = Astro.props
+
+const cell = css({ px: '4', py: '3', fontSize: 'sm', color: 'fg.muted', textAlign: 'center' })
+const headCell = css({ px: '4', py: '3', fontSize: 'sm', fontWeight: 'semibold', color: 'fg.default', textAlign: 'center' })
+---
+
+<div
+  tabindex="0"
+  role="region"
+  aria-label="Plan comparison"
+  class={css({
+    w: '100%',
+    maxW: '1200px',
+    mx: 'auto',
+    px: { base: '5', md: '8' },
+    overflowX: 'auto',
+  })}
+>
+  <table
+    class={css({
+      w: '100%',
+      borderCollapse: 'collapse',
+      minW: '720px',
+      borderWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+      borderRadius: 'lg',
+      overflow: 'hidden',
+    })}
+  >
+    <caption class={css({ srOnly: true })}>Plan comparison</caption>
+    <thead>
+      <tr class={css({ bg: 'surface.subtle' })}>
+        <th scope="col" class={css({ px: '4', py: '3', textAlign: 'left', fontSize: 'sm', color: 'fg.subtle' })}
+          >Feature</th
+        >
+        {columns.map((column) => <th scope="col" class={headCell}>{column}</th>)}
+      </tr>
+    </thead>
+    {
+      sections.map((section) => (
+        <tbody>
+          <tr class={css({ bg: 'surface.subtle' })}>
+            <th
+              scope="colgroup"
+              colspan={columns.length + 1}
+              class={css({
+                px: '4',
+                py: '2',
+                textAlign: 'left',
+                fontSize: '2xs',
+                fontWeight: 'semibold',
+                letterSpacing: 'wider',
+                textTransform: 'uppercase',
+                color: 'fg.subtle',
+              })}
+            >
+              {section.heading}
+            </th>
+          </tr>
+          {section.rows.map((row) => (
+            <tr class={css({ borderTopWidth: 'hairline', borderStyle: 'solid', borderColor: 'border' })}>
+              <th scope="row" class={css({ px: '4', py: '3', textAlign: 'left', fontSize: 'sm', fontWeight: 'normal', color: 'fg.default' })}>
+                {row.label}
+              </th>
+              {row.values.map((value) => (
+                <td class={cell}>
+                  {value === '✓' ? (
+                    <span
+                      role="img"
+                      aria-label="Included"
+                      class={css({ display: 'inline-flex', color: 'accent.text' })}
+                    >
+                      <Check size={14} />
+                    </span>
+                  ) : (
+                    value
+                  )}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      ))
+    }
+  </table>
+</div>

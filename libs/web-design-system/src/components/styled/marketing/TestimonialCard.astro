@@ -1,0 +1,58 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  quote: string
+  name: string
+  role: string
+}
+
+const { quote, name, role } = Astro.props
+
+const initials = name
+  .split(' ')
+  .map((part) => part[0])
+  .join('')
+  .slice(0, 2)
+  .toUpperCase()
+---
+
+<figure
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    gap: '6',
+    p: '6',
+    borderRadius: 'lg',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.subtle',
+    height: 'full',
+  })}
+>
+  <blockquote class={css({ fontSize: 'lg', lineHeight: 'snug', color: 'fg.default' })}>
+    “{quote}”
+  </blockquote>
+  <figcaption class={css({ display: 'flex', alignItems: 'center', gap: '3' })}>
+    <span
+      aria-hidden="true"
+      class={css({
+        display: 'grid',
+        placeItems: 'center',
+        w: '9',
+        h: '9',
+        borderRadius: 'full',
+        bg: 'accent.subtle',
+        color: 'accent.text',
+        fontSize: 'xs',
+        fontWeight: 'semibold',
+      })}>{initials}</span
+    >
+    <span class={css({ display: 'flex', flexDirection: 'column' })}>
+      <span class={css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })}>{name}</span>
+      <span class={css({ fontSize: 'xs', color: 'fg.subtle' })}>{role}</span>
+    </span>
+  </figcaption>
+</figure>

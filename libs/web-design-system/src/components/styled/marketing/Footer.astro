@@ -1,0 +1,122 @@
+---
+import { css } from '../../../../styled-system/css'
+import { LogoMark } from '../../../icons'
+
+const columns = [
+  {
+    heading: 'Product',
+    links: ['Features', 'Pricing', 'Integrations', 'Changelog', 'Docs'],
+  },
+  {
+    heading: 'Company',
+    links: ['About', 'Customers', 'Careers', 'Blog', 'Contact'],
+  },
+  {
+    heading: 'Resources',
+    links: ['Method', 'Security', 'Status', 'Download', 'Community'],
+  },
+]
+
+const headingStyle = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'fg.subtle',
+  mb: '3',
+})
+
+const linkStyle = css({
+  display: 'block',
+  py: '1',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  transitionProperty: 'color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+---
+
+<footer
+  class={css({
+    borderTopWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    mt: '24',
+  })}
+>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(3, 1fr)' },
+      gap: '10',
+      w: '100%',
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: '16',
+    })}
+  >
+    <div>
+      <a
+        href="/"
+        class={css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '2',
+          fontWeight: 'semibold',
+          color: 'fg.default',
+          mb: '3',
+        })}
+      >
+        <LogoMark size={18} />
+        <span>Placeholder</span>
+      </a>
+      <p class={css({ fontSize: 'sm', color: 'fg.subtle', maxW: '260px', lineHeight: 'relaxed' })}>
+        A Linear-style design system built on Astro, Solid, and Panda CSS. All content on this
+        site is placeholder text.
+      </p>
+    </div>
+
+    {
+      columns.map((column) => (
+        <div>
+          <h3 class={headingStyle}>{column.heading}</h3>
+          <ul class={css({ listStyle: 'none', m: '0', p: '0' })}>
+            {column.links.map((link) => (
+              <li>
+                <a class={linkStyle} href="/replicas/home">
+                  {link}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </div>
+
+  <div
+    class={css({
+      borderTopWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border.subtle',
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '3',
+      w: '100%',
+      maxW: '1200px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: '5',
+      fontSize: 'xs',
+      color: 'fg.subtle',
+    })}
+  >
+    <span>© 2026 Placeholder. Not affiliated with any real product.</span>
+    <span>Placeholder content throughout.</span>
+  </div>
+</footer>

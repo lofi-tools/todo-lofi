@@ -1,0 +1,59 @@
+/**
+ * Global element styling. Consumes semantic tokens only, so the light theme
+ * is a token swap (spec §4.4).
+ *
+ * In the `base` cascade layer, below `utilities`, so utility classes always
+ * win over element defaults.
+ */
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  html[data-theme='light'] {
+    color-scheme: light;
+  }
+
+  body {
+    background-color: var(--colors-canvas);
+    color: var(--colors-fg-default);
+    font-family: var(--fonts-sans);
+    font-size: var(--font-sizes-md);
+    line-height: 1.5;
+  }
+
+  ::selection {
+    background-color: var(--colors-accent-subtle);
+    color: var(--colors-fg-default);
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--shadows-focus);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-weight: var(--font-weights-semibold);
+    letter-spacing: -0.02em;
+  }
+
+  /**
+   * Motion is CSS-only in v1 (decision #25); when a user asks for reduced
+   * motion, every transition and animation collapses.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

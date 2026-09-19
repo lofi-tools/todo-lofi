@@ -1,0 +1,107 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Check } from '../../../icons'
+
+interface Props {
+  tier: string
+  price: string
+  cadence?: string
+  note?: string
+  features: string[]
+  cta: string
+  href?: string
+  featured?: boolean
+}
+
+const {
+  tier,
+  price,
+  cadence = '',
+  note,
+  features,
+  cta,
+  href = '/replicas/pricing',
+  featured = false,
+} = Astro.props
+---
+
+<div
+  class={css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5',
+    p: '6',
+    borderRadius: 'lg',
+    borderWidth: featured ? 'thick' : 'hairline',
+    borderStyle: 'solid',
+    borderColor: featured ? 'accent' : 'border',
+    bg: 'surface.subtle',
+    height: 'full',
+  })}
+>
+  <div>
+    <div class={css({ display: 'flex', alignItems: 'center', gap: '2' })}>
+      <h3 class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>{tier}</h3>
+      {
+        featured && (
+          <span
+            class={css({
+              fontSize: '2xs',
+              fontWeight: 'semibold',
+              color: 'accent.text',
+              bg: 'accent.subtle',
+              px: '2',
+              h: '5',
+              display: 'inline-flex',
+              alignItems: 'center',
+              borderRadius: 'full',
+            })}
+          >
+            Popular
+          </span>
+        )
+      }
+    </div>
+    <div class={css({ display: 'flex', alignItems: 'baseline', gap: '1.5', mt: '3' })}>
+      <span class={css({ fontSize: '5xl', fontWeight: 'semibold', color: 'fg.default' })}>{price}</span>
+      {cadence && <span class={css({ fontSize: 'sm', color: 'fg.muted' })}>{cadence}</span>}
+    </div>
+    {note && <p class={css({ fontSize: 'xs', color: 'fg.subtle', mt: '2' })}>{note}</p>}
+  </div>
+
+  <a
+    href={href}
+    class={css({
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      h: '10',
+      px: '5',
+      borderRadius: 'sm',
+      fontSize: 'md',
+      fontWeight: 'medium',
+      bg: featured ? 'accent' : 'surface.elevated',
+      color: featured ? 'fg.onAccent' : 'fg.default',
+      borderWidth: featured ? '0' : 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border',
+      _hover: { bg: featured ? 'accent.hover' : 'surface.hover' },
+      _focusVisible: { outline: 'none', boxShadow: 'focus' },
+    })}
+  >
+    {cta}
+  </a>
+
+  <ul class={css({ display: 'flex', flexDirection: 'column', gap: '2.5', listStyle: 'none', p: '0' })}>
+    {
+      features.map((feature) => (
+        <li class={css({ display: 'flex', alignItems: 'flex-start', gap: '2.5', fontSize: 'sm', color: 'fg.muted' })}>
+          <span class={css({ color: 'accent.text', mt: '0.5', flexShrink: '0' })}>
+            <Check size={14} />
+          </span>
+          {feature}
+        </li>
+      ))
+    }
+  </ul>
+</div>

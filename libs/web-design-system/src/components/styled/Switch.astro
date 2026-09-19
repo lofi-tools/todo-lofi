@@ -1,0 +1,14 @@
+---
+import { Switch } from './interactive'
+
+interface Props {
+  label: string
+  defaultChecked?: boolean
+  disabled?: boolean
+  class?: string
+}
+
+const { label, defaultChecked, disabled, class: className } = Astro.props
+---
+
+<Switch label={label} defaultChecked={defaultChecked} disabled={disabled} class={className} client:only="solid" />

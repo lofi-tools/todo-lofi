@@ -1,0 +1,31 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../../layouts/Base.astro'
+import PricingCard from 'web-design-system/astro/marketing/PricingCard.astro'
+import PricingComparisonTable from 'web-design-system/astro/marketing/PricingComparisonTable.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import { pricingPlans, comparisonColumns, comparisonSections } from '../../data/placeholder'
+---
+
+<Base title="Pricing" description="A Linear-style pricing replica with placeholder content.">
+  <section class={css({ pt: { base: '16', md: '20' }, pb: { base: '10', md: '12' } })}>
+    <div class={css({ maxW: '720px', mx: 'auto', px: { base: '5', md: '8' }, textAlign: 'center' })}>
+      <h1 class={css({ textStyle: 'display', color: 'fg.default' })}>Pricing</h1>
+      <p class={css({ textStyle: 'body.lg', color: 'fg.muted', mt: '4' })}>
+        Use it free with your whole team. Upgrade for unlimited issues and additional controls.
+      </p>
+    </div>
+  </section>
+
+  <section class={css({ pb: { base: '12', md: '16' } })}>
+    <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' }, gap: '4', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' }, alignItems: 'stretch' })}>
+      {pricingPlans.map((plan) => <PricingCard {...plan} />)}
+    </div>
+  </section>
+
+  <section class={css({ py: { base: '10', md: '16' } })}>
+    <PricingComparisonTable columns={comparisonColumns} sections={comparisonSections} />
+  </section>
+
+  <CTASection title="Get started today" primaryCta={{ label: 'Get started', href: '/replicas/pricing' }} />
+</Base>

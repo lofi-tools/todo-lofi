@@ -1,0 +1,122 @@
+---
+import { css } from 'styled-system/css'
+import Gallery from '../layouts/Gallery.astro'
+import Demo from '../components/Demo.astro'
+import { Container, Button, Badge, Card } from 'web-design-system/components'
+
+// Link styled as a secondary button — an anchor, not a button wrapping one,
+// so there is no nested interactive element.
+const linkButton = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  h: '9',
+  px: '4',
+  borderRadius: 'sm',
+  bg: 'surface.elevated',
+  color: 'fg.default',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  fontSize: 'md',
+  fontWeight: 'medium',
+  _hover: { bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const layers = [
+  {
+    name: 'Tokens',
+    detail: 'Colors, type, spacing, radii, shadows, motion — extracted from linear.app and hand-normalized.',
+  },
+  {
+    name: 'Panda preset',
+    detail: 'The shared preset both this site and the design system generate CSS from, so class names line up.',
+  },
+  {
+    name: 'Headless',
+    detail: 'Ark UI Solid primitives: unstyled behavior, keyboard handling, and ARIA.',
+  },
+  {
+    name: 'Styled',
+    detail: 'Panda recipes and patterns over the headless primitives, with .astro wrappers.',
+  },
+]
+---
+
+<Gallery
+  title="Placeholder Design System"
+  description="A Linear-style design system built on Astro, SolidJS, Panda CSS, and Ark UI. All content is placeholder text."
+>
+  <section class={css({ display: 'flex', flexDirection: 'column', gap: '3', mb: '10' })}>
+    <h2 class={css({ textStyle: 'h3', color: 'fg.default' })}>Layers</h2>
+    <ol class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+      {
+        layers.map((layer, index) => (
+          <li
+            class={css({
+              p: '5',
+              borderRadius: 'lg',
+              borderWidth: 'hairline',
+              borderStyle: 'solid',
+              borderColor: 'border',
+              bg: 'surface.subtle',
+            })}
+          >
+            <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '2' })}>
+              <span
+                class={css({
+                  display: 'grid',
+                  placeItems: 'center',
+                  w: '6',
+                  h: '6',
+                  borderRadius: 'full',
+                  bg: 'accent.subtle',
+                  color: 'accent.text',
+                  fontSize: '2xs',
+                  fontWeight: 'semibold',
+                })}
+              >
+                {index + 1}
+              </span>
+              <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>
+                {layer.name}
+              </span>
+            </div>
+            <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>{layer.detail}</p>
+          </li>
+        ))
+      }
+    </ol>
+  </section>
+
+  <Demo
+    title="Everything composed together"
+    layer="astro"
+    importPath="web-design-system/components"
+    notes="Button, Badge, Card, Container"
+  >
+    <Container size="lg" class={css({ px: '0' })}>
+      <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '3', alignItems: 'center', mb: '5' })}>
+        <Button variant="primary">Get started</Button>
+        <Button variant="secondary">Contact sales</Button>
+        <Button variant="ghost">Log in</Button>
+        <Badge tone="accent">Beta</Badge>
+        <Badge tone="success">GA</Badge>
+      </div>
+      <Card padding="md">
+        <h3 class={css({ fontSize: 'lg', fontWeight: 'semibold', color: 'fg.default' })}>
+          A card from the design system
+        </h3>
+        <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', lineHeight: 'relaxed' })}>
+          Every visual on this site comes from the package under
+          <code class={css({ fontFamily: 'mono', fontSize: 'xs', ml: '1' })}>libs/web-design-system</code>.
+        </p>
+      </Card>
+    </Container>
+  </Demo>
+
+  <div class={css({ display: 'flex', flexWrap: 'wrap', gap: '3' })}>
+    <a href="/foundations" class={linkButton}>Foundations →</a>
+    <a href="/replicas/home" class={linkButton}>See the home replica →</a>
+  </div>
+</Gallery>

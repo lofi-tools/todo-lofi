@@ -1,0 +1,61 @@
+---
+import { css } from '../../../../styled-system/css'
+import { Circle, CircleDot, CircleHalf, Check } from '../../../icons'
+import IssueRow from './IssueRow.astro'
+import type { KanbanColumn } from './types'
+
+interface Props {
+  columns: KanbanColumn[]
+  compact?: boolean
+}
+
+const { columns, compact = false } = Astro.props
+
+const statusIcon = {
+  backlog: Circle,
+  todo: Circle,
+  'in-progress': CircleHalf,
+  done: CircleDot,
+} as const
+---
+
+<div
+  class={css({
+    display: 'grid',
+    gridTemplateColumns: { base: '1fr', md: `repeat(${Math.min(columns.length, 4)}, minmax(0, 1fr))` },
+    gap: '3',
+    p: compact ? '3' : '4',
+    bg: 'canvas',
+  })}
+>
+  {
+    columns.map((column) => {
+      const Icon = statusIcon[column.status]
+      return (
+        <section class={css({ display: 'flex', flexDirection: 'column', gap: '2', minW: '0' })}>
+          <header
+            class={css({
+              display: 'flex',
+              alignItems: 'center',
+              gap: '2',
+              px: '1',
+              py: '1',
+              fontSize: 'xs',
+              fontWeight: 'medium',
+              color: 'fg.muted',
+            })}
+          >
+            <span class={css({ color: 'fg.subtle', display: 'inline-flex' })}>
+              {column.status === 'done' ? <Check size={13} /> : <Icon size={13} />}
+            </span>
+            <span>{column.title}</span>
+            <span class={css({ color: 'fg.subtle' })}>{column.issues.length}</span>
+          </header>
+          {column.issues.map((issue) => (
+            <IssueRow issue={issue} />
+          ))}
+        </section>
+      )
+    })
+  }
+</div>

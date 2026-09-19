@@ -1,0 +1,50 @@
+---
+import { css } from '../../../../styled-system/css'
+
+interface Props {
+  label: string
+}
+
+const { label } = Astro.props
+
+// `badge.*` foregrounds are tuned to clear AA on the tinted backgrounds.
+const palette: Record<string, { fg: string; bg: string }> = {
+  Bug: { fg: 'badge.danger', bg: 'danger.subtle' },
+  Feature: { fg: 'badge.accent', bg: 'accent.subtle' },
+  Improvement: { fg: 'badge.success', bg: 'success.subtle' },
+  Design: { fg: 'badge.accent', bg: 'accent.subtle' },
+  Performance: { fg: 'badge.warning', bg: 'warning.subtle' },
+  AI: { fg: 'badge.info', bg: 'accent.subtle' },
+}
+
+const colors = palette[label] ?? { fg: 'fg.muted', bg: 'surface.hover' }
+---
+
+<span
+  class={css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '1.5',
+    h: '5',
+    px: '2',
+    borderRadius: 'full',
+    fontSize: '2xs',
+    fontWeight: 'medium',
+    whiteSpace: 'nowrap',
+    color: colors.fg,
+    bg: colors.bg,
+  })}
+>
+  <span
+    aria-hidden="true"
+    class={css({
+      w: '1.5',
+      h: '1.5',
+      borderRadius: 'full',
+      bg: 'currentColor',
+      flexShrink: '0',
+    })}
+  >
+  </span>
+  {label}
+</span>
