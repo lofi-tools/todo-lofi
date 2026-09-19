@@ -38,7 +38,16 @@ impl StoreLock {
         // await, so a caller cancelled while queued cannot leave the count
         // behind and make every later pass yield on sight.
         let _queued = StoreWait(self);
-        self.inner.lock().await
+        // TEMPORARY DIAGNOSTIC (see `watch_for_foreground_hangs`): with
+        // `TODO_LOFI_WATCH_HANGS` set, a long wait for the store is logged with
+        // the caller that waited, which is what makes a click look stalled.
+        let wait_start = std::time::Instant::now();
+        let guard = self.inner.lock().await;
+        let waited = wait_start.elapsed();
+        if waited >= STORE_LOCK_WARN && watch_hangs() {
+            tracing::warn!(target: "hang", "queued {:?} for the store lock", waited);
+        }
+        guard
     }
 
     /// Whether somebody is queued for the store right now.
@@ -57,6 +66,17 @@ impl Drop for StoreWait<'_> {
             .waiting
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// TEMPORARY DIAGNOSTIC: the wait for the store lock that is worth logging
+/// while `TODO_LOFI_WATCH_HANGS` is set. A click's store calls should never
+/// queue this long. Remove with the rest of the hang instrumentation.
+const STORE_LOCK_WARN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether the temporary hang instrumentation is on.
+pub(crate) fn watch_hangs() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("TODO_LOFI_WATCH_HANGS").is_some())
 }
 
 /// One try plus three retries for a transient GitHub failure (decision 22).

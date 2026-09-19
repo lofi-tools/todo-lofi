@@ -33,7 +33,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::text::TextView;
+use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
 use crate::theme::{
@@ -74,17 +74,42 @@ const MONO_FONT: &str = "ui-monospace";
 const PROMPT_FONT_SIZE: f32 = 12.;
 const REPLY_FONT_SIZE: f32 = 13.;
 const TOOL_CALL_FONT_SIZE: f32 = 13.;
+/// How long the first Escape keeps the cancel hint up. Cancelling drops the
+/// queue, so it takes a second, deliberate press.
+const ESC_CANCEL_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
 
-actions!(agent_pane, [SlashUp, SlashDown, DismissOverlay]);
+actions!(agent_pane, [SlashUp, SlashDown]);
 
 /// Register the pane's key bindings. Called once at startup, before the first
 /// pane is created; the bindings only match while the pane has focus.
+///
+/// Escape is deliberately not bound here: the window-wide keystroke observer
+/// in `Layout` owns it (see [`AgentPane::on_escape`]), so it behaves the same
+/// wherever focus sits inside the pane.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", SlashUp, Some(AGENT_PANE_CONTEXT)),
         KeyBinding::new("down", SlashDown, Some(AGENT_PANE_CONTEXT)),
-        KeyBinding::new("escape", DismissOverlay, Some(AGENT_PANE_CONTEXT)),
     ]);
+}
+
+/// The markdown style a transcript message renders with: the row's own body
+/// size, with headings a single step above it. The renderer's default scales
+/// headings from a 14px base, so an H1 lands at 28px — more than twice the
+/// message it belongs to.
+fn message_markdown_style(body_size: f32) -> TextViewStyle {
+    TextViewStyle::default()
+        .heading_font_size(move |level, _| match level {
+            1 => px(body_size + 3.),
+            2 => px(body_size + 2.),
+            3 => px(body_size + 1.),
+            // H4-H6 already read as emphasis: keeping them at the body size is
+            // what makes a bulleted or bold message uniform.
+            _ => px(body_size),
+        })
+        // A fenced block starts from the theme's 13px mono step, which is a
+        // third size again next to a 12px message; it reads as body text.
+        .code_block(gpui::StyleRefinement::default().text_size(px(body_size)))
 }
 
 /// The checkout an active coding run works in, as the pane points at it: the
@@ -405,7 +430,13 @@ pub struct AgentPane {
     overlay_cursor: usize,
     /// Up/Down, taken before the keymap so the open dropdown's arrows move
     /// its highlight even while the model filter field has focus.
-    _arrow_interceptor: Subscription,
+    _key_interceptor: Subscription,
+    /// The first Escape armed a turn cancellation: the hint is up, and a
+    /// second Escape inside the window stops the turn.
+    esc_armed: bool,
+    /// The timer that takes the hint back down. Held so the work is not
+    /// cancelled by being dropped, and dropped to end the window early.
+    _esc_timer: Option<Task<()>>,
 }
 
 impl AgentPane {
@@ -440,9 +471,11 @@ impl AgentPane {
             },
         );
         let pane = cx.weak_entity();
-        let _arrow_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+        let _key_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let handled = pane
-                .update(cx, |pane, cx| pane.on_arrow_key(&event.keystroke, cx))
+                .update(cx, |pane, cx| {
+                    pane.on_intercepted_key(&event.keystroke, window, cx)
+                })
                 .unwrap_or(false);
             if handled {
                 cx.stop_propagation();
@@ -469,7 +502,9 @@ impl AgentPane {
                 px(OVERLAY_ROW_HEIGHT * OVERLAY_MAX_ROWS as f32),
             ),
             overlay_cursor: 0,
-            _arrow_interceptor,
+            _key_interceptor,
+            esc_armed: false,
+            _esc_timer: None,
         }
     }
 
@@ -531,6 +566,60 @@ impl AgentPane {
             return true;
         }
         false
+    }
+
+    /// Escape inside the pane. An open dropdown closes first, whatever else is
+    /// running; past that, a running turn needs a second press to be stopped,
+    /// with the hint up in between (see [`Self::arm_escape_cancel`]).
+    ///
+    /// Returns whether the pane took the key, so the window-wide handler in
+    /// `Layout` only falls through to deselecting when the pane is idle or the
+    /// reader is somewhere else.
+    pub fn on_escape(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if self.dismiss_overlay(cx) {
+            return true;
+        }
+        if !self.is_busy() || !self.focus_handle.contains_focused(window, cx) {
+            return false;
+        }
+        if self.take_armed_escape() {
+            self.stop(cx);
+        } else {
+            self.arm_escape_cancel(cx);
+        }
+        true
+    }
+
+    /// Put the cancel hint up for [`ESC_CANCEL_WINDOW`], after which Escape
+    /// goes back to meaning what it means everywhere else.
+    fn arm_escape_cancel(&mut self, cx: &mut Context<Self>) {
+        self._esc_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ESC_CANCEL_WINDOW).await;
+            this.update(cx, |pane, cx| {
+                if pane.esc_armed {
+                    pane.esc_armed = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        self.esc_armed = true;
+        cx.notify();
+    }
+
+    /// Take the armed cancellation, ending its window. `false` when the hint
+    /// was not up, so the caller arms instead of cancelling.
+    fn take_armed_escape(&mut self) -> bool {
+        let armed = self.esc_armed;
+        self.disarm_escape();
+        armed
+    }
+
+    /// End the hint's window early: the turn stopped before its second Escape
+    /// arrived, so there is nothing left to confirm.
+    fn disarm_escape(&mut self) {
+        self._esc_timer = None;
+        self.esc_armed = false;
     }
 
     /// Point the pane at the selected project, resolving (or re-resolving)
@@ -964,6 +1053,8 @@ impl AgentPane {
         result: anyhow::Result<String>,
         cx: &mut Context<Self>,
     ) {
+        // A turn that ended on its own takes the cancel hint with it.
+        self.disarm_escape();
         let next = {
             let Some(entry) = self.projects.get_mut(tag_name) else {
                 return;
@@ -991,6 +1082,7 @@ impl AgentPane {
 
     /// Stop the streaming turn and drop the queue, reporting what was lost.
     fn stop(&mut self, cx: &mut Context<Self>) {
+        self.disarm_escape();
         let Some(tag_name) = self.active.clone() else {
             return;
         };
@@ -1676,13 +1768,32 @@ impl AgentPane {
         }
     }
 
-    /// Handle an intercepted Up/Down: while a dropdown is open the arrows
-    /// move its highlight, wherever focus is. The model dropdown focuses its
-    /// filter field, and a focused `Input` binds `up`/`down` to its own caret
-    /// actions, which outrank anything the pane could bind on an ancestor —
-    /// so the key is caught here, ahead of the keymap. Returns whether the key
-    /// was taken.
-    fn on_arrow_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
+    /// Handle a key taken ahead of the keymap. Two do: Ctrl-C, which
+    /// interrupts the running turn the way a terminal does, and Up/Down while
+    /// a dropdown is open, which move its highlight wherever focus is. A
+    /// focused `Input` binds all of them itself — the arrows to its caret and
+    /// Ctrl-C to copy — and a binding on the element outranks one the pane
+    /// could put on an ancestor, so they are caught here instead. Returns
+    /// whether the key was taken.
+    fn on_intercepted_key(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // The interceptor is window-wide, so the pane only answers for keys
+        // pressed while it holds the focus, and only while a turn is running:
+        // an idle pane leaves Ctrl-C to the prompt box's copy.
+        if keystroke.key == "c" && keystroke.modifiers.control {
+            if self.is_busy()
+                && self.focus_handle.contains_focused(window, cx)
+                && !self.prompt_selection_is_copyable(window, cx)
+            {
+                self.stop(cx);
+                return true;
+            }
+            return false;
+        }
         if self.overlay.is_none() || keystroke.modifiers.modified() {
             return false;
         }
@@ -1693,6 +1804,15 @@ impl AgentPane {
         };
         self.move_overlay_cursor(delta, cx);
         true
+    }
+
+    /// Whether Ctrl-C in the prompt box means copy right now: the box holds
+    /// the focus and a range of it is selected. A selection is there to be
+    /// copied, so the turn keeps running and the shortcut does what the
+    /// platform says it does.
+    fn prompt_selection_is_copyable(&self, window: &Window, cx: &App) -> bool {
+        let prompt = self.prompt.read(cx);
+        !prompt.selected_range().is_empty() && prompt.focus_handle(cx).is_focused(window)
     }
 
     fn move_overlay_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -2091,6 +2211,10 @@ impl AgentPane {
         .scrollbar(true)
         .jump_button(true)
         .with_jump_button_label("Jump to latest")
+        // The scroller's default row gap is 32px, which reads as a paragraph
+        // break between every message. Rows carry their own padding, so a
+        // small explicit gap keeps a turn's messages together (12px total).
+        .with_row_style(gpui::StyleRefinement::default().pb(px(4.)))
         .into_any_element()
     }
 
@@ -2120,7 +2244,8 @@ impl AgentPane {
                         .rounded_lg()
                         .child(
                             TextView::markdown(format!("user-{entry_id}"), text.clone())
-                                .text_size(px(PROMPT_FONT_SIZE)),
+                                .text_size(px(PROMPT_FONT_SIZE))
+                                .style(message_markdown_style(PROMPT_FONT_SIZE)),
                         ),
                 )
                 .into_any_element(),
@@ -2152,7 +2277,8 @@ impl AgentPane {
                             .w_full()
                             .child(
                                 TextView::markdown(format!("agent-{entry_id}"), text.clone())
-                                    .text_size(px(REPLY_FONT_SIZE)),
+                                    .text_size(px(REPLY_FONT_SIZE))
+                                    .style(message_markdown_style(REPLY_FONT_SIZE)),
                             ),
                     )
                     .into_any_element()
@@ -2227,10 +2353,13 @@ impl AgentPane {
                         div()
                             .text_xs()
                             .text_color(rgb(TEXT_MUTED))
-                            .child(TextView::markdown(
-                                format!("thought-{entry_id}"),
-                                text.clone(),
-                            )),
+                            .child(
+                                TextView::markdown(
+                                    format!("thought-{entry_id}"),
+                                    text.clone(),
+                                )
+                                .style(message_markdown_style(PROMPT_FONT_SIZE)),
+                            ),
                     );
                 }
                 element.into_any_element()
@@ -2597,14 +2726,9 @@ impl AgentPane {
                     this.move_slash(1, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &DismissOverlay, _, cx| {
-                if this.dismiss_overlay(cx) {
-                    cx.stop_propagation();
-                }
-            }))
             // The live "something is happening" line, so a slow first token
             // never looks like a dead pane.
-            .when_some(self.render_activity(), |this, activity| {
+            .when_some(self.render_activity(cx), |this, activity| {
                 this.child(activity)
             })
             .child(self.render_controls(busy, can_send, queue_len, cx))
@@ -2653,14 +2777,20 @@ impl AgentPane {
     /// The turn's live status: a spinner plus what the agent is doing right
     /// now, so a slow first token never looks like a dead pane. `None` when the
     /// pane is idle, so holding still costs nothing.
-    fn render_activity(&self) -> Option<AnyElement> {
+    ///
+    /// While the Escape cancellation is armed the same line carries the hint,
+    /// and clicking it is the mouse's second Escape.
+    fn render_activity(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.is_busy() {
             return None;
         }
         let entry = self.active_entry()?;
-        // The turn paused on the user rather than on the agent: no spinner,
-        // because nothing is running until the card is answered.
-        let (label, spinning) = if entry.transcript.has_pending_permission() {
+        // An armed Escape takes the line over for its one second: it is the
+        // answer to "did that do anything?", and the activity it replaces is
+        // still there when the hint goes.
+        let (label, spinning) = if self.esc_armed {
+            ("again to cancel the conversation".to_string(), false)
+        } else if entry.transcript.has_pending_permission() {
             ("Waiting for your approval".to_string(), false)
         } else {
             let label = match entry.transcript.activity() {
@@ -2672,8 +2802,25 @@ impl AgentPane {
             };
             (label, true)
         };
-        let mut row = div().flex_none().h_flex().items_center().gap_2().px_1();
-        row = row.child(if spinning {
+        let mut row = div()
+            .id("agent-cancel-hint")
+            .flex_none()
+            .h_flex()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .rounded_md()
+            .when(self.esc_armed, |this| {
+                this.debug_selector(|| "agent-cancel-hint".to_string())
+                    .cursor_pointer()
+                    .hover(|this| this.bg(rgb(PANEL_HOVER)))
+                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+            });
+        row = row.child(if self.esc_armed {
+            // The hint is an instruction, so the key it names is drawn as a
+            // key rather than as just another word.
+            keycap("Esc")
+        } else if spinning {
             gpui_component::spinner::Spinner::new()
                 .with_size(px(12.))
                 .color(rgb(TEXT_MUTED).into())
@@ -2681,8 +2828,9 @@ impl AgentPane {
         } else {
             div().text_xs().text_color(rgb(TEXT_FAINT)).child("●").into_any_element()
         });
+        let label_color = if self.esc_armed { TEXT_STRONG } else { TEXT_MUTED };
         Some(
-            row.child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(label))
+            row.child(div().text_xs().text_color(rgb(label_color)).child(label))
                 .into_any_element(),
         )
     }
@@ -2811,8 +2959,12 @@ impl AgentPane {
                 })),
             )
             .child(if busy {
-                icon_button("agent-stop", IconName::Pause, "Stop the turn")
-                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                icon_button(
+                    "agent-stop",
+                    IconName::Pause,
+                    "Stop the turn · Ctrl-C or Esc twice",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
                     .into_any_element()
             } else {
                 Button::new("agent-send")
@@ -3094,6 +3246,27 @@ fn icon(name: IconName, color: u32) -> AnyElement {
         .flex_none()
         .text_color(rgb(color))
         .child(name)
+        .into_any_element()
+}
+
+/// A keyboard key as a small chip, for hints that name the key to press.
+fn keycap(key: &str) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(16.))
+        .min_w(px(20.))
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(CARD_BG))
+        .border_1()
+        .border_color(rgb(HAIRLINE))
+        .rounded_sm()
+        .font_family(MONO_FONT)
+        .text_size(px(10.))
+        .text_color(rgb(TEXT_STRONG))
+        .child(key.to_string())
         .into_any_element()
 }
 
@@ -3635,6 +3808,10 @@ impl Render for AgentPane {
         let prompt = self.render_prompt(window, cx);
         div()
             .id("agent-pane")
+            // Tracking the pane's own handle is what lets it ask whether a
+            // key (Ctrl-C) was pressed with the focus anywhere inside it —
+            // the prompt box, the transcript, or one of its buttons.
+            .track_focus(&self.focus_handle)
             .size_full()
             .min_h_0()
             .flex()
@@ -3747,6 +3924,238 @@ mod tests {
             task_context_text("Only a title", Some("   "), &[]),
             "Task: Only a title"
         );
+    }
+
+    /// A message renders at one size: headings take a single step above the
+    /// body, and fenced code blocks are body text rather than the theme's 13px
+    /// mono step.
+    #[test]
+    fn message_markdown_keeps_its_sizes_at_the_body_step() {
+        let style = message_markdown_style(PROMPT_FONT_SIZE);
+        let heading = style
+            .heading_font_size
+            .as_ref()
+            .expect("the pane sizes headings itself");
+        let sizes: Vec<f32> = (1..=6)
+            .map(|level| f32::from(heading(level, px(14.))))
+            .collect();
+        assert_eq!(sizes, vec![15., 14., 13., 12., 12., 12.]);
+        assert_eq!(
+            style.code_block.text.font_size,
+            Some(gpui::AbsoluteLength::Pixels(px(PROMPT_FONT_SIZE))),
+            "a fenced block renders at the message's own size"
+        );
+    }
+
+    /// A pane entry with a running turn and one queued message: stopping it is
+    /// observable through the queue empty and the notice left behind.
+    fn busy_entry_with_a_queued_message() -> ProjectEntry {
+        let mut entry = project_entry(PROJECT);
+        entry.state = PaneState::Failed {
+            title: "Agent exited".to_string(),
+            detail: String::new(),
+        };
+        entry.busy = true;
+        entry.queue.push_back("queued".to_string());
+        entry
+    }
+
+    /// A Ctrl-C keystroke, as the platform reports one.
+    fn ctrl_c() -> gpui::Keystroke {
+        gpui::Keystroke {
+            key: "c".to_string(),
+            key_char: Some("c".to_string()),
+            modifiers: gpui::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The notice `stop` leaves when it drops queued messages.
+    fn stop_notice(entry: &ProjectEntry) -> Option<String> {
+        (0..entry.transcript.len()).find_map(|index| match &entry.transcript.entry(index)?.kind {
+            EntryKind::Notice { text, .. } if text.contains("Stop cleared") => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    /// Escape is a two-step cancel while a turn runs: the first press puts the
+    /// hint up and the second, inside the window, stops the turn. An idle pane
+    /// takes no Escape, so the window-wide deselect still works.
+    #[gpui::test]
+    fn escape_arms_and_then_cancels_a_running_turn(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("escape-cancel"), window, cx);
+            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The pane holds the focus, as it does once the reader has clicked
+        // into the conversation.
+        let focus = cx.update(|_, cx| pane.read(cx).focus_handle.clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let handled = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.on_escape(window, cx))
+        });
+        assert!(handled, "the running turn takes the first Escape");
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert!(pane.esc_armed, "the hint is up");
+            assert!(pane._esc_timer.is_some(), "the hint expires on its own");
+            assert_eq!(pane.queue_len(), 1, "nothing is cancelled yet");
+        });
+
+        let handled = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.on_escape(window, cx))
+        });
+        assert!(handled, "the second Escape is the cancel");
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert!(!pane.esc_armed, "the hint goes as the turn stops");
+            assert_eq!(pane.queue_len(), 0, "the queue is dropped with the turn");
+            let entry = pane.projects.get(PROJECT).expect("the project entry");
+            assert_eq!(
+                stop_notice(entry).as_deref(),
+                Some("Stop cleared 1 queued message(s)"),
+                "stopping reports what it dropped"
+            );
+        });
+
+        // With nothing running, Escape belongs to the window again.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.projects.get_mut(PROJECT).expect("entry").busy = false;
+                assert!(!pane.on_escape(window, cx), "an idle pane takes no Escape");
+            });
+        });
+    }
+
+    /// Ctrl-C interrupts a running turn from anywhere inside the pane — here
+    /// from the model picker's filter field, which binds Ctrl-C to copy.
+    #[gpui::test]
+    fn ctrl_c_interrupts_the_running_turn_from_inside_the_pane(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("ctrl-c"), window, cx);
+            let model: SessionConfigOption = serde_json::from_value(serde_json::json!({
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "a",
+                "options": [{"value": "a", "name": "A"}]
+            }))
+            .expect("model option");
+            let mut entry = busy_entry_with_a_queued_message();
+            entry.transcript.seed_controls(None, vec![model]);
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane.overlay = Some(Overlay::Model);
+            pane.overlay_query
+                .update(cx, |state, cx| state.focus(window, cx));
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let interrupt = ctrl_c();
+        let handled = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+        });
+        assert!(handled, "Ctrl-C interrupts from inside the pane");
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.queue_len(), 0, "the turn's queue is dropped");
+            let entry = pane.projects.get(PROJECT).expect("the project entry");
+            assert!(stop_notice(entry).is_some(), "the interrupt reports itself");
+        });
+
+        // Idle, Ctrl-C is the filter field's copy again.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.projects.get_mut(PROJECT).expect("entry").busy = false;
+                assert!(!pane.on_intercepted_key(&interrupt, window, cx));
+            });
+        });
+    }
+
+    /// The Ctrl-C above is an interrupt only while there is nothing to copy:
+    /// a selection in the prompt box keeps the platform meaning of the key.
+    #[gpui::test]
+    fn ctrl_c_in_the_prompt_box_copies_a_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("ctrl-c-copy"), window, cx);
+            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        // Focus the prompt box with everything in it selected, as a drag or
+        // Cmd-A leaves it.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.prompt.update(cx, |state, cx| {
+                    state.set_value("copy me", window, cx);
+                    state.select_all(window, cx);
+                    state.focus(window, cx);
+                });
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let interrupt = ctrl_c();
+        let handled = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+        });
+        assert!(!handled, "Ctrl-C with a selection is the box's copy");
+        cx.update(|_, cx| {
+            assert_eq!(pane.read(cx).queue_len(), 1, "the turn keeps running");
+        });
+
+        // The same key with nothing selected is the interrupt again.
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.prompt
+                    .update(cx, |state, cx| state.set_value("", window, cx));
+            });
+        });
+        let handled = cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+        });
+        assert!(handled, "an empty prompt box is not a selection to copy");
+        cx.update(|_, cx| {
+            assert_eq!(pane.read(cx).queue_len(), 0, "the turn is interrupted");
+        });
+    }
+
+    /// Clicking the armed hint is the mouse's second Escape: it cancels the
+    /// turn without waiting for the next press.
+    #[gpui::test]
+    fn clicking_the_cancel_hint_stops_the_turn(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("hint-click"), window, cx);
+            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.active = Some(PROJECT.to_string());
+            pane.esc_armed = true;
+            pane
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let hint = cx
+            .debug_bounds("agent-cancel-hint")
+            .expect("the hint is on screen while armed");
+        cx.simulate_click(hint.center(), gpui::Modifiers::none());
+
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.queue_len(), 0, "the click stopped the turn");
+            assert!(!pane.esc_armed, "the hint is down again");
+        });
     }
 
     /// opencode's session mode arrives as a `mode`-category config option

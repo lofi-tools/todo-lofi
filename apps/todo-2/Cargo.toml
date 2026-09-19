@@ -25,7 +25,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
-gpui = { package = "gpui-pre", version = "0.3.4" }
+# TEMPORARY: the `profiler` feature exposes gpui's foreground hang detector,
+# used by `watch_for_foreground_hangs` while diagnosing UI stalls.
+gpui = { package = "gpui-pre", version = "0.3.4", features = ["profiler"] }
 gpui_platform = { package = "gpui-pre-platform", version = "0.3.4", features = [
   "font-kit",
 ] }

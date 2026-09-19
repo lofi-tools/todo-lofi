@@ -390,6 +390,12 @@ input — the same technique `main.rs` already documents for the travel popover.
   prompt box, `HAIRLINE` for every 1px border.
 - Spacing: pane padding `p_3`; transcript row gap `12px`; tool-call card padding `p_2`;
   radius `rounded_md` for rows, `rounded_lg` for cards and the prompt box.
+- Markdown inside a message renders with `message_markdown_style(body)`: headings are resolved
+  from the row's own body size (H1 = body + 3px, H2 = +2px, H3 = +1px, H4–H6 = body) instead of
+  the component default's 14px base, which puts an H1 at 28px next to 12px body text. Bullets,
+  emphasis and links inherit the body size already, and the `code_block` refinement pins fenced
+  blocks to it too (the theme's mono step is 13px, a third size next to a 12px message). Inline
+  code keeps the renderer's 0.875× mono scale, which is not configurable from the style.
 - Typography: markdown/agent text at the gpui-component default size; mono (`ui-monospace`,
   `SF Mono`, `Menlo`, `monospace`) for arguments, diffs and terminal output at a size one step
   smaller; notices `text_xs`.
@@ -405,8 +411,18 @@ input — the same technique `main.rs` already documents for the travel popover.
   its own focus) → model/mode chips → auto-approve toggle → attach → textarea → Send/Stop.
 - Opening the pane puts focus in the textarea (deferred one frame if the element is not in the
   focus tree yet — the project picker needed `window.on_next_frame` for exactly this).
-- `escape`: closes the slash dropdown first; otherwise does not steal Escape from the window-wide
-  deselect observer in `main.rs` — the pane must not swallow it when nothing pane-local is open.
+- `escape`: closes a dropdown first. While a turn is running **and the pane holds the focus**, the
+  next Escape arms the cancellation — the activity row shows an `Esc` keycap chip followed by
+  "again to cancel the conversation" for one second, and is clickable for the same cancel — and a
+  second Escape inside that window calls Stop. An idle pane,
+  or one that does not hold the focus, returns the key to the window-wide deselect observer in
+  `main.rs`. Escape is not bound in `AGENT_PANE_CONTEXT`: the observer owns it, so every focus
+  position inside the pane behaves the same.
+- The Stop button's tooltip names both shortcuts: "Stop the turn · Ctrl-C or Esc twice".
+- `ctrl-c`: interrupts the running turn, from anywhere inside the pane (terminal habit). Taken by
+  the pane's keystroke interceptor, ahead of the prompt box's own Ctrl-C → copy. It falls through
+  while no turn is running, and also while the prompt box holds the focus *with a selection in it*
+  — a selection is there to be copied, so the platform meaning of the key wins.
 - Every icon-only control needs a tooltip **and** an accessible label (`.aria_label(…)`, which
   `Textarea` and `Button` both support).
 - Hover states: `bg(rgb(PANEL_HOVER))` on interactive rows, matching `nav_footer_row`; cursor

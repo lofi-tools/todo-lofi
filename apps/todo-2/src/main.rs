@@ -663,14 +663,17 @@ impl Layout {
                     if layout._picker_subscription.is_some() {
                         return;
                     }
-                    // An open dropdown in the agent pane swallows the first
-                    // Escape; the next one deselects as usual.
+                    // The agent pane takes Escape while it holds the focus: an
+                    // open dropdown closes, and a running turn is cancelled on
+                    // a second press (the first puts the hint up). Anything
+                    // else — an idle pane, focus elsewhere — deselects as
+                    // usual.
                     if matches!(
                         layout.right_pane,
                         RightPane::Agent | RightPane::DetailsAndAgent
                     ) && layout
                         .agent_pane
-                        .update(cx, |pane, cx| pane.dismiss_overlay(cx))
+                        .update(cx, |pane, cx| pane.on_escape(window, cx))
                     {
                         return;
                     }
@@ -2213,6 +2216,7 @@ fn main() {
         cx.set_global(notices.sink());
         let notices = notices.into_receiver();
         gpui_tokio::init(cx);
+        watch_for_foreground_hangs(cx);
         gpui_component::init(cx);
         ui_parts::project_picker::init(cx);
         ui_parts::task_picker::init(cx);
@@ -2311,6 +2315,43 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// TEMPORARY DIAGNOSTIC. With `TODO_LOFI_WATCH_HANGS` set, a background thread
+/// drains gpui's foreground journal and warns about every interval that
+/// blocked the UI thread: the event kind, how long it blocked, and — for a
+/// task poll — the source location the task was spawned from. Remove once the
+/// stall it was added for is found. Requires the `profiler` feature on `gpui`.
+fn watch_for_foreground_hangs(cx: &mut App) {
+    if std::env::var_os("TODO_LOFI_WATCH_HANGS").is_none() {
+        return;
+    }
+    // A frame's worth of work is normal; only a stall a user would feel is
+    // worth reporting, and the budget keeps every slightly heavy frame out.
+    const STALL: std::time::Duration = std::time::Duration::from_millis(150);
+    const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+    let journal = cx.foreground_journal();
+    std::thread::Builder::new()
+        .name("hang-watch".to_string())
+        .spawn(move || {
+            let mut detector = gpui::profiler::hang::HangDetector::new(journal, STALL, FRAME_BUDGET);
+            loop {
+                for incident in detector.poll() {
+                    let (start, end) = incident.active_window();
+                    tracing::warn!(
+                        target: "hang",
+                        trigger = ?incident.trigger,
+                        active = ?end.duration_since(start),
+                        "foreground hang"
+                    );
+                    for event in incident.contributors.iter().take(8) {
+                        tracing::warn!(target: "hang", "  {:?} took {:?}", event, event.duration());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        })
+        .ok();
 }
 
 /// Notification cards float in the bottom-right corner: out of the reading
