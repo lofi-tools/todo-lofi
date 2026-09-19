@@ -281,7 +281,9 @@ impl Render for NavBar {
             .bg(rgb(0x1e1e1e))
             .border_r_1()
             .border_color(rgb(0x333333))
-            .p_4()
+            .px_4()
+            .pt_4()
+            .pb_2()
             .v_flex()
             .gap_0p5()
             .child(
@@ -438,7 +440,7 @@ impl Render for NavBar {
                     .flex_none()
                     .border_t_1()
                     .border_color(rgb(0x333333))
-                    .pt_2()
+.pt_3()
                     .v_flex()
                     .gap_0p5()
                     .child(nav_footer_row(
@@ -518,11 +520,9 @@ fn nav_footer_row(
         .items_center()
         .gap_1p5()
         .px_2()
-        // Top padding only, and the full old 4px moved up here: the rows sit
-        // inside the navbar's own `p_4`, so a bottom padding of their own would
-        // stack onto that edge, while the top padding is what holds the
-        // footer's separator above them.
-        .pt_2()
+        // Equal top and bottom padding per row; the rows sit inside the
+        // navbar's own `p_4`, so both edges get the same breathing room.
+        .py_1()
         .rounded_md()
         .text_color(rgb(TEXT_MUTED))
         .bg(if active { rgb(PANEL_HOVER) } else { rgb(PANEL_BG) })
