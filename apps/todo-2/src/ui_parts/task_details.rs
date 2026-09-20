@@ -6024,12 +6024,12 @@ impl Render for TaskDetails {
                             .text_color(rgb(0xe5e5e5))
                             .cursor_pointer()
                             .child(desc.clone())
-                            .on_click(cx.listener(|this, event, window, cx| {
-                                if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 2) {
-                                    this.request_begin_field(EditedField::Description, window, cx);
-                                } else {
-                                    this.maybe_switch_to(EditedField::Description, window, cx);
-                                }
+                            // A single click opens the editor here, unlike the
+                            // title and tags: the description is the pane's
+                            // main body of text, so reading it and editing it
+                            // are the same gesture, matching the empty row.
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_begin_field(EditedField::Description, window, cx);
                             })),
                     );
                 } else {
