@@ -1,0 +1,130 @@
+---
+import { css } from 'styled-system/css'
+import { LogoMark } from 'web-design-system/icons'
+import { docPages, REPO_URL } from '../data/docs'
+
+const columns = [
+  {
+    heading: 'Docs',
+    links: docPages.map((page) => ({ label: page.label, href: page.href })),
+  },
+  {
+    heading: 'Repository',
+    links: [
+      { label: 'Source', href: REPO_URL },
+      { label: 'Issues', href: `${REPO_URL}/issues` },
+      { label: 'README', href: `${REPO_URL}#readme` },
+      { label: 'Specs', href: `${REPO_URL}/tree/main/docs/spec` },
+    ],
+  },
+  {
+    heading: 'Reference',
+    links: [
+      { label: 'Design system', href: `${REPO_URL}/blob/main/libs/web-design-system/DESIGN.md` },
+      { label: 'Showcase', href: `${REPO_URL}/tree/main/demos/design-system-showcase` },
+      { label: 'agent-cli', href: `${REPO_URL}/blob/main/apps/agent-cli/README.md` },
+      { label: 'AGPL-3.0 license', href: `${REPO_URL}/blob/main/LICENSE` },
+    ],
+  },
+]
+
+const headingStyle = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'fg.subtle',
+  mb: '3',
+})
+
+const linkStyle = css({
+  display: 'inline-flex',
+  py: '1',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  transitionProperty: 'color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+---
+
+<footer
+  class={css({
+    borderTopWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    mt: '20',
+  })}
+>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(3, 1fr)' },
+      gap: '10',
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: '12',
+    })}
+  >
+    <div>
+      <div class={css({ display: 'inline-flex', alignItems: 'center', gap: '2', fontWeight: 'semibold', color: 'fg.default', mb: '3' })}>
+        <LogoMark size={18} />
+        <span>todo-lofi</span>
+      </div>
+      <p class={css({ fontSize: 'sm', color: 'fg.subtle', maxW: '280px', lineHeight: 'relaxed' })}>
+        A local-first task manager for macOS and Linux, built on GPUI. Runs offline; syncs when you
+        want it to.
+      </p>
+    </div>
+
+    {
+      columns.map((column) => (
+        <div>
+          <h2 class={headingStyle}>{column.heading}</h2>
+          <ul class={css({ listStyle: 'none', m: '0', p: '0', display: 'flex', flexDirection: 'column' })}>
+            {column.links.map((link) => (
+              <li>
+                <a
+                  class={linkStyle}
+                  href={link.href}
+                  target={link.href.startsWith('http') ? '_blank' : undefined}
+                  rel={link.href.startsWith('http') ? 'noreferrer' : undefined}
+                >
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </div>
+
+  <div
+    class={css({
+      borderTopWidth: 'hairline',
+      borderStyle: 'solid',
+      borderColor: 'border.subtle',
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '3',
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: '5',
+      fontSize: 'xs',
+      color: 'fg.subtle',
+    })}
+  >
+    <span>© 2026 todo-lofi contributors. Licensed AGPL-3.0.</span>
+    <span>
+      This site is built with <code class={css({ fontFamily: 'mono', fontSize: 'xs' })}>libs/web-design-system</code>.
+    </span>
+  </div>
+</footer>

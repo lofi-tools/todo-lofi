@@ -8,6 +8,40 @@ importers:
 
   .: {}
 
+  apps/docs-web:
+    dependencies:
+      '@astrojs/solid-js':
+        specifier: ^7.0.2
+        version: 7.0.2(esbuild@0.28.2)(solid-js@1.9.15)(yaml@2.9.1)
+      astro:
+        specifier: ^7.3.3
+        version: 7.3.3(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(yaml@2.9.1)
+      solid-js:
+        specifier: ^1.9.15
+        version: 1.9.15
+      web-design-system:
+        specifier: workspace:*
+        version: link:../../libs/web-design-system
+    devDependencies:
+      '@astrojs/check':
+        specifier: ^0.9.10
+        version: 0.9.10(@emnapi/runtime@1.11.3)(prettier@3.9.8)(typescript@5.9.3)
+      '@axe-core/playwright':
+        specifier: ^4.13.0
+        version: 4.13.0(playwright-core@1.63.0)
+      '@pandacss/dev':
+        specifier: ^1.12.1
+        version: 1.12.1(jsdom@27.4.0)(typescript@5.9.3)
+      '@pandacss/preset-panda':
+        specifier: ^1.12.1
+        version: 1.12.1
+      '@playwright/test':
+        specifier: ^1.63.0
+        version: 1.63.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   demos/design-system-showcase:
     dependencies:
       '@astrojs/solid-js':
@@ -4598,7 +4632,7 @@ snapshots:
       '@vue/shared': 3.5.25
       estree-walker: 2.0.2
       magic-string: 0.30.21
-      postcss: 8.5.14
+      postcss: 8.5.28
       source-map-js: 1.2.1
 
   '@vue/compiler-ssr@3.5.25':

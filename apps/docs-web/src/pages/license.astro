@@ -1,0 +1,113 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import TableScroll from '../components/TableScroll.astro'
+import { REPO_URL } from '../data/docs'
+
+const toc = [
+  { label: 'What the license gives you', href: '#what-you-get' },
+  { label: 'Obligations', href: '#obligations' },
+  { label: 'Where the license lives', href: '#where' },
+  { label: 'Third-party code', href: '#third-party' },
+  { label: 'Contributions', href: '#contributions' },
+]
+---
+
+<Docs
+  title="License"
+  description="todo-lofi is free software under the GNU Affero General Public License v3.0. Here is what that means in practice."
+  toc={toc}
+>
+  <Callout tone="warning" title="The license text is authoritative">
+    This page summarizes the AGPL-3.0; it is not a substitute for it and it is not legal advice. The full
+    text is in <code>LICENSE</code> at the repository root.
+  </Callout>
+
+  <h2 id="what-you-get">What the license gives you</h2>
+  <p>
+    You may run the software for any purpose, study and modify it, and redistribute it — commercially or
+    not — provided you pass on the same freedoms to everyone downstream.
+  </p>
+
+  <h2 id="obligations">Obligations</h2>
+  <ul>
+    <li>
+      <strong>Share the source.</strong> If you distribute the software, or a modified version of it, you
+      must make the complete corresponding source available under the AGPL-3.0.
+    </li>
+    <li>
+      <strong>Network use counts.</strong> Running a modified version as a service over a network requires
+      offering the source to the people using that service. This is the clause that separates the AGPL
+      from the GPL.
+    </li>
+    <li>
+      <strong>Keep the notices.</strong> Copyright notices and the license text stay in place, and
+      significant changes must be stated.
+    </li>
+    <li>
+      <strong>No warranty.</strong> The software is provided as is, with no warranty, as the license
+      states.
+    </li>
+  </ul>
+  <p>
+    If you want to use the code under different terms — for example, in a closed product you cannot
+    license as AGPL — you need a separate agreement from the copyright holders.
+  </p>
+
+  <h2 id="where">Where the license lives</h2>
+  <TableScroll label="Where the license lives">
+    <table>
+      <thead>
+        <tr>
+          <th>Path</th>
+          <th>What it is</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>LICENSE</code></td>
+          <td>The full AGPL-3.0 text, at the repository root.</td>
+        </tr>
+        <tr>
+          <td><code>Cargo.toml</code></td>
+          <td>The workspace manifest; each crate inherits the workspace license field.</td>
+        </tr>
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The canonical text is also published by the
+    <a href="https://www.gnu.org/licenses/agpl-3.0.html">Free Software Foundation</a>, and the matching
+    identifier is <code>AGPL-3.0</code>.
+  </p>
+
+  <h2 id="third-party">Third-party code</h2>
+  <ul>
+    <li>
+      Dependencies pulled from crates.io or git keep their own licenses; the AGPL covers this
+      repository's code, not theirs.
+    </li>
+    <li>
+      The vendored forks under <code>patched/</code> (for example the cersei provider and agent forks)
+      retain their upstream licenses. Read the license in each patched crate before reusing it.
+    </li>
+    <li>
+      The self-hosted font in the web design system is Inter Variable, under the SIL Open Font License.
+    </li>
+    <li>
+      The web design system's icons and copy are placeholders written for this repository. It reproduces no
+      third-party wordmark, screenshot, or marketing copy.
+    </li>
+  </ul>
+
+  <h2 id="contributions">Contributions</h2>
+  <p>
+    By contributing you agree that your contribution is licensed under the same terms, so the project can
+    keep offering one consistent license to everyone. There is no separate CLA.
+  </p>
+  <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
+    See <a href={`${REPO_URL}/blob/main/LICENSE`}>LICENSE</a> for the complete terms, and
+    <a href="/contributing">Contributing</a> for how to propose a change.
+  </p>
+</Docs>

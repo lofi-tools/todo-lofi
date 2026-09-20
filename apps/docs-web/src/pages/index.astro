@@ -1,0 +1,178 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+import screenshot from '../../../../docs/img/Screenshot 2026-09-19 at 21.20.15.png'
+
+const toc = [
+  { label: 'What it is', href: '#what-it-is' },
+  { label: 'Highlights', href: '#highlights' },
+  { label: 'How the pieces fit', href: '#how-the-pieces-fit' },
+  { label: 'Where to start', href: '#where-to-start' },
+]
+
+const highlights = [
+  {
+    title: 'Integrated AI agent',
+    status: 'Available',
+    tone: 'success',
+    body: 'A docked agent pane for doing work, not just answering questions: it can read and change your lists, set up repeats, and run a task through a whole workflow.',
+  },
+  {
+    title: 'Tags, projects, and areas',
+    status: 'Available',
+    tone: 'success',
+    body: 'Group and filter tasks with nested tags, organize them into a tree of projects and areas, and reorder by drag and drop.',
+  },
+  {
+    title: 'Repeat and scheduling',
+    status: 'Available',
+    tone: 'success',
+    body: 'Recurring tasks are configured in a dedicated picker instead of a syntax you have to remember.',
+  },
+  {
+    title: 'Semi-automated workflows',
+    status: 'Available',
+    tone: 'success',
+    body: 'A task can carry a workflow. Coding tasks, for example, move through interview, spec, coding, review, and merge.',
+  },
+  {
+    title: 'Two-way sync',
+    status: 'Todoist · GitHub preview',
+    tone: 'accent',
+    body: 'Keep working in the task app you already use. Todoist sync is the current target; GitHub issues and projects are in preview.',
+  },
+  {
+    title: 'Mini-apps (extensions)',
+    status: 'Some coming soon',
+    tone: 'warning',
+    body: 'Small purpose-built panes: travel checklist templates ship today; message follow-ups, birthday reminders, and job application tracking are planned.',
+  },
+] as const
+
+const next = [
+  { title: 'Quickstart', href: '/quickstart', body: 'Install Nix and direnv, enter the dev shell, and run the desktop app.' },
+  { title: 'Architecture', href: '/architecture', body: 'The workspace layout, the persistence layer, and where each feature lives.' },
+  { title: 'Integrations', href: '/integrations', body: 'Todoist, GitHub, providers, MCP servers, and the ACP agent surface.' },
+  { title: 'Contributing', href: '/contributing', body: 'Checks to run, conventions to follow, and how specs drive changes.' },
+]
+---
+
+<Docs title="Overview" description="todo-lofi is a local-first task manager for macOS and Linux, built on GPUI. Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow — all running offline." toc={toc}>
+  <h2 id="what-it-is">What it is</h2>
+  <p>
+    <strong>todo-lofi</strong> keeps your tasks in a local SQLite database and renders them with
+    <a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI</a>, the GPU-accelerated
+    UI framework behind Zed. <code>apps/todo-2</code> is the desktop app; everything it needs to persist
+    lives in <code>libs/storage</code>.
+  </p>
+  <p>
+    The app runs offline by default. Network features are opt-in: Todoist sync, GitHub issues, and the
+    agent's model providers each bring their own credentials and never gate the core task loop.
+  </p>
+
+  <figure class={css({ m: '0', my: '6' })}>
+    <img
+      src={screenshot.src}
+      width={screenshot.width}
+      height={screenshot.height}
+      alt="The todo-lofi desktop app: a task list on the left, task details in the middle, and the agent pane on the right."
+      class={css({
+        w: 'full',
+        h: 'auto',
+        borderRadius: 'lg',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border',
+        bg: 'surface.subtle',
+      })}
+    />
+    <figcaption class={css({ mt: '2', fontSize: 'xs', color: 'fg.subtle' })}>
+      The desktop app: task list, task details, and the agent pane.
+    </figcaption>
+  </figure>
+
+  <h2 id="highlights">Highlights</h2>
+  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+    {
+      highlights.map((highlight) => (
+        <li
+          class={css({
+            p: '5',
+            borderRadius: 'lg',
+            borderWidth: 'hairline',
+            borderStyle: 'solid',
+            borderColor: 'border',
+            bg: 'surface.subtle',
+          })}
+        >
+          <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '2', flexWrap: 'wrap' })}>
+            <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>
+              {highlight.title}
+            </span>
+            <Badge tone={highlight.tone} variant="subtle">{highlight.status}</Badge>
+          </div>
+          <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
+            {highlight.body}
+          </p>
+        </li>
+      ))
+    }
+  </ul>
+
+  <h2 id="how-the-pieces-fit">How the pieces fit</h2>
+  <p>
+    The repository is a Cargo workspace plus two web surfaces that share a design system. The Rust side
+    owns the app, the data, and the agent; the web side owns the docs you are reading and the component
+    showcase.
+  </p>
+  <ul>
+    <li><code>apps/todo-2</code> — the GPUI desktop application.</li>
+    <li><code>apps/agent-cli</code> — the terminal agent, an ACP server, and the provider registry.</li>
+    <li><code>libs/storage</code> — SQLite persistence, migrations, and the sync/workflow tables.</li>
+    <li><code>libs/web-design-system</code> — the design system this site is built with.</li>
+  </ul>
+  <p>
+    <a href="/architecture">Architecture</a> walks through each crate and how they depend on one another.
+  </p>
+
+  <Callout tone="tip" title="About this site">
+    This documentation site lives in <code>apps/docs-web</code> and is built with the repository's own
+    design system — Astro, SolidJS, Panda CSS, and Ark UI. Run it with <code>pnpm dev</code> from
+    the repository root; <code>demos/design-system-showcase</code> is the component gallery behind it.
+  </Callout>
+
+  <h2 id="where-to-start">Where to start</h2>
+  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+    {
+      next.map((item) => (
+        <li>
+          <a
+            href={item.href}
+            class={css({
+              display: 'block',
+              p: '5',
+              borderRadius: 'lg',
+              borderWidth: 'hairline',
+              borderStyle: 'solid',
+              borderColor: 'border',
+              bg: 'surface.subtle',
+              _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+              transitionProperty: 'border-color, background-color',
+              transitionDuration: 'fast',
+            })}
+          >
+            <span class={css({ display: 'block', fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>
+              {item.title}
+            </span>
+            <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+              {item.body}
+            </span>
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</Docs>

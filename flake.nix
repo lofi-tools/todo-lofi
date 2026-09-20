@@ -191,7 +191,34 @@
               done
             '';
 
-            web = ''pnpm install; pnpm dev'';
+            # The Astro CLI for the web packages. pnpm installs it per package
+            # (node_modules/.bin), so it is not on PATH in the dev shell; this
+            # runs the version the workspace pins rather than a nixpkgs "astro",
+            # which is a different tool (uber/astro) entirely. Used for
+            # `astro dev stop|status|logs`, `astro check`, and so on.
+            astro = with bash; ''set -e
+              for dir in "$PWD" "${wd}/apps/docs-web" "${wd}/demos/design-system-showcase"; do
+                bin="$dir/node_modules/.bin/astro"
+                if [ -x "$bin" ]; then exec "$bin" "$@"; fi
+              done
+              echo "astro: not installed yet - run 'pnpm install' first" >&2
+              exit 1
+            '';
+
+            # Stop dev servers left behind by a previous session. Astro records
+            # a running `astro dev` in the project's .astro/dev.json and refuses
+            # to start a second one, which is what `web` runs this for.
+            dev-stop = with bash; ''set -e
+              for dir in apps/docs-web demos/design-system-showcase; do
+                if [ -d "${wd}/$dir" ]; then
+                  (cd "${wd}/$dir" && astro dev stop) || true
+                fi
+              done
+            '';
+
+            # Docs site by default (`pnpm dev`); the design-system showcase is
+            # `pnpm dev:ds`.
+            web = ''set -e; pnpm install; dev-stop; pnpm dev'';
           };
 
           env = {

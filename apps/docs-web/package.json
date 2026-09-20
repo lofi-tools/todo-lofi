@@ -1,0 +1,31 @@
+{
+  "name": "docs-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The todo-lofi documentation website, built with the web design system.",
+  "scripts": {
+    "codegen": "panda codegen && panda cssgen --outfile styled-system/styles.css",
+    "predev": "pnpm run codegen",
+    "dev": "astro dev",
+    "prebuild": "pnpm run codegen",
+    "build": "astro build",
+    "preview": "astro preview",
+    "typecheck": "pnpm run codegen && astro check",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@astrojs/solid-js": "^7.0.2",
+    "astro": "^7.3.3",
+    "solid-js": "^1.9.15",
+    "web-design-system": "workspace:*"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "@axe-core/playwright": "^4.13.0",
+    "@pandacss/dev": "^1.12.1",
+    "@pandacss/preset-panda": "^1.12.1",
+    "@playwright/test": "^1.63.0",
+    "typescript": "^5.9.3"
+  }
+}

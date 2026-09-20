@@ -1,0 +1,250 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../components/TableScroll.astro'
+
+const toc = [
+  { label: 'Workspace layout', href: '#workspace-layout' },
+  { label: 'The desktop app', href: '#desktop-app' },
+  { label: 'The agent side', href: '#agent-side' },
+  { label: 'Persistence', href: '#persistence' },
+  { label: 'Web surfaces', href: '#web-surfaces' },
+  { label: 'Specs', href: '#specs' },
+]
+
+const tree = `todo-lofi/
+├── apps/
+│   ├── todo-2/                # GPUI desktop application
+│   └── agent-cli/             # terminal agent + ACP server
+├── libs/
+│   ├── storage/               # SQLite persistence, migrations, sync tables
+│   ├── acp-client/            # Agent Client Protocol client
+│   ├── ai_providers/          # LLM provider abstraction
+│   ├── gpui-tokio/            # GPUI <-> Tokio bridge
+│   ├── report_proc/           # proc-macro crate
+│   ├── web-design-system/     # Panda/Solid design system (not a crate)
+│   └── ...                    # CRDT experiments (dson, op_crdt)
+├── demos/
+│   └── design-system-showcase # component gallery + page replicas
+├── apps/docs-web/             # this documentation site
+├── patched/                   # vendored upstream forks
+├── docs/                      # specs, agent skills, images
+└── flake.nix                  # devShell: Rust, cargo-watch, Node, pnpm`
+
+const apps = [
+  {
+    name: 'apps/todo-2',
+    role: 'The desktop application',
+    detail:
+      'GPUI views and app state: task lists and details, the agent pane, mini-apps, sync panes, and settings.',
+  },
+  {
+    name: 'apps/agent-cli',
+    role: 'The terminal agent',
+    detail:
+      'A full-screen TUI, a provider/model registry with fallback combos, sub-agents, and an ACP server over stdio.',
+  },
+  {
+    name: 'libs/storage',
+    role: 'Persistence',
+    detail:
+      'The SQLite data model and migrations: tasks, tags and tag settings, repeats, trips, workflows, Todoist, GitHub, and managed apps.',
+  },
+  {
+    name: 'libs/acp-client',
+    role: 'Agent plumbing',
+    detail:
+      'Launches agent processes, owns sessions and the transcript model, and provides the file-system and terminal capabilities an agent session needs.',
+  },
+  {
+    name: 'libs/ai_providers',
+    role: 'Model access',
+    detail:
+      'OpenAI-compatible provider implementations on top of the cersei agent library, including an OAuth-backed provider.',
+  },
+  {
+    name: 'libs/gpui-tokio',
+    role: 'Runtime bridge',
+    detail: 'Runs Tokio futures from GPUI entities so async work never blocks the UI thread.',
+  },
+]
+
+const desktopModules = [
+  { name: 'main.rs', detail: 'Application entry point and window setup.' },
+  { name: 'store.rs', detail: 'The app-level store that entities read and write.' },
+  { name: 'projects.rs', detail: 'Project and area tree state.' },
+  { name: 'theme.rs', detail: 'The desktop palette. Deliberately independent of the web design system.' },
+  { name: 'ui_parts/', detail: 'The panes: task list and row, task details, agent pane, mini-apps, integrations, automations, pickers, settings, notifications, navbar.' },
+  { name: 'coding_git.rs, coding_mcp.rs', detail: 'Git and MCP support for coding workflow runs.' },
+  { name: 'components/', detail: 'Reusable widgets: calendar, checkbox, date/time picker, mini task list, tag chip.' },
+]
+
+const specs = [
+  { file: 'workflow-engine-spec.md', status: 'Draft v1', topic: 'Workflow engine data model in libs/storage, minimal UI contract.' },
+  { file: 'workflow-simplification-spec.md', status: 'Draft v1', topic: 'The v2 workflow model; supersedes the v1 data model.' },
+  { file: 'coding-workflow-runs-spec.md', status: 'Implemented', topic: 'AI-assisted feature development runs: phases, state, and review.' },
+  { file: 'coding-workflow-subtasks-spec.md', status: 'Proposed', topic: 'Subtasks inside a run and coverage of the spec they implement.' },
+  { file: 'todoist-sync-spec.md', status: 'Draft v1', topic: 'Todoist import plus immediate push of title/description/done deltas.' },
+  { file: 'github-integration-spec.md', status: 'Draft v1', topic: 'GitHub issues/projects sync and a git-backed coding workflow.' },
+  { file: 'acp-client-and-agent-panel-spec.md', status: 'Draft v1', topic: 'The ACP client crate and the todo-2 agent panel that drives it.' },
+  { file: 'todo2-agent-pane-ui-spec.md', status: 'Draft v1', topic: 'The agent pane UI: layout, states, and interactions.' },
+  { file: 'agent-cli-interview-feature-spec.md', status: 'Draft v1', topic: 'The /interview command that turns a request into a spec.' },
+  { file: 'todo2-managed-apps-spec.md', status: 'Draft v2', topic: 'Managed tags, sections, and tasks — the model behind mini-apps.' },
+  { file: 'todo2-nested-projects-spec.md', status: 'Draft v1', topic: 'Nesting project directories under tags.' },
+  { file: 'symphony.md', status: 'Draft v1', topic: 'A language-agnostic service specification.' },
+  { file: 'web-design-system-spec.md', status: 'Implemented v1', topic: 'The web design system and its showcase.' },
+]
+---
+
+<Docs
+  title="Architecture"
+  description="A Cargo workspace for the app and its libraries, plus a pnpm workspace for the web surfaces. Here is how the pieces relate."
+  toc={toc}
+>
+  <h2 id="workspace-layout">Workspace layout</h2>
+  <CodeBlock filename="todo-lofi" code={tree} showLineNumbers={false} />
+  <p>
+    <code>Cargo.toml</code> declares members as <code>apps/*</code>, <code>libs/*</code>, and
+    <code>demos/*</code>, and explicitly excludes the three JavaScript packages so{' '}
+    <code>cargo check --workspace</code> never walks their trees.
+  </p>
+
+  <h2 id="desktop-app">The desktop app</h2>
+  <p>
+    <code>apps/todo-2</code> is GPUI all the way down: one window, a handful of panes, and entities that
+    hold state. Async work (sync, agent sessions, file reads) is pushed onto Tokio through{' '}
+    <code>libs/gpui-tokio</code> and applied back on the UI thread.
+  </p>
+  <TableScroll label="Desktop app modules">
+    <table>
+      <thead>
+        <tr>
+          <th>Module</th>
+          <th>Responsibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          desktopModules.map((module) => (
+            <tr>
+              <td><code>{module.name}</code></td>
+              <td>{module.detail}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <Callout tone="note" title="Two themes, on purpose">
+    <code>apps/todo-2/src/theme.rs</code> is the desktop palette. It is intentionally not generated from
+    the web design system's tokens — the two surfaces share no code, and the design system spec lists that
+    as a non-goal.
+  </Callout>
+
+  <h2 id="agent-side">The agent side</h2>
+  <p>
+    There is one agent implementation and two front ends. <code>apps/agent-cli</code> is a terminal TUI
+    that also speaks the Agent Client Protocol over stdio; <code>libs/acp-client</code> is the client that
+    the desktop app's agent pane uses to talk to that same protocol. Provider selection, model fallback
+    combos, MCP servers, hooks, and sub-agents all live on the CLI side and are shared.
+  </p>
+  <TableScroll label="Workspace crates">
+    <table>
+      <thead>
+        <tr>
+          <th>Crate</th>
+          <th>Role</th>
+          <th>What it contains</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          apps.map((app) => (
+            <tr>
+              <td><code>{app.name}</code></td>
+              <td>{app.role}</td>
+              <td>{app.detail}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <h2 id="persistence">Persistence</h2>
+  <p>
+    <code>libs/storage</code> owns the database. It is SQLite, accessed through the toasty ORM, and it
+    carries its own migration binary:
+  </p>
+  <ul>
+    <li><code>task.rs</code>, <code>tag.rs</code>, <code>tag_settings.rs</code> — the core task model.</li>
+    <li><code>repeat.rs</code> — recurring rules.</li>
+    <li><code>workflow.rs</code> — workflow definitions and run state.</li>
+    <li><code>todoist.rs</code>, <code>github.rs</code>, <code>external.rs</code> — sync mappings for outside systems.</li>
+    <li><code>managed.rs</code>, <code>link.rs</code>, <code>trip.rs</code> — the models behind mini-apps, links, and trips.</li>
+    <li><code>migrations.rs</code> and <code>src/bin/</code> — schema migrations, driven by the <code>mig</code> command.</li>
+  </ul>
+  <p>
+    The remaining <code>libs/*</code> crates are narrower: <code>ai_providers</code> and
+    <code>gpui-tokio</code> are infrastructure, <code>report_proc</code> and
+    <code>derive_entity_id</code> are macros, and <code>dson_freeform_task</code>,
+    <code>dson_typed_task</code>, and <code>op_crdt</code> are CRDT experiments for conflict-free task
+    data.
+  </p>
+
+  <h2 id="web-surfaces">Web surfaces</h2>
+  <p>
+    Two web apps share one design system, and none of them touch the Rust workspace:
+  </p>
+  <ul>
+    <li>
+      <code>libs/web-design-system</code> — tokens, a Panda preset, Ark UI headless primitives, and styled
+      Solid components with <code>.astro</code> wrappers.
+    </li>
+    <li>
+      <code>demos/design-system-showcase</code> — the component gallery and the page shapes the design
+      system is built from.
+    </li>
+    <li>
+      <code>apps/docs-web</code> — this site. It consumes the design system's preset and the marketing
+      docs components rather than restyling them.
+    </li>
+  </ul>
+  <p>
+    See the design system's <code>DESIGN.md</code> for the token and layering rules, and
+    <a href="/contributing">Contributing</a> for the checks that keep them honest.
+  </p>
+
+  <h2 id="specs">Specs</h2>
+  <p>
+    Non-trivial features are specified before they are built. Each spec records the decisions taken during
+    the interview that produced it, so the file is the rationale as well as the design.
+  </p>
+  <TableScroll label="Specs">
+    <table>
+      <thead>
+        <tr>
+          <th>Spec</th>
+          <th>Status</th>
+          <th>Covers</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          specs.map((spec) => (
+            <tr>
+              <td><code>{spec.file}</code></td>
+              <td>{spec.status}</td>
+              <td>{spec.topic}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
+    All specs live in <code>docs/spec/</code> at the repository root.
+  </p>
+</Docs>

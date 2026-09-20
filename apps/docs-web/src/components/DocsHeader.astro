@@ -1,0 +1,128 @@
+---
+import { css } from 'styled-system/css'
+import { Badge } from 'web-design-system/components'
+import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
+import { LogoMark } from 'web-design-system/icons'
+import { docPages, REPO_URL } from '../data/docs'
+
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/'
+
+const navItem = (active: boolean) =>
+  css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    h: '8',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    transitionProperty: 'color, background-color',
+    transitionDuration: 'fast',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
+---
+
+<header
+  class={css({
+    position: 'sticky',
+    top: '0',
+    zIndex: 'sticky',
+    w: 'full',
+    borderBottomWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    bg: 'canvas',
+    backdropFilter: 'blur(12px)',
+    backgroundColor: 'rgba(8, 9, 10, 0.72)',
+    _light: { backgroundColor: 'rgba(255, 255, 255, 0.78)' },
+  })}
+>
+  <nav
+    aria-label="Main"
+    class={css({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4',
+      h: '14',
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+    })}
+  >
+    <a
+      href="/"
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+        fontWeight: 'semibold',
+        letterSpacing: 'tight',
+        color: 'fg.default',
+        flexShrink: '0',
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+    >
+      <LogoMark size={18} />
+      <span>todo-lofi</span>
+    </a>
+    <Badge tone="accent" variant="subtle">docs</Badge>
+
+    <ul
+      class={css({
+        display: { base: 'none', lg: 'flex' },
+        alignItems: 'center',
+        gap: '0.5',
+        listStyle: 'none',
+        m: '0',
+        p: '0',
+      })}
+    >
+      {
+        docPages.map((page) => (
+          <li>
+            <a
+              class={navItem(path === page.href)}
+              href={page.href}
+              aria-current={path === page.href ? 'page' : undefined}
+            >
+              {page.label}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+
+    <div class={css({ flex: '1' })} />
+
+    <a
+      class={css({
+        display: { base: 'none', sm: 'inline-flex' },
+        alignItems: 'center',
+        h: '8',
+        px: '3',
+        borderRadius: 'sm',
+        fontSize: 'sm',
+        color: 'fg.muted',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border',
+        bg: 'surface.subtle',
+        transitionProperty: 'color, border-color',
+        transitionDuration: 'fast',
+        _hover: { color: 'fg.default', borderColor: 'border.strong' },
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+      href={REPO_URL}
+      target="_blank"
+      rel="noreferrer"
+    >
+      GitHub
+    </a>
+
+    <ThemeToggle />
+  </nav>
+</header>

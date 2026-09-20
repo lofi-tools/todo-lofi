@@ -12,7 +12,7 @@ From the repository root:
 
 ```sh
 pnpm install
-pnpm dev        # astro dev, regenerates Panda CSS first
+pnpm dev:ds     # astro dev, regenerates Panda CSS first
 pnpm build      # codegen for the design system + static build
 pnpm preview    # serve the built site
 ```

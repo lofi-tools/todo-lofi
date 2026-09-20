@@ -1,0 +1,132 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../components/TableScroll.astro'
+import { REPO_URL } from '../data/docs'
+
+const toc = [
+  { label: 'Before you start', href: '#before-you-start' },
+  { label: 'Workflow', href: '#workflow' },
+  { label: 'Checks to run', href: '#checks' },
+  { label: 'Rust conventions', href: '#rust-conventions' },
+  { label: 'Web conventions', href: '#web-conventions' },
+  { label: 'Vendoring a crate', href: '#vendoring' },
+]
+
+const workflow = `# 1. Fork, then branch from main
+git checkout -b your-feature
+
+# 2. Make the change, running the relevant checks as you go
+ccheck
+cargo test -p storage
+
+# 3. Keep commits focused and rebased on main before you open the PR
+git fetch origin && git rebase origin/main`
+
+const checks = [
+  { command: 'cargo check -p todo-2', purpose: 'The desktop app compiles.' },
+  { command: 'cargo test -p storage', purpose: 'Persistence and migration tests pass.' },
+  { command: 'ccheck', purpose: 'cargo check across the main workspace crates.' },
+  { command: 'tt', purpose: 'Run the Rust test suite (macOS adds signing/quarantine fixups).' },
+  { command: 'testdbg', purpose: 'Storage tests with debug logging when a failure needs more detail.' },
+  { command: 'pnpm typecheck', purpose: 'Typecheck all three JavaScript packages.' },
+  { command: 'pnpm test', purpose: 'Vitest: token integrity, WCAG contrast math, component rendering.' },
+  { command: 'pnpm test:e2e', purpose: 'Playwright: every showcase route loads, theming persists, axe finds no serious WCAG 2.1 AA violations.' },
+  { command: 'pnpm build:docs', purpose: 'This site still builds.' },
+]
+---
+
+<Docs
+  title="Contributing"
+  description="Contributions are welcome. Open an issue before a non-trivial change, keep the change focused, and run the checks below before you push."
+  toc={toc}
+>
+  <h2 id="before-you-start">Before you start</h2>
+  <p>
+    The repository is spec-driven: features of any size get a file in <code>docs/spec/</code> first, and
+    that file records the decisions behind the design. If you are changing behavior rather than fixing a
+    bug, expect to write or update a spec.
+  </p>
+  <Callout tone="tip" title="Ask first">
+    Open an issue to discuss a non-trivial change before writing it. It is much cheaper to disagree with a
+    spec than with a pull request.
+  </Callout>
+
+  <h2 id="workflow">Workflow</h2>
+  <CodeBlock filename="terminal" code={workflow} showLineNumbers={false} />
+
+  <h2 id="checks">Checks to run</h2>
+  <TableScroll label="Checks to run">
+    <table>
+      <thead>
+        <tr>
+          <th>Command</th>
+          <th>What it verifies</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          checks.map((check) => (
+            <tr>
+              <td><code>{check.command}</code></td>
+              <td>{check.purpose}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The full test matrix, including the end-to-end suite, is described in
+    <code>libs/web-design-system/DESIGN.md</code> for the web packages. Playwright uses the locally
+    installed Chrome, so no browser download is required.
+  </p>
+
+  <h2 id="rust-conventions">Rust conventions</h2>
+  <p>
+    <code>AGENTS.md</code> at the repository root is the authoritative list. The short version:
+  </p>
+  <ul>
+    <li>Correctness and clarity first; speed and efficiency are secondary unless the task says otherwise.</li>
+    <li>No panicking shortcuts. Propagate with <code>?</code> instead of <code>unwrap()</code>, and be careful with indexing and slicing, which can panic.</li>
+    <li>Never silently discard an error. Propagate it, log it, or handle it explicitly — <code>let _ =</code> on a fallible call hides bugs.</li>
+    <li>Async failures must reach the UI layer so users get meaningful feedback.</li>
+    <li>New modules are <code>src/some_module.rs</code>; do not create <code>mod.rs</code> trees.</li>
+    <li>Prefer descriptive names over abbreviations, and comments that explain <em>why</em> the code is shaped that way.</li>
+    <li>Implement functionality in existing files unless it is a genuinely new component.</li>
+  </ul>
+  <p>
+    In GPUI tests, drive timeouts and delays with the GPUI executor (<code>cx.background_executor().timer(...)</code>)
+    rather than an external timer, so <code>run_until_parked()</code> can pump the work.
+  </p>
+
+  <h2 id="web-conventions">Web conventions</h2>
+  <p>
+    Everything under <code>libs/web-design-system</code>, <code>demos/design-system-showcase</code>, and
+    <code>apps/docs-web</code> follows <code>DESIGN.md</code>:
+  </p>
+  <ul>
+    <li>Components consume semantic tokens (<code>accent.text</code>, <code>surface.subtle</code>, <code>fg.muted</code>), never raw palette values, so a theme stays a token swap.</li>
+    <li>One component per file, PascalCase, with props extended from the underlying DOM props and split with <code>splitProps</code>.</li>
+    <li>Hydration is opt-in and documented per wrapper: <code>client:only="solid"</code> for Ark-based overlays, <code>client:visible</code> for simple stateful wrappers, pure <code>.astro</code> for static sections.</li>
+    <li>Keep <code>hash</code>, <code>separator</code>, and <code>prefix</code> identical across all three <code>panda.config.ts</code> files, and make each app's <code>include</code> globs cover the design system's source.</li>
+    <li>WCAG 2.1 AA is the floor: visible focus, labeled icon-only controls, keyboard-focusable scroll regions, and motion that collapses under <code>prefers-reduced-motion</code>.</li>
+  </ul>
+
+  <h2 id="vendoring">Vendoring a crate</h2>
+  <p>
+    When an upstream crate needs a patch, clone it into <code>patched/</code> with{' '}
+    <code>clone-patch &lt;crate&gt;</code>, edit it there, and point a <code>[patch]</code> entry in the
+    root <code>Cargo.toml</code> at the checkout. Add a comment explaining why the fork exists and keep the
+    revision in the entry in sync with the vendored <code>Cargo.toml</code>.
+  </p>
+  <p>
+    A vendored fork keeps its own license and copyright; note any behavioral change in the comment above
+    the patch entry, as the existing cersei forks do.
+  </p>
+  <p>
+    Questions about a specific area are best asked in an issue, with the relevant spec file linked. The
+    repository also lives at <a href={REPO_URL}>{REPO_URL.replace('https://', '')}</a>.
+  </p>
+</Docs>

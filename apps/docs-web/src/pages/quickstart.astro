@@ -1,0 +1,168 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../components/TableScroll.astro'
+
+const toc = [
+  { label: 'Prerequisites', href: '#prerequisites' },
+  { label: 'Install Nix', href: '#install-nix' },
+  { label: 'Install direnv', href: '#install-direnv' },
+  { label: 'Enable nix-direnv', href: '#nix-direnv' },
+  { label: 'Allow the environment', href: '#allow-the-environment' },
+  { label: 'Run the app', href: '#run-the-app' },
+  { label: 'Command reference', href: '#command-reference' },
+  { label: 'Web surfaces', href: '#web-surfaces' },
+  { label: 'Troubleshooting', href: '#troubleshooting' },
+]
+
+const installNix = `# Recommended: the Determinate Systems installer (flakes enabled by default)
+curl -L https://install.determinate.systems/nix | sh -s -- install
+
+# Or the official multi-user installer, then enable flakes in /etc/nix/nix.conf:
+#   experimental-features = nix-command flakes
+curl -L https://nixos.org/nix/install | sh -s -- --daemon`
+
+const installDirenv = `nix profile install nixpkgs#direnv   # or: brew install direnv / apt install direnv
+
+# Hook it into your shell (bash shown; see \`direnv hook --help\` for others)
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc`
+
+const nixDirenv = `git clone https://github.com/nix-community/nix-direnv ~/.config/direnv/nix-direnv
+echo 'source ~/.config/direnv/nix-direnv/direnvrc' >> ~/.config/direnv/direnvrc`
+
+const allowEnv = `# From the repository root
+direnv allow
+
+# The first run builds the devShell and takes a while; later shells load from
+# the nix-direnv cache. Verify it worked:
+direnv status        # should show "Found RC allowed true"
+which cargo rustc    # should resolve into the Nix store`
+
+const runApp = `cargo run -p todo-2    # run the desktop app
+t2                     # or run it under cargo-watch for auto-rebuilds`
+
+const commands = [
+  { command: 'cargo run -p todo-2', purpose: 'Run the desktop app.' },
+  { command: 't2', purpose: 'Run the desktop app under cargo-watch, rebuilding on change.' },
+  { command: 't2-bundle', purpose: 'Assemble the macOS bundle (icon, Info.plist, signing) without launching it.' },
+  { command: 'ccheck', purpose: 'cargo check the main workspace crates.' },
+  { command: 'tt', purpose: 'Run the Rust test suite, with macOS codesign/quarantine fixups for the test binaries.' },
+  { command: 'testdbg', purpose: 'Run the storage tests with debug logging.' },
+  { command: 'mig <args>', purpose: 'Run a storage migration (cargo run --bin migrate -- migration ...).' },
+  { command: 'clone-patch <crate>', purpose: "Clone a crate's upstream repository into patched/ to vendor a fork." },
+  { command: 'skills', purpose: 'Sync docs/agent_skills/*.md into .agents/skills/.' },
+  { command: 'web', purpose: 'Install the JS workspace, stop any dev server left by a previous session, and start the docs site.' },
+  { command: 'dev-stop', purpose: 'Stop the dev servers the web packages left running.' },
+  { command: 'astro <args>', purpose: "The workspace's pinned Astro CLI, e.g. astro dev status or astro check." },
+  { command: 'pnpm dev', purpose: 'Run this documentation site with auto-rebuilds.' },
+  { command: 'pnpm dev:ds', purpose: 'Run the design-system showcase with auto-rebuilds.' },
+]
+
+const webCommands = `pnpm install      # install the pnpm workspace (design system, showcase, docs)
+pnpm dev          # this site (Astro's default port, or the next free one)
+pnpm build:docs   # static build of this site
+pnpm dev:ds       # the design-system showcase
+pnpm typecheck    # typecheck all three JS packages
+pnpm test         # Vitest suite for the design system
+pnpm test:e2e     # Playwright smoke, theming, and WCAG 2.1 AA checks`
+---
+
+<Docs
+  title="Quickstart"
+  description="Get the repository running: Nix provides the toolchain, direnv loads it automatically, and cargo runs the desktop app."
+  toc={toc}
+>
+  <Callout tone="note" title="Prerequisites">
+    A Unix-like machine (macOS is the main target today; Linux works for the Rust crates), Nix with
+    flakes enabled, and direnv. The dev shell also brings Node and pnpm for the web packages, so you do
+    not need those installed globally.
+  </Callout>
+
+  <h2 id="prerequisites">Prerequisites</h2>
+  <p>
+    The repository uses <a href="https://nixos.org">Nix</a> flakes for its development environment: the
+    <code>.envrc</code> file loads <code>flake.nix</code>, which provides the Rust toolchain,
+    <code>cargo-watch</code>, Node, pnpm, and the helper commands used below. direnv with
+    <a href="https://github.com/nix-community/nix-direnv">nix-direnv</a> loads it automatically when you
+    <code>cd</code> into the repo and caches the shell between visits.
+  </p>
+
+  <h2 id="install-nix">Install Nix</h2>
+  <CodeBlock filename="terminal" code={installNix} showLineNumbers={false} />
+  <p>Open a new shell afterwards so <code>nix</code> is on your <code>PATH</code>.</p>
+
+  <h2 id="install-direnv">Install direnv</h2>
+  <CodeBlock filename="terminal" code={installDirenv} showLineNumbers={false} />
+
+  <h2 id="nix-direnv">Enable nix-direnv</h2>
+  <p>
+    nix-direnv caches the built devShell, so re-entering the repository is fast. The manual install:
+  </p>
+  <CodeBlock filename="terminal" code={nixDirenv} showLineNumbers={false} />
+  <p>
+    Alternatively, use the <code>nix-direnv</code> Home Manager or NixOS module.
+  </p>
+
+  <h2 id="allow-the-environment">Allow the environment</h2>
+  <CodeBlock filename="terminal" code={allowEnv} showLineNumbers={false} />
+
+  <h2 id="run-the-app">Run the app</h2>
+  <CodeBlock filename="terminal" code={runApp} showLineNumbers={false} />
+  <p>
+    <code>t2</code> is the usual development loop: it runs the binary under <code>cargo-watch</code> so
+    logs stream to the terminal and rebuilds happen on save.
+  </p>
+
+  <h2 id="command-reference">Command reference</h2>
+  <p>The dev shell adds the following commands, all available from the repository root.</p>
+  <TableScroll label="Dev shell commands">
+    <table>
+      <thead>
+        <tr>
+          <th>Command</th>
+          <th>What it does</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          commands.map((entry) => (
+            <tr>
+              <td><code>{entry.command}</code></td>
+              <td>{entry.purpose}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <h2 id="web-surfaces">Web surfaces</h2>
+  <p>
+    The <code>pnpm</code> workspace holds three packages: the design system
+    (<code>libs/web-design-system</code>), its showcase (<code>demos/design-system-showcase</code>), and
+    this documentation site (<code>apps/docs-web</code>). None of them are Cargo members.
+  </p>
+  <CodeBlock filename="terminal" code={webCommands} showLineNumbers={false} />
+  <Callout tone="warning" title="Class parity">
+    The design system, the showcase, and this site each run Panda codegen. Their <code>panda.config.ts</code>
+    files must keep <code>hash</code>, <code>separator</code>, and <code>prefix</code> identical, and each
+    app's <code>include</code> globs must cover the design system's source. If they drift, components render
+    unstyled with no error.
+  </Callout>
+
+  <h2 id="troubleshooting">Troubleshooting</h2>
+  <ul>
+    <li><code>direnv reload</code> re-evaluates <code>.envrc</code> after a change (for example, <code>flake.lock</code>).</li>
+    <li><code>direnv status</code> explains why the environment is or is not loaded.</li>
+    <li>
+      If builds fail on a fresh lockfile, try <code>direnv reload</code> or <code>nix flake update</code>
+      in the repository.
+    </li>
+    <li>
+      On macOS, launching a bundled <code>.app</code> can prompt for access to Documents/Music/Photos;
+      running the raw binary under <code>t2</code> keeps the shell's existing permissions.
+    </li>
+  </ul>
+</Docs>

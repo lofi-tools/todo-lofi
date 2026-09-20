@@ -1,0 +1,23 @@
+---
+import { css } from 'styled-system/css'
+
+/**
+ * Wide reference tables scroll inside the article column instead of widening
+ * the page on narrow viewports. The region is focusable and labelled so a
+ * keyboard user can scroll it (DESIGN.md §5).
+ */
+interface Props {
+  label: string
+}
+
+const { label } = Astro.props
+---
+
+<div
+  role="region"
+  aria-label={label}
+  tabindex="0"
+  class={css({ overflowX: 'auto', maxW: '100%', _focusVisible: { outline: 'none', boxShadow: 'focus' } })}
+>
+  <slot />
+</div>

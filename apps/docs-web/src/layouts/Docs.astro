@@ -1,0 +1,194 @@
+---
+import { css } from 'styled-system/css'
+import Base from './Base.astro'
+import DocsHeader from '../components/DocsHeader.astro'
+import DocsFooter from '../components/DocsFooter.astro'
+import DocSidebar from 'web-design-system/astro/marketing/DocSidebar.astro'
+import DocTOC from 'web-design-system/astro/marketing/DocTOC.astro'
+import Prose from 'web-design-system/astro/marketing/Prose.astro'
+import { ChevronLeft, ChevronRight } from 'web-design-system/icons'
+import { docPages, pageNeighbours, pageSourceUrl, sidebarGroups } from '../data/docs'
+
+interface Props {
+  title: string
+  description?: string
+  toc?: { label: string; href: string }[]
+}
+
+const { title, description, toc } = Astro.props
+
+const path = Astro.url.pathname
+const groups = sidebarGroups(path)
+const { previous, next } = pageNeighbours(path)
+const sourceUrl = pageSourceUrl(path)
+
+const skipLink = css({
+  position: 'absolute',
+  top: '-16',
+  left: '5',
+  zIndex: 'sticky',
+  px: '3',
+  h: '9',
+  display: 'inline-flex',
+  alignItems: 'center',
+  borderRadius: 'sm',
+  bg: 'surface.elevated',
+  color: 'fg.default',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border.strong',
+  fontSize: 'sm',
+  transitionProperty: 'top',
+  transitionDuration: 'fast',
+  _focus: { top: '3' },
+})
+
+const mobileLink = (active: boolean) =>
+  css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: '0',
+    h: '8',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
+
+const pager = (direction: 'previous' | 'next') =>
+  css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '1',
+    p: '4',
+    borderRadius: 'md',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border',
+    bg: 'surface.subtle',
+    alignItems: direction === 'next' ? 'flex-end' : 'flex-start',
+    textAlign: direction === 'next' ? 'right' : 'left',
+    transitionProperty: 'border-color, background-color',
+    transitionDuration: 'fast',
+    _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
+
+const pagerLabel = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1',
+  fontSize: '2xs',
+  textTransform: 'uppercase',
+  letterSpacing: 'wider',
+  color: 'fg.subtle',
+})
+---
+
+<Base title={title} description={description}>
+  <a class={skipLink} href="#content">Skip to content</a>
+
+  <DocsHeader />
+
+  <nav
+    aria-label="Docs sections"
+    class={css({
+      display: { base: 'flex', lg: 'none' },
+      gap: '1',
+      overflowX: 'auto',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      pt: '4',
+    })}
+  >
+    {
+      docPages.map((page) => (
+        <a
+          class={mobileLink(path.replace(/\/+$/, '') === page.href)}
+          href={page.href}
+          aria-current={path.replace(/\/+$/, '') === page.href ? 'page' : undefined}
+        >
+          {page.label}
+        </a>
+      ))
+    }
+  </nav>
+
+  <main
+    id="content"
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: { base: '1fr', lg: '220px minmax(0, 1fr)', xl: '220px minmax(0, 1fr) 180px' },
+      gap: { base: '8', lg: '12' },
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: { base: '8', md: '12' },
+      alignItems: 'start',
+    })}
+  >
+    <aside class={css({ display: { base: 'none', lg: 'block' }, position: 'sticky', top: '20' })}>
+      <DocSidebar groups={groups} />
+    </aside>
+
+    <div class={css({ minW: '0' })}>
+      <article>
+        <Prose>
+          <h1>{title}</h1>
+          {description && <p>{description}</p>}
+          <slot />
+        </Prose>
+      </article>
+
+      <nav aria-label="Pagination" class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '3', mt: '12' })}>
+        {
+          previous ? (
+            <a class={pager('previous')} href={previous.href} rel="prev">
+              <span class={pagerLabel}>
+                <ChevronLeft size={12} /> Previous
+              </span>
+              <span class={css({ fontSize: 'sm', color: 'fg.default', fontWeight: 'medium' })}>{previous.label}</span>
+            </a>
+          ) : (
+            <span />
+          )
+        }
+        {
+          next ? (
+            <a class={pager('next')} href={next.href} rel="next">
+              <span class={pagerLabel}>
+                Next <ChevronRight size={12} />
+              </span>
+              <span class={css({ fontSize: 'sm', color: 'fg.default', fontWeight: 'medium' })}>{next.label}</span>
+            </a>
+          ) : (
+            <span />
+          )
+        }
+      </nav>
+
+      <p class={css({ mt: '6', fontSize: 'xs', color: 'fg.subtle' })}>
+        <a
+          class={css({ color: 'fg.muted', textDecoration: 'underline', textUnderlineOffset: '2px', _hover: { color: 'fg.default' }, _focusVisible: { outline: 'none', boxShadow: 'focus' } })}
+          href={sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Edit this page on GitHub
+        </a>
+      </p>
+    </div>
+
+    <aside class={css({ display: { base: 'none', xl: 'block' }, position: 'sticky', top: '20' })}>
+      {toc && toc.length > 0 && <DocTOC items={toc} />}
+    </aside>
+  </main>
+
+  <DocsFooter />
+</Base>

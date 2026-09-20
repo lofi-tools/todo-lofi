@@ -4,9 +4,10 @@ resolver = "2"
 package = { version = "0.1.0", edition = "2024" }
 metadata.crane.name = "my-workspace"
 members = ["apps/*", "libs/*", "demos/*"]
-# The web design system and its showcase are pnpm/Astro packages, not crates.
-# Excluded explicitly so `cargo check --workspace` never walks their trees.
-exclude = ["libs/web-design-system", "demos/design-system-showcase"]
+# The web design system, its showcase, and the docs website are pnpm/Astro
+# packages, not crates. Excluded explicitly so `cargo check --workspace` never
+# walks their trees.
+exclude = ["libs/web-design-system", "demos/design-system-showcase", "apps/docs-web"]
 
 
 [workspace.dependencies]

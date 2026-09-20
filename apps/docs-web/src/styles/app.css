@@ -1,0 +1,22 @@
+/**
+ * Docs-site tweaks on top of the design system's reset/base.
+ *
+ * In the `base` cascade layer so Panda's `utilities` still win — the docs
+ * pages are full of file paths (`docs/spec/coding-workflow-subtasks-spec.md`)
+ * and command names, which are unbreakable at narrow widths and would force
+ * the whole page to scroll sideways.
+ */
+@layer base {
+  code,
+  kbd,
+  samp {
+    overflow-wrap: break-word;
+  }
+
+  p,
+  li,
+  td,
+  th {
+    overflow-wrap: break-word;
+  }
+}

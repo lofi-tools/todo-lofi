@@ -43,14 +43,29 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 #### Testing
 - `ccheck` — cargo check all workspace packages (todo-2, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)
+#### Docs website
+- `pnpm dev` — run the documentation site (`apps/docs-web`) with auto-rebuilds
+- `pnpm build:docs` — Panda codegen + static build of the docs site
+- `pnpm test:e2e:docs` — Playwright smoke, theming, layout, and WCAG 2.1 AA checks for the docs site
+- `web` — install the JS workspace, stop any dev server a previous session left running, then start the docs site
+- `dev-stop` — stop the dev servers the web packages left running (`astro dev stop` in `apps/docs-web` and the showcase)
+- `astro <args>` — the workspace's pinned Astro CLI, e.g. `astro dev status` or `astro check`
+
+Astro refuses to start a second dev server for the same project, so reach for
+`dev-stop` (or `web`) instead of killing the process by hand.
+
+See `apps/docs-web/README.md`.
 #### Web design system
-- `pnpm install` — install the pnpm workspace (`libs/web-design-system`, `demos/design-system-showcase`)
-- `pnpm dev` — run the design-system showcase with auto-rebuilds
+- `pnpm install` — install the pnpm workspace (`libs/web-design-system`, `demos/design-system-showcase`, `apps/docs-web`)
+- `pnpm dev:ds` — run the design-system showcase with auto-rebuilds
 - `pnpm build` — Panda codegen + static build of the showcase
-- `pnpm typecheck` / `pnpm test` — typecheck both JS packages / run the Vitest suite
+- `pnpm typecheck` / `pnpm test` — typecheck all JS packages / run the Vitest suite
 - `pnpm test:e2e` — Playwright smoke, theming, and WCAG 2.1 AA checks (uses local Chrome)
 
 See `docs/spec/web-design-system-spec.md` and `libs/web-design-system/DESIGN.md`.
+
+The documentation site consumes the same preset and docs components; the
+showcase is where the components themselves are documented.
 #### Contributions
 - `mig <args>` — run a storage migration (`cargo run --bin migrate -- migration ...`)
 - `clone-patch <crate>` — clone a crate's repo into `patched/` to vendor a fork
@@ -60,7 +75,9 @@ See `docs/spec/web-design-system-spec.md` and `libs/web-design-system/DESIGN.md`
 ```
 todo-lofi/
 ├── apps/
-│   └── todo-2/        # Desktop GPUI application
+│   ├── todo-2/        # Desktop GPUI application
+│   ├── agent-cli/     # Terminal AI agent + ACP server
+│   └── docs-web/      # Documentation website (Astro + web design system)
 
 ├── libs/
 │   ├── storage/          # SQLite-backed persistence layer
@@ -78,7 +95,12 @@ todo-lofi/
 
 ## Contributing
 
-### Temporary docs website: https://deepwiki.com/lofi-tools/todo-lofi
+### Docs website: `apps/docs-web`
+
+What the app does, how to run it, how the workspace is put together, and the
+integrations it talks to — built with the in-repo web design system. Run it with
+`pnpm dev`. The [deepwiki mirror](https://deepwiki.com/lofi-tools/todo-lofi)
+remains available as a temporary fallback.
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.
 

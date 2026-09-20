@@ -1,0 +1,134 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Tasks, tags, and projects', href: '#tasks' },
+  { label: 'Integrated AI agent', href: '#agent' },
+  { label: 'Repeat and scheduling', href: '#repeat' },
+  { label: 'Semi-automated workflows', href: '#workflows' },
+  { label: 'Two-way sync', href: '#sync' },
+  { label: 'Mini-apps (extensions)', href: '#extensions' },
+  { label: 'Status at a glance', href: '#status' },
+]
+
+const statusRow = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '3',
+  p: '4',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const statuses = [
+  { name: 'Todoist two-way sync', state: 'Available', tone: 'success' },
+  { name: 'GitHub issues and projects', state: 'Preview', tone: 'accent' },
+  { name: 'Travel checklist templates', state: 'Available', tone: 'success' },
+  { name: 'Message follow-ups and birthday wishes', state: 'Coming soon', tone: 'warning' },
+  { name: 'Job application tracking', state: 'Coming soon', tone: 'warning' },
+  { name: 'Outside apps managing task lists', state: 'Coming soon', tone: 'warning' },
+] as const
+---
+
+<Docs
+  title="Features"
+  description="What the app does today, what is in preview, and what is planned. Everything below is local-first: the task database is yours, on disk."
+  toc={toc}
+>
+  <h2 id="tasks">Tasks, tags, and projects</h2>
+  <p>
+    Tasks are organized in a tree: areas contain projects, projects contain tasks, and nested tags cut
+    across all of it. Any view can be filtered by tag, so a list can be a saved question rather than a
+    folder you have to maintain.
+  </p>
+  <ul>
+    <li><strong>Nested tags</strong> with their own settings, managed from the tag settings pane.</li>
+    <li><strong>Tree-structured projects</strong> with drag-and-drop reordering.</li>
+    <li><strong>Task details</strong> in a dedicated pane: notes, dates, priorities, subtasks, and repeat rules.</li>
+    <li><strong>Keyboard-first</strong>: core actions are reachable without a pointing device, with command and task pickers for everything else.</li>
+  </ul>
+
+  <h2 id="agent">Integrated AI agent</h2>
+  <p>
+    The agent pane opens beside your tasks, so you can hand over work in the context you are already in.
+    It runs through the same agent stack as <code>apps/agent-cli</code>: providers you configure, tools
+    for reading and editing files, and an Agent Client Protocol (ACP) session underneath.
+  </p>
+  <p>
+    Typical use is delegation, not chat: "group today's triage by what should happen next", "set up the
+    release checklist for next month", "take this task through the coding workflow". See
+    <a href="/integrations">Integrations</a> for the provider and MCP configuration it shares with the CLI.
+  </p>
+
+  <h2 id="repeat">Repeat and scheduling</h2>
+  <p>
+    Recurring work is configured through a dedicated repeat picker rather than a free-text syntax, and
+    shown as a plain-language rule on the task. Due dates use the same date/time picker as the rest of the
+    app.
+  </p>
+
+  <h2 id="workflows">Semi-automated workflows</h2>
+  <p>
+    A task can carry a workflow: an ordered set of stages with their own state, so long-running work is
+    visible as stages instead of a single status.
+  </p>
+  <p>The coding workflow is the reference implementation:</p>
+  <ol>
+    <li><strong>Interview</strong> — the agent asks what the work actually is before writing anything.</li>
+    <li><strong>Spec</strong> — the answers become a written spec on the task.</li>
+    <li><strong>Coding</strong> — an agent works the spec in a checkout, with files and diffs in the app.</li>
+    <li><strong>Review</strong> — the change is reviewed before it moves on.</li>
+    <li><strong>Merge</strong> — the finished change is merged.</li>
+  </ol>
+  <p>
+    Specs for the engine and its subtask handling live in the repository under
+    <code>docs/spec/</code>; the workflow tables live in <code>libs/storage</code>.
+  </p>
+
+  <h2 id="sync">Two-way sync</h2>
+  <p>
+    Sync is bolt-on, not load-bearing. The local database is authoritative for the app; a sync engine maps
+    it onto an external system and reconciles changes in both directions.
+  </p>
+  <ul>
+    <li><strong>Todoist</strong> — two-way sync with authentication handled in-app.</li>
+    <li><strong>GitHub issues and projects</strong> — in preview; the same sync surface, backed by the GitHub API.</li>
+  </ul>
+  <Callout tone="note" title="Offline by default">
+    Nothing in the task loop requires a network call. Sync runs when you have credentials configured and
+    a connection; when it does not, the app keeps working against the local database.
+  </Callout>
+
+  <h2 id="extensions">Mini-apps (extensions)</h2>
+  <p>
+    Mini-apps are small purpose-built panes that manage their own slice of your lists. They appear as their
+    own tab in the app, so a travel checklist or a job application pipeline is a first-class surface rather
+    than a tag convention.
+  </p>
+  <ul>
+    <li><strong>Travel checklist templates</strong> — trip-shaped checklists that generate the tasks you need.</li>
+    <li><strong>Message follow-ups and birthday wishes</strong> — planned.</li>
+    <li><strong>Job application tracking</strong> — planned.</li>
+  </ul>
+
+  <h2 id="status">Status at a glance</h2>
+  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '3', listStyle: 'none', p: '0', m: '0' })}>
+    {
+      statuses.map((entry) => (
+        <li class={statusRow}>
+          <Badge tone={entry.tone} variant="subtle">{entry.state}</Badge>
+          <span class={css({ fontSize: 'sm', color: 'fg.default' })}>{entry.name}</span>
+        </li>
+      ))
+    }
+  </ul>
+  <p class={css({ mt: '4', fontSize: 'sm', color: 'fg.subtle' })}>
+    Statuses mirror the README. When in doubt, the code is the source of truth.
+  </p>
+</Docs>
