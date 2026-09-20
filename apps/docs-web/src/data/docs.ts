@@ -1,7 +1,9 @@
 /**
- * The documentation map. One source of truth for the header nav, the sidebar,
- * and the previous/next links, so a new page is one entry here plus one file
- * in `src/pages`.
+ * The documentation map. Two levels of navigation: the header's tab bar is the
+ * two guides (one per audience), and each guide's left nav nests its pages
+ * under section headings. One source of truth for the tabs, the left nav, and
+ * the previous/next links, so a new page is one entry here and one file under
+ * `src/pages`.
  */
 
 export interface DocLink {
@@ -9,63 +11,133 @@ export interface DocLink {
   href: string
 }
 
-export interface DocGroup {
+export interface DocNavItem extends DocLink {
+  active?: boolean
+}
+
+export interface DocSection {
   heading: string
   items: DocLink[]
 }
 
+export interface DocGuide {
+  /** Tab label. */
+  heading: string
+  /** One line telling the reader whether this guide is for them. */
+  summary: string
+  /** The guide's landing page — also where its tab points. */
+  href: string
+  sections: DocSection[]
+}
+
 export const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
 
-export const docGroups: DocGroup[] = [
+export const docGuides: DocGuide[] = [
   {
-    heading: 'Getting started',
-    items: [
-      { label: 'Overview', href: '/' },
-      { label: 'Quickstart', href: '/quickstart' },
+    heading: 'User guide',
+    summary: 'Install the app, use it, and configure it.',
+    href: '/',
+    sections: [
+      {
+        heading: 'Getting started',
+        items: [
+          { label: 'Overview', href: '/' },
+          { label: 'Install and run', href: '/install' },
+          { label: 'Feature status', href: '/status' },
+        ],
+      },
+      {
+        heading: 'Tasklist',
+        items: [
+          { label: 'Tasks, tags, and projects', href: '/tasks' },
+          { label: 'Repeat and scheduling', href: '/repeats' },
+          { label: 'Semi-automated workflows', href: '/workflows' },
+          { label: 'Mini-apps and extensions', href: '/mini-apps' },
+        ],
+      },
+      {
+        heading: 'Integrations',
+        items: [
+          { label: 'Integrated AI agent', href: '/agent' },
+          { label: 'Two-way sync', href: '/sync' },
+        ],
+      },
+      {
+        heading: 'Configuration',
+        items: [{ label: 'Configuration', href: '/configuration' }],
+      },
     ],
   },
   {
-    heading: 'Concepts',
-    items: [
-      { label: 'Features', href: '/features' },
-      { label: 'Architecture', href: '/architecture' },
-      { label: 'Integrations', href: '/integrations' },
-    ],
-  },
-  {
-    heading: 'Project',
-    items: [
-      { label: 'Contributing', href: '/contributing' },
-      { label: 'License', href: '/license' },
+    // The contributor guide is one flat list, so its single section heading is
+    // the guide name itself.
+    heading: 'Contributor guide',
+    summary: 'How it works, and how to work on it.',
+    href: '/contributor',
+    sections: [
+      {
+        heading: 'Contributor guide',
+        items: [
+          { label: 'Overview', href: '/contributor' },
+          { label: 'Development setup', href: '/contributor/development' },
+          { label: 'Architecture', href: '/contributor/architecture' },
+          { label: 'Integrations', href: '/contributor/integrations' },
+          { label: 'Contributing', href: '/contributor/contributing' },
+          { label: 'License', href: '/contributor/license' },
+        ],
+      },
     ],
   },
 ]
 
-/** Flat reading order, used for the previous/next footer links. */
-export const docPages: DocLink[] = docGroups.flatMap((group) => group.items)
+/** The guide a route belongs to. */
+export function guideFor(pathname: string): DocGuide | undefined {
+  const current = currentPath(pathname)
+  return docGuides.find((guide) =>
+    guide.sections.some((section) => section.items.some((item) => item.href === current)),
+  )
+}
 
-/** Sidebar groups with the current route marked active. */
-export function sidebarGroups(pathname: string): DocGroup[] {
-  const current = pathname.replace(/\/+$/, '') || '/'
-  return docGroups.map((group) => ({
-    heading: group.heading,
-    items: group.items.map((item) => ({
-      ...item,
-      active: item.href === current,
-    })),
+/** The current guide's sections, with the active route marked. */
+export function guideSections(pathname: string): DocSection[] {
+  const current = currentPath(pathname)
+  const guide = guideFor(pathname)
+  if (!guide) return []
+  return guide.sections.map((section) => ({
+    heading: section.heading,
+    items: section.items.map((item) => ({ ...item, active: item.href === current })),
   }))
+}
+
+/** Every page in a guide, in reading order, regardless of its section. */
+export function guideLinks(guide: DocGuide): DocLink[] {
+  return guide.sections.flatMap((section) => section.items)
+}
+
+/** The current guide's pages in reading order, with the active route marked. */
+export function guideItems(pathname: string): DocNavItem[] {
+  return guideSections(pathname).flatMap((section) => section.items)
+}
+
+/** The neighbours of the current route, within its guide. */
+export function pageNeighbours(pathname: string): { previous?: DocLink; next?: DocLink } {
+  const items = guideItems(pathname)
+  const current = currentPath(pathname)
+  const index = items.findIndex((item) => item.href === current)
+  if (index === -1) return {}
+  return { previous: items[index - 1], next: items[index + 1] }
 }
 
 /** Where the current route's source page lives in the repository. */
 export function pageSourceUrl(pathname: string): string {
-  const slug = pathname.replace(/^\/+|\/+$/g, '')
-  return `${REPO_URL}/blob/main/apps/docs-web/src/pages/${slug === '' ? 'index' : slug}.astro`
+  const current = currentPath(pathname)
+  if (current === '/') return `${REPO_URL}/blob/main/apps/docs-web/src/pages/index.astro`
+  // A guide's landing page is the index of its directory.
+  const isLanding = docGuides.some((guide) => guide.href === current)
+  const file = isLanding ? `${current}/index` : current
+  return `${REPO_URL}/blob/main/apps/docs-web/src/pages${file}.astro`
 }
 
-/** The neighbours of the current route in reading order. */
-export function pageNeighbours(pathname: string): { previous?: DocLink; next?: DocLink } {
-  const current = pathname.replace(/\/+$/, '') || '/'
-  const index = docPages.findIndex((page) => page.href === current)
-  if (index === -1) return {}
-  return { previous: docPages[index - 1], next: docPages[index + 1] }
+function currentPath(pathname: string): string {
+  return pathname.replace(/\/+$/, '') || '/'
 }

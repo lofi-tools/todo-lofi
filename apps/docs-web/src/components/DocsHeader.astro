@@ -3,9 +3,9 @@ import { css } from 'styled-system/css'
 import { Badge } from 'web-design-system/components'
 import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
 import { LogoMark } from 'web-design-system/icons'
-import { docPages, REPO_URL } from '../data/docs'
+import { docGuides, guideFor, REPO_URL } from '../data/docs'
 
-const path = Astro.url.pathname.replace(/\/+$/, '') || '/'
+const active = guideFor(Astro.url.pathname)
 
 const navItem = (active: boolean) =>
   css({
@@ -71,6 +71,10 @@ const navItem = (active: boolean) =>
     </a>
     <Badge tone="accent" variant="subtle">docs</Badge>
 
+    <!--
+      The two guides, one per audience. Each tab opens its guide's landing
+      page; the pages inside a guide are the left nav (or the mobile strip).
+    -->
     <ul
       class={css({
         display: { base: 'none', lg: 'flex' },
@@ -82,14 +86,15 @@ const navItem = (active: boolean) =>
       })}
     >
       {
-        docPages.map((page) => (
+        docGuides.map((guide) => (
           <li>
             <a
-              class={navItem(path === page.href)}
-              href={page.href}
-              aria-current={path === page.href ? 'page' : undefined}
+              class={navItem(active?.heading === guide.heading)}
+              href={guide.href}
+              aria-current={active?.heading === guide.heading ? 'true' : undefined}
+              title={guide.summary}
             >
-              {page.label}
+              {guide.heading}
             </a>
           </li>
         ))

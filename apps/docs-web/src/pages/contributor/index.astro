@@ -1,0 +1,139 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { docGuides, guideLinks, REPO_URL } from '../../data/docs'
+
+const toc = [
+  { label: "What's in this guide", href: '#in-this-guide' },
+  { label: 'Reading order', href: '#reading-order' },
+  { label: 'Where the rules live', href: '#rules' },
+  { label: 'Two workspaces', href: '#workspaces' },
+]
+
+const contributorGuide = docGuides.find((guide) => guide.heading === 'Contributor guide')
+const pages = (contributorGuide ? guideLinks(contributorGuide) : []).filter(
+  (item) => item.href !== '/contributor',
+)
+
+/** Page copy, keyed by nav label so the list itself stays sourced from docs.ts. */
+const summaries: Record<string, string> = {
+  'Development setup': 'Get a working shell: Nix and direnv, the dev-shell commands, and the web packages.',
+  Architecture: 'The map — crates, persistence, the desktop app, and the spec index.',
+  Integrations: 'The area you are most likely to touch: sync, the provider layer, MCP, and the agent protocol.',
+  Contributing: 'Which checks must pass, and the Rust and web conventions to follow.',
+  License: 'AGPL-3.0 in practice, and what that means for a change you want to upstream.',
+}
+
+const rules = [
+  { name: 'AGENTS.md', what: 'The Rust coding guidelines: error handling, naming, file layout, GPUI timers.' },
+  { name: 'docs/spec/*.md', what: 'One spec per non-trivial feature, recording the decisions behind it.' },
+  { name: 'libs/web-design-system/DESIGN.md', what: 'Web tokens, layers, component conventions, and the class-parity rule.' },
+  { name: 'README.md', what: 'Entry points and the quickest path to each part of the repository.' },
+]
+---
+
+<Docs
+  title="Contributor guide"
+  description="How todo-lofi is put together and how to work on it — for anyone building, extending, or reviewing the code."
+  toc={toc}
+>
+  <Callout tone="note" title="Here to use the app?">
+    This guide is about the code. Installing, using, and configuring todo-lofi is the
+    <a href="/">User guide</a>.
+  </Callout>
+
+  <h2 id="in-this-guide">What's in this guide</h2>
+  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+    {
+      pages.map((page) => (
+        <li
+          class={css({
+            p: '5',
+            borderRadius: 'lg',
+            borderWidth: 'hairline',
+            borderStyle: 'solid',
+            borderColor: 'border',
+            bg: 'surface.subtle',
+          })}
+        >
+          <a
+            href={page.href}
+            class={css({
+              display: 'block',
+              fontWeight: 'semibold',
+              color: 'fg.default',
+              mb: '1',
+              _hover: { color: 'accent.text' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+            })}
+          >
+            {page.label}
+          </a>
+          <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
+            {summaries[page.label]}
+          </p>
+        </li>
+      ))
+    }
+  </ul>
+
+  <h2 id="reading-order">Reading order</h2>
+  <p>
+    Nothing here is long, and the order matters more than usual: the setup page is what makes the rest
+    actionable, and the architecture page is the map you will keep coming back to.
+  </p>
+  <ol>
+    {
+      pages.map((page) => (
+        <li>
+          <a href={page.href}><strong>{page.label}</strong></a> — {summaries[page.label]}
+        </li>
+      ))
+    }
+  </ol>
+
+  <h2 id="rules">Where the rules live</h2>
+  <p>
+    Conventions are written down rather than implied, in four places:
+  </p>
+  <ul>
+    {
+      rules.map((rule) => (
+        <li>
+          <code>{rule.name}</code> — {rule.what}
+        </li>
+      ))
+    }
+  </ul>
+  <p>
+    The repository is also spec-driven: behavior changes get a file in <code>docs/spec/</code> first, and
+    that file records the interview decisions behind the design.{' '}
+    <a href="/contributor/architecture#specs">Architecture</a> lists every spec with its status.
+  </p>
+
+  <h2 id="workspaces">Two workspaces</h2>
+  <p>
+    The repository holds two unrelated build worlds, and it helps to know which one you are in:
+  </p>
+  <ul>
+    <li>
+      <strong>The Cargo workspace</strong> — <code>apps/todo-2</code>, <code>apps/agent-cli</code>, and the
+      crates under <code>libs/</code>. Everything the desktop app and the agent do lives here.
+    </li>
+    <li>
+      <strong>The pnpm workspace</strong> — <code>libs/web-design-system</code>,{' '}
+      <code>demos/design-system-showcase</code>, and this site. Three separate Astro/Panda projects sharing
+      one design-system preset.
+    </li>
+  </ul>
+  <p>
+    The two are deliberately decoupled: the desktop palette lives in{' '}
+    <code>apps/todo-2/src/theme.rs</code> and is not generated from the web tokens. What the web packages
+    do share is class-generation settings — if they drift, the design system's components render unstyled
+    with no error. <a href="/contributor/development#web-surfaces">Development setup</a> has the detail.
+  </p>
+  <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
+    The repository lives at <a href={REPO_URL}>{REPO_URL.replace('https://', '')}</a>.
+  </p>
+</Docs>

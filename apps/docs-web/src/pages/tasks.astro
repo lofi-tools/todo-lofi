@@ -1,0 +1,71 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'The task list', href: '#list' },
+  { label: 'Task details', href: '#details' },
+  { label: 'Tags', href: '#tags' },
+  { label: 'Projects and areas', href: '#projects' },
+  { label: 'Filtering', href: '#filtering' },
+]
+---
+
+<Docs
+  title="Tasks, tags, and projects"
+  description="Tasks are the unit of work, tags are how you cut across them, and projects give them a home. Everything lives in one local tree that you arrange yourself."
+  toc={toc}
+>
+  <h2 id="list">The task list</h2>
+  <p>
+    The main pane is the list you are working in. Each row shows the task's title with the labels and
+    priority you have given it; selecting a row opens its details beside the list, so you never lose your
+    place while editing.
+  </p>
+  <p>
+    The app is built to be driven from the keyboard: core actions are reachable without a pointing device,
+    and pickers stand in for the lists you would otherwise hunt through — one for jumping to a task, one
+    for moving it to a project.
+  </p>
+
+  <h2 id="details">Task details</h2>
+  <p>
+    A task carries more than a title. The details pane is where the rest of it lives:
+  </p>
+  <ul>
+    <li><strong>Notes</strong> — free-form text on the task itself.</li>
+    <li><strong>Due date and time</strong>, set with a date and time picker rather than by typing a string.</li>
+    <li><strong>Priority</strong> — the one field that makes a long list sortable at a glance.</li>
+    <li><strong>Repeat rule</strong>, configured in its own picker — see <a href="/repeats">Repeat and scheduling</a>.</li>
+    <li><strong>Subtasks</strong>, as a short list under the task's own details.</li>
+  </ul>
+
+  <h2 id="tags">Tags</h2>
+  <p>
+    Tags are nested, so a taxonomy can grow without turning into a flat pile of labels. Each tag has its
+    own settings pane, which is where its behavior and appearance are defined rather than somewhere in the
+    app's global preferences.
+  </p>
+  <p>
+    Because tags cut across the project tree, they are the honest answer to "show me this kind of work,
+    wherever it lives".
+  </p>
+
+  <h2 id="projects">Projects and areas</h2>
+  <p>
+    Projects hold tasks, and areas hold projects. The tree is yours to shape: drag-and-drop reordering
+    means the order in the sidebar is the order you chose, not an alphabetized or date-sorted
+    approximation.
+  </p>
+
+  <h2 id="filtering">Filtering</h2>
+  <p>
+    The tree is the default way to narrow what you are looking at, and tags are the other one: filter a
+    list by tag and it becomes a saved question rather than a folder you have to maintain by hand.
+  </p>
+
+  <Callout tone="tip" title="After this">
+    <a href="/agent">Integrated AI agent</a> is what makes the tree worth delegating to — the agent works
+    in the same lists you see, and <a href="/workflows">workflows</a> let a task carry its own process.
+  </Callout>
+</Docs>

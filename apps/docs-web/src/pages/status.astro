@@ -1,0 +1,117 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Available', href: '#available' },
+  { label: 'Preview', href: '#preview' },
+  { label: 'Planned', href: '#planned' },
+  { label: 'Reading the code', href: '#code' },
+]
+
+const groups = [
+  {
+    id: 'available',
+    heading: 'Available',
+    tone: 'success',
+    state: 'available',
+    summary: 'Built, used, and not expected to change shape.',
+    items: [
+      { name: 'Local task list', href: '/tasks', note: 'Tasks, nested tags, projects and areas, drag-and-drop ordering.' },
+      { name: 'Repeat and scheduling', href: '/repeats', note: 'Recurring rules through a dedicated picker.' },
+      { name: 'Integrated AI agent', href: '/agent', note: 'The agent pane, driven over the Agent Client Protocol.' },
+      { name: 'Configurable model providers', href: '/configuration', note: 'OpenAI-compatible providers, per-model tuning, fallback combos.' },
+      { name: 'Todoist two-way sync', href: '/sync', note: 'Import plus push of title, description, and done deltas.' },
+      { name: 'Travel checklist templates', href: '/mini-apps', note: 'Trip-shaped checklists that generate their own tasks.' },
+    ],
+  },
+  {
+    id: 'preview',
+    heading: 'Preview',
+    tone: 'accent',
+    state: 'preview',
+    summary: 'Usable, but the design is still moving — expect the shape to change.',
+    items: [
+      { name: 'GitHub issues and projects sync', href: '/sync', note: 'The same sync surface as Todoist, mapped onto GitHub.' },
+      { name: 'Git-backed coding workflow', href: '/workflows', note: 'Runs that work in a real checkout and produce real diffs.' },
+    ],
+  },
+  {
+    id: 'planned',
+    heading: 'Planned',
+    tone: 'warning',
+    state: 'coming soon',
+    summary: 'Specified or sketched, not built.',
+    items: [
+      { name: 'Message follow-ups and birthday wishes', href: '/mini-apps', note: 'Keeping in touch, as tasks with a cadence.' },
+      { name: 'Job application tracking', href: '/mini-apps', note: 'A pipeline mini-app: applied, interviewing, offer, closed.' },
+      { name: 'Outside apps managing part of your lists', href: '/mini-apps', note: 'Another program owning a section of the tree.' },
+    ],
+  },
+] as const
+
+const row = css({
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: '3',
+  p: '4',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+---
+
+<Docs
+  title="Feature status"
+  description="An honest inventory of what exists, what is in preview, and what is only planned. It mirrors the README; the code is the final authority."
+  toc={toc}
+>
+  {
+    groups.map((group) => (
+      <section>
+        <h2 id={group.id}>{group.heading}</h2>
+        <p>{group.summary}</p>
+        <ul class={css({ display: 'flex', flexDirection: 'column', gap: '3', listStyle: 'none', p: '0', m: '0' })}>
+          {group.items.map((item) => (
+            <li class={row}>
+              <Badge tone={group.tone} variant="subtle">{group.state}</Badge>
+              <span class={css({ minW: '0' })}>
+                <a
+                  href={item.href}
+                  class={css({ display: 'block', fontSize: 'sm', color: 'fg.default', fontWeight: 'medium' })}
+                >
+                  {item.name}
+                </a>
+                <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', mt: '0.5' })}>
+                  {item.note}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
+    ))
+  }
+
+  <h2 id="code">Reading the code</h2>
+  <p>
+    Status labels age badly, so they are kept short and blunt here: <strong>available</strong> means built
+    and used, <strong>preview</strong> means usable but still changing shape, and{' '}
+    <strong>coming soon</strong> means specified or sketched rather than built.
+  </p>
+  <p>
+    When a label and the code disagree, believe the code — and the per-feature specs in{' '}
+    <code>docs/spec/</code>, which are listed with their own status on the
+    <a href="/contributor/architecture#specs">architecture page</a>.
+  </p>
+
+  <Callout tone="note" title="Where to go next">
+    Ready to set it up? <a href="/configuration">Configuration</a> covers providers, credentials, and the
+    in-app panes. Want to change something? <a href="/contributor">The contributor guide</a> starts with a
+    working shell.
+  </Callout>
+</Docs>

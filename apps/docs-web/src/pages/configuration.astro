@@ -1,0 +1,173 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../components/TableScroll.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'In-app settings', href: '#settings' },
+  { label: 'Agent providers and models', href: '#agent' },
+  { label: 'Todoist', href: '#todoist' },
+  { label: 'GitHub', href: '#github' },
+  { label: 'Going deeper', href: '#deeper' },
+]
+
+const config = `{
+  "provider": "auto",
+  "model": "auto",
+  "max_turns": 50,
+
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "env:OPENROUTER_API_KEY",
+      "models": ["openrouter/free"]
+    }
+  },
+
+  "combos": {
+    "coding": [
+      ["poolside", "poolside/laguna-xs-2.1"],
+      ["openrouter", "openrouter/free"]
+    ]
+  }
+}`
+
+const apiKeyForms = [
+  { form: '!command', meaning: 'Runs the rest as a shell command and uses its trimmed stdout as the key.' },
+  { form: 'env:VAR', meaning: 'Reads the environment variable VAR.' },
+  { form: 'anything else', meaning: 'Treated as a literal key.' },
+]
+
+const envVars = [
+  { variable: 'ABSTRACT_MODEL', overrides: 'model' },
+  { variable: 'ABSTRACT_PROVIDER', overrides: 'provider' },
+  { variable: 'ABSTRACT_EFFORT', overrides: 'effort' },
+  { variable: 'ABSTRACT_THEME', overrides: 'theme' },
+  { variable: 'ABSTRACT_MAX_TURNS', overrides: 'max_turns' },
+  { variable: '<PROVIDER>_API_KEY', overrides: 'a provider key, via its env: spec' },
+]
+---
+
+<Docs
+  title="Configuration"
+  description="Where the app's settings live: the in-app panes for everyday preferences, and the layered JSON config for the agent, sync accounts, and model providers."
+  toc={toc}
+>
+  <Callout tone="tip" title="Nothing here is required">
+    A local task list needs no configuration at all. The agent and the sync integrations are opt-in, and
+    each one asks for credentials the first time you use it.
+  </Callout>
+
+  <h2 id="settings">In-app settings</h2>
+  <p>
+    Preferences are edited in the app rather than in a file. Each of these is a pane of its own:
+  </p>
+  <ul>
+    <li><strong>Settings</strong> — application-level preferences.</li>
+    <li><strong>Tag settings</strong> — per-tag behavior for the tag tree.</li>
+    <li><strong>Integrations</strong> — the connected accounts: Todoist and GitHub.</li>
+    <li><strong>Automations</strong> — the semi-automated workflows a task can carry.</li>
+    <li><strong>Mini-apps</strong> — the panels that manage their own slice of your lists, such as travel checklists.</li>
+  </ul>
+
+  <h2 id="agent">Agent providers and models</h2>
+  <p>
+    The agent pane and <code>agent-cli</code> share one configuration, a layered JSON file merged in this
+    order — later wins:
+  </p>
+  <ol>
+    <li>built-in defaults</li>
+    <li><code>~/.abstract/config.json</code> — your global settings</li>
+    <li><code>.abstract/config.json</code> — per-project settings</li>
+    <li><code>ABSTRACT_*</code> environment variables</li>
+    <li>CLI flags</li>
+  </ol>
+  <p>
+    Providers are OpenAI-compatible and come with sensible defaults, so the common case is picking one and
+    supplying a key. Override or add a provider under <code>providers</code>; only set the fields you want
+    to change.
+  </p>
+  <CodeBlock filename=".abstract/config.json" code={config} />
+  <p>An <code>api_key</code> takes one of three forms:</p>
+  <TableScroll label="API key forms">
+    <table>
+      <thead>
+        <tr>
+          <th>Form</th>
+          <th>Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          apiKeyForms.map((entry) => (
+            <tr>
+              <td><code>{entry.form}</code></td>
+              <td>{entry.meaning}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    A <strong>combo</strong> is a named list of provider/model pairs that shows up in the model picker as a
+    single choice. It runs on its first entry and, if that fails before producing any output (a provider
+    error or a rate limit), retries on the next one. Because the retry only happens before any output,
+    work is never duplicated.
+  </p>
+  <p>
+    Environment variables override the file, which is handy for shells and CI:
+  </p>
+  <TableScroll label="Environment variables">
+    <table>
+      <thead>
+        <tr>
+          <th>Variable</th>
+          <th>Overrides</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          envVars.map((entry) => (
+            <tr>
+              <td><code>{entry.variable}</code></td>
+              <td>{entry.overrides}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The complete provider, model, and environment-variable reference is in{' '}
+    <code>apps/agent-cli/README.md</code>.
+  </p>
+
+  <h2 id="todoist">Todoist</h2>
+  <p>
+    Add your Todoist account in the integrations pane to turn on two-way sync. Once connected, the app
+    imports your projects and tasks and keeps changes flowing in both directions; you keep working wherever
+    you prefer, and the local database stays authoritative when the network is not there.
+  </p>
+  <p>
+    How the mapping works, and exactly which fields are pushed today, is on the{' '}
+    <a href="/contributor/integrations#todoist">integrations page</a>.
+  </p>
+
+  <h2 id="github">GitHub</h2>
+  <p>
+    GitHub issues and projects sync is in preview. <Badge tone="accent" variant="subtle">preview</Badge>{' '}
+    Authenticate from the integrations pane; the app then maps issues and projects onto your lists, and the
+    coding workflow can use a real checkout for its git-backed stages.
+  </p>
+
+  <h2 id="deeper">Going deeper</h2>
+  <p>
+    Tool servers, lifecycle hooks, and proxies are configured in the same JSON file — those, plus the Agent
+    Client Protocol that connects the app to the agent, are documented on the{' '}
+    <a href="/contributor/integrations">integrations</a> page because they are closer to the internals than to a
+    preference.
+  </p>
+</Docs>

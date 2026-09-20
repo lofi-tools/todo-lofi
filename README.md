@@ -48,11 +48,13 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - `pnpm build:docs` — Panda codegen + static build of the docs site
 - `pnpm test:e2e:docs` — Playwright smoke, theming, layout, and WCAG 2.1 AA checks for the docs site
 - `web` — install the JS workspace, stop any dev server a previous session left running, then start the docs site
-- `dev-stop` — stop the dev servers the web packages left running (`astro dev stop` in `apps/docs-web` and the showcase)
+- `dev-stop` — stop the dev and preview servers the web packages left running (`astro dev stop` / `astro preview stop`, in `apps/docs-web` and the showcase)
 - `astro <args>` — the workspace's pinned Astro CLI, e.g. `astro dev status` or `astro check`
 
-Astro refuses to start a second dev server for the same project, so reach for
-`dev-stop` (or `web`) instead of killing the process by hand.
+Astro refuses to start a second dev server for the same project, and the e2e
+suites reuse a preview server that is already listening — so reach for `dev-stop`
+(or `web`) instead of killing the process by hand, or a test run will quietly
+exercise the previous build.
 
 See `apps/docs-web/README.md`.
 #### Web design system

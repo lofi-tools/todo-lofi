@@ -1,0 +1,64 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Offline first', href: '#offline' },
+  { label: 'Todoist', href: '#todoist' },
+  { label: 'GitHub', href: '#github' },
+  { label: 'What syncs', href: '#what-syncs' },
+]
+---
+
+<Docs
+  title="Two-way sync"
+  description="Keep working in the task list you already use. Sync is opt-in and bolt-on: the local database stays authoritative, and the app is fully usable without it."
+  toc={toc}
+>
+  <h2 id="offline">Offline first</h2>
+  <p>
+    Your tasks live in a local database on your machine, and that database is what the app reads and
+    writes. Sync is a layer on top of it: when you connect an outside system, the app maps your tasks onto
+    it and reconciles changes in both directions.
+  </p>
+  <p>
+    The practical consequence is that a sync that fails does not break the app. Nothing in the task loop
+    requires a network call, so you keep working offline and the mapping catches up when it can.
+  </p>
+
+  <h2 id="todoist">Todoist</h2>
+  <p>
+    Todoist is the primary external task list, and it is the integration to reach for if you want two-way
+    sync today. <Badge tone="success" variant="subtle">available</Badge>
+  </p>
+  <p>
+    Connect your account from the app's integrations pane. Once connected, changes you make in Todoist
+    arrive locally and changes you make locally are pushed back, with the local database remaining the copy
+    the app trusts.
+  </p>
+
+  <h2 id="github">GitHub</h2>
+  <p>
+    GitHub issues and projects are in preview. <Badge tone="accent" variant="subtle">preview</Badge> The
+    same sync surface is there — authenticate in the integrations pane and your issues and projects map
+    onto your lists — but expect the shape of that mapping to change while it settles.
+  </p>
+  <p>
+    GitHub also has a second, separate role: a coding workflow run can use a real checkout, which is what
+    makes the diffs in <a href="/workflows">Semi-automated workflows</a> real.
+  </p>
+
+  <h2 id="what-syncs">What syncs</h2>
+  <p>
+    Titles, descriptions, and completion state are what flow today; the exact contract is written down
+    rather than implied. If you need to know whether a specific field survives a round trip, the
+    integration's spec is the answer — see <a href="/contributor/integrations">Integrations</a>.
+  </p>
+
+  <Callout tone="note" title="Setting this up">
+    Accounts and credentials are configured in the app, not in a file. See
+    <a href="/configuration">Configuration</a> for the integrations pane, and
+    <a href="/status">Feature status</a> for what is shipped versus planned.
+  </Callout>
+</Docs>

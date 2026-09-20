@@ -1,0 +1,64 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'What a workflow is', href: '#what' },
+  { label: 'The coding workflow', href: '#coding' },
+  { label: 'Running one', href: '#running' },
+  { label: 'Where it lives', href: '#where' },
+]
+---
+
+<Docs
+  title="Semi-automated workflows"
+  description="A task can carry a process: an ordered set of stages with their own state, so long-running work is visible as stages rather than a single status."
+  toc={toc}
+>
+  <h2 id="what">What a workflow is</h2>
+  <p>
+    Work that takes more than one sitting does not fit a checkbox. A workflow attaches that shape to a
+    task: the stages it goes through, which one it is in, and what has to happen before it moves on.
+  </p>
+  <p>
+    "Semi-automated" is the honest description. The transitions are explicit and reviewable; the agent does
+    the work inside a stage, but you decide when the stage is done. The automations pane is where workflows
+    are listed and adjusted.
+  </p>
+
+  <h2 id="coding">The coding workflow</h2>
+  <p>
+    Coding tasks are the reference implementation, and the one used to build the app itself. Its stages:
+  </p>
+  <ol>
+    <li><strong>Interview</strong> — the agent asks what the work actually is, before anything is written.</li>
+    <li><strong>Spec</strong> — those answers become a written spec on the task, so the plan outlives the conversation.</li>
+    <li><strong>Coding</strong> — an agent works the spec in a checkout, with the files and diffs visible in the app.</li>
+    <li><strong>Review</strong> — the change is reviewed before it is allowed to move on.</li>
+    <li><strong>Merge</strong> — the finished change lands.</li>
+  </ol>
+  <p>
+    The point of making it a workflow rather than a prompt is that each stage has a state you can look at.
+    You can leave a task in review overnight and pick it up knowing exactly where it stopped.
+  </p>
+
+  <h2 id="running">Running one</h2>
+  <p>
+    You start a workflow by asking for it — "take this task through the coding workflow" — and the agent
+    moves it stage by stage. A run can use a real checkout, which is what lets the coding stages produce
+    actual diffs instead of a description of one.
+  </p>
+
+  <h2 id="where">Where it lives</h2>
+  <p>
+    Workflow definitions and run state live in the storage layer, next to the tasks they belong to, and the
+    data model has its own specs — the v2 simplification supersedes the v1 model, and the coding run has a
+    spec of its own. The <a href="/contributor/architecture#specs">spec table</a> lists them with their
+    status, and <a href="/contributor/integrations#github">Integrations</a> covers the git-backed side.
+  </p>
+
+  <Callout tone="note" title="Related">
+    The agent that does the work is the same one described in <a href="/agent">Integrated AI agent</a>;
+    workflows are what it does when the task is bigger than one request.
+  </Callout>
+</Docs>

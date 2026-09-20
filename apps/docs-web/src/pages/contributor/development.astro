@@ -1,12 +1,11 @@
 ---
-import { css } from 'styled-system/css'
-import Docs from '../layouts/Docs.astro'
+import Docs from '../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
 import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
-import TableScroll from '../components/TableScroll.astro'
+import TableScroll from '../../components/TableScroll.astro'
 
 const toc = [
-  { label: 'Prerequisites', href: '#prerequisites' },
+  { label: 'What you need', href: '#prerequisites' },
   { label: 'Install Nix', href: '#install-nix' },
   { label: 'Install direnv', href: '#install-direnv' },
   { label: 'Enable nix-direnv', href: '#nix-direnv' },
@@ -54,7 +53,7 @@ const commands = [
   { command: 'clone-patch <crate>', purpose: "Clone a crate's upstream repository into patched/ to vendor a fork." },
   { command: 'skills', purpose: 'Sync docs/agent_skills/*.md into .agents/skills/.' },
   { command: 'web', purpose: 'Install the JS workspace, stop any dev server left by a previous session, and start the docs site.' },
-  { command: 'dev-stop', purpose: 'Stop the dev servers the web packages left running.' },
+  { command: 'dev-stop', purpose: 'Stop the dev and preview servers the web packages left running (astro dev stop / astro preview stop).' },
   { command: 'astro <args>', purpose: "The workspace's pinned Astro CLI, e.g. astro dev status or astro check." },
   { command: 'pnpm dev', purpose: 'Run this documentation site with auto-rebuilds.' },
   { command: 'pnpm dev:ds', purpose: 'Run the design-system showcase with auto-rebuilds.' },
@@ -70,17 +69,17 @@ pnpm test:e2e     # Playwright smoke, theming, and WCAG 2.1 AA checks`
 ---
 
 <Docs
-  title="Quickstart"
-  description="Get the repository running: Nix provides the toolchain, direnv loads it automatically, and cargo runs the desktop app."
+  title="Development setup"
+  description="Set up the toolchain for working on the repository: Nix provides the environment, direnv loads it automatically, and cargo runs the app."
   toc={toc}
 >
-  <Callout tone="note" title="Prerequisites">
+  <Callout tone="note" title="What you need">
     A Unix-like machine (macOS is the main target today; Linux works for the Rust crates), Nix with
     flakes enabled, and direnv. The dev shell also brings Node and pnpm for the web packages, so you do
     not need those installed globally.
   </Callout>
 
-  <h2 id="prerequisites">Prerequisites</h2>
+  <h2 id="prerequisites">What you need</h2>
   <p>
     The repository uses <a href="https://nixos.org">Nix</a> flakes for its development environment: the
     <code>.envrc</code> file loads <code>flake.nix</code>, which provides the Rust toolchain,

@@ -1,0 +1,67 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'The pane', href: '#pane' },
+  { label: 'Delegating work', href: '#delegation' },
+  { label: 'What it inherits', href: '#stack' },
+  { label: 'Configuring it', href: '#configure' },
+]
+---
+
+<Docs
+  title="Integrated AI agent"
+  description="An agent pane that opens beside your tasks, so you can hand over work without leaving the list you are looking at."
+  toc={toc}
+>
+  <h2 id="pane">The pane</h2>
+  <p>
+    The agent is a pane in the app, not a separate window or a chat site. It sits next to the list you are
+    already in, which means the context you have built up — the task, its project, the tags around it — is
+    context the request already has.
+  </p>
+
+  <h2 id="delegation">Delegating work</h2>
+  <p>
+    The pane is for delegation rather than conversation. Requests that read naturally against your own
+    lists are the ones it is built for:
+  </p>
+  <ul>
+    <li>"Group today's triage by what should happen next."</li>
+    <li>"Set up the release checklist for next month."</li>
+    <li>"Take this task through the coding workflow."</li>
+    <li>"Turn these notes into tasks in the right project."</li>
+  </ul>
+  <p>
+    Because it acts on the same database the rest of the app is reading, the result shows up as real tasks
+    you can edit — not as a summary you have to transcribe by hand.
+  </p>
+
+  <h2 id="stack">What it inherits</h2>
+  <p>
+    The pane drives the same agent as the terminal tool, over the Agent Client Protocol, so it inherits that
+    configuration rather than reimplementing it:
+  </p>
+  <ul>
+    <li>The <strong>provider and model</strong> you selected, including fallback when a provider fails before producing output.</li>
+    <li>The <strong>tools</strong> the agent has — files, search, shell, and anything you have added as an MCP server.</li>
+    <li><strong>Hooks</strong> bound to agent events, so automation outside the app still fires.</li>
+  </ul>
+  <p>
+    The protocol and the client that speaks it are covered on the contributor side in
+    <a href="/contributor/integrations#acp">the agent protocol</a>.
+  </p>
+
+  <h2 id="configure">Configuring it</h2>
+  <p>
+    Nothing needs configuring to use the local lists. To use the agent, pick a provider and give it a key
+    — that is one JSON file, documented in <a href="/configuration#agent">Configuration</a>. Tool servers
+    and hooks live in the same file.
+  </p>
+
+  <Callout tone="note" title="Workflows are the interesting part">
+    A single request is useful; a task that carries its own process is better. See
+    <a href="/workflows">Semi-automated workflows</a> for the staged version of this.
+  </Callout>
+</Docs>

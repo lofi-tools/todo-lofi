@@ -15,47 +15,69 @@ const toc = [
 const highlights = [
   {
     title: 'Integrated AI agent',
+    href: '/agent',
     status: 'Available',
     tone: 'success',
     body: 'A docked agent pane for doing work, not just answering questions: it can read and change your lists, set up repeats, and run a task through a whole workflow.',
   },
   {
     title: 'Tags, projects, and areas',
+    href: '/tasks',
     status: 'Available',
     tone: 'success',
     body: 'Group and filter tasks with nested tags, organize them into a tree of projects and areas, and reorder by drag and drop.',
   },
   {
     title: 'Repeat and scheduling',
+    href: '/repeats',
     status: 'Available',
     tone: 'success',
     body: 'Recurring tasks are configured in a dedicated picker instead of a syntax you have to remember.',
   },
   {
     title: 'Semi-automated workflows',
+    href: '/workflows',
     status: 'Available',
     tone: 'success',
     body: 'A task can carry a workflow. Coding tasks, for example, move through interview, spec, coding, review, and merge.',
   },
   {
     title: 'Two-way sync',
+    href: '/sync',
     status: 'Todoist · GitHub preview',
     tone: 'accent',
     body: 'Keep working in the task app you already use. Todoist sync is the current target; GitHub issues and projects are in preview.',
   },
   {
     title: 'Mini-apps (extensions)',
+    href: '/mini-apps',
     status: 'Some coming soon',
     tone: 'warning',
     body: 'Small purpose-built panes: travel checklist templates ship today; message follow-ups, birthday reminders, and job application tracking are planned.',
   },
 ] as const
 
-const next = [
-  { title: 'Quickstart', href: '/quickstart', body: 'Install Nix and direnv, enter the dev shell, and run the desktop app.' },
-  { title: 'Architecture', href: '/architecture', body: 'The workspace layout, the persistence layer, and where each feature lives.' },
-  { title: 'Integrations', href: '/integrations', body: 'Todoist, GitHub, providers, MCP servers, and the ACP agent surface.' },
-  { title: 'Contributing', href: '/contributing', body: 'Checks to run, conventions to follow, and how specs drive changes.' },
+const audiences = [
+  {
+    heading: 'Using the app',
+    body: 'You want to run todo-lofi and get your tasks into it.',
+    links: [
+      { title: 'Install and run', href: '/install', body: 'What you need, and how to run it from a checkout or build a macOS app.' },
+      { title: 'Tasks, tags, and projects', href: '/tasks', body: 'How the tree works, and what a task carries besides a title.' },
+      { title: 'Feature status', href: '/status', body: 'What is available, what is in preview, and what is only planned.' },
+      { title: 'Configuration', href: '/configuration', body: 'In-app settings, model providers, and connecting Todoist or GitHub.' },
+    ],
+  },
+  {
+    heading: 'Working on it',
+    body: 'You want to build, extend, or review the code.',
+    links: [
+      { title: 'Contributor guide', href: '/contributor', body: 'The whole guide: setup, architecture, integrations, checks, and the license.' },
+      { title: 'Development setup', href: '/contributor/development', body: 'Nix and direnv, the dev shell commands, and the web packages.' },
+      { title: 'Architecture', href: '/contributor/architecture', body: 'The workspace layout, the persistence layer, and where each feature lives.' },
+      { title: 'Contributing', href: '/contributor/contributing', body: 'Checks to run, conventions to follow, and how specs drive changes.' },
+    ],
+  },
 ]
 ---
 
@@ -97,25 +119,33 @@ const next = [
   <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
     {
       highlights.map((highlight) => (
-        <li
-          class={css({
-            p: '5',
-            borderRadius: 'lg',
-            borderWidth: 'hairline',
-            borderStyle: 'solid',
-            borderColor: 'border',
-            bg: 'surface.subtle',
-          })}
-        >
-          <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '2', flexWrap: 'wrap' })}>
-            <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>
-              {highlight.title}
-            </span>
-            <Badge tone={highlight.tone} variant="subtle">{highlight.status}</Badge>
-          </div>
-          <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
-            {highlight.body}
-          </p>
+        <li>
+          <a
+            href={highlight.href}
+            class={css({
+              display: 'block',
+              p: '5',
+              borderRadius: 'lg',
+              borderWidth: 'hairline',
+              borderStyle: 'solid',
+              borderColor: 'border',
+              bg: 'surface.subtle',
+              _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+              transitionProperty: 'border-color, background-color',
+              transitionDuration: 'fast',
+            })}
+          >
+            <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '2', flexWrap: 'wrap' })}>
+              <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>
+                {highlight.title}
+              </span>
+              <Badge tone={highlight.tone} variant="subtle">{highlight.status}</Badge>
+            </div>
+            <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
+              {highlight.body}
+            </p>
+          </a>
         </li>
       ))
     }
@@ -134,7 +164,8 @@ const next = [
     <li><code>libs/web-design-system</code> — the design system this site is built with.</li>
   </ul>
   <p>
-    <a href="/architecture">Architecture</a> walks through each crate and how they depend on one another.
+    <a href="/contributor/architecture">Architecture</a> walks through each crate and how they depend on
+    one another.
   </p>
 
   <Callout tone="tip" title="About this site">
@@ -144,35 +175,43 @@ const next = [
   </Callout>
 
   <h2 id="where-to-start">Where to start</h2>
-  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
-    {
-      next.map((item) => (
-        <li>
-          <a
-            href={item.href}
-            class={css({
-              display: 'block',
-              p: '5',
-              borderRadius: 'lg',
-              borderWidth: 'hairline',
-              borderStyle: 'solid',
-              borderColor: 'border',
-              bg: 'surface.subtle',
-              _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
-              _focusVisible: { outline: 'none', boxShadow: 'focus' },
-              transitionProperty: 'border-color, background-color',
-              transitionDuration: 'fast',
-            })}
-          >
-            <span class={css({ display: 'block', fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>
-              {item.title}
-            </span>
-            <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
-              {item.body}
-            </span>
-          </a>
-        </li>
-      ))
-    }
-  </ul>
+  {
+    audiences.map((audience) => (
+      <section class={css({ mb: '8' })}>
+        <h3 class={css({ textStyle: 'h4', color: 'fg.default', mb: '1' })}>{audience.heading}</h3>
+        <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '0', mb: '3' })}>{audience.body}</p>
+        <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+          {
+            audience.links.map((item) => (
+              <li>
+                <a
+                  href={item.href}
+                  class={css({
+                    display: 'block',
+                    p: '5',
+                    borderRadius: 'lg',
+                    borderWidth: 'hairline',
+                    borderStyle: 'solid',
+                    borderColor: 'border',
+                    bg: 'surface.subtle',
+                    _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
+                    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+                    transitionProperty: 'border-color, background-color',
+                    transitionDuration: 'fast',
+                  })}
+                >
+                  <span class={css({ display: 'block', fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>
+                    {item.title}
+                  </span>
+                  <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+                    {item.body}
+                  </span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </section>
+    ))
+  }
 </Docs>

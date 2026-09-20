@@ -1,0 +1,75 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'What they are', href: '#what' },
+  { label: 'Travel checklists', href: '#travel' },
+  { label: 'Planned', href: '#planned' },
+  { label: 'How they are modelled', href: '#model' },
+]
+
+const planned = [
+  { name: 'Message follow-ups and birthday wishes', note: 'Keeping in touch with people, as tasks with a natural cadence.' },
+  { name: 'Job application tracking', note: 'A pipeline rather than a list: applied, interviewing, offer, closed.' },
+  { name: 'Outside apps managing part of your lists', note: 'Let another program own a section of the tree and keep it in sync.' },
+]
+---
+
+<Docs
+  title="Mini-apps and extensions"
+  description="Small, purpose-built panes that manage their own slice of your lists — a travel checklist or a pipeline, instead of a tag convention you have to remember."
+  toc={toc}
+>
+  <h2 id="what">What they are</h2>
+  <p>
+    A mini-app is a panel in the app that owns a specific kind of work. It appears as its own area rather
+    than hiding inside the general task list, which is the difference between "I have a tag for trips" and
+    "I have a trips pane that knows what a trip needs".
+  </p>
+  <p>
+    They are extensions in the useful sense: they bring their own vocabulary and their own defaults, but
+    they write into the same local database as everything else, so a task created by a mini-app is still a
+    task you can move, tag, and schedule.
+  </p>
+
+  <h2 id="travel">Travel checklists</h2>
+  <p>
+    Travel is the one that ships today. <Badge tone="success" variant="subtle">available</Badge> Give it a
+    trip and it produces the checklist that kind of trip needs — the packing list, the pre-departure
+    chores, the things that only matter for that destination — as regular tasks in the right place.
+  </p>
+  <p>
+    The value is in the template, not the storage: the list of what a trip needs is the part people forget,
+    and the app is where you already look at lists.
+  </p>
+
+  <h2 id="planned">Planned</h2>
+  <ul>
+    {
+      planned.map((item) => (
+        <li>
+          <strong>{item.name}</strong> — {item.note} <Badge tone="warning" variant="subtle">coming soon</Badge>
+        </li>
+      ))
+    }
+  </ul>
+
+  <h2 id="model">How they are modelled</h2>
+  <p>
+    Mini-apps are built on the same primitives the rest of the app uses — managed tags, sections, and tasks
+    — rather than on a private store of their own. That is a deliberate constraint: it means a mini-app can
+    never hold your data hostage, and its tasks show up in every view that already works.
+  </p>
+  <p>
+    The model is specified in <code>docs/spec/todo2-managed-apps-spec.md</code>; the
+    <a href="/contributor/architecture#specs">spec table</a> has its status, and
+    <a href="/status">Feature status</a> tracks what is shipped.
+  </p>
+
+  <Callout tone="tip" title="Working on one">
+    Mini-apps are the most approachable part of the app to extend: a pane, a template, and the storage
+    layer's managed entities. Start at <a href="/contributor">the contributor guide</a>.
+  </Callout>
+</Docs>

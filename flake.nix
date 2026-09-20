@@ -205,14 +205,17 @@
               exit 1
             '';
 
-            # Stop dev servers left behind by a previous session. Astro records
-            # a running `astro dev` in the project's .astro/dev.json and refuses
-            # to start a second one, which is what `web` runs this for.
+            # Stop web servers left behind by a previous session. Astro records a
+            # running `astro dev` / `astro preview` in the project's .astro/*.json
+            # and refuses to start a second one, which is what `web` runs this for.
+            # A stale preview server is the nastier case: the Playwright suites
+            # reuse it and quietly test the previous build.
             dev-stop = with bash; ''set -e
               for dir in apps/docs-web demos/design-system-showcase; do
-                if [ -d "${wd}/$dir" ]; then
-                  (cd "${wd}/$dir" && astro dev stop) || true
-                fi
+                [ -d "${wd}/$dir" ] || continue
+                for cmd in dev preview; do
+                  (cd "${wd}/$dir" && astro "$cmd" stop) || true
+                done
               done
             '';
 

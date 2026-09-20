@@ -1,0 +1,148 @@
+---
+import Docs from '../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../components/TableScroll.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'How sync works', href: '#sync' },
+  { label: 'Todoist', href: '#todoist' },
+  { label: 'GitHub', href: '#github' },
+  { label: 'The provider layer', href: '#providers' },
+  { label: 'Tool servers, hooks, and proxies', href: '#mcp' },
+  { label: 'The agent protocol', href: '#acp' },
+  { label: 'Where each piece lives', href: '#where' },
+]
+
+const agentRuns = `cargo run -p agent-cli                    # interactive TUI
+cargo run -p agent-cli -- --acp           # ACP server over stdio (JSON-RPC 2.0 NDJSON)
+cargo run -p agent-cli -- -p "fix the tests"   # single-shot prompt, runs with tools`
+
+const mcpConfig = `{
+  "mcp_servers": [
+    { "name": "my-tools", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+  ],
+  "hooks": [
+    { "event": "on_turn_end", "command": "echo turn done" }
+  ],
+  "proxy": { "enabled": false, "url": "http://localhost:8317/v1" }
+}`
+
+const modules = [
+  { surface: 'Todoist', code: 'apps/todo-2/src/todoist_auth.rs, libs/storage/src/todoist.rs, apps/todo-2/src/ui_parts/todoist_sync.rs', spec: 'docs/spec/todoist-sync-spec.md' },
+  { surface: 'GitHub', code: 'apps/todo-2/src/github_auth.rs, libs/storage/src/github.rs', spec: 'docs/spec/github-integration-spec.md' },
+  { surface: 'Coding workflow git side', code: 'apps/todo-2/src/coding_git.rs, apps/todo-2/src/coding_mcp.rs', spec: 'docs/spec/coding-workflow-runs-spec.md' },
+  { surface: 'Agent panel ← ACP client', code: 'apps/todo-2/src/ui_parts/agent_pane.rs, libs/acp-client', spec: 'docs/spec/acp-client-and-agent-panel-spec.md' },
+  { surface: 'Provider layer', code: 'libs/ai_providers, apps/agent-cli/src/providers.rs', spec: 'apps/agent-cli/README.md' },
+]
+---
+
+<Docs
+  title="Integrations"
+  description="The technical side of the outside world: how sync is mapped, where each piece lives, and the protocols the app speaks. Setting up your own accounts is in the User guide."
+  toc={toc}
+>
+  <Callout tone="note" title="Setting this up for yourself">
+    If you want to connect an account or pick a model rather than read the implementation, start at
+    <a href="/configuration">Configuration</a>. This page is the internals.
+  </Callout>
+
+  <h2 id="sync">How sync works</h2>
+  <p>
+    Sync is bolt-on, not load-bearing. The local database is authoritative for the app; a sync engine maps
+    it onto an external system, records the mapping in the storage layer, and reconciles changes in both
+    directions. Nothing in the task loop requires a network call, so a sync that fails leaves the app fully
+    usable.
+  </p>
+  <p>
+    Each outside system gets its own storage module, its own authentication path in the app, and a spec in
+    <code>docs/spec/</code> that states what is implemented today — those specs are the accurate record,
+    including the parts that are still open.
+  </p>
+
+  <h2 id="todoist">Todoist</h2>
+  <p>
+    Todoist is the primary external task list. The current spec (draft v1) covers import plus an immediate
+    push of title, description, and done deltas; pushing every field is still open. Migrations for the
+    mapping tables run through the storage crate's migration binary (<code>mig</code> in the dev shell).
+  </p>
+
+  <h2 id="github">GitHub</h2>
+  <p>
+    GitHub support is in preview and has two halves: issues and projects sync, and a git-backed coding
+    workflow. <Badge tone="accent" variant="subtle">preview</Badge> Expect the shape of the mapping to
+    change, since the sync engine and the workflow engine are both still moving.
+  </p>
+  <p>
+    The coding workflow is the interesting half: a run can use a real checkout, drive the git operations
+    itself, and reach tool servers over MCP (<code>coding_git.rs</code> and <code>coding_mcp.rs</code>).
+  </p>
+
+  <h2 id="providers">The provider layer</h2>
+  <p>
+    Providers are OpenAI-compatible endpoints. <code>libs/ai_providers</code> implements them on top of the
+    cersei agent library, including an OAuth-backed provider for services that do not hand out static keys.
+    Request tuning is per model rather than per provider, so one model's sampling parameters can never leak
+    into another model on the same endpoint.
+  </p>
+  <p>
+    Fallback lives above the provider: a <em>combo</em> is a named sequence of provider/model pairs, tried
+    in order when a run fails before producing any output. Because the switch only happens before the first
+    token, a retry cannot duplicate partial work. Entries that fail cool down for a few minutes, and that
+    cooldown state is persisted in a small JSON file rather than a database, so a rate-limited provider is
+    not hammered again immediately.
+  </p>
+
+  <h2 id="mcp">Tool servers, hooks, and proxies</h2>
+  <p>
+    The agent's config also wires up its tools and its lifecycle. MCP servers are launched as child
+    processes and their tools are merged into the agent's tool set; hooks run shell commands on agent
+    events; a proxy can route provider traffic through a gateway.
+  </p>
+  <CodeBlock filename=".abstract/config.json" code={mcpConfig} />
+
+  <h2 id="acp">The agent protocol</h2>
+  <p>
+    <code>agent-cli</code> doubles as an Agent Client Protocol server, which is how the desktop app's agent
+    pane drives it. The protocol runs over stdio as newline-delimited JSON-RPC 2.0 and supports{' '}
+    <code>initialize</code>, <code>session/new</code>, <code>session/load</code>,{' '}
+    <code>session/prompt</code>, <code>session/set_config_option</code>, and <code>session/cancel</code>,
+    with streaming updates delivered as notifications.
+  </p>
+  <CodeBlock filename="terminal" code={agentRuns} showLineNumbers={false} />
+  <p>
+    <code>session/new</code> advertises the available providers and models so a client can switch models
+    mid-session, and a fallback switch is reported to the client rather than happening silently. The client
+    side is <code>libs/acp-client</code>: process launch, sessions, the transcript model, and the
+    file-system and terminal capabilities a session needs.
+  </p>
+
+  <h2 id="where">Where each piece lives</h2>
+  <TableScroll label="Where each integration surface lives">
+    <table>
+      <thead>
+        <tr>
+          <th>Surface</th>
+          <th>Code</th>
+          <th>Spec</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          modules.map((entry) => (
+            <tr>
+              <td>{entry.surface}</td>
+              <td><code>{entry.code}</code></td>
+              <td><code>{entry.spec}</code></td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    <a href="/contributor/architecture">Architecture</a> covers the crates themselves, and the
+    <a href="/contributor/architecture#specs">spec table</a> lists every spec with its status.
+  </p>
+</Docs>

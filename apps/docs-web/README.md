@@ -10,15 +10,29 @@ components (`DocSidebar`, `DocTOC`, `Prose`, `Callout`), and `CodeBlock` that
 
 ## Routes
 
-| Route | Content |
-| --- | --- |
-| `/` | Overview: what the app is, highlights, and where to start |
-| `/quickstart` | Nix + direnv setup, running the app, the command reference |
-| `/features` | Tasks, agent, repeats, workflows, sync, mini-apps, and status |
-| `/architecture` | Workspace layout, the desktop app, persistence, specs |
-| `/integrations` | Todoist, GitHub, providers, MCP/hooks, and the agent protocol |
-| `/contributing` | Workflow, checks, and the Rust/web conventions |
-| `/license` | AGPL-3.0 in practice, third-party code, contributions |
+The navigation has two levels: the header's tab bar splits the docs into two
+guides, one per audience, and the left nav inside each guide lists only that
+guide's pages, nested under section headings (`Getting started`, `Tasklist`,
+`Integrations`, `Configuration`). Both levels come from `src/data/docs.ts`.
+
+| Guide / section | Route | Content |
+| --- | --- | --- |
+| User guide | `/` | Overview: what the app is, highlights, and where to start |
+| User guide | `/install` | Requirements, running from a checkout, the macOS app bundle |
+| User guide | `/tasks` | The task list, task details, tags, projects and areas, filtering |
+| User guide | `/agent` | The agent pane: what it does, what it inherits, how to configure it |
+| User guide | `/repeats` | Repeat rules, dates and times, why a picker |
+| User guide | `/workflows` | Workflows as staged state, and the coding workflow |
+| User guide | `/sync` | Offline first, Todoist, GitHub, and what syncs |
+| User guide | `/mini-apps` | Travel checklists today, the planned ones, and the model behind them |
+| User guide | `/status` | Available / preview / planned, per feature |
+| User guide | `/configuration` | In-app settings, providers and keys, Todoist, GitHub |
+| Contributor guide | `/contributor` | Landing: what the guide covers and the reading order |
+| Contributor guide | `/contributor/development` | Nix + direnv setup, the dev shell commands, web packages |
+| Contributor guide | `/contributor/architecture` | Workspace layout, the desktop app, persistence, specs |
+| Contributor guide | `/contributor/integrations` | Sync internals, provider layer, MCP/hooks, agent protocol |
+| Contributor guide | `/contributor/contributing` | Workflow, checks, and the Rust/web conventions |
+| Contributor guide | `/contributor/license` | AGPL-3.0 in practice, third-party code, contributions |
 
 ## Running
 
@@ -49,9 +63,12 @@ server on port 4322 (the showcase suite uses 4321, so both can run at once).
 
 1. Create `src/pages/<slug>.astro` and wrap the content in the `Docs` layout,
    passing `title`, `description`, and a `toc` list whose hrefs match the page's
-   heading ids.
-2. Add the page to `src/data/docs.ts`. The header nav, the sidebar, and the
-   previous/next links all read from that file, so one entry is enough.
+   heading ids. Reference tables get wrapped in `TableScroll.astro` so wide
+   content scrolls instead of widening the page.
+2. Add the page to the matching section in `src/data/docs.ts` (user pages sit at
+   the root, contributor pages under `contributor/`). The header tabs, the left
+   nav, and the previous/next links all read from that file, so one entry is
+   enough. Section headings are only rendered when a guide has more than one.
 
 ## Notes
 

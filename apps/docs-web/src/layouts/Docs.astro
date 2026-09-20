@@ -7,7 +7,14 @@ import DocSidebar from 'web-design-system/astro/marketing/DocSidebar.astro'
 import DocTOC from 'web-design-system/astro/marketing/DocTOC.astro'
 import Prose from 'web-design-system/astro/marketing/Prose.astro'
 import { ChevronLeft, ChevronRight } from 'web-design-system/icons'
-import { docPages, pageNeighbours, pageSourceUrl, sidebarGroups } from '../data/docs'
+import {
+  docGuides,
+  guideFor,
+  guideItems,
+  guideSections,
+  pageNeighbours,
+  pageSourceUrl,
+} from '../data/docs'
 
 interface Props {
   title: string
@@ -18,7 +25,9 @@ interface Props {
 const { title, description, toc } = Astro.props
 
 const path = Astro.url.pathname
-const groups = sidebarGroups(path)
+const guide = guideFor(path)
+const sections = guideSections(path)
+const items = guideItems(path)
 const { previous, next } = pageNeighbours(path)
 const sourceUrl = pageSourceUrl(path)
 
@@ -43,7 +52,7 @@ const skipLink = css({
   _focus: { top: '3' },
 })
 
-const mobileLink = (active: boolean) =>
+const pill = (active: boolean) =>
   css({
     display: 'inline-flex',
     alignItems: 'center',
@@ -94,36 +103,34 @@ const pagerLabel = css({
 
   <DocsHeader />
 
-  <nav
-    aria-label="Docs sections"
-    class={css({
-      display: { base: 'flex', lg: 'none' },
-      gap: '1',
-      overflowX: 'auto',
-      maxW: '1280px',
-      mx: 'auto',
-      px: { base: '5', md: '8' },
-      pt: '4',
-    })}
-  >
-    {
-      docPages.map((page) => (
-        <a
-          class={mobileLink(path.replace(/\/+$/, '') === page.href)}
-          href={page.href}
-          aria-current={path.replace(/\/+$/, '') === page.href ? 'page' : undefined}
-        >
-          {page.label}
-        </a>
-      ))
-    }
-  </nav>
+  <!-- Below lg the header's tabs are hidden, so the guide switch moves here. -->
+  <div class={css({ display: { base: 'block', lg: 'none' }, maxW: '1280px', mx: 'auto', px: { base: '5', md: '8' }, pt: '4' })}>
+    <nav aria-label="Guides" class={css({ display: 'flex', gap: '1' })}>
+      {
+        docGuides.map((entry) => (
+          <a class={pill(guide?.heading === entry.heading)} href={entry.href}>
+            {entry.heading}
+          </a>
+        ))
+      }
+    </nav>
+
+    <nav aria-label="Docs sections" class={css({ display: 'flex', gap: '1', overflowX: 'auto', mt: '1' })}>
+      {
+        items.map((item) => (
+          <a class={pill(item.active ?? false)} href={item.href} aria-current={item.active ? 'page' : undefined}>
+            {item.label}
+          </a>
+        ))
+      }
+    </nav>
+  </div>
 
   <main
     id="content"
     class={css({
       display: 'grid',
-      gridTemplateColumns: { base: '1fr', lg: '220px minmax(0, 1fr)', xl: '220px minmax(0, 1fr) 180px' },
+      gridTemplateColumns: { base: '1fr', lg: '240px minmax(0, 1fr)', xl: '240px minmax(0, 1fr) 180px' },
       gap: { base: '8', lg: '12' },
       w: '100%',
       maxW: '1280px',
@@ -134,7 +141,7 @@ const pagerLabel = css({
     })}
   >
     <aside class={css({ display: { base: 'none', lg: 'block' }, position: 'sticky', top: '20' })}>
-      <DocSidebar groups={groups} />
+      {sections.length > 0 && <DocSidebar groups={sections} />}
     </aside>
 
     <div class={css({ minW: '0' })}>

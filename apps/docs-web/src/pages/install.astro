@@ -1,0 +1,95 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../components/TableScroll.astro'
+import { REPO_URL } from '../data/docs'
+
+const toc = [
+  { label: 'What you need', href: '#what-you-need' },
+  { label: 'Run it from a checkout', href: '#from-a-checkout' },
+  { label: 'Build a macOS app', href: '#macos-app' },
+  { label: 'First launch', href: '#first-launch' },
+]
+
+const clone = `git clone ${REPO_URL}.git
+cd todo-lofi
+
+# Run the desktop app
+cargo run -p todo-2`
+
+const requirements = [
+  { need: 'macOS', detail: 'macOS 12 or newer. The bundle sets that as its minimum system version.' },
+  { need: 'Linux', detail: 'The Rust crates build on Linux; GPUI needs the platform graphics and input libraries.' },
+  { need: 'Rust', detail: 'A toolchain new enough for edition 2024 (1.85+), plus the platform GUI dependencies.' },
+  { need: 'Nix (optional)', detail: 'The dev shell provides the pinned toolchain, cargo-watch, Node, and pnpm — see Development setup.' },
+]
+---
+
+<Docs
+  title="Install and run"
+  description="todo-lofi is a desktop app for macOS and Linux. There are no installers yet, so today you run it from a checkout of the repository."
+  toc={toc}
+>
+  <Callout tone="warning" title="Pre-release">
+    There is no published download. The app is developed and run from the repository; everything below
+    assumes you can clone it.
+  </Callout>
+
+  <h2 id="what-you-need">What you need</h2>
+  <TableScroll label="Requirements">
+    <table>
+      <thead>
+        <tr>
+          <th>You need</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          requirements.map((requirement) => (
+            <tr>
+              <td>{requirement.need}</td>
+              <td>{requirement.detail}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The least fiddly path is the development shell, because it brings the toolchain and every helper
+    command with it. <a href="/contributor/development">Development setup</a> walks through installing Nix and direnv;
+    if you already have a workable Rust toolchain, you can skip it.
+  </p>
+
+  <h2 id="from-a-checkout">Run it from a checkout</h2>
+  <CodeBlock filename="terminal" code={clone} showLineNumbers={false} />
+  <p>
+    The app starts with an empty database. Nothing leaves your machine: there is no account to create and
+    no telemetry, and the network features stay off until you configure them.
+  </p>
+
+  <h2 id="macos-app">Build a macOS app</h2>
+  <p>
+    On macOS, the dev shell's <code>t2-bundle</code> assembles a real <code>todo-lofi.app</code> for you —
+    it builds the binary, copies the icon and <code>Info.plist</code> into the bundle, signs it with the
+    <code>todo-lofi-dev</code> identity when that certificate exists, and clears the quarantine flag. It
+    assembles the bundle without launching it.
+  </p>
+  <p>
+    That is also how release builds are produced, so it is the closest thing to an install today. For
+    everyday development, run the raw binary instead (<code>t2</code>, or{' '}
+    <code>cargo run -p todo-2</code>) — see{' '}
+    <a href="/contributor/development#command-reference">the command reference</a>.
+  </p>
+
+  <h2 id="first-launch">First launch</h2>
+  <ol>
+    <li><a href="/tasks">Tasks, tags, and projects</a> — the four pages that follow cover the app itself, from the task list to the agent pane.</li>
+    <li><a href="/configuration">Configuration</a> — the in-app settings panes, plus model providers, Todoist, and GitHub credentials.</li>
+  </ol>
+  <p>
+    A task list works offline out of the box; sync and the agent are the parts that need credentials.
+  </p>
+</Docs>

@@ -1,0 +1,47 @@
+---
+import Docs from '../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'Repeat rules', href: '#rules' },
+  { label: 'Dates and times', href: '#dates' },
+  { label: 'Why a picker', href: '#why' },
+]
+---
+
+<Docs
+  title="Repeat and scheduling"
+  description="Recurring work is configured in a picker and shown back to you in plain language, so a rule you wrote months ago is still readable."
+  toc={toc}
+>
+  <h2 id="rules">Repeat rules</h2>
+  <p>
+    A task can repeat on a rule, and that rule is set through a dedicated picker rather than by typing a
+    string into a due-date field. The task then carries the rule with it: the same item comes back when it
+    is due, in the same place in the tree, instead of a copy you have to re-file.
+  </p>
+  <p>
+    Repeats are a first-class part of the task model, not a calendar app bolted onto the side — the rules
+    are stored alongside the tasks in the local database.
+  </p>
+
+  <h2 id="dates">Dates and times</h2>
+  <p>
+    Due dates go through the same date and time picker used everywhere else in the app, with a calendar to
+    jump by month. Scheduling is deliberately a small set of explicit choices: a date, optionally a time,
+    and optionally a repeat — which is enough to answer "when does this come back" without inventing a
+    grammar.
+  </p>
+
+  <h2 id="why">Why a picker</h2>
+  <p>
+    Free-text recurrence is where task managers quietly go wrong: the rule is unreadable after a month,
+    invisible when it misfires, and different every time someone types it. A picker trades a little speed
+    at entry for a rule the app can display, edit, and reason about later.
+  </p>
+
+  <Callout tone="tip" title="Made to be reviewed">
+    Rules that are visible are rules you will fix. If a task repeats more often than you meant, the picker
+    is where you correct it — see <a href="/tasks#details">Task details</a> for the fields a task carries.
+  </Callout>
+</Docs>
