@@ -341,6 +341,14 @@ impl Layout {
                     NavDestination::Tag(path) => {
                         this.check_managed_tag(path, &layout_weak, cx);
                         this.sync_agent_project(path, window, cx);
+                        // A project GitHub backs fetches as it opens, so its
+                        // tasks arrive with the view rather than at the
+                        // poller's next tick.
+                        if let Some(tag_name) = path.last().cloned() {
+                            this.integrations.update(cx, |view, cx| {
+                                view.project_opened(tag_name, cx)
+                            });
+                        }
                     }
                     NavDestination::AllTasks => {
                         this.managed_tag = None;

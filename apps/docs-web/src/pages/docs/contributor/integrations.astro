@@ -111,6 +111,15 @@ const modules = [
     <code>since</code> cursor alongside the last sync time — so a poll can be conditional and incremental
     rather than re-reading everything.
   </p>
+  <p>
+    When a pass runs is demand-driven rather than purely periodic. The poller idles at the card's sync
+    frequency (five minutes by default, never on <em>Manual</em>) and tightens to fifteen seconds while a
+    pull request or a run is live. Two moments skip the cadence entirely, because someone is waiting on
+    them: the first load of the connection starts a pass, so the projects on screen at startup are current,
+    and opening a project that a repo backs starts one, so its issues are fetched as the view renders
+    instead of at the next tick. Passes never stack, and one that started seconds ago is treated as fresh
+    enough to leave alone.
+  </p>
 
   <h2 id="providers">The provider layer</h2>
   <p>

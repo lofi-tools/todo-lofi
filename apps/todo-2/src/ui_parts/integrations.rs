@@ -26,6 +26,11 @@ use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 /// is the card's sync frequency; the active one stays fixed.
 const GITHUB_POLL_ACTIVE: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A pass that started within this window already holds what an immediately
+/// following one would fetch, so opening projects in quick succession does
+/// not line up passes back to back.
+const GITHUB_SYNC_FRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Sync frequency presets for the GitHub card: `(seconds, label)`.
 /// `0` means manual syncing only.
 const GITHUB_POLL_PRESETS: [(u64, &str); 4] = [
@@ -92,12 +97,19 @@ pub struct IntegrationsView {
     /// The token field on the GitHub card, created on first render like the
     /// tag pickers below. The token itself is never echoed back into it.
     github_pat_input: Option<Entity<InputState>>,
+    /// When the last pass was started, so an automatic pass only goes out
+    /// when the data on screen can still be stale.
+    github_sync_started: Option<std::time::Instant>,
+    /// Whether the launch pass has gone out. The connection's first load
+    /// starts it; later reloads leave the cadence to the poller.
+    github_launch_sync_done: bool,
     _github_pat_sub: Option<Subscription>,
     _load: Option<gpui::Task<()>>,
     _connect: Option<gpui::Task<()>>,
     _sync: Option<gpui::Task<()>>,
     _github_poll: Option<gpui::Task<()>>,
     _github_sync: Option<gpui::Task<()>>,
+    _github_project_sync: Option<gpui::Task<()>>,
     _github_pr_poll: Option<gpui::Task<()>>,
     _github_poller: Option<gpui::Task<()>>,
     _github_tick: Option<gpui::Task<()>>,
@@ -128,12 +140,15 @@ impl IntegrationsView {
             github_settings_expanded: false,
             github_pat_saved: github_auth::has_personal_token(),
             github_pat_input: None,
+            github_sync_started: None,
+            github_launch_sync_done: false,
             _github_pat_sub: None,
             _load: None,
             _connect: None,
             _sync: None,
             _github_poll: None,
             _github_sync: None,
+            _github_project_sync: None,
             _github_pr_poll: None,
             _github_poller: None,
             _github_tick: None,
@@ -347,6 +362,7 @@ impl IntegrationsView {
                     this.github_app_enabled =
                         github_app.map(|(_, enabled)| enabled).unwrap_or(true);
                     this._load = None;
+                    this.start_github_launch_sync(cx);
                     cx.notify();
                 })
                 .ok();
@@ -653,6 +669,7 @@ impl IntegrationsView {
             return;
         }
         self.github_syncing = true;
+        self.github_sync_started = Some(std::time::Instant::now());
         self.github_status = Some("Syncing GitHub…".to_string());
         self.set_github_expanded(true, cx);
         cx.notify();
@@ -682,6 +699,66 @@ impl IntegrationsView {
                 })
                 .ok();
             }
+        }));
+    }
+
+    /// The id of the connected GitHub integration, if there is one.
+    fn github_integration_id(&self) -> Option<u64> {
+        self.connected
+            .iter()
+            .find(|integration| integration.provider == "github")
+            .map(|integration| integration.id)
+    }
+
+    /// Start a pass now, for callers that cannot wait out the poller's next
+    /// tick: the launch of the app and every GitHub-backed project that is
+    /// opened. A pass already in flight is left alone, and so is a connection
+    /// that is absent, disabled, or short of credentials — those would only
+    /// produce a failure notice the user cannot act on.
+    pub fn sync_github_now(&mut self, cx: &mut Context<Self>) {
+        if !self.github_connected()
+            || self.github_disabled()
+            || self.github_syncing
+            || !github_auth::has_usable_credentials()
+        {
+            return;
+        }
+        if self
+            .github_sync_started
+            .is_some_and(|started| started.elapsed() < GITHUB_SYNC_FRESH)
+        {
+            return;
+        }
+        self.start_github_sync(false, cx);
+    }
+
+    /// The connection's first load is the launch moment for GitHub: a pass
+    /// goes out then and there, so the projects shown on startup have their
+    /// tasks without waiting out the poller's first tick.
+    fn start_github_launch_sync(&mut self, cx: &mut Context<Self>) {
+        if self.github_launch_sync_done {
+            return;
+        }
+        self.github_launch_sync_done = true;
+        self.sync_github_now(cx);
+    }
+
+    /// A project was opened. When GitHub is what backs it, pass now rather
+    /// than at the next tick, so its tasks arrive with the view. Local
+    /// projects cost two reads and no network.
+    pub fn project_opened(&mut self, tag_name: String, cx: &mut Context<Self>) {
+        if !self.github_connected() || self.github_disabled() {
+            return;
+        }
+        let Some(integration_id) = self.github_integration_id() else {
+            return;
+        };
+        let store = self.store.clone();
+        self._github_project_sync = Some(cx.spawn(async move |this, cx| {
+            if !project_is_github_backed(&store, integration_id, tag_name, cx).await {
+                return;
+            }
+            this.update(cx, |this, cx| this.sync_github_now(cx)).ok();
         }));
     }
 
@@ -1557,6 +1634,33 @@ fn todoist_icon() -> gpui_component::Icon {
         .with_size(Size::Large)
 }
 
+/// Whether GitHub is what backs a project: the tag is resolved and checked
+/// against every repo this integration syncs with — a detected remote or an
+/// explicit sync target alike (`bound_repos` covers both). Both halves are
+/// reads, so a local project opens without asking GitHub anything.
+async fn project_is_github_backed(
+    store: &Store,
+    integration_id: u64,
+    tag_name: String,
+    cx: &impl gpui::AppContext,
+) -> bool {
+    let tag = match store.get_tag_by_name(tag_name, cx).await {
+        Ok(Some(tag)) => tag,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::error!("Failed to resolve the opened project: {error}");
+            return false;
+        }
+    };
+    match store.tag_bound_repos(tag.id, integration_id, cx).await {
+        Ok(repos) => !repos.is_empty(),
+        Err(error) => {
+            tracing::error!("Failed to read the opened project's GitHub repos: {error}");
+            false
+        }
+    }
+}
+
 /// A countdown in the `m:ss` shape the device code block shows.
 fn format_countdown(remaining: std::time::Duration) -> String {
     format!(
@@ -1654,5 +1758,74 @@ mod tests {
         );
         assert_eq!(format_countdown(std::time::Duration::from_secs(65)), "1:05");
         assert_eq!(format_countdown(std::time::Duration::ZERO), "0:00");
+    }
+
+    /// The decision for one project name, driven to completion: the store's
+    /// reads run on Tokio while the answer comes back on a GPUI task, so the
+    /// test pumps the executor in real time until it lands.
+    fn backed(
+        cx: &mut gpui::TestAppContext,
+        store: &Store,
+        integration_id: u64,
+        tag_name: &str,
+    ) -> bool {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        cx.executor().allow_parking();
+        let recorded: Rc<Cell<Option<bool>>> = Rc::new(Cell::new(None));
+        let recorder = recorded.clone();
+        let store = store.clone();
+        let tag_name = tag_name.to_string();
+        cx.spawn(move |cx: gpui::AsyncApp| async move {
+            let decision = project_is_github_backed(&store, integration_id, tag_name, &cx).await;
+            recorder.set(Some(decision));
+        })
+        .detach();
+        for _ in 0..400 {
+            if let Some(decision) = recorded.get() {
+                return decision;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        panic!("the project lookup did not finish");
+    }
+
+    /// Opening a project only asks GitHub for one a repo backs: the tag has
+    /// to resolve and carry a binding. A local project costs the same two
+    /// reads and no network, and an unknown name is not a project at all.
+    #[gpui::test]
+    fn only_a_github_backed_project_is_fetched(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let (store, integration_id) = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let mut store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            let bound = store.create_tag("bound").await.expect("the synced tag");
+            store.create_tag("local").await.expect("the local tag");
+            let integration = store
+                .create_integration("github", Some("octocat".to_string()))
+                .await
+                .expect("the integration");
+            store
+                .bind_repo_tag(bound.id, integration.id, "octocat", "hello-world")
+                .await
+                .expect("the repo binding");
+            (Store::new(store), integration.id)
+        });
+
+        assert!(backed(cx, &store, integration_id, "bound"));
+        assert!(!backed(cx, &store, integration_id, "local"));
+        assert!(!backed(cx, &store, integration_id, "missing"));
     }
 }
