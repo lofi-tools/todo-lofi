@@ -681,6 +681,10 @@ pub struct TaskDetails {
     /// the folder icon instead of a hashtag. Refreshed with each selection.
     project_tags: std::collections::HashSet<String>,
     _project_tags_fetch: Option<gpui::Task<()>>,
+    /// Shift-Enter saves the description. A focused `Textarea` binds Enter
+    /// itself, and a binding on the element outranks one an ancestor could
+    /// carry, so the key is taken ahead of the keymap.
+    _key_interceptor: Subscription,
 }
 
 struct TimeEditInputs {
@@ -702,7 +706,18 @@ impl Clone for TimeEditInputs {
 }
 
 impl TaskDetails {
-    pub fn new(store: Store, _cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Store, cx: &mut Context<Self>) -> Self {
+        let details = cx.weak_entity();
+        let _key_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            let handled = details
+                .update(cx, |details, cx| {
+                    details.on_intercepted_key(&event.keystroke, window, cx)
+                })
+                .unwrap_or(false);
+            if handled {
+                cx.stop_propagation();
+            }
+        });
         Self {
             selected: None,
             store,
@@ -789,6 +804,7 @@ impl TaskDetails {
             github_comments_expanded: false,
             project_tags: std::collections::HashSet::new(),
             _project_tags_fetch: None,
+            _key_interceptor,
         }
     }
 
@@ -1632,6 +1648,38 @@ impl TaskDetails {
         cx.notify();
     }
 
+    /// Handle a key taken ahead of the keymap: Shift-Enter saves the
+    /// description. A plain Enter is untouched, so it keeps inserting a
+    /// newline. Returns whether the key was taken.
+    fn on_intercepted_key(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(input) = self.description_input.clone() else {
+            return false;
+        };
+        if keystroke.key != "enter" {
+            return false;
+        }
+        // Shift alone: a keystroke carrying other modifiers would not have
+        // matched the keymap's shift-enter either, so it is not this shortcut.
+        let modifiers = keystroke.modifiers;
+        let shift_only = modifiers.shift
+            && !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.function);
+        if !shift_only {
+            return false;
+        }
+        // The interceptor is window-wide, so the details pane only answers
+        // while the description is the editor that holds the focus.
+        if !input.read(cx).focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        self.commit_description_edit(cx);
+        true
+    }
+
     fn begin_description_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_read_only() {
             return;
@@ -1648,8 +1696,9 @@ impl TaskDetails {
             state.set_value(&description, window, cx);
             state
         });
-        // Multi-line, so Enter belongs to the text: the edit commits when the
-        // field loses focus, the way the tag input does.
+        // Multi-line: Enter belongs to the text and inserts a newline, while
+        // Shift-Enter saves (see `on_intercepted_key`). Losing focus saves too,
+        // the way the tag input does.
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
             if matches!(event, InputEvent::Blur) {
                 this.commit_description_edit(cx);
@@ -6630,5 +6679,104 @@ mod coding_tests {
             prompt.contains("Sign in with Google."),
             "the prompt carries the task's description: {prompt}"
         );
+    }
+
+    fn enter_keystroke(modifiers: gpui::Modifiers) -> gpui::Keystroke {
+        gpui::Keystroke {
+            key: "enter".to_string(),
+            key_char: None,
+            modifiers,
+        }
+    }
+
+    /// Shift-Enter saves the description. A plain Enter is left alone so the
+    /// textarea keeps inserting a newline. Driven through the interceptor
+    /// rather than a window keystroke so the shortcut can be asserted without
+    /// depending on the keymap.
+    #[gpui::test]
+    fn shift_enter_saves_the_description(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        // One runtime for the whole test: the store is opened on it, and the
+        // write the pane spawns when it saves goes through it too — that write
+        // reaches the store via `gpui_tokio`, which needs the global below.
+        // Timers have to be on: opening the store arms one.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let store = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            Store::new(store)
+        });
+
+        let (details, cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
+
+        let edited = "Sign in with Google.\nAnd with GitHub.";
+        cx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.selected = Some(feature("Add OAuth", Some("Sign in with Google.")));
+                details.begin_description_edit(window, cx);
+                let input = details
+                    .description_input
+                    .clone()
+                    .expect("the description editor opens");
+                input.update(cx, |state, cx| {
+                    state.set_value(edited, window, cx);
+                    state.focus(window, cx);
+                });
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // A plain Enter belongs to the text: not taken, and the edit stays open.
+        let handled = cx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.on_intercepted_key(&enter_keystroke(gpui::Modifiers::default()), window, cx)
+            })
+        });
+        assert!(!handled, "a plain Enter stays with the textarea");
+        cx.update(|_, cx| {
+            assert!(
+                details.read(cx).editing_description,
+                "a plain Enter does not close the editor"
+            );
+        });
+
+        // Shift-Enter saves.
+        let handled = cx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.on_intercepted_key(
+                    &enter_keystroke(gpui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert!(handled, "Shift-Enter is taken ahead of the keymap");
+        cx.update(|_, cx| {
+            let details = details.read(cx);
+            assert!(!details.editing_description, "saving closes the editor");
+            assert!(details.description_input.is_none(), "the editor is dropped");
+            assert_eq!(
+                details
+                    .selected
+                    .as_ref()
+                    .and_then(|task| task.task.description.as_deref()),
+                Some(edited),
+                "what was typed is saved, newline and all"
+            );
+        });
     }
 }
