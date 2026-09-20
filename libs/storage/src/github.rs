@@ -10,7 +10,7 @@
 //! One integration spans many repos, so an issue's external id is
 //! `owner/repo#number` — the bare number is only unique within a repo.
 
-use crate::{ExternalComment, QueryResult, Task, TodoStore};
+use crate::{ExternalComment, QueryResult, Tag, Task, TodoStore};
 use snafu::ResultExt;
 use std::collections::BTreeMap;
 
@@ -2626,6 +2626,29 @@ impl TodoStore {
         if let Some((_, parent_issue)) = &parent {
             self.attach_sub_issue(client, parent_issue, task_id).await?;
         }
+        // Reflect the task's local tags (a project's subtags included) as
+        // labels straight away, so a captured task does not wait for the next
+        // sync's merge (§5.5). The issue and its link are already recorded, so
+        // a label failure is logged and left to the next merge rather than
+        // stranding the capture.
+        if let Err(error) = self
+            .push_local_issue_labels(
+                client,
+                integration_id,
+                &external_id,
+                task_id,
+                &owner,
+                &repo,
+                issue.number,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id,
+                %error,
+                "could not copy local tags onto the new issue"
+            );
+        }
         Ok(Some((
             integration_id,
             IssueRef {
@@ -2634,6 +2657,41 @@ impl TodoStore {
                 number: issue.number,
             },
         )))
+    }
+
+    /// Add the task's local tags to an issue it is linked to, and fold them
+    /// into the link's snapshot so the next pull does not read the app's own
+    /// push as a remote edit. Best-effort by design: a failure is logged by
+    /// the caller and retried by the next merge, because the issue already
+    /// exists by the time this runs.
+    async fn push_local_issue_labels<C: GithubClient>(
+        &mut self,
+        client: &C,
+        integration_id: u64,
+        external_id: &str,
+        task_id: u64,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> anyhow::Result<()> {
+        let labels = self.local_issue_labels(task_id, None).await?;
+        if labels.is_empty() {
+            return Ok(());
+        }
+        for label in &labels {
+            client.ensure_label(owner, repo, label).await?;
+        }
+        client
+            .add_issue_labels(owner, repo, number, &labels)
+            .await?;
+        let Some(link) = self.issue_link(integration_id, external_id).await? else {
+            return Ok(());
+        };
+        let mut state = link.state;
+        state.remote.labels = labels;
+        self.save_issue_field_state(integration_id, external_id, &state)
+            .await?;
+        Ok(())
     }
 
     /// Open the issue for a task captured by a repo-bound project tag, so a
@@ -3227,7 +3285,9 @@ impl TodoStore {
     ) -> anyhow::Result<()> {
         let task = self.get_task(link.task_id).await?;
         let snapshot = link.state.remote.clone();
-        let local_labels = self.local_issue_labels(link.task_id, bound.tag_id).await?;
+        let local_labels = self
+            .local_issue_labels(link.task_id, Some(bound.tag_id))
+            .await?;
 
         let title_changed = task.title != snapshot.title;
         let body_changed = task.description.clone().unwrap_or_default() != snapshot.body;
@@ -3386,15 +3446,17 @@ impl TodoStore {
     }
 
     /// Tags on the task that stand in for issue labels: everything except the
-    /// repo binding itself and other project tags.
+    /// repo binding itself and other project tags. `exclude_tag_id` is the
+    /// bound repo tag when the caller has it; tags with a sync target are left
+    /// out either way.
     async fn local_issue_labels(
         &mut self,
         task_id: u64,
-        repo_tag_id: u64,
+        exclude_tag_id: Option<u64>,
     ) -> QueryResult<Vec<String>> {
         let mut out = Vec::new();
         for tag in self.get_direct_task_tags(task_id).await? {
-            if tag.id == repo_tag_id {
+            if Some(tag.id) == exclude_tag_id {
                 continue;
             }
             if self.tag_settings(tag.id).await?.sync_target.is_some() {
@@ -3408,9 +3470,10 @@ impl TodoStore {
         Ok(out)
     }
 
-    /// Get-or-create a local tag for a remote label. The remote label is the
-    /// display name, so a name that is already taken locally gets a
-    /// namespaced tag instead of merging into the user's tag (§5.2).
+    /// Get-or-create a local tag for a remote label, placed under the repo's
+    /// project tag so an imported label reads as a subtag of the project it
+    /// came from. The remote label is the display name, and a tag the user
+    /// already made with that name is reused rather than duplicated (§5.2).
     async fn assign_issue_labels(
         &mut self,
         task_id: u64,
@@ -3418,25 +3481,60 @@ impl TodoStore {
         labels: &[String],
     ) -> QueryResult<()> {
         for label in labels {
-            let tag = match self.get_tag_by_name(label).await? {
-                Some(tag) => tag,
-                None => {
-                    let scoped = format!("github/{label}");
-                    match self.get_tag_by_name(&scoped).await? {
-                        Some(tag) => tag,
-                        None => {
-                            self.create_tag_with_display_name(scoped, Some(label.clone()))
-                                .await?
-                        }
-                    }
-                }
-            };
+            let tag = self.github_label_tag(bound, label).await?;
             if tag.id == bound.tag_id {
                 continue;
             }
             self.assign_tag_to_task(task_id, &tag.name).await?;
         }
         Ok(())
+    }
+
+    /// The local tag standing in for one remote label: the user's own tag when
+    /// one is named after the label, otherwise a per-repo
+    /// `github/<owner>/<repo>/<label>` tag. Scoping the name to the
+    /// repo keeps two projects from sharing one label tag — which, now that
+    /// labels hang under their project, would also leak each project's tasks
+    /// into the other's aggregated view.
+    async fn github_label_tag(&mut self, bound: &BoundRepo, label: &str) -> QueryResult<Tag> {
+        let tag = match self.get_tag_by_name(label).await? {
+            Some(tag) => tag,
+            None => {
+                let scoped = format!("github/{}/{}/{}", bound.owner, bound.repo, label);
+                match self.get_tag_by_name(&scoped).await? {
+                    Some(tag) => tag,
+                    None => {
+                        self.create_tag_with_display_name(scoped, Some(label.to_string()))
+                            .await?
+                    }
+                }
+            }
+        };
+        self.place_label_tag(tag.id, bound.tag_id).await?;
+        Ok(tag)
+    }
+
+    /// Nest an imported label under its project tag. Idempotent, and
+    /// non-fatal when the label already sits above the project (that placement
+    /// would cycle): the label still syncs as a direct tag, it just cannot be
+    /// nested here, which is logged rather than allowed to fail the pass.
+    async fn place_label_tag(&mut self, tag_id: u64, project_tag_id: u64) -> QueryResult<()> {
+        if tag_id == project_tag_id {
+            return Ok(());
+        }
+        match self.add_tag_implication(tag_id, project_tag_id).await {
+            Ok(()) => Ok(()),
+            Err(crate::QueryErr::UnexpectedValue { message }) => {
+                tracing::warn!(
+                    tag_id,
+                    project_tag_id,
+                    %message,
+                    "could not nest a GitHub label under its project"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether every pull request of a run is finished: merged, or waived by
@@ -4246,8 +4344,8 @@ mod tests {
 
         fn add_issue_labels<'a>(
             &'a self,
-            _owner: &'a str,
-            _repo: &'a str,
+            owner: &'a str,
+            repo: &'a str,
             number: u64,
             labels: &'a [String],
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
@@ -4256,6 +4354,22 @@ mod tests {
                     .lock()
                     .expect("pr labels")
                     .push((number, labels.to_vec()));
+                // Mirror GitHub: the labels land on the issue itself, so a
+                // pull that follows sees them. A number with no issue in the
+                // fake (the PR step's metadata copy) is left alone.
+                if let Some(issues) = self
+                    .issues
+                    .lock()
+                    .expect("issues lock")
+                    .get_mut(&format!("{owner}/{repo}"))
+                    && let Some(issue) = issues.iter_mut().find(|issue| issue.number == number)
+                {
+                    for label in labels {
+                        if !issue.labels.contains(label) {
+                            issue.labels.push(label.clone());
+                        }
+                    }
+                }
                 Ok(())
             }
         }
@@ -5054,6 +5168,169 @@ mod tests {
         // A label removed locally is still never removed remotely.
         let fake_before = fake.last_patch().labels.unwrap_or_default();
         assert!(fake_before.contains(&"bug".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_imported_label_becomes_a_subtag_of_the_project() -> anyhow::Result<()> {
+        let (mut storage, integration, project) = bound_store("o", "r").await?;
+        // The user already has a tag named after one of the labels, so that
+        // one is reused and nested instead of being copied as `github/o/r/…`.
+        let mine = storage.create_tag("bugs").await?;
+        let mut issue = remote(1, "Buggy", "open", 100);
+        issue.labels = vec!["bug".to_string()];
+        let mut other = remote(2, "Also buggy", "open", 110);
+        other.labels = vec!["Bugs".to_string()];
+        let fake = FakeGithub::default()
+            .with_issue("o/r", issue)
+            .with_issue("o/r", other);
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+
+        // A new label hangs under the project tag, named per repo and
+        // displayed as the label, so the navbar reads `project > bug`.
+        let children = storage.get_children(project.id).await?;
+        let bug = children
+            .iter()
+            .find(|tag| tag.label() == "bug")
+            .expect("the label is a subtag of the project");
+        assert_eq!(bug.name, "github/o/r/bug");
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+        assert!(
+            storage
+                .get_direct_task_tags(task_id)
+                .await?
+                .iter()
+                .any(|tag| tag.id == bug.id)
+        );
+
+        // The user's own tag is reused (and nested), not duplicated.
+        let bugs = children
+            .iter()
+            .find(|tag| tag.label() == "bugs")
+            .expect("the user's tag is nested, not copied");
+        assert_eq!(bugs.id, mine.id);
+        assert!(storage.get_tag_by_name("github/o/r/Bugs").await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_captured_task_carries_its_subtags_as_labels() -> anyhow::Result<()> {
+        let (mut storage, integration, project) = bound_store("o", "r").await?;
+        // A subtag placed under the project, as tag settings does.
+        let subtag = storage.create_tag("bugs").await?;
+        storage.add_tag_implication(subtag.id, project.id).await?;
+        let task = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
+        storage.assign_tag_to_task(task.id, &project.name).await?;
+        storage.assign_tag_to_task(task.id, &subtag.name).await?;
+
+        // Opening the issue reflects the local tags at once, so the label does
+        // not wait for the next sync.
+        let fake = FakeGithub::default();
+        assert!(
+            storage
+                .push_github_new_task(&fake, task.id)
+                .await?
+                .is_some()
+        );
+        assert_eq!(
+            *fake.labels.lock().expect("labels lock"),
+            vec!["bugs".to_string()]
+        );
+        assert_eq!(
+            *fake.pull_request_labels.lock().expect("labels"),
+            vec![(1u64, vec!["bugs".to_string()])]
+        );
+        // The snapshot took them, so the pull that follows is quiet rather
+        // than reading the app's own push as a remote edit.
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.pushed, 0);
+        assert_eq!(storage.list_tasks().await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_same_label_in_two_projects_stays_two_tags() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        let integration = storage.create_integration("github", None).await?;
+        let first = storage.create_tag("first").await?;
+        storage
+            .bind_repo_tag(first.id, integration.id, "o", "first")
+            .await?;
+        let second = storage.create_tag("second").await?;
+        storage
+            .bind_repo_tag(second.id, integration.id, "o", "second")
+            .await?;
+
+        let mut issue = remote(1, "Buggy", "open", 100);
+        issue.labels = vec!["bug".to_string()];
+        let fake = FakeGithub::default()
+            .with_issue("o/first", issue.clone())
+            .with_issue("o/second", issue);
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+
+        let first_bug = storage
+            .get_children(first.id)
+            .await?
+            .into_iter()
+            .find(|tag| tag.label() == "bug")
+            .expect("first project nests the label");
+        let second_bug = storage
+            .get_children(second.id)
+            .await?
+            .into_iter()
+            .find(|tag| tag.label() == "bug")
+            .expect("second project nests the label");
+        assert_ne!(first_bug.id, second_bug.id);
+        // Each project's view holds only its own task: the two label tags are
+        // not shared, so neither project's aggregation reaches the other.
+        let first_tasks = storage.list_tasks_by_tag(first.id).await?;
+        assert_eq!(first_tasks.len(), 1);
+        assert_eq!(first_tasks[0].title, "Buggy");
+        let second_tasks = storage.list_tasks_by_tag(second.id).await?;
+        assert_eq!(second_tasks.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_local_subtag_of_a_project_is_pushed_as_a_label() -> anyhow::Result<()> {
+        let (mut storage, integration, project) = bound_store("o", "r").await?;
+        // A subtag placed under the project, as tag settings does.
+        let subtag = storage.create_tag("bugs").await?;
+        storage.add_tag_implication(subtag.id, project.id).await?;
+
+        let mut issue = remote(1, "Buggy", "open", 100);
+        issue.labels = Vec::new();
+        let fake = FakeGithub::default().with_issue("o/r", issue);
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+
+        storage.assign_tag_to_task(task_id, &subtag.name).await?;
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        assert_eq!(summary.labels, 1, "the subtag becomes a remote label");
+        assert_eq!(
+            *fake.labels.lock().expect("labels lock"),
+            vec!["bugs".to_string()]
+        );
         Ok(())
     }
 

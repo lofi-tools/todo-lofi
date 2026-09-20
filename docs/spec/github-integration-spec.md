@@ -185,7 +185,7 @@ branch-creation guard refuses a dirty tree; see §6.2).
 | Repository (`owner/repo`) | Project tag, namespaced `github/<owner>/<repo>`, with `tag_settings.sync_target` set | binding |
 | Issue | Task (title, body → `description`) | two-way |
 | Issue state (`open`/`closed`) | `done` / `completed_at` | two-way |
-| Labels | Tags | two-way, additive (decision 27) |
+| Labels | Tags, nested under the issue's project tag | two-way, additive (decision 27) |
 | Comments | `tasks.comments` (one-way import) | GitHub → local |
 | Assignees, milestone, author, `html_url` | Metadata chips (stored in the link's `field_state`, rendered read-only) | GitHub → local |
 | Sub-issue relationship | `tasks.parent_id` (the child's link also records the parent issue) | two-way, GitHub owns the relationship (§5.9) |
@@ -269,10 +269,18 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 - Pushed: `title`, `body`, `state` (open/closed), labels.
 - Not pushed: assignees, milestone, comment threads.
 - **Additive labels** (decision 27): adding a local tag creates the label if
-  missing (`POST /repos/{owner}/{repo}/labels`) and adds it to the issue; the app
-  never deletes or renames label objects, and never removes a label it did not
-  add. (Whether the app may *remove* a label it previously added when the tag is
-  removed locally is an open item — §10.)
+  missing (`POST /repos/{owner}/{repo}/labels`) and adds it to the issue —
+  including when the issue is opened, so a task captured with a project subtag
+  shows its label at once; the app never deletes or renames label objects, and
+  never removes a label it did not add. (Whether the app may *remove* a label it
+  previously added when the tag is removed locally is an open item — §10.)
+- **Labels are the project's subtags** (both directions). A remote label is
+  imported as a tag under the issue's project tag (the user's own tag is reused
+  when one is named after the label, otherwise it is created as the per-repo
+  `github/<owner>/<repo>/<label>`, displayed as the label, so two projects never
+  share one label tag), and a local tag under a repo-bound project is pushed as
+  a label. The project view's descendant aggregation then holds every issue
+  carrying one of the project's labels.
 - **Subtasks** are mirrored too: a subtask opens its own issue and is attached
   under its parent's issue, opening the parent's chain first (§5.9).
 - Workflow-step tasks (`workflow_run_id` set) never sync, matching today's rule
