@@ -1,9 +1,11 @@
 ---
 import Docs from '../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
 
 const toc = [
   { label: 'The pane', href: '#pane' },
+  { label: 'Connecting opencode', href: '#opencode' },
   { label: 'Delegating work', href: '#delegation' },
   { label: 'What it inherits', href: '#stack' },
   { label: 'Configuring it', href: '#configure' },
@@ -20,6 +22,26 @@ const toc = [
     The agent is a pane in the app, not a separate window or a chat site. It sits next to the list you are
     already in, which means the context you have built up — the task, its project, the tags around it — is
     context the request already has.
+  </p>
+
+  <h2 id="opencode">Connecting opencode</h2>
+  <p>
+    The pane does not bundle an agent — it connects to <strong>opencode</strong> over the Agent Client
+    Protocol (ACP). Install opencode so the <code>opencode</code> executable is on your <code>PATH</code>,
+    then open the agent pane on a directory-backed project:
+  </p>
+  <CodeBlock filename="terminal" code={'which opencode\nopencode --version'} />
+  <ol>
+    <li>Install opencode and confirm <code>opencode</code> resolves on your <code>PATH</code>.</li>
+    <li>Sign in or add provider keys in opencode itself (<code>opencode auth login</code>) — the pane reuses that authentication, there is nothing separate to enter here.</li>
+    <li>In the app, open a project backed by a directory and switch the right pane to the agent.</li>
+    <li>The pane launches <code>opencode acp</code> in the project directory and shows the resolved command while starting. Each project keeps its own session, resumed across restarts.</li>
+    <li>Pick the model and mode from the chips in the pane header — those options come from opencode's session configuration.</li>
+  </ol>
+  <p>
+    If the pane reports the agent was not found, opencode is missing from <code>PATH</code> in the
+    environment the app was launched from. If it reports an authentication error, fix it in opencode
+    (login or provider key) and retry — the pane surfaces what <code>opencode acp</code> reports.
   </p>
 
   <h2 id="delegation">Delegating work</h2>
@@ -47,6 +69,7 @@ const toc = [
     <li>The <strong>provider and model</strong> you selected, including fallback when a provider fails before producing output.</li>
     <li>The <strong>tools</strong> the agent has — files, search, shell, and anything you have added as an MCP server.</li>
     <li><strong>Hooks</strong> bound to agent events, so automation outside the app still fires.</li>
+    <li><strong>Fallback combos</strong> — a named list of provider/model pairs tried in order when one fails before producing output.</li>
   </ul>
   <p>
     The protocol and the client that speaks it are covered on the contributor side in
@@ -57,7 +80,8 @@ const toc = [
   <p>
     Nothing needs configuring to use the local lists. To use the agent, pick a provider and give it a key
     — that is one JSON file, documented in <a href="/docs/configuration#agent">Configuration</a>. Tool servers
-    and hooks live in the same file.
+    and hooks live in the same file. API keys can come from a command, an environment variable, or a
+    literal value, and per-model settings such as token limits and temperature are available for tuning.
   </p>
 
   <Callout tone="note" title="Workflows are the interesting part">

@@ -5,6 +5,7 @@ import Callout from 'web-design-system/astro/marketing/Callout.astro'
 const toc = [
   { label: 'Repeat rules', href: '#rules' },
   { label: 'Dates and times', href: '#dates' },
+  { label: 'Start times and sequences', href: '#sequences' },
   { label: 'Why a picker', href: '#why' },
 ]
 ---
@@ -31,6 +32,19 @@ const toc = [
     jump by month. Scheduling is deliberately a small set of explicit choices: a date, optionally a time,
     and optionally a repeat — which is enough to answer "when does this come back" without inventing a
     grammar.
+  </p>
+  <p>
+    Rules cover daily, weekly (including specific weekdays), and monthly (including a day of the month)
+    rhythms. Each new occurrence is generated from the rule when it comes due, in the same place in the
+    tree.
+  </p>
+
+  <h2 id="sequences">Start times and sequences</h2>
+  <p>
+    A repeat can have a start time as well as a due time: the occurrence stays hidden until it becomes
+    doable, then appears. Repeats can also be chained, so one occurrence of a rule waits on the same-day
+    occurrence of another — "shower after gym", every day, in the right order. A repeat can even schedule
+    a workflow run instead of a plain task, which is how recurring checklists stay automatic.
   </p>
 
   <h2 id="why">Why a picker</h2>

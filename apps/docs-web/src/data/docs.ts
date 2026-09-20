@@ -70,7 +70,10 @@ export const docGuides: DocGuide[] = [
       },
       {
         heading: 'Configuration',
-        items: [{ label: 'Configuration', href: '/docs/configuration' }],
+        items: [
+          { label: 'Configuration', href: '/docs/configuration' },
+          { label: 'Glossary', href: '/docs/glossary' },
+        ],
       },
     ],
   },

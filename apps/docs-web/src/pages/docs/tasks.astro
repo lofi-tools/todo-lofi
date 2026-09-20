@@ -5,6 +5,8 @@ import Callout from 'web-design-system/astro/marketing/Callout.astro'
 const toc = [
   { label: 'The task list', href: '#list' },
   { label: 'Task details', href: '#details' },
+  { label: 'Priority and ordering', href: '#priority' },
+  { label: 'Dependencies and subtasks', href: '#dependencies' },
   { label: 'Tags', href: '#tags' },
   { label: 'Projects and areas', href: '#projects' },
   { label: 'Filtering', href: '#filtering' },
@@ -40,6 +42,34 @@ const toc = [
     <li><strong>Subtasks</strong>, as a short list under the task's own details.</li>
   </ul>
 
+  <h2 id="priority">Priority and ordering</h2>
+  <p>
+    The list is sorted by priority score: each task combines the importance and urgency you gave it
+    with deadline pressure. A task with no deadline keeps the score you set; as a deadline approaches
+    the pressure rises steeply, and overdue tasks keep climbing so they stay at the top until handled.
+  </p>
+  <p>
+    Dragging a task between two others keeps it there without reshuffling the rest of the list — the
+    app picks importance and urgency values that land its score between its new neighbours.
+  </p>
+
+  <h2 id="dependencies">Dependencies and subtasks</h2>
+  <p>
+    A task can have subtasks (a parent with children) and blockers (a task that cannot start until
+    another finishes). Blocked tasks are marked as such in the list, including chains like "this blocks
+    X, which blocks Y", and a task can also be hidden until a time you chose — see
+    <a href="/docs/repeats">Repeat and scheduling</a>.
+  </p>
+  <p>
+    Ordering hints ("do this after that") are softer than blockers: they suggest a sequence without
+    marking anything blocked. Dependency chains cannot loop — the app refuses a link that would make a
+    task depend on itself, directly or indirectly.
+  </p>
+  <p>
+    Tags on a parent flow down to its subtasks, so a subtask shows the tags it was given plus the ones
+    it inherits. The list displays the most specific ones to avoid repeating the whole ancestry.
+  </p>
+
   <h2 id="tags">Tags</h2>
   <p>
     Tags are nested, so a taxonomy can grow without turning into a flat pile of labels. Each tag has its
@@ -48,7 +78,8 @@ const toc = [
   </p>
   <p>
     Because tags cut across the project tree, they are the honest answer to "show me this kind of work,
-    wherever it lives".
+    wherever it lives". Tags can be nested and grouped into named sections inside a tag's settings pane,
+    and a tag can show a friendlier display name than its internal name.
   </p>
 
   <h2 id="projects">Projects and areas</h2>

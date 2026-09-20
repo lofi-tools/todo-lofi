@@ -48,6 +48,12 @@ const toc = [
     moves it stage by stage. A run can use a real checkout, which is what lets the coding stages produce
     actual diffs instead of a description of one.
   </p>
+  <p>
+    Recipes are built from three kinds of steps: actions that become ordinary tasks, timed waits that hold
+    a step until its moment, and events that wait for an outside signal or for you. Later steps only appear
+    once their prerequisites are met, so a run stays a short live checklist instead of the whole plan at
+    once. The automations pane lists recipes, starts runs, advances steps, fires events, and cancels runs.
+  </p>
 
   <h2 id="where">Where it lives</h2>
   <p>

@@ -8,49 +8,49 @@ import screenshot from '../../assets/app.png'
 const toc = [
   { label: 'What it is', href: '#what-it-is' },
   { label: 'Highlights', href: '#highlights' },
-  { label: 'How the pieces fit', href: '#how-the-pieces-fit' },
+  { label: 'Your data stays yours', href: '#your-data-stays-yours' },
   { label: 'Where to start', href: '#where-to-start' },
 ]
 
 const highlights = [
   {
     title: 'Integrated AI agent',
-    href: '/agent',
+    href: '/docs/agent',
     status: 'Available',
     tone: 'success',
     body: 'A docked agent pane for doing work, not just answering questions: it can read and change your lists, set up repeats, and run a task through a whole workflow.',
   },
   {
     title: 'Tags, projects, and areas',
-    href: '/tasks',
+    href: '/docs/tasks',
     status: 'Available',
     tone: 'success',
     body: 'Group and filter tasks with nested tags, organize them into a tree of projects and areas, and reorder by drag and drop.',
   },
   {
     title: 'Repeat and scheduling',
-    href: '/repeats',
+    href: '/docs/repeats',
     status: 'Available',
     tone: 'success',
     body: 'Recurring tasks are configured in a dedicated picker instead of a syntax you have to remember.',
   },
   {
     title: 'Semi-automated workflows',
-    href: '/workflows',
+    href: '/docs/workflows',
     status: 'Available',
     tone: 'success',
     body: 'A task can carry a workflow. Coding tasks, for example, move through interview, spec, implement, review, and merge.',
   },
   {
     title: 'Two-way sync',
-    href: '/sync',
+    href: '/docs/sync',
     status: 'Todoist · GitHub preview',
     tone: 'accent',
     body: 'Keep working in the task app you already use. Todoist sync is the current target; GitHub issues and projects are in preview.',
   },
   {
     title: 'Mini-apps (extensions)',
-    href: '/mini-apps',
+    href: '/docs/mini-apps',
     status: 'Some coming soon',
     tone: 'warning',
     body: 'Small purpose-built panes: travel checklist templates ship today; message follow-ups, birthday reminders, and job application tracking are planned.',
@@ -62,36 +62,28 @@ const audiences = [
     heading: 'Using the app',
     body: 'You want to run todo-lofi and get your tasks into it.',
     links: [
-      { title: 'Install and run', href: '/install', body: 'What you need, and how to run it from a checkout or build a macOS app.' },
-      { title: 'Tasks, tags, and projects', href: '/tasks', body: 'How the tree works, and what a task carries besides a title.' },
-      { title: 'Feature status', href: '/status', body: 'What is available, what is in preview, and what is only planned.' },
-      { title: 'Configuration', href: '/configuration', body: 'In-app settings, model providers, and connecting Todoist or GitHub.' },
-    ],
-  },
-  {
-    heading: 'Working on it',
-    body: 'You want to build, extend, or review the code.',
-    links: [
-      { title: 'Contributor guide', href: '/contributor', body: 'The whole guide: setup, architecture, integrations, checks, and the license.' },
-      { title: 'Development setup', href: '/contributor/development', body: 'Nix and direnv, the dev shell commands, and the web packages.' },
-      { title: 'Architecture', href: '/contributor/architecture', body: 'The workspace layout, the persistence layer, and where each feature lives.' },
-      { title: 'Contributing', href: '/contributor/contributing', body: 'Checks to run, conventions to follow, and how specs drive changes.' },
+      { title: 'Install and run', href: '/docs/install', body: 'What you need, and how to run it from a checkout or build a macOS app.' },
+      { title: 'Tasks, tags, and projects', href: '/docs/tasks', body: 'How the tree works, and what a task carries besides a title.' },
+      { title: 'Feature status', href: '/docs/status', body: 'What is available, what is in preview, and what is only planned.' },
+      { title: 'Configuration', href: '/docs/configuration', body: 'In-app settings, model providers, and connecting Todoist or GitHub.' },
     ],
   },
 ]
 ---
 
-<Docs title="Overview" description="todo-lofi is a local-first task manager for macOS and Linux, built on GPUI. Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow — all running offline." toc={toc}>
+<Docs title="Overview" description="todo-lofi is a local-first task manager for macOS and Linux. Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow — all running offline." toc={toc}>
   <h2 id="what-it-is">What it is</h2>
   <p>
-    <strong>todo-lofi</strong> keeps your tasks in a local SQLite database and renders them with
-    <a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI</a>, the GPU-accelerated
-    UI framework behind Zed. <code>apps/todo-2</code> is the desktop app; everything it needs to persist
-    lives in <code>libs/storage</code>.
+    <strong>todo-lofi</strong> is a task manager that keeps your lists on your own machine and stays
+    fully usable with no network at all. Organize work into nested tags, projects, and areas; set
+    repeats through a picker instead of memorizing syntax; hand work to the docked agent pane; and let
+    long-running efforts carry their own staged workflows.
   </p>
   <p>
-    The app runs offline by default. Network features are opt-in: Todoist sync, GitHub issues, and the
-    agent's model providers each bring their own credentials and never gate the core task loop.
+    Everything in the core loop — listing, editing, repeating, and reordering tasks — works offline and
+    is driven from the keyboard. Network features are opt-in extras: connect Todoist or GitHub sync, or
+    give the agent a model provider, and each one brings its own credentials without ever gating the
+    task list itself.
   </p>
 
   <figure class={css({ m: '0', my: '6' })}>
@@ -151,27 +143,24 @@ const audiences = [
     }
   </ul>
 
-  <h2 id="how-the-pieces-fit">How the pieces fit</h2>
+  <h2 id="your-data-stays-yours">Your data stays yours</h2>
   <p>
-    The repository is a Cargo workspace plus two web surfaces that share a design system. The Rust side
-    owns the app, the data, and the agent; the web side owns the docs you are reading and the component
-    showcase.
+    Your tasks live on your machine, and that copy is the one the app trusts. Sync is a layer on top:
+    when you connect an outside system, the app maps your tasks onto it and reconciles changes in both
+    directions — but a sync that fails never breaks the list, and you keep working offline until it
+    catches up.
   </p>
-  <ul>
-    <li><code>apps/todo-2</code> — the GPUI desktop application.</li>
-    <li><code>apps/agent-cli</code> — the terminal agent, an ACP server, and the provider registry.</li>
-    <li><code>libs/storage</code> — SQLite persistence, migrations, and the sync/workflow tables.</li>
-    <li><code>libs/web-design-system</code> — the design system this site is built with.</li>
-  </ul>
   <p>
-    <a href="/docs/contributor/architecture">Architecture</a> walks through each crate and how they depend on
-    one another.
+    The same opt-in rule holds for the agent: nothing needs configuring to use the local lists, and the
+    agent only starts working once you pick a provider and give it a key. See
+    <a href="/docs/configuration">Configuration</a> for providers and accounts, and
+    <a href="/docs/status">Feature status</a> for what is shipped versus planned.
   </p>
 
-  <Callout tone="tip" title="About this site">
-    This documentation site lives in <code>apps/docs-web</code> and is built with the repository's own
-    design system — Astro, SolidJS, Panda CSS, and Ark UI. Run it with <code>pnpm dev</code> from
-    the repository root; <code>demos/design-system-showcase</code> is the component gallery behind it.
+  <Callout tone="note" title="Working on the code?">
+    How the workspace is laid out, which crate owns what, and how to run it all live in
+    <a href="/docs/contributor">the contributor guide</a> — start with
+    <a href="/docs/contributor/architecture">Architecture</a>.
   </Callout>
 
   <h2 id="where-to-start">Where to start</h2>

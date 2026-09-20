@@ -1,0 +1,79 @@
+---
+import Docs from '../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'Tasks and lists', href: '#tasks' },
+  { label: 'Automation', href: '#automation' },
+  { label: 'Sync and extensions', href: '#sync' },
+]
+
+const tasks = [
+  { term: 'Priority score', meaning: 'The number that orders your list. Importance and urgency you set, pushed up by deadline pressure as a due date nears or passes.' },
+  { term: 'Blocked', meaning: 'A task waiting on another unfinished task, or hidden until a time you chose. Blocked tasks are marked in the list.' },
+  { term: 'After', meaning: 'A soft ordering hint — "do this after that" — without marking anything blocked.' },
+  { term: 'Subtask', meaning: 'A child task under a parent. Tags on the parent flow down, and the list shows the most specific ones.' },
+]
+
+const automation = [
+  { term: 'Workflow recipe', meaning: 'A reusable process: the ordered stages a task goes through.' },
+  { term: 'Workflow run', meaning: 'One task going through a recipe, shown as a short live checklist of its current steps.' },
+  { term: 'Action, wait, and event steps', meaning: 'The three step kinds: actions become tasks, waits hold until a time, events wait for a signal or for you.' },
+  { term: 'Coding workflow', meaning: 'The built-in recipe for feature work: interview, spec, implement, review, merge.' },
+  { term: 'Agent pane', meaning: 'The assistant beside your lists. It works in the same database, so its results arrive as real tasks.' },
+]
+
+const sync = [
+  { term: 'Mini-app', meaning: 'A purpose-built pane, such as travel checklists, that writes ordinary tasks into your lists.' },
+  { term: 'Managed task', meaning: 'A task owned by a mini-app or integration, marked with a lock. Only its completion can be changed.' },
+  { term: 'Repeat rule', meaning: 'A recurrence attached to a task — daily, weekly, or monthly — that generates each new occurrence.' },
+  { term: 'Combo', meaning: 'A named list of provider/model pairs the agent tries in order when one fails before producing output.' },
+]
+---
+
+<Docs
+  title="Glossary"
+  description="The words the app uses, in one place — what a blocked task, a recipe, a run, or a managed task means when you meet it in a list."
+  toc={toc}
+>
+  <h2 id="tasks">Tasks and lists</h2>
+  <dl>
+    {
+      tasks.map((entry) => (
+        <div>
+          <dt><strong>{entry.term}</strong></dt>
+          <dd>{entry.meaning}</dd>
+        </div>
+      ))
+    }
+  </dl>
+
+  <h2 id="automation">Automation</h2>
+  <dl>
+    {
+      automation.map((entry) => (
+        <div>
+          <dt><strong>{entry.term}</strong></dt>
+          <dd>{entry.meaning}</dd>
+        </div>
+      ))
+    }
+  </dl>
+
+  <h2 id="sync">Sync and extensions</h2>
+  <dl>
+    {
+      sync.map((entry) => (
+        <div>
+          <dt><strong>{entry.term}</strong></dt>
+          <dd>{entry.meaning}</dd>
+        </div>
+      ))
+    }
+  </dl>
+
+  <Callout tone="note" title="Deeper terms">
+    Internals such as the storage engine, the agent protocol, and the codebase layout live in
+    <a href="/docs/contributor/architecture">the contributor guide</a>.
+  </Callout>
+</Docs>
