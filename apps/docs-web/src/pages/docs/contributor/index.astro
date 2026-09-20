@@ -12,14 +12,18 @@ const toc = [
 ]
 
 const contributorGuide = docGuides.find((guide) => guide.heading === 'Contributor guide')
+const landingHref = contributorGuide?.href
 const pages = (contributorGuide ? guideLinks(contributorGuide) : []).filter(
-  (item) => item.href !== '/contributor',
+  (item) => item.href !== landingHref,
 )
 
 /** Page copy, keyed by nav label so the list itself stays sourced from docs.ts. */
 const summaries: Record<string, string> = {
   'Development setup': 'Get a working shell: Nix and direnv, the dev-shell commands, and the web packages.',
   Architecture: 'The map — crates, persistence, the desktop app, and the spec index.',
+  'Data model': 'The storage layer: what a task is, how it is ordered, who owns a row, and how repeats become tasks.',
+  'Workflow engine': 'Recipes, runs, and the coding pipeline — including branches, worktrees, and the loopback tool server.',
+  'Agent runtime': 'The protocol the desktop pane speaks, the agent\u2019s tools and sub-agents, and the vendored patches.',
   Integrations: 'The area you are most likely to touch: sync, the provider layer, MCP, and the agent protocol.',
   Contributing: 'Which checks must pass, and the Rust and web conventions to follow.',
   License: 'AGPL-3.0 in practice, and what that means for a change you want to upstream.',

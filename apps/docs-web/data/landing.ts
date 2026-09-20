@@ -91,6 +91,82 @@ export const agentThread: ChatMessage[] = [
   ),
 ]
 
+/**
+ * A phase row in the automations panel illustration.
+ *
+ * Key names avoid CSS property names on purpose (see the note at the top of
+ * this file): `content`, `display`, and friends would be read as declarations.
+ */
+export interface RunPhase {
+  label: string
+  state: 'done' | 'active' | 'pending'
+}
+
+export interface RunAction {
+  label: string
+  kind: 'primary' | 'quiet' | 'danger'
+}
+
+export interface AutomationRun {
+  task: string
+  round: string
+  branch: string
+  baseBranch: string
+  phases: RunPhase[]
+  actions: RunAction[]
+  notes: string[]
+}
+
+const CODING_ORDER = ['Interview', 'Spec', 'Implement', 'Review', 'Merge']
+
+/** Earlier phases are done, this one is active, the rest are pending. */
+const codingPhases = (active: string): RunPhase[] =>
+  CODING_ORDER.map((label) => ({
+    label,
+    state:
+      label === active ? 'active' : CODING_ORDER.indexOf(label) < CODING_ORDER.indexOf(active) ? 'done' : 'pending',
+  }))
+
+/** Two coding runs, at different phases, as the automations panel groups them. */
+export const automationRuns: AutomationRun[] = [
+  {
+    task: 'Add OAuth login',
+    round: 'Round 2 · Implement',
+    branch: 'feature/42-add-oauth',
+    baseBranch: 'main',
+    phases: codingPhases('Implement'),
+    actions: [{ label: 'Complete step', kind: 'primary' }],
+    notes: [
+      'Round 1 rejected · error paths are not covered',
+      'Spec saved · docs/spec/add-oauth-spec.md',
+    ],
+  },
+  {
+    task: 'Map Todoist sections onto tags',
+    round: 'Round 1 · Interview',
+    branch: '',
+    baseBranch: 'main',
+    phases: codingPhases('Interview'),
+    actions: [
+      { label: 'Approve', kind: 'primary' },
+      { label: 'Reject', kind: 'quiet' },
+    ],
+    notes: ['Interview round 1 · asking clarifying questions'],
+  },
+]
+
+/** Branches whose runs are gone but which still want deleting. */
+export const branchCleanup: { branch: string; note: string }[] = [
+  { branch: 'feature/old-notes-pane', note: 'run cancelled' },
+]
+
+/** The recipe group above the runs. */
+export const automationRecipe = {
+  name: 'Coding workflow',
+  summary: 'Five phases, each a step you complete. The agent works inside a phase; you decide when it ends.',
+  status: 'Enabled',
+}
+
 /** Coding work as the workflow stages hold it. */
 export const codingColumns: KanbanColumn[] = [
   column('Interview', 'todo', [

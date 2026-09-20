@@ -37,6 +37,9 @@ extension surface rather than part of the everyday tasklist.
 | Contributor guide | `/docs/contributor` | Landing: what the guide covers and the reading order |
 | Contributor guide | `/docs/contributor/development` | Nix + direnv setup, the dev shell commands, web packages |
 | Contributor guide | `/docs/contributor/architecture` | Workspace layout, the desktop app, persistence, specs |
+| Contributor guide | `/docs/contributor/data-model` | Storage internals: the task, priority scoring, tags, links, ownership, repeats |
+| Contributor guide | `/docs/contributor/workflow-engine` | Recipes, runs, the coding pipeline, git worktrees, the loopback tool server |
+| Contributor guide | `/docs/contributor/agent-runtime` | ACP surface, the connection, tools, sub-agents, vendored patches |
 | Contributor guide | `/docs/contributor/integrations` | Sync internals, provider layer, MCP/hooks, agent protocol |
 | Contributor guide | `/docs/contributor/contributing` | Workflow, checks, and the Rust/web conventions |
 | Contributor guide | `/docs/contributor/license` | AGPL-3.0 in practice, third-party code, contributions |
@@ -87,6 +90,12 @@ server on port 4322 (the showcase suite uses 4321, so both can run at once).
   `libs/web-design-system/panda.config.ts` and the showcase's config, and its
   `include` globs must cover the design system's source — otherwise the design
   system's components render unstyled with no error (`DESIGN.md` §3).
+- The automations pane on the landing page and the overview is a
+  **design-system replica** (`src/components/AutomationsPanel.astro`), not a
+  bitmap — the same approach the showcase takes for its page replicas. Its
+  action affordances are `span`s rather than `button`s on purpose: a row of
+  controls that do nothing would be a lie to anyone using a keyboard or a
+  screen reader.
 - The landing page's illustrative data lives in `data/landing.ts`, **outside**
   `src/`. Panda scans every file under `src/` for style-shaped objects, and
   those records use keys that are also CSS property names (`title`, `status`,

@@ -1,0 +1,366 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/TableScroll.astro'
+
+const toc = [
+  { label: 'The task', href: '#task' },
+  { label: 'Priority scoring', href: '#priority' },
+  { label: 'Tags and the tag tree', href: '#tags' },
+  { label: 'Links and blocking', href: '#links' },
+  { label: 'Managed apps and ownership', href: '#managed' },
+  { label: 'Repeats', href: '#repeats' },
+  { label: 'Generated content', href: '#generated' },
+  { label: 'Migrations', href: '#migrations' },
+]
+
+// Tuples rather than objects: Panda scans every file under `src/` and treats
+// object literals as style candidates, so a record with a `meta` or `content`
+// key can end up as a bogus CSS declaration. Strings in arrays are inert.
+const taskFields: [string, string][] = [
+  ['id', 'Task identifier. Ids are generated with a `task` prefix by `derive_entity_id`.'],
+  ['title, description', 'What the task is, and the longer note behind it.'],
+  ['deadline', 'Unix timestamp the task is due. Unset means no deadline, and no deadline pressure.'],
+  ['blocked_until', 'Time-based block. The task stays out of the list until this passes.'],
+  ['importance_factor', 'User-adjustable f64 multiplier for priority. Defaults to 1.0.'],
+  ['urgency_factor', 'User-adjustable f64 multiplier for priority. Defaults to 1.0.'],
+  ['done, completed_at', 'Completion flag and when it was set.'],
+  ['parent_id', 'Subtask edge. Subtasks are ordinary tasks with a parent.'],
+  ['labels', 'JSON list of tags applied directly to this task.'],
+  ['branch_name', 'The branch a coding task is being worked on.'],
+  ['timezone', 'Captured at creation so deadlines and repeats are evaluated where they were set.'],
+  ['comments', 'JSON list of comments pulled in from an external system.'],
+  ['source_task_id', 'The task this one was derived from, when it came from another task.'],
+  ['deleted_at', 'Tombstone. Set instead of deleting the row.'],
+  ['workflow_run_id, node_id', 'Set when the workflow engine materialized this task as a step.'],
+  ['spec, spec_path', 'The spec a coding run produced, and where it was written.'],
+]
+
+const metaFields: [string, string][] = [
+  ['task', 'The stored task.'],
+  ['direct_tags', 'Tags applied to this task itself.'],
+  ['inherited_tags', 'Direct tags of the ancestor chain, so a subtask is tagged like its parents.'],
+  ['inferred_tags', 'Tags reached through tag implications.'],
+  ['leaf_tags', 'The most specific tags only: ancestors implied by another tag on the same task are omitted, which is what the task list displays.'],
+  ['blocked', 'True when an unfinished blocker or a `blocked_until` timestamp keeps the task from being worked on.'],
+  ['managed_by, managed_label', 'The managed app that owns the task, if any.'],
+]
+
+const linkQueries: [string, string][] = [
+  ['blocker_ids(task_id)', 'The ids of the tasks that block this one.'],
+  ['list_blockers(task_id)', 'The same, as full task rows.'],
+  ['subtasks_map(task_ids)', 'Parent id to its direct subtasks. This is what lets the list render subtasks collapsed, with the first inline and the rest behind an N/M counter.'],
+]
+
+const managedClasses: [string, string][] = [
+  ['recipe', 'Ships a workflow: the automations behind trips and other generated content.'],
+  ['integration', 'Owns what a sync pulls in, such as a linked Todoist project.'],
+  ['builtin', 'Content the app ships itself, such as demo data.'],
+]
+
+const repeats: [string, string][] = [
+  ['interval_days', 'How often the task repeats. 1 is daily, 7 is weekly.'],
+  ['time_of_day', 'When on the occurrence date the repeat is scheduled.'],
+  ['start_time_of_day', 'Written onto the materialized task as its `blocked_until`, so a repeat is not in the list before it is actually doable.'],
+  ['weekdays, month_day', 'The weekdays for a weekly repeat, or the day of the month for a monthly one.'],
+  ['strict', 'Whether a missed occurrence is skipped or caught up.'],
+  ['timezone', 'The original zone the recurrence is evaluated in.'],
+  ['blocked_by_template_id', 'Per-generation dependence: this occurrence is blocked by the same-date occurrence of another template.'],
+  ['recipe_id', 'When set, the template schedules a workflow run instead of a task.'],
+]
+
+const integrity: [string, string][] = [
+  ['orphaned_tag_owners', '`tags.managed_by` points at an app that no longer exists.'],
+  ['orphaned_section_owners', '`tag_sections.managed_by` points at a missing app.'],
+  ['orphaned_task_owners', '`tasks.managed_by` points at a missing app.'],
+  ['orphaned_recipe_apps, orphaned_integration_apps', 'A recipe or integration points at a missing app.'],
+  ['dangling_binding_apps, dangling_binding_tags', 'An `app_tag_bindings` row points at a missing app or tag.'],
+]
+
+const score = `score = importance_factor × urgency_factor × deadline_pressure`
+---
+
+<Docs
+  title="Data model"
+  description="The storage layer behind the app: what a task is, how it is ordered, how tags and links relate, who owns a row, how repeats become tasks, and how the schema moves."
+  toc={toc}
+>
+  <p>
+    Everything the app shows comes out of <code>libs/storage</code>, a SQLite database behind
+    the toasty ORM. This page is the shape of that data. The UI-side view of the same
+    features is in the <a href="/docs/tasks">user guide</a>.
+  </p>
+
+  <h2 id="task">The task</h2>
+  <p>
+    <code>Task</code> is one row, and almost everything is a column on it rather than a side
+    table: the deadline, the two priority multipliers, the subtask edge, and the fields the
+    workflow engine and coding runs add.
+  </p>
+  <TableScroll label="Task fields">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        {taskFields.map(([field, detail]) => (
+          <tr>
+            <td><code>{field}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <p>
+    Loading a task also computes the fields that are never stored. <code>TaskWithMeta</code>
+    is the row as the UI uses it:
+  </p>
+  <TableScroll label="TaskWithMeta fields">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        {metaFields.map(([field, detail]) => (
+          <tr>
+            <td><code>{field}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <Callout tone="note" title="Nothing is deleted">
+    Deleting a task sets <code>deleted_at</code> and leaves the row in place; queries add a{' '}
+    <code>deleted_at IS NULL</code> filter rather than removing anything. Cancelling a
+    workflow run works the same way. Two things fall out of that: a sync mapping never points
+    at a row that has vanished underneath it, and something a user can no longer see can still
+    be the reason an external system needs updating.
+  </Callout>
+
+  <h2 id="priority">Priority scoring</h2>
+  <p>
+    Order is not a stored position. It is a score, recomputed on load, and the list is sorted
+    by it:
+  </p>
+  <CodeBlock filename="libs/storage/src/task.rs" code={score} showLineNumbers={false} />
+  <p>
+    <code>deadline_pressure</code> is what makes the list feel like it does. With no deadline
+    it is <code>1.0</code>. Before the deadline it is <code>86400 / seconds remaining</code>,
+    so pressure climbs hyperbolically as the task comes due and is exactly <code>86400</code>{' '}
+    at the deadline. Past the deadline it keeps growing, linearly, so an overdue task does not
+    sit at a plateau — a day late always outranks anything merely due today.
+  </p>
+  <p>
+    Because the score is derived, a drag-and-drop cannot just write an index. Dropping a task
+    between two others calls <code>factors_between(above, below)</code>, which solves for an
+    importance and urgency pair whose score lands between the neighbours' live scores, using
+    their geometric mean. Ordering survives edits to either neighbour without renumbering the
+    list.
+  </p>
+
+  <h2 id="tags">Tags and the tag tree</h2>
+  <p>
+    A tag is a name plus an optional display name, and <code>label()</code> prefers the display
+    name. Project tags are named <code>project:&#123;path&#125;</code> and display the
+    directory's name.
+  </p>
+  <p>
+    Tag implications form a DAG — an implier is a child of an implied tag — which is what makes
+    nesting work. The sidebar still renders a <em>tree</em>, built from that DAG by
+    <code>TreeBuild</code>: a depth-first walk that tracks the current path so a cycle cannot be
+    re-entered, bounded by a maximum depth of 32 so a pathological graph cannot hang the
+    renderer. Children are ordered projects first, then plain tags, then sections, and
+    alphabetically within each group.
+  </p>
+  <p>
+    Per-tag settings live beside the tag, not on it: a sync target (which integration, and which
+    object over there), the directories that back a directory-project, and the tag's sections in
+    order. Sections are what let a generated checklist render under its own headings instead of
+    as a flat list.
+  </p>
+
+  <h2 id="links">Links and blocking</h2>
+  <p>
+    Task-to-task relationships come in two kinds. <strong>Blocked by</strong> is a hard
+    dependency: a task is blocked while any of its blockers is unfinished, and that blocked
+    state is computed on read, never stored. <strong>After</strong> is a soft ordering hint —
+    this should come after that, but nothing stops you.
+  </p>
+  <p>
+    Each kind forms its own DAG. Adding a link runs a breadth-first search for the target from
+    the source, and a link that would close a cycle is rejected outright (a task linked to
+    itself counts). The graph is never repaired afterwards because it can never be broken.
+  </p>
+  <TableScroll label="Relationship queries">
+    <table>
+      <thead>
+        <tr><th>Query</th><th>Returns</th></tr>
+      </thead>
+      <tbody>
+        {linkQueries.map(([query, detail]) => (
+          <tr>
+            <td><code>{query}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <h2 id="managed">Managed apps and ownership</h2>
+  <p>
+    Generated content — trip checklists, synced tasks, demo data — needs to be owned by
+    something, so that regenerating it, or turning it off, is well-defined. That is the managed
+    apps model, and it is deliberately one mechanism rather than one per feature.
+  </p>
+  <p>
+    An <em>app</em> is any entity that owns content on your behalf. It has a kind, a slug, a
+    label, and an enabled flag:
+  </p>
+  <TableScroll label="App kinds">
+    <table>
+      <thead>
+        <tr><th>Kind</th><th>Owns</th></tr>
+      </thead>
+      <tbody>
+        {managedClasses.map(([kind, detail]) => (
+          <tr>
+            <td><code>{kind}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    An app attaches to a tag through a binding, whose role is either <code>full_tag</code> — the
+    app owns the whole tag — or <code>partial</code>, where it manages some of the tag's
+    sections or tasks while you own the rest. A binding also carries{' '}
+    <code>capture_new_tasks</code>, which is what makes a task you add to a synced tag get
+    picked up and pushed to the other side.
+  </p>
+  <p>
+    Ownership itself is a nullable <code>managed_by</code> column on tags, sections, and tasks.
+    Null means you own it. On a task it is paired with a mode:
+  </p>
+  <ul>
+    <li>
+      <strong>Managed</strong> — the app owns the task. Content edits are blocked, completing it
+      is still always allowed, and the app may replace the task when it regenerates.
+    </li>
+    <li>
+      <strong>Captured</strong> — the app only propagates the task. It stays completely normal
+      and editable, the app will not regenerate or remove it, and moving it out of the scope
+      simply stops the syncing.
+    </li>
+  </ul>
+  <p>
+    Two flags decide what happens when the two of you have both touched a task.{' '}
+    <code>managed_editable</code> lets an app opt a managed task back into local edits.
+    <code>user_modified</code> is set by any local content edit, and regeneration and removal
+    skip a task that has it — so a deliberate edit is never silently overwritten. Completing or
+    reopening a task deliberately does not set it, because that is not a content change.
+  </p>
+  <p>
+    The two halves of a managed row are visible in the UI: read-only fields carry a lock, and
+    double-clicking to rename a managed row quietly does nothing rather than appearing to work.
+  </p>
+  <Callout tone="note" title="Auditing ownership">
+    Because ownership is spread across several tables, it can rot — an app is removed and a row
+    still points at it. <code>check_managed_integrity</code> walks the tables and reports each
+    kind of breakage:
+    <ul>
+      {
+        integrity.map(([category, detail]) => (
+          <li>
+            <code>{category}</code> — {detail}
+          </li>
+        ))
+      }
+    </ul>
+    A report caps each category at ten rows so a broken database does not flood the log, and an
+    operation that touches several rows at once — deleting or regenerating an app — runs inside
+    a transaction, so it either lands completely or not at all.
+  </Callout>
+
+  <h2 id="repeats">Repeats</h2>
+  <p>
+    A repeat is a template, not a task. <code>RepeatTaskTemplate</code> holds the rule, and the
+    occurrences you see in the list are tasks materialized from it:
+  </p>
+  <TableScroll label="Repeat template fields">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        {repeats.map(([field, detail]) => (
+          <tr>
+            <td><code>{field}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    Two of those fields are worth calling out because they are the parts that make repeats feel
+    less like a calendar rule and more like a plan.{' '}
+    <code>start_time_of_day</code> becomes the occurrence's <code>blocked_until</code>, which is
+    why an 08:00 repeat is not sitting in your list at 07:00 waiting to be dismissed.
+  </p>
+  <p>
+    <code>blocked_by_template_id</code> gives per-generation dependence: this template's
+    occurrence on a date is blocked by the <em>same date's</em> occurrence of another template.
+    A daily task can therefore wait on another daily task — today's gym before today's shower —
+    even though both are generated independently and neither knows about the order in the list.
+  </p>
+  <p>
+    Setting <code>recipe_id</code> turns a repeat into a schedule for a workflow run rather than
+    a task, which is how a recurring automation is expressed. Demo content comes from
+    <code>libs/storage/src/testing.rs</code>, which builds seed tags, seed tasks, and the
+    assignments between them.
+  </p>
+
+  <h2 id="generated">Generated content, end to end</h2>
+  <p>
+    Travel checklists are the worked example of the pieces above, and the only managed tag that
+    ships today. An automation owns the tag: enabling it creates the tag, and disabling it
+    removes the tag and everything the tag owns.
+  </p>
+  <p>
+    Each trip is a workflow run of the recipe, with the trip's name, length, and activities in
+    the run's params. The checklist items are ordinary tasks carrying that run's{' '}
+    <code>workflow_run_id</code>, tagged with the managed tag's section tags — “Pack” and
+    “Before leaving” — so the existing task list renders a trip's checklist sectioned like any
+    other tag with sections. The run completes when the checklist does.
+  </p>
+  <p>
+    The items themselves are derived from the trip's shape: base items every trip needs, extras
+    that appear only for the activities you picked, and adjustments that depend on length —
+    clothing scaled to the trip and capped at a week, with laundry suggested beyond that.
+    Choosing days from a fixed set of lengths and activities from a fixed list is what keeps the
+    generation predictable rather than a model's guess.
+  </p>
+
+  <h2 id="migrations">Migrations</h2>
+  <p>
+    The schema is versioned as numbered SQL files under{' '}
+    <code>libs/storage/toasty/migrations/</code>, applied by the migration binary through the{' '}
+    <code>mig</code> command in the dev shell. Reading them in order is a good way to watch a
+    feature arrive: <code>0010_todoist_sync.sql</code> brings the sync mapping tables,{' '}
+    <code>0012_repeat_start_time.sql</code> and <code>0013_repeat_dependency.sql</code> add the
+    two repeat fields above, <code>0017_coding_workflow.sql</code> the coding run columns, and{' '}
+    <code>0018_apps.sql</code> with <code>0019_managed_scope.sql</code> the ownership model.
+  </p>
+  <p>
+    <a href="/docs/contributor/workflow-engine">The workflow engine</a> builds on this data
+    model to turn recipes into steps, and <a href="/docs/contributor/architecture">Architecture</a>{' '}
+    covers where these crates sit in the workspace.
+  </p>
+</Docs>

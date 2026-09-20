@@ -1,0 +1,209 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/TableScroll.astro'
+
+const toc = [
+  { label: 'The protocol surface', href: '#protocol' },
+  { label: 'The connection', href: '#connection' },
+  { label: 'Tools', href: '#tools' },
+  { label: 'Sub-agents', href: '#subagents' },
+  { label: 'Reaching the client\u2019s files', href: '#fs' },
+  { label: 'Direct prompt mode', href: '#direct' },
+  { label: 'Patched cersei', href: '#cersei' },
+]
+
+// Tuples, not objects: Panda scans `src/` for style-shaped objects, and object
+// keys that happen to be CSS properties become bogus declarations.
+const methods: [string, string][] = [
+  ['initialize', 'Advertises capabilities and the authentication methods the client may use.'],
+  ['session/new', 'Starts a session with a working directory and, optionally, extra MCP servers. It also advertises the available providers and models so a client can switch models mid-session.'],
+  ['session/load', 'Resumes an existing session, replaying the conversation as session/update notifications.'],
+  ['session/prompt', 'Streams session/update notifications for a turn and finishes with a stop reason.'],
+  ['session/set_config_option', 'Changes a session option, alongside session/set_mode and unstable_set_session_model.'],
+  ['session/cancel', 'Cancels the turn in progress.'],
+]
+
+const connectionMethods: [string, string][] = [
+  ['send, send_line', 'Serialize a value, or a raw line, onto stdout.'],
+  ['response, error', 'A successful JSON-RPC response, or an error one.'],
+  ['notification, send_update', 'A JSON-RPC notification, and the session/update form of it.'],
+  ['send_available_commands', 'Tells the client which slash commands exist.'],
+]
+
+const subAgentFields: [string, string][] = [
+  ['id, display_name', 'How the parent and the transcript refer to it.'],
+  ['spawner_prompt', 'What the parent model is told about the sub-agent, which is how it knows when to spawn it.'],
+  ['system_prompt', 'The sub-agent\u2019s own instructions.'],
+  ['tools', 'Builds a fresh tool set for each spawned instance rather than sharing one.'],
+  ['max_turns', 'Caps how long a sub-agent may run.'],
+  ['include_message_history', 'Whether the sub-agent is seeded with the parent\u2019s conversation.'],
+  ['strip_think_tags', 'Whether reasoning tags are stripped from its output before the parent sees it.'],
+]
+
+const compact = `AUTOCOMPACT_TRIGGER_FRACTION = 0.90
+KEEP_RECENT_MESSAGES        = 10
+MAX_CONSECUTIVE_FAILURES    = 3`
+---
+
+<Docs
+  title="Agent runtime"
+  description="How the agent side actually runs: the protocol the desktop app speaks to it, the tools it has, how it delegates to sub-agents, and the patches carried on the vendored agent library."
+  toc={toc}
+>
+  <p>
+    One agent implementation serves both front ends. <code>apps/agent-cli</code> is a terminal
+    TUI that doubles as a protocol server; the desktop app's agent pane is a client of that same
+    protocol. This page is the implementation side. For connecting your own provider or tool
+    servers, see <a href="/docs/configuration">Configuration</a>, and for the sync and provider
+    layer, <a href="/docs/contributor/integrations">Integrations</a>.
+  </p>
+
+  <h2 id="protocol">The protocol surface</h2>
+  <p>
+    Running <code>agent-cli</code> with <code>--acp</code> makes it an Agent Client Protocol
+    server over stdin and stdout: newline-delimited JSON-RPC 2.0, implementing a subset of the
+    Gemini CLI's ACP v1 surface. Requests arrive on stdin; responses and streaming notifications
+    leave on stdout.
+  </p>
+  <TableScroll label="ACP methods">
+    <table>
+      <thead>
+        <tr><th>Method</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        {methods.map(([method, detail]) => (
+          <tr>
+            <td><code>{method}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The direction of travel is not one-way. The agent can send its own requests back to the
+    client — <code>fs/read_text_file</code> and <code>fs/write_text_file</code> — and awaits the
+    responses, correlating them by id. Those calls are gated on what the client says it supports
+    at initialization.
+  </p>
+  <p>
+    A fallback switch is reported to the client rather than happening silently, so a model that
+    quietly changed mid-session cannot be mistaken for the one you chose.
+  </p>
+
+  <h2 id="connection">The connection</h2>
+  <p>
+    <code>AcpConnection</code> owns the wire. Its job is twofold: every write to stdout is
+    serialized, so a response and a streaming notification produced by different tasks can never
+    interleave into a corrupt line; and requests the agent has sent to the client are tracked by
+    id so their answers can be matched up.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Method</th><th>Does</th></tr>
+    </thead>
+    <tbody>
+      {connectionMethods.map(([method, detail]) => (
+        <tr>
+          <td><code>{method}</code></td>
+          <td>{detail}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+
+  <h2 id="tools">Tools</h2>
+  <p>
+    Beyond the built-in tool set, the agent carries tools of its own.{' '}
+    <code>AskUserTool</code> is the one worth knowing about, because it has two modes: in the TUI
+    it puts the question to you and waits for the answer, and under ACP or a headless run it
+    returns a structured result instead. That is what lets the same interview flow be driven
+    from a terminal, from the desktop pane, or from a script without a second implementation.
+  </p>
+  <p>
+    Its input schema covers the question, an optional short header, suggested answers, a
+    multi-select flag, and validation rules — the same shape the app's own question UI uses.
+  </p>
+
+  <h2 id="subagents">Sub-agents</h2>
+  <p>
+    Delegation is a tool: <code>spawn_agents</code> hands focused work to sub-agents that have
+    their own system prompts and their own tools. The parent's system prompt lists the catalog,
+    with a short note per sub-agent on when to reach for it, so spawning is a decision the model
+    makes rather than something hardcoded around it.
+  </p>
+  <TableScroll label="A sub-agent definition">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        {subAgentFields.map(([field, detail]) => (
+          <tr>
+            <td><code>{field}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    Sub-agent activity is broadcast on a channel rather than being flattened into the parent's
+    output. The TUI subscribes and renders nested tool calls underneath the{' '}
+    <code>spawn_agents</code> call that caused them, which is what makes delegation legible
+    instead of a black box. Under ACP and headless runs there is no receiver, and those events
+    are simply dropped.
+  </p>
+
+  <h2 id="fs">Reaching the client's files</h2>
+  <p>
+    The file tools go through a trait rather than straight to disk, so a client can serve
+    unsaved editor buffers and observe the edits the agent makes. In the TUI and in headless
+    runs there is no client to ask, so the sink is absent and the tools touch the local
+    filesystem directly. The capability is negotiated, not assumed.
+  </p>
+
+  <h2 id="direct">Direct prompt mode</h2>
+  <p>
+    Not everything needs the agent loop. Direct prompt mode sends a single user message to one
+    model and returns the raw streamed response, resolving the provider, model, and key through
+    the same machinery as the rest of the CLI.
+  </p>
+  <p>
+    Its real purpose is testing: it captures exactly what a model streams, including the thinking
+    deltas that the provider layer would otherwise drop, and saves them as fixtures organised by
+    format family and model. Parsing can then be tested offline against real responses instead
+    of hand-written approximations.
+  </p>
+
+  <h2 id="cersei">Patched cersei</h2>
+  <p>
+    The agent is built on the cersei agent library, and the repository carries patched copies of
+    its agent and provider crates. The patches exist because the behaviour the app needs is in
+    the library's internals rather than behind an interface.
+  </p>
+  <p>
+    The largest is auto-compaction: as a conversation approaches the model's context limit, older
+    messages are summarized to make room while keeping the recent thread intact.
+  </p>
+  <CodeBlock filename="patched/cersei-agent/src/compact.rs" code={compact} showLineNumbers={false} />
+  <p>
+    Compaction triggers at 90% of the window, always preserves the ten most recent messages, and
+    disables itself after three consecutive failures rather than looping on a conversation it
+    cannot shrink. A conversation's fullness is also surfaced to the UI as a three-state warning,
+    so running out of context is something you can see coming.
+  </p>
+  <Callout tone="note" title="Read the patches as part of the codebase">
+    Anything in <code>patched/</code> is code you maintain. A bug in agent behaviour may live
+    there rather than in <code>apps/agent-cli</code>, and an upstream update has to be
+    reconciled with the patches rather than merged over them.
+  </Callout>
+  <p>
+    <a href="/docs/contributor/workflow-engine">The workflow engine</a> explains the coding
+    pipeline that drives these sessions, and{' '}
+    <a href="/docs/contributor/integrations">Integrations</a> covers the provider layer and the
+    MCP servers you configure yourself.
+  </p>
+</Docs>

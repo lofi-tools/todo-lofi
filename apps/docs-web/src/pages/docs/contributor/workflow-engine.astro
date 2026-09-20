@@ -1,0 +1,340 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import TableScroll from '../../../components/TableScroll.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Recipes and runs', href: '#recipes' },
+  { label: 'Nodes and edges', href: '#nodes' },
+  { label: 'How a step becomes a task', href: '#materialization' },
+  { label: 'The run lifecycle', href: '#lifecycle' },
+  { label: 'The coding pipeline', href: '#coding' },
+  { label: 'Branches and worktrees', href: '#git' },
+  { label: 'The loopback tool server', href: '#mcp' },
+  { label: 'Prompts', href: '#prompts' },
+  { label: 'The automations panel', href: '#panel' },
+]
+
+// Tuples, not objects: Panda treats object literals under `src/` as style
+// candidates, so records with keys like `content` become bogus CSS.
+const recipeFields: [string, string][] = [
+  ['id, slug', 'Identity, and the name the recipe is referred to by.'],
+  ['version', 'Monotonically increasing. A recipe is immutable and versioned, so a run pins an exact one.'],
+  ['recipe_json', 'The graph itself: the nodes and the edges between them.'],
+]
+
+const runFields: [string, string][] = [
+  ['recipe_id, params', 'Which recipe, and this run\u2019s values for its parameters.'],
+  ['status', 'active, completed, or cancelled.'],
+  ['step_results', 'Node id to result, written as each step finishes. The reserved @notes key holds a coding run\u2019s ordered log of annotations, rejections, approvals, spec saves, and merges.'],
+  ['root_task_id', 'For a coding run, the feature task it is attached to. Its phase steps materialize as that task\u2019s subtasks.'],
+  ['branch, base_branch, branch_status', 'The feature branch, where it was cut from, and where it is in its life.'],
+]
+
+const nodeFields: [string, string][] = [
+  ['id, kind', 'The step, and whether it is an action or an event wait.'],
+  ['ai, approval', 'Whether an agent does the work, and whether a person has to sign it off.'],
+  ['phase', 'For coding recipes: interview, spec, implement, review, or merge.'],
+  ['subtask', 'Whether the step becomes a subtask of the run\u2019s root task rather than a standalone task.'],
+  ['retrigger_on_reject, retrigger_node', 'Whether a rejection can reopen an earlier step, and which one if it is not simply the feeder.'],
+]
+
+const edgeFields: [string, string][] = [
+  ['from, to', 'The step being left and the step being entered.'],
+  ['condition_type', 'on_complete, on_result, timer, or event.'],
+  ['condition_value', 'The value the condition is matched against, for on_result edges.'],
+]
+
+const gitOps: [string, string][] = [
+  ['is_repo, changed_paths', 'Whether a directory is a repository, and which tracked or untracked files differ.'],
+  ['current_branch, branch_exists, switch_branch', 'Branch inspection and checkout.'],
+  ['worktree_add', 'Adds a worktree on a new branch cut from a base. This is where a run\u2019s feature branch is actually created.'],
+  ['worktree_remove, worktree_prune', 'Removes a worktree, refusing when it holds uncommitted work; prunes entries whose checkout was deleted by hand.'],
+  ['merge_no_ff, abort_merge, delete_branch', 'Merge with a commit so the feature boundary stays visible, abort one, and delete a branch.'],
+  ['push_branch, stage_and_commit', 'Push a branch and set its upstream; stage everything and commit.'],
+  ['resolve_remote, parse_github_remote, git_common_dir, ensure_excluded', 'Find the remote and its owner/repo, locate the common git directory, and add the worktree path to git\u2019s exclude file.'],
+]
+
+const serverTools: [string, string][] = [
+  ['attach the spec', 'Save the interviewed spec onto the feature task.'],
+  ['create and interview sub-tasks', 'Split work out of the feature and start a run on it.'],
+  ['log annotations', 'Append to the run\u2019s ordered note log.'],
+  ['propose a branch name', 'Record the branch the run should use. The app creates it once the spec is approved.'],
+  ['report phase completion', 'Move the run on to the next phase.'],
+]
+
+const phases: string[] = ['interview', 'spec', 'implement', 'review', 'merge']
+---
+
+<Docs
+  title="Workflow engine"
+  description="Recipes, runs, and how a workflow turns into ordinary tasks — plus the coding pipeline that runs on top of it, its git handling, and the panel that drives it."
+  toc={toc}
+>
+  <p>
+    The workflow engine is how a repeatable process — a coding feature, a trip checklist, a
+    recurring chore — becomes concrete tasks with state of their own. It lives in{' '}
+    <code>libs/storage/src/workflow.rs</code>. The reader-facing description of what workflows
+    do is in <a href="/docs/workflows">the user guide</a>.
+  </p>
+
+  <h2 id="recipes">Recipes and runs</h2>
+  <p>
+    A <strong>recipe</strong> is the blueprint, stored as a graph. A <strong>run</strong> is one
+    instance of it:
+  </p>
+  <TableScroll label="Recipe fields">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        {recipeFields.map(([field, detail]) => (
+          <tr>
+            <td><code>{field}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <table>
+    <thead>
+      <tr><th>Run field</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      {runFields.map(([field, detail]) => (
+        <tr>
+          <td><code>{field}</code></td>
+          <td>{detail}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+  <p>
+    Versioning is the point of the recipe split: a run records the version it started on, so
+    editing a recipe can never change the meaning of a run already in flight.
+  </p>
+
+  <h2 id="nodes">Nodes and edges</h2>
+  <p>
+    A recipe is a directed acyclic graph. Each <code>RecipeNode</code> is a step, and each{' '}
+    <code>RecipeEdge</code> says when the next one is entered.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Node field</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      {nodeFields.map(([field, detail]) => (
+        <tr>
+          <td><code>{field}</code></td>
+          <td>{detail}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+  <table>
+    <thead>
+      <tr><th>Edge field</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      {edgeFields.map(([field, detail]) => (
+        <tr>
+          <td><code>{field}</code></td>
+          <td>{detail}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+
+  <h2 id="materialization">How a step becomes a task</h2>
+  <p>
+    There is no separate workflow-task entity. A step <em>is</em> an ordinary task row carrying{' '}
+    <code>workflow_run_id</code> and <code>node_id</code>, which is why a workflow step shows up
+    in your list, can be ticked, and needs no special rendering.
+  </p>
+  <ul>
+    <li>
+      <strong>Lazy</strong> — a step's row is created only once its prerequisites are satisfied,
+      so a run does not dump its whole future onto the list.
+    </li>
+    <li>
+      <strong>Time waits</strong> — a downstream action task is created with{' '}
+      <code>blocked_until = completion + duration</code>. The list hides anything more than two
+      days out, so the waiting is invisible until it is nearly actionable rather than a wall of
+      tasks you cannot start.
+    </li>
+    <li>
+      <strong>Event waits</strong> — a visible, tickable task, resolved by a webhook, a button,
+      or you ticking it. One representation for "something outside has to happen", whatever the
+      source.
+    </li>
+    <li>
+      <strong>Coding runs</strong> — the phase steps materialize as subtasks of the run's root
+      task, so the feature and its phases stay one unit in the list.
+    </li>
+  </ul>
+
+  <h2 id="lifecycle">The run lifecycle</h2>
+  <p>
+    Three operations drive a run. <code>complete_workflow_step(task_id, result)</code> marks a
+    step's task done, records its result against the node, and then evaluates the outgoing edges
+    to decide what to materialize next — the engine advances by completing steps, not by a
+    scheduler ticking in the background. <code>fire_workflow_event(run_id, name)</code> resolves
+    an event wait. <code>cancel_workflow_run(run_id)</code> tombstones every task belonging to
+    the run and marks it cancelled.
+  </p>
+  <Callout tone="note" title="Cancelling keeps the branch">
+    A cancelled coding run stays visible with its branch name rather than disappearing, so the
+    branch is cleaned up deliberately instead of being orphaned in your repository.
+  </Callout>
+  <p>
+    Rejection is the fourth path, and the one that makes review loops work. When an approval step
+    rejects and the node allows it, the engine reopens an earlier step — the feeder, or a
+    specific <code>retrigger_node</code> — and tombstones that step's still-pending children, so
+    the reopened work starts from a clean slate rather than inheriting answers that were just
+    rejected.
+  </p>
+
+  <h2 id="coding">The coding pipeline</h2>
+  <p>
+    The coding workflow is a recipe whose nodes carry a phase. There are five:
+  </p>
+  <ul>
+    {
+      phases.map((phase) => (
+        <li>
+          <code>{phase}</code>
+        </li>
+      ))
+    }
+  </ul>
+  <p>
+    The task details pane renders them as a stepper. Each phase's state is derived, not stored:
+    Active means it has an open step, Done means every step in it is complete, otherwise
+    Pending. The round number in labels like <Badge tone="accent" variant="subtle">
+      Round 2 · Implement
+    </Badge> is counted from the rejections recorded in the run's notes, so going back a round
+    is visible as history rather than a silent reset.
+  </p>
+  <p>
+    A rejection reopens the interview step, which is what lets a feature be re-specified instead
+    of patched after the fact.
+  </p>
+
+  <h2 id="git">Branches and worktrees</h2>
+  <p>
+    <code>apps/todo-2/src/coding_git.rs</code> shells out to <code>git</code>. Every function is
+    synchronous and expects to be called from a blocking context, and failures carry git's own
+    stderr so the step that failed can show you why.
+  </p>
+  <TableScroll label="Git operations">
+    <table>
+      <thead>
+        <tr><th>Operation</th><th>Does</th></tr>
+      </thead>
+      <tbody>
+        {gitOps.map(([operation, detail]) => (
+          <tr>
+            <td><code>{operation}</code></td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The feature branch is created by adding a <em>worktree</em> for it, not by switching the
+    checkout you are working in — so a coding run cannot move the branch out from under your own
+    editor. Before that, the worktree's path is written into git's exclude file, so the main
+    checkout never shows the new files as untracked noise.
+  </p>
+  <p>
+    Removing a worktree refuses when it holds uncommitted changes: you are never silently
+    deleted out of an edit. The branch itself survives removal, which is what keeps it in the
+    panel's cleanup list.
+  </p>
+  <Callout tone="note" title="Your credentials, not the API token">
+    Pushing a branch uses your own git credentials. The provider's API token never reaches git,
+    a remote URL, or a credential helper.
+  </Callout>
+  <p>
+    <code>branch_status</code> moves a run's branch through its life: proposed by the agent,
+    active once created, then merged, deleted, or abandoned. The statuses exist so a branch can
+    be accounted for after its run is gone.
+  </p>
+
+  <h2 id="mcp">The loopback tool server</h2>
+  <p>
+    The agent cannot touch the store directly. Instead the app hosts a minimal MCP server on
+    loopback, bound to an ephemeral port on <code>127.0.0.1</code> with a per-process bearer
+    token, started on a dedicated thread. It implements only the three methods the coding flow
+    needs: <code>initialize</code>, <code>tools/list</code>, and <code>tools/call</code>.
+  </p>
+  <TableScroll label="What the tool server lets the agent do">
+    <table>
+      <thead>
+        <tr><th>Tool</th><th>Effect</th></tr>
+      </thead>
+      <tbody>
+        {serverTools.map(([tool, detail]) => (
+          <tr>
+            <td>{tool}</td>
+            <td>{detail}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    Those calls mutate the store and then notify the foreground application to refresh, so the
+    UI keeps up with what the agent is doing mid-phase instead of waiting for the turn to end.
+    On the agent's side, the same tools are reached as MCP tools; the servers you configure
+    yourself are a separate set — see <a href="/docs/contributor/integrations">Integrations</a>.
+  </p>
+
+  <h2 id="prompts">Prompts</h2>
+  <p>
+    Phases are driven by prompts the app composes and drops into the agent pane's prompt box for
+    you to edit before sending; nothing is sent on your behalf. The interview prompt is the
+    substantial one, and it asks the agent to gather context by reading files and searching the
+    codebase, ask clarifying questions over several rounds, write the spec to{' '}
+    <code>./docs/spec/&lt;slug&gt;-spec.md</code>, call <code>save_spec</code> when it is
+    available, and reply with a summary and the path it chose.
+  </p>
+  <p>
+    A later round of an interview gets told which round it is and why the previous one was
+    rejected, so a re-spec starts from the objection rather than from scratch. The implement
+    prompt is much shorter — implement the approved spec — because by then the spec carries the
+    detail.
+  </p>
+  <p>
+    When a feature has open subtasks, the interview prompt requires a decision on every one of
+    them: either give it its own spec, or mark it explicitly covered by the feature's. Leaving
+    one undecided is not allowed, which is what stops a feature from quietly shipping with
+    unexamined sub-work.
+  </p>
+
+  <h2 id="panel">The automations panel</h2>
+  <p>
+    <code>AutomationsPanel</code> is the UI over all of this, and it replaced the older
+    workflows page rather than sitting beside it. It lists the available recipes as automations,
+    lists active runs grouped by the recipe they came from, and — for an active run — presents
+    the steps that need a decision, with the buttons the step's outgoing edges imply: approve or
+    reject where the edge is <code>on_result</code>, complete where it is{' '}
+    <code>on_complete</code>.
+  </p>
+  <p>
+    For a coding run it shows the current phase and gives you the branch housekeeping, including
+    deleting a branch. It refreshes from the store rather than holding its own copy, and emits a
+    changed event when a run moves or ownership changes, so the task list and the tag tree
+    update too.
+  </p>
+  <p>
+    <a href="/docs/contributor/data-model">The data model</a> covers the tables these runs are
+    stored in, and <a href="/docs/contributor/agent-runtime">the agent runtime</a> covers the
+    other side of the loopback server.
+  </p>
+</Docs>

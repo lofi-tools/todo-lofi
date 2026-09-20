@@ -15,6 +15,7 @@ import IssueRow from 'web-design-system/astro/product/IssueRow.astro'
 import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
 import Timeline from 'web-design-system/astro/product/Timeline.astro'
 import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
+import AutomationsPanel from '../components/AutomationsPanel.astro'
 import screenshot from '../assets/app.png'
 
 import { agentThread, codingColumns, repeatRows, taskRows } from '../../data/landing'
@@ -114,11 +115,12 @@ const ctaSecondary = css({
       linkHref="/docs/contributor/architecture"
     />
 
-    <div class={css({ mt: { base: '8', md: '12' } })}>
+    <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
       <SectionHeading
         eyebrow="What it does"
         title="Work that has a shape, kept in one place"
         description="Four things the app does beyond a list of checkboxes. Each one has a page in the user guide."
+        align="left"
       />
     </div>
 
@@ -166,22 +168,46 @@ const ctaSecondary = css({
       <KanbanBoard columns={codingColumns} />
     </FeatureSection>
 
-    <section class={css({ py: { base: '12', md: '20' } })}>
+    <FeatureSection
+      eyebrow="Automations"
+      title="The panel that drives a run"
+      description="An automation is a recipe with runs under it. The pane lists the recipes, groups each one's active runs, shows the phase a run has reached, and hands you the decision — approve, reject, or complete — along with the branch housekeeping a coding run leaves behind."
+      href="/docs/workflows"
+      linkLabel="Read about workflows"
+    >
+      <AutomationsPanel />
+    </FeatureSection>
+
+    <div
+      class={css({
+        mt: { base: '12', md: '20' },
+        pt: { base: '12', md: '16' },
+        borderTopWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border.subtle',
+      })}
+    >
       <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
         <SectionHeading
           eyebrow="Documentation"
           title="Two guides, one for each job"
           description="Everything under /docs. Start with the one that matches what you are here to do."
+          align="left"
         />
+      </div>
 
-        <div
-          class={css({
-            display: 'grid',
-            gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
-            gap: '4',
-            mt: '10',
-          })}
-        >
+      <div
+        class={css({
+          display: 'grid',
+          gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+          gap: '4',
+          mt: { base: '12', md: '20' },
+          w: '100%',
+          maxW: '1200px',
+          mx: 'auto',
+          px: { base: '5', md: '8' },
+        })}
+      >
           {
             guides.map((guide) => (
               <div
@@ -249,9 +275,8 @@ const ctaSecondary = css({
               </div>
             ))
           }
-        </div>
       </div>
-    </section>
+    </div>
 
     <CTASection
       title="Start with the guide that fits"

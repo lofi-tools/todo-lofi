@@ -63,9 +63,36 @@ const modules = [
 
   <h2 id="todoist">Todoist</h2>
   <p>
-    Todoist is the primary external task list. The current spec (draft v1) covers import plus an immediate
-    push of title, description, and done deltas; pushing every field is still open. Migrations for the
-    mapping tables run through the storage crate's migration binary (<code>mig</code> in the dev shell).
+    Todoist is the primary external task list, and the sync currently runs{' '}
+    <strong>one way: import only</strong>. The spec (draft v1) covers a push of title, description, and
+    done deltas, but that is not implemented — <code>libs/storage/src/todoist.rs</code> says so at the top,
+    and it matters because remote state wins every mapped field whenever the remote
+    <code>updated_at</code> is newer than the link's timestamp. Local edits and completions on a synced
+    task can therefore be overwritten until push lands, and label and section removal is additive-only for
+    the same reason.
+  </p>
+  <p>For each linked project the import is a three-step pass:</p>
+  <ol>
+    <li>
+      Fetch the project's <strong>sections</strong> and turn them into child tags under the project tag,
+      recorded as tag sections on it — which is what lets a synced project show its section headings.
+    </li>
+    <li>
+      Fetch its <strong>tasks</strong> and create or per-field merge each one, tagged with the project tag
+      and its own section's child tag.
+    </li>
+    <li>
+      <strong>Tombstone</strong> any locally linked task that is no longer present remotely.
+    </li>
+  </ol>
+  <p>
+    The mapping lives in four tables from <code>0010_todoist_sync.sql</code>:{' '}
+    <code>integrations</code> (provider, account label), <code>external_task_links</code> and{' '}
+    <code>external_tag_links</code> (integration plus external id to a local row), and{' '}
+    <code>sync_state</code>, which holds the watermark a project was last synced from. Priority crosses the
+    boundary by mapping Todoist's four-step priority onto the local urgency factor and back, and due dates
+    onto deadlines; a sync reports what it did as counts of projects, sections, upserted tasks, and
+    tombstones.
   </p>
 
   <h2 id="github">GitHub</h2>
@@ -77,6 +104,12 @@ const modules = [
   <p>
     The coding workflow is the interesting half: a run can use a real checkout, drive the git operations
     itself, and reach tool servers over MCP (<code>coding_git.rs</code> and <code>coding_mcp.rs</code>).
+    <a href="/docs/contributor/workflow-engine">The workflow engine</a> covers that in full.
+  </p>
+  <p>
+    GitHub's sync keeps its own watermark table, separate from Todoist's, storing an <code>etag</code> and a
+    <code>since</code> cursor alongside the last sync time — so a poll can be conditional and incremental
+    rather than re-reading everything.
   </p>
 
   <h2 id="providers">The provider layer</h2>
@@ -116,6 +149,11 @@ const modules = [
     mid-session, and a fallback switch is reported to the client rather than happening silently. The client
     side is <code>libs/acp-client</code>: process launch, sessions, the transcript model, and the
     file-system and terminal capabilities a session needs.
+  </p>
+  <p>
+    The server side — the full method surface, the connection, the agent's tools and sub-agents, and the
+    patches carried on the vendored agent library — is
+    <a href="/docs/contributor/agent-runtime">Agent runtime</a>.
   </p>
 
   <h2 id="where">Where each piece lives</h2>

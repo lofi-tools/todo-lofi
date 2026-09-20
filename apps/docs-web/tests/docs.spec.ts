@@ -44,7 +44,10 @@ const guides: Guide[] = [
       },
       {
         heading: 'Configuration',
-        pages: [['Configuration', '/docs/configuration']],
+        pages: [
+          ['Configuration', '/docs/configuration'],
+          ['Glossary', '/docs/glossary'],
+        ],
       },
     ],
   },
@@ -58,6 +61,9 @@ const guides: Guide[] = [
           ['Overview', '/docs/contributor'],
           ['Development setup', '/docs/contributor/development'],
           ['Architecture', '/docs/contributor/architecture'],
+          ['Data model', '/docs/contributor/data-model'],
+          ['Workflow engine', '/docs/contributor/workflow-engine'],
+          ['Agent runtime', '/docs/contributor/agent-runtime'],
           ['Integrations', '/docs/contributor/integrations'],
           ['Contributing', '/docs/contributor/contributing'],
           ['License', '/docs/contributor/license'],
@@ -129,6 +135,26 @@ test.describe('landing page', () => {
     await expect(page).toHaveURL(/\/docs\/?$/)
     await expect(page.locator('h1').first()).toHaveText('Overview')
   })
+
+  // The automations pane is a replica, not a bitmap: it has to be built and
+  // styled on both pages that illustrate with it.
+  for (const [where, path] of [
+    ['landing page', '/'],
+    ['overview', '/docs'],
+  ] as const) {
+    test(`the automations pane illustration renders on the ${where}`, async ({ page }) => {
+      await page.goto(path)
+
+      await expect(page.getByText('Branches to clean up')).toBeVisible()
+
+      const badge = page.getByText('Round 2 · Implement')
+      await expect(badge).toBeVisible()
+      // Present is not enough: the design system's recipe class has to have
+      // reached it, which shows up as the tone's tinted background.
+      const background = await badge.evaluate((node) => getComputedStyle(node).backgroundColor)
+      expect(background).not.toBe('rgba(0, 0, 0, 0)')
+    })
+  }
 })
 
 test('the design system stylesheet is applied', async ({ page }) => {

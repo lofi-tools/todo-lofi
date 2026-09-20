@@ -1,0 +1,149 @@
+---
+import { css } from 'styled-system/css'
+import { Badge, Card } from 'web-design-system/components'
+import { automationRecipe, automationRuns, branchCleanup } from '../../data/landing'
+
+/**
+ * The automations pane, rebuilt in the design system rather than pasted in as a
+ * bitmap — the same approach the showcase takes for its page replicas.
+ *
+ * The action affordances are `span`s, not `button`s: this illustrates the pane,
+ * and a row of controls that do nothing would be a lie to anyone navigating by
+ * keyboard or screen reader.
+ */
+
+const panel = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '5',
+  p: { base: '4', sm: '5' },
+})
+
+const rowBetween = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '3',
+  flexWrap: 'wrap',
+})
+
+const sectionHeading = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'fg.subtle',
+})
+
+const action = (kind: 'primary' | 'quiet' | 'danger') =>
+  css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    h: '7',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: '2xs',
+    fontWeight: 'medium',
+    whiteSpace: 'nowrap',
+    ...(kind === 'primary'
+      ? { bg: 'accent', color: 'fg.onAccent' }
+      : { borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', color: 'fg.default' }),
+  })
+
+const phaseDot = (state: 'done' | 'active' | 'pending') =>
+  css({
+    w: '2',
+    h: '2',
+    borderRadius: 'full',
+    flexShrink: '0',
+    bg: state === 'done' ? 'success' : state === 'active' ? 'accent' : 'border.strong',
+  })
+
+const phaseLabel = (state: 'done' | 'active' | 'pending') =>
+  css({
+    fontSize: '2xs',
+    color: state === 'pending' ? 'fg.subtle' : 'fg.default',
+    fontWeight: state === 'active' ? 'semibold' : 'normal',
+    whiteSpace: 'nowrap',
+  })
+---
+
+<div class={panel}>
+  <div class={rowBetween}>
+    <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>Automations</span>
+    <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>1 recipe · 2 active runs</span>
+  </div>
+
+  <section class={css({ display: 'flex', flexDirection: 'column', gap: '2' })}>
+    <div class={rowBetween}>
+      <span class={css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })}>
+        {automationRecipe.name}
+      </span>
+      <Badge tone="success" variant="subtle">{automationRecipe.status}</Badge>
+    </div>
+    <p class={css({ fontSize: '2xs', color: 'fg.muted', m: '0', lineHeight: 'relaxed' })}>
+      {automationRecipe.summary}
+    </p>
+  </section>
+
+  {
+    automationRuns.map((run) => (
+      <Card padding="sm" class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+        <div class={rowBetween}>
+          <span class={css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })}>{run.task}</span>
+          <Badge tone="accent" variant="subtle">{run.round}</Badge>
+        </div>
+
+        <div class={css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })}>
+          {run.phases.map((phase, index) => (
+            <>
+              <span class={css({ display: 'inline-flex', alignItems: 'center', gap: '1.5' })}>
+                <span class={phaseDot(phase.state)} aria-hidden="true" />
+                <span class={phaseLabel(phase.state)}>{phase.label}</span>
+              </span>
+              {index < run.phases.length - 1 && (
+                <span class={css({ w: '3', h: '1px', bg: 'border', flexShrink: '0' })} aria-hidden="true" />
+              )}
+            </>
+          ))}
+        </div>
+
+        <div class={css({ display: 'flex', gap: '4', flexWrap: 'wrap', fontSize: '2xs' })}>
+          <span class={css({ color: 'fg.subtle' })}>
+            Branch <code class={css({ color: 'fg.muted' })}>{run.branch || 'not proposed yet'}</code>
+          </span>
+          <span class={css({ color: 'fg.subtle' })}>
+            Base <code class={css({ color: 'fg.muted' })}>{run.baseBranch}</code>
+          </span>
+        </div>
+
+        <ul class={css({ listStyle: 'none', m: '0', p: '0', display: 'flex', flexDirection: 'column', gap: '1' })}>
+          {run.notes.map((note) => (
+            <li class={css({ fontSize: '2xs', color: 'fg.muted' })}>{note}</li>
+          ))}
+        </ul>
+
+        <div class={css({ display: 'flex', gap: '2', flexWrap: 'wrap' })}>
+          {run.actions.map((entry) => (
+            <span class={action(entry.kind)}>{entry.label}</span>
+          ))}
+        </div>
+      </Card>
+    ))
+  }
+
+  <section class={css({ display: 'flex', flexDirection: 'column', gap: '2' })}>
+    <span class={sectionHeading}>Branches to clean up</span>
+    {
+      branchCleanup.map((entry) => (
+        <div class={rowBetween}>
+          <span class={css({ display: 'flex', alignItems: 'center', gap: '2', minW: '0' })}>
+            <code class={css({ fontSize: '2xs', color: 'fg.default' })}>{entry.branch}</code>
+            <span class={css({ fontSize: '2xs', color: 'fg.subtle' })}>{entry.note}</span>
+          </span>
+          <span class={action('quiet')}>Delete</span>
+        </div>
+      ))
+    }
+  </section>
+</div>

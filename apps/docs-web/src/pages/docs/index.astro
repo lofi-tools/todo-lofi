@@ -3,6 +3,7 @@ import { css } from 'styled-system/css'
 import Docs from '../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
 import { Badge } from 'web-design-system/components'
+import AutomationsPanel from '../../components/AutomationsPanel.astro'
 import screenshot from '../../assets/app.png'
 
 const toc = [
@@ -142,6 +143,25 @@ const audiences = [
       ))
     }
   </ul>
+
+  <figure class={css({ m: '0', my: '8' })}>
+    <div
+      class={css({
+        borderRadius: 'lg',
+        borderWidth: 'hairline',
+        borderStyle: 'solid',
+        borderColor: 'border',
+        bg: 'surface.subtle',
+        overflow: 'hidden',
+      })}
+    >
+      <AutomationsPanel />
+    </div>
+    <figcaption class={css({ mt: '2', fontSize: 'xs', color: 'fg.subtle' })}>
+      The automations pane: a recipe, the runs under it with the phase each one has reached, and the
+      branch cleanup a coding run leaves behind.
+    </figcaption>
+  </figure>
 
   <h2 id="your-data-stays-yours">Your data stays yours</h2>
   <p>
