@@ -1,6 +1,14 @@
 # Coding Workflow Runs (AI-assisted feature development) — Spec
 
 Status: Implemented (see §19 for the parts that are still open)
+
+Superseded in part by `docs/spec/coding-interview-readonly-session-spec.md`:
+the spec artifact now lives in the namespaced `task_extra` store (namespace
+`coding`, key `spec`), `tasks.spec` / `tasks.spec_path` are gone, the MCP tool
+`save_spec` is renamed `set_spec` and gains a `get_spec` counterpart, and the
+interview runs in a read-only opencode process instead of the pane's full-tools
+session. Everything else here still holds.
+
 Supersedes/relates to: `docs/spec/workflow-engine-spec.md` (v1 recipe format),
 `docs/spec/workflow-simplification-spec.md` (v2 data model, implemented),
 `docs/spec/agent-cli-interview-feature-spec.md` (`/interview`, `ask_user`),

@@ -20,7 +20,7 @@ use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1::{
     AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities, CloseSessionRequest,
     CreateTerminalRequest, FileSystemCapabilities, InitializeRequest, KillTerminalRequest,
-    LoadSessionRequest, NewSessionRequest, PromptRequest, ReadTextFileRequest,
+    LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionConfigId, SessionConfigOption, SessionConfigOptionValue, SessionId, SessionModeId,
@@ -52,6 +52,11 @@ pub struct AgentInfo {
     pub name: String,
     pub version: String,
     pub load_session: bool,
+    /// The agent accepts HTTP MCP servers in `session/new`. Only then may the
+    /// client attach its loopback endpoint (`McpServer::Http`).
+    pub mcp_http: bool,
+    /// The agent accepts SSE MCP servers in `session/new`.
+    pub mcp_sse: bool,
     pub auth_methods: Vec<AuthMethod>,
 }
 
@@ -70,11 +75,13 @@ pub struct Requester {
 }
 
 impl Requester {
-    /// Create a session rooted at `cwd` with extra workspace roots.
+    /// Create a session rooted at `cwd` with extra workspace roots and any MCP
+    /// servers to attach (the agent must advertise the matching transport).
     pub async fn new_session(
         &self,
         cwd: PathBuf,
         additional: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
     ) -> Result<
         (
             SessionId,
@@ -83,7 +90,9 @@ impl Requester {
         ),
         AcpError,
     > {
-        let request = NewSessionRequest::new(cwd).additional_directories(additional);
+        let request = NewSessionRequest::new(cwd)
+            .additional_directories(additional)
+            .mcp_servers(mcp_servers);
         let response = self
             .connection
             .send_request(request)
@@ -103,8 +112,11 @@ impl Requester {
         session_id: SessionId,
         cwd: PathBuf,
         additional: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
     ) -> Result<(Option<SessionModeState>, Vec<SessionConfigOption>), AcpError> {
-        let request = LoadSessionRequest::new(session_id, cwd).additional_directories(additional);
+        let request = LoadSessionRequest::new(session_id, cwd)
+            .additional_directories(additional)
+            .mcp_servers(mcp_servers);
         let response = self
             .connection
             .send_request(request)
@@ -511,6 +523,8 @@ where
                     .map(|info| info.version.clone())
                     .unwrap_or_default(),
                 load_session: initialize.agent_capabilities.load_session,
+                mcp_http: initialize.agent_capabilities.mcp_capabilities.http,
+                mcp_sse: initialize.agent_capabilities.mcp_capabilities.sse,
                 auth_methods: initialize.auth_methods.clone(),
             };
             if ready_tx.send((cx.clone(), info)).is_err() {

@@ -1,6 +1,14 @@
 # Coding Workflow Subtasks and Spec Coverage — Spec
 
 Status: Proposed (no code written; this spec is the output of the interview)
+
+Updated by `docs/spec/coding-interview-readonly-session-spec.md`: where this
+spec says a spec is `tasks.spec`, it now lives in the namespaced `task_extra`
+store (`coding` / `spec`), and the write tool is `set_spec` (renamed from
+`save_spec`) with `get_spec` to read it back. The coverage model, `role`, and
+`spec_covered_at` are unchanged; `TaskWithMeta.spec` is the loaded value the
+pane reads. Run the coverage arguments here through that rename.
+
 Relates to: `docs/spec/coding-workflow-runs-spec.md` (the run, its phases, the
 stepper), `docs/spec/github-integration-spec.md` (§5.5 and §5.9 — sub-issue ↔
 subtask sync), `docs/spec/workflow-simplification-spec.md` (v2 data model,

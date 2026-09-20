@@ -34,11 +34,12 @@ const taskFields: [string, string][] = [
   ['source_task_id', 'The task this one was derived from, when it came from another task.'],
   ['deleted_at', 'Tombstone. Set instead of deleting the row.'],
   ['workflow_run_id, node_id', 'Set when the workflow engine materialized this task as a step.'],
-  ['spec, spec_path', 'The spec a coding run produced, and where it was written.'],
+  ['role, spec_covered_at', 'Coding runs only: `role` marks an engine step, `spec_covered_at` records when the feature spec was taken to cover a subtask.'],
 ]
 
 const metaFields: [string, string][] = [
   ['task', 'The stored task.'],
+  ['spec', 'The task\'s spec markdown, loaded from the namespaced `task_extra` store. `None` in list queries.'],
   ['direct_tags', 'Tags applied to this task itself.'],
   ['inherited_tags', 'Direct tags of the ancestor chain, so a subtask is tagged like its parents.'],
   ['inferred_tags', 'Tags reached through tag implications.'],

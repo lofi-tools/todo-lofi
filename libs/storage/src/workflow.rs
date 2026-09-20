@@ -2140,7 +2140,6 @@ impl TodoStore {
         &mut self,
         root_task_id: u64,
         umbrella: Option<String>,
-        umbrella_path: Option<String>,
         subtask_specs: Vec<SubtaskSpecInput>,
         covered_ids: Vec<u64>,
     ) -> QueryResult<()> {
@@ -2158,14 +2157,12 @@ impl TodoStore {
         let now = jiff::Timestamp::now();
         self.with_transaction(move |store| {
             Box::pin(async move {
-                if umbrella.is_some() || umbrella_path.is_some() {
-                    store
-                        .save_task_spec(root_task_id, umbrella, umbrella_path)
-                        .await?;
+                if umbrella.is_some() {
+                    store.save_task_spec(root_task_id, umbrella).await?;
                 }
                 for input in &subtask_specs {
                     store
-                        .save_task_spec(input.task_id, Some(input.spec.clone()), None)
+                        .save_task_spec(input.task_id, Some(input.spec.clone()))
                         .await?;
                 }
                 for id in &covered_ids {
@@ -3073,13 +3070,12 @@ mod tests {
                 comments: None,
                 workflow_run_id: None,
                 node_id: None,
-                spec: None,
-                spec_path: None,
                 role: None,
                 spec_covered_at: None,
                 subtasks: toasty::Deferred::default(),
                 parent: toasty::Deferred::default(),
             },
+            spec: None,
             direct_tags: Vec::new(),
             inherited_tags: Vec::new(),
             inferred_tags: Vec::new(),
@@ -3099,14 +3095,14 @@ mod tests {
     #[test]
     fn test_subtask_coverage_states() {
         let mut own = coverage_task(1, false);
-        own.task.spec = Some("its own spec".to_string());
+        own.spec = Some("its own spec".to_string());
         let mut marked = coverage_task(2, false);
         marked.task.spec_covered_at = Some(jiff::Timestamp::now());
         let mut bare = coverage_task(3, false);
         bare.task.description = Some("a description is not a spec".to_string());
         let done = coverage_task(4, true);
         let mut done_but_specced = coverage_task(5, true);
-        done_but_specced.task.spec = Some("spec".to_string());
+        done_but_specced.spec = Some("spec".to_string());
 
         assert_eq!(subtask_coverage(&own), SubtaskCoverage::Own);
         assert_eq!(subtask_coverage(&marked), SubtaskCoverage::Covered);
@@ -3533,7 +3529,6 @@ mod tests {
             .save_subtask_specs(
                 feature_id,
                 Some("# Umbrella".to_string()),
-                None,
                 vec![SubtaskSpecInput {
                     task_id: grandchild.id,
                     spec: "nope".to_string(),
@@ -3542,14 +3537,13 @@ mod tests {
             )
             .await;
         assert!(refused.is_err());
-        assert!(store.get_task(feature_id).await?.spec.is_none());
-        assert!(store.get_task(grandchild.id).await?.spec.is_none());
+        assert!(store.get_task_spec(feature_id).await?.is_none());
+        assert!(store.get_task_spec(grandchild.id).await?.is_none());
 
         store
             .save_subtask_specs(
                 feature_id,
                 Some("# Umbrella".to_string()),
-                Some("docs/spec/add-oauth-spec.md".to_string()),
                 vec![SubtaskSpecInput {
                     task_id: owned.id,
                     spec: "Refresh hourly".to_string(),
@@ -3557,10 +3551,10 @@ mod tests {
                 vec![covered.id],
             )
             .await?;
-        let feature = store.get_task(feature_id).await?;
-        assert_eq!(feature.spec.as_deref(), Some("# Umbrella"));
+        let feature_spec = store.get_task_spec(feature_id).await?;
+        assert_eq!(feature_spec.as_deref(), Some("# Umbrella"));
         assert_eq!(
-            store.get_task(owned.id).await?.spec.as_deref(),
+            store.get_task_spec(owned.id).await?.as_deref(),
             Some("Refresh hourly")
         );
         assert!(store.get_task(covered.id).await?.spec_covered_at.is_some());
@@ -3582,7 +3576,6 @@ mod tests {
             store
                 .save_subtask_specs(
                     feature_id,
-                    None,
                     None,
                     Vec::new(),
                     vec![interview_step],
@@ -3682,7 +3675,7 @@ mod tests {
         assert_eq!(subtask_coverage(&marked), SubtaskCoverage::Covered);
 
         store
-            .save_task_spec(subtask.id, Some("Write it by hand".to_string()), None)
+            .save_task_spec(subtask.id, Some("Write it by hand".to_string()))
             .await?;
         let own = store.get_task_with_meta(subtask.id).await?;
         assert_eq!(subtask_coverage(&own), SubtaskCoverage::Own);
@@ -3694,7 +3687,7 @@ mod tests {
         let step = pending_step(&view, "interview").task.id;
         assert!(
             store
-                .save_task_spec(step, Some("nope".to_string()), None)
+                .save_task_spec(step, Some("nope".to_string()))
                 .await
                 .is_err()
         );

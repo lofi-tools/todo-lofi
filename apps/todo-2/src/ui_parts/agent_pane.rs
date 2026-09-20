@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use acp_client::schema::{
-    PermissionOptionId, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    McpServer, PermissionOptionId, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionId,
     SessionModeId, SessionModeState, ToolCallUpdate,
 };
@@ -36,6 +36,7 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
 
+use crate::coding_agent::McpEndpoint;
 use crate::theme::{
     APP_BG, CARD_BG, DANGER, DIFF_ADD_BG, DIFF_DEL_BG, HAIRLINE, PANEL_BG, PANEL_HOVER, SUCCESS,
     TEXT_FAINT, TEXT_MUTED, TEXT_STRONG,
@@ -282,6 +283,12 @@ fn task_context_text(title: &str, description: Option<&str>, tags: &[String]) ->
 /// Everything the pane knows about one project.
 struct ProjectEntry {
     project: AgentProject,
+    /// The profile this project's process runs under. A coding run swaps it
+    /// between the read-only interview agent and the full-tools default
+    /// (spec decisions #2/#13); general chat keeps the default.
+    agent: Arc<dyn AgentServer>,
+    /// The app's MCP endpoint for this profile's token, when the run needs it.
+    mcp: Option<McpEndpoint>,
     state: PaneState,
     transcript: Transcript,
     busy: bool,
@@ -309,9 +316,16 @@ struct ProjectEntry {
 }
 
 impl ProjectEntry {
-    fn new(project: AgentProject, tool_permissions: ToolPermissions) -> Self {
+    fn new(
+        project: AgentProject,
+        tool_permissions: ToolPermissions,
+        agent: Arc<dyn AgentServer>,
+        mcp: Option<McpEndpoint>,
+    ) -> Self {
         Self {
             project,
+            agent,
+            mcp,
             state: PaneState::NoDirectory {
                 candidates: Vec::new(),
             },
@@ -429,6 +443,7 @@ type OverlayRows = (String, Vec<(String, String)>, String);
 
 pub struct AgentPane {
     session_store: SessionStore,
+    /// The default profile: what a project uses outside a coding run.
     agent: Arc<dyn AgentServer>,
     /// One entry per project the pane has touched, keyed by tag name.
     projects: HashMap<String, ProjectEntry>,
@@ -542,6 +557,12 @@ impl AgentPane {
         self.active_entry().map(|entry| &entry.project)
     }
 
+    /// The agent id the on-screen project's process runs under, so the layout
+    /// can tell whether a coding phase needs a profile switch.
+    pub fn active_agent_id(&self) -> Option<&str> {
+        self.active_entry().map(|entry| entry.agent.id())
+    }
+
     /// Whether the on-screen project has a turn running.
     pub fn is_busy(&self) -> bool {
         self.active_entry().map(|entry| entry.busy).unwrap_or(false)
@@ -551,6 +572,35 @@ impl AgentPane {
     /// control does. The run's Workflow row delegates here (decision #27).
     pub fn stop_turn(&mut self, cx: &mut Context<Self>) {
         self.stop(cx);
+    }
+
+    /// Open a coding run's session for `project` under a specific profile,
+    /// keeping the transcript already on screen (spec decision #14). The
+    /// layout calls this when the user starts the interview or the coding
+    /// phase; the process is replaced, not the history.
+    pub fn start_run_session(
+        &mut self,
+        project: AgentProject,
+        agent: Arc<dyn AgentServer>,
+        mcp: Option<McpEndpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let tag_name = project.tag_name.clone();
+        let tool_permissions = self.stored_tool_permissions(&project);
+        let existing = self.projects.remove(&tag_name);
+        let mut entry = ProjectEntry::new(project, tool_permissions, agent, mcp);
+        if let Some(existing) = existing {
+            // Keep the history and the answers the user already gave; the
+            // process and its session are what changes.
+            entry.tool_permissions = existing.tool_permissions;
+            entry.transcript = existing.transcript;
+            entry.expanded = existing.expanded;
+        }
+        self.projects.insert(tag_name.clone(), entry);
+        self.active = Some(tag_name.clone());
+        self.start_session(&tag_name, false, true, cx);
+        self.sync_scroller(cx);
+        cx.notify();
     }
 
     /// Number of prompts queued for the on-screen project.
@@ -692,10 +742,14 @@ impl AgentPane {
             .unwrap_or_else(|| self.stored_tool_permissions(&project));
 
         let Some(existing) = self.projects.get(&tag_name) else {
-            let mut entry = ProjectEntry::new(project, tool_permissions);
+            // A brand-new project starts on the default profile with no MCP
+            // endpoint: only a coding run attaches one, and it does so through
+            // `start_run_session` (spec decision #3, scope).
+            let mut entry =
+                ProjectEntry::new(project, tool_permissions, self.agent.clone(), None);
             entry.state = match &resolution {
                 Some((cwd, _)) => {
-                    let command = self.agent.command_line(cwd);
+                    let command = entry.agent.command_line(cwd);
                     PaneState::Launching {
                         command,
                         cwd: cwd.clone(),
@@ -707,7 +761,7 @@ impl AgentPane {
             };
             self.projects.insert(tag_name.clone(), entry);
             if resolution.is_some() {
-                self.start_session(&tag_name, resumable, cx);
+                self.start_session(&tag_name, resumable, false, cx);
             }
             return;
         };
@@ -751,8 +805,10 @@ impl AgentPane {
         // No directory resolves any more: tear the project down rather than
         // leaving an agent editing a directory that is gone.
         let candidates = existing.project.candidates.clone();
+        let agent = existing.agent.clone();
+        let mcp = existing.mcp.clone();
         self.teardown(&tag_name, cx);
-        let mut entry = ProjectEntry::new(project, tool_permissions);
+        let mut entry = ProjectEntry::new(project, tool_permissions, agent, mcp);
         entry.state = PaneState::NoDirectory { candidates };
         self.projects.insert(tag_name, entry);
     }
@@ -790,11 +846,15 @@ impl AgentPane {
         cwd: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let command = self.agent.command_line(&cwd);
+        let command = self
+            .projects
+            .get(tag_name)
+            .map(|entry| entry.agent.command_line(&cwd))
+            .unwrap_or_else(|| self.agent.command_line(&cwd));
         if let Some(entry) = self.projects.get_mut(tag_name) {
             entry.state = PaneState::Launching { command, cwd };
         }
-        self.start_session(tag_name, resumable, cx);
+        self.start_session(tag_name, resumable, false, cx);
     }
 
     /// Read the project's stored tool approval policy, if any.
@@ -807,15 +867,28 @@ impl AgentPane {
     }
 
     /// Start (or restart) the agent process and session for a project.
-    fn start_session(&mut self, tag_name: &str, resume: bool, cx: &mut Context<Self>) {
+    /// Start (or restart) the project's process and session.
+    ///
+    /// `keep_transcript` preserves what is already on screen, which is what a
+    /// profile swap needs: the interview's history stays reachable while the
+    /// coding process takes over the pane (spec decisions #13/#14).
+    fn start_session(
+        &mut self,
+        tag_name: &str,
+        resume: bool,
+        keep_transcript: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(entry) = self.projects.get_mut(tag_name) else {
             return;
         };
-        entry.transcript.clear();
+        if !keep_transcript {
+            entry.transcript.clear();
+            entry.expanded.clear();
+        }
         entry.permission_replies.clear();
         entry.permission_tools.clear();
         entry.terminals.clear();
-        entry.expanded.clear();
         entry.queue.clear();
         entry.mode_seen = None;
         let Some((cwd, additional)) = entry.project.resolve() else {
@@ -823,7 +896,7 @@ impl AgentPane {
             entry.state = PaneState::NoDirectory { candidates };
             return;
         };
-        let command = self.agent.command_line(&cwd);
+        let command = entry.agent.command_line(&cwd);
         entry.state = PaneState::Launching {
             command,
             cwd: cwd.clone(),
@@ -842,14 +915,15 @@ impl AgentPane {
         let agent: Arc<dyn AgentServer> = match checkout_target_dir(entry.project.checkout.as_ref())
         {
             Some(target_dir) => Arc::new(EnvAgent {
-                inner: self.agent.clone(),
+                inner: entry.agent.clone(),
                 name: "CARGO_TARGET_DIR",
                 value: target_dir.display().to_string(),
             }),
-            None => self.agent.clone(),
+            None => entry.agent.clone(),
         };
         let agent_id = agent.id().to_string();
         let store = self.session_store.clone();
+        let endpoint = entry.mcp.clone();
 
         let launch = gpui_tokio::Tokio::spawn_result(cx, async move {
             let roots =
@@ -859,6 +933,21 @@ impl AgentPane {
                 tool_permissions: tool_permissions.clone(),
             })
             .await?;
+            // The run's tools reach the agent over the app's loopback MCP
+            // endpoint. An agent that cannot take an HTTP server would run a
+            // phase that can save nothing, so the launch is refused instead
+            // (spec decision #21).
+            let mcp_servers: Vec<McpServer> = match endpoint.as_ref() {
+                Some(endpoint) if connection.info.mcp_http => vec![endpoint.server()],
+                Some(endpoint) => {
+                    anyhow::bail!(
+                        "{} does not accept an HTTP MCP server, so the {} profile cannot be used",
+                        connection.info.name,
+                        endpoint.profile
+                    );
+                }
+                None => Vec::new(),
+            };
             let stored = if resume {
                 store.get(&project_path)
             } else {
@@ -869,7 +958,12 @@ impl AgentPane {
                     let session_id = SessionId::new(previous.session_id.clone());
                     match connection
                         .requester
-                        .load_session(session_id.clone(), cwd.clone(), additional.clone())
+                        .load_session(
+                            session_id.clone(),
+                            cwd.clone(),
+                            additional.clone(),
+                            mcp_servers.clone(),
+                        )
                         .await
                     {
                         Ok((modes, config_options)) => {
@@ -879,15 +973,20 @@ impl AgentPane {
                             tracing::warn!("could not resume ACP session: {error}");
                             let notice =
                                 format!("Could not resume session {}: {error}", previous.session_id);
-                            let (session_id, modes, config_options) =
-                                create_session(&connection, &cwd, &additional).await?;
+                            let (session_id, modes, config_options) = create_session(
+                                &connection,
+                                &cwd,
+                                &additional,
+                                mcp_servers,
+                            )
+                            .await?;
                             Ok((session_id, modes, config_options, Some(notice)))
                         }
                     }
                 }
                 _ => {
                     let (session_id, modes, config_options) =
-                        create_session(&connection, &cwd, &additional).await?;
+                        create_session(&connection, &cwd, &additional, mcp_servers).await?;
                     Ok((session_id, modes, config_options, None))
                 }
             };
@@ -999,7 +1098,7 @@ impl AgentPane {
                 }));
             }
             Err(error) => {
-                let title = format!("Could not start {}", self.agent.display_name());
+                let title = format!("Could not start {}", entry.agent.display_name());
                 entry.state = PaneState::Failed {
                     title,
                     detail: error.to_string(),
@@ -1169,7 +1268,7 @@ impl AgentPane {
         if self.is_busy() {
             return;
         }
-        self.start_session(&tag_name, false, cx);
+        self.start_session(&tag_name, false, false, cx);
         self.sync_scroller(cx);
         cx.notify();
     }
@@ -1182,7 +1281,7 @@ impl AgentPane {
         if !self.projects.contains_key(&tag_name) {
             return;
         }
-        self.start_session(&tag_name, true, cx);
+        self.start_session(&tag_name, true, false, cx);
         self.sync_scroller(cx);
         cx.notify();
     }
@@ -1211,7 +1310,7 @@ impl AgentPane {
             let result = sign_in.await;
             this.update(cx, |pane, cx| {
                 match result {
-                    Ok(()) => pane.start_session(&tag_owned, true, cx),
+                    Ok(()) => pane.start_session(&tag_owned, true, false, cx),
                     Err(error) => {
                         let message = format!("Sign-in failed: {error}");
                         notifications::report(cx, Severity::Error, message.clone());
@@ -2031,10 +2130,11 @@ async fn create_session(
     connection: &AcpConnection,
     cwd: &std::path::Path,
     additional: &[PathBuf],
+    mcp_servers: Vec<McpServer>,
 ) -> anyhow::Result<(SessionId, Option<SessionModeState>, Vec<SessionConfigOption>)> {
     let (session_id, modes, config_options) = connection
         .requester
-        .new_session(cwd.to_path_buf(), additional.to_vec())
+        .new_session(cwd.to_path_buf(), additional.to_vec(), mcp_servers)
         .await?;
     Ok((session_id, modes, config_options))
 }
@@ -2337,7 +2437,7 @@ impl AgentPane {
                             .text_color(rgb(TEXT_FAINT))
                             .child(format!(
                                 "{}{}",
-                                self.agent.display_name(),
+                                entry.agent.display_name(),
                                 self.model_label()
                                     .map(|model| format!(" · {model}"))
                                     .unwrap_or_default()
@@ -2738,7 +2838,7 @@ impl AgentPane {
         match &entry.state {
             PaneState::NoDirectory { candidates } => render_no_directory(candidates),
             PaneState::Launching { command, cwd } => {
-                let name = self.agent.display_name().to_string();
+                let name = entry.agent.display_name().to_string();
                 render_launching(&name, command, cwd)
             }
             PaneState::Failed { title, detail } => div()
@@ -3959,6 +4059,8 @@ mod tests {
                 checkout: None,
             },
             ToolPermissions::default(),
+            Arc::new(OpenCodeAgent),
+            None,
         )
     }
 

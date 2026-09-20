@@ -11,6 +11,7 @@
 //! Tool calls mutate the same `TodoStore` the UI uses, and each mutating call
 //! signals the foreground app so the stepper reloads.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -20,11 +21,19 @@ use storage::task::TaskCreate;
 
 use crate::store::Store;
 
+/// The read-only interview process's profile.
+pub const INTERVIEW_PROFILE: &str = "interview";
+/// The full-tools coding process's profile.
+pub const CODING_PROFILE: &str = "coding";
+
 /// A running loopback MCP endpoint. Dropping it leaves the listener thread
 /// running for the life of the process (there is nothing to release).
 pub struct CodingMcpServer {
     url: String,
-    token: String,
+    /// Bearer token per agent profile. Each process gets its own, so a tool
+    /// call can be attributed (and, later, scoped) to the profile that made
+    /// it (spec decision #11).
+    tokens: BTreeMap<String, String>,
 }
 
 impl CodingMcpServer {
@@ -32,8 +41,10 @@ impl CodingMcpServer {
         &self.url
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
+    /// The bearer token a process of `profile` must send. `None` for an
+    /// unknown profile, which another agent must never be handed.
+    pub fn profile_token(&self, profile: &str) -> Option<&str> {
+        self.tokens.get(profile).map(String::as_str)
     }
 }
 
@@ -47,8 +58,10 @@ pub fn start(
 ) -> anyhow::Result<CodingMcpServer> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
-    let token = random_token();
-    let server_token = token.clone();
+    let mut tokens = BTreeMap::new();
+    tokens.insert(INTERVIEW_PROFILE.to_string(), random_token());
+    tokens.insert(CODING_PROFILE.to_string(), random_token());
+    let server_tokens = tokens.clone();
     std::thread::Builder::new()
         .name("coding-mcp".to_string())
         .spawn(move || {
@@ -56,15 +69,34 @@ pub fn start(
                 let Ok(stream) = stream else {
                     continue;
                 };
-                if let Err(error) = serve(stream, &store, &handle, &server_token, &notify) {
+                if let Err(error) = serve(stream, &store, &handle, &server_tokens, &notify) {
                     tracing::warn!("coding MCP request failed: {error}");
                 }
             }
         })?;
     Ok(CodingMcpServer {
         url: format!("http://{address}/mcp"),
-        token,
+        tokens,
     })
+}
+
+/// Which profile a bearer token belongs to, for the `tools/call` scope check.
+fn profile_for_token<'a>(tokens: &'a BTreeMap<String, String>, header: &str) -> Option<&'a str> {
+    let token = header.strip_prefix("Bearer ")?;
+    tokens
+        .iter()
+        .find(|(_, candidate)| candidate.as_str() == token)
+        .map(|(profile, _)| profile.as_str())
+}
+
+/// The tools a profile may call. Both profiles expose the whole surface today
+/// (spec decision #10): the difference between them is opencode's own
+/// filesystem/shell tools, not the MCP surface. Narrowing one profile later is
+/// a change to this single function.
+fn allows_tool(_profile: &str, tool: &str) -> bool {
+    tool_definitions()
+        .iter()
+        .any(|definition| definition.get("name").and_then(Value::as_str) == Some(tool))
 }
 
 /// A token long enough that a local process cannot guess it, without pulling
@@ -91,7 +123,7 @@ fn serve(
     stream: TcpStream,
     store: &Store,
     handle: &tokio::runtime::Handle,
-    token: &str,
+    tokens: &BTreeMap<String, String>,
     notify: &Option<tokio::sync::mpsc::UnboundedSender<()>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -100,7 +132,7 @@ fn serve(
         return Ok(());
     }
     let mut content_length = 0usize;
-    let mut authorized = false;
+    let mut authorization = String::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -116,7 +148,7 @@ fn serve(
         let value = value.trim();
         match name.to_ascii_lowercase().as_str() {
             "content-length" => content_length = value.parse().unwrap_or(0),
-            "authorization" => authorized = value == format!("Bearer {token}"),
+            "authorization" => authorization = value.to_string(),
             _ => {}
         }
     }
@@ -127,9 +159,10 @@ fn serve(
     if !request_line.starts_with("POST ") {
         return write_response(&mut stream, 405, None);
     }
-    if !authorized {
+    let Some(profile) = profile_for_token(tokens, &authorization) else {
         return write_response(&mut stream, 401, None);
-    }
+    };
+    let profile = profile.to_string();
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return write_response(&mut stream, 400, Some(error_response(Value::Null, -32700, "parse error")));
     };
@@ -165,10 +198,14 @@ fn serve(
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let outcome = handle.block_on(async {
-                let mut store = store.0.lock().await;
-                dispatch(&mut store, name, arguments).await
-            });
+            let outcome = if allows_tool(&profile, name) {
+                handle.block_on(async {
+                    let mut store = store.0.lock().await;
+                    dispatch(&mut store, name, arguments).await
+                })
+            } else {
+                Err(format!("the {profile} profile may not call `{name}`"))
+            };
             match outcome {
                 Ok(value) => {
                     if let Some(notify) = notify {
@@ -237,14 +274,24 @@ pub fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "save_spec",
-            "description": "Save the spec you interviewed out: the umbrella spec on the feature task, plus a spec for each subtask that needs its own, plus the ids of the subtasks the umbrella covers. Completes the interview phase. Every subtask id must be a direct subtask (never a workflow step).",
+            "name": "get_spec",
+            "description": "Read the spec currently stored for a task (the umbrella spec on the feature task, or a subtask's own spec). Returns null when nothing has been saved yet; call this before revising a spec on a later interview round.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "integer", "description": "The task whose spec to read." }
+                },
+                "required": ["task_id"]
+            }
+        }),
+        json!({
+            "name": "set_spec",
+            "description": "Save the spec you interviewed out: the umbrella spec on the feature task, plus a spec for each subtask that needs its own, plus the ids of the subtasks the umbrella covers. This is how the spec reaches the app — do not write a spec file. Completes the interview phase. Every subtask id must be a direct subtask (never a workflow step).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "integer" },
                     "content": { "type": "string", "description": "The umbrella spec markdown." },
-                    "path": { "type": "string", "description": "Where the spec was written on disk." },
                     "subtasks": {
                         "type": "array",
                         "description": "Subtask specs: one entry per subtask you specced individually.",
@@ -357,7 +404,8 @@ pub async fn dispatch(
 ) -> Result<Value, String> {
     match tool {
         "get_coding_context" => get_coding_context(store, &arguments).await,
-        "save_spec" => save_spec(store, &arguments).await,
+        "get_spec" => get_spec(store, &arguments).await,
+        "set_spec" => set_spec(store, &arguments).await,
         "create_sub_task" => create_sub_task(store, &arguments).await,
         "request_sub_task_interview" => request_sub_task_interview(store, &arguments).await,
         "append_note" => append_note(store, &arguments).await,
@@ -436,10 +484,9 @@ async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<
     let root_task_id = run.root_task_id;
     let spec = match root_task_id {
         Some(task_id) => store
-            .get_task(task_id)
+            .get_task_spec(task_id)
             .await
-            .map_err(|e| e.to_string())?
-            .spec,
+            .map_err(|e| e.to_string())?,
         None => None,
     };
     // The run's real subtasks (never steps), with the same coverage state the
@@ -481,14 +528,26 @@ async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<
     }))
 }
 
-async fn save_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
+/// The spec currently stored for a task, or `null`. A read-only interview
+/// round calls this first to revise what is already there.
+async fn get_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
+    let task_id = arg_u64(arguments, "task_id")?;
+    // A missing task is an error the model must see, not a silent `null`.
+    store.get_task(task_id).await.map_err(|e| e.to_string())?;
+    let spec = store
+        .get_task_spec(task_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "task_id": task_id, "spec": spec }))
+}
+
+async fn set_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
     let (_run, view) = resolve(store, arguments).await?;
     let task_id = view
         .run
         .root_task_id
         .ok_or_else(|| "this run has no feature task".to_string())?;
     let content = arg_str(arguments, "content").ok_or_else(|| "`content` is required".to_string())?;
-    let path = arg_str(arguments, "path");
     let subtask_specs = arg_subtask_specs(arguments)?;
     let covered = arg_covered_ids(arguments);
     let awaiting_interview = view
@@ -499,7 +558,7 @@ async fn save_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, St
     // and the completed interview step. An id that is not a direct, non-step
     // subtask of this run is refused before anything is written (§6.2).
     store
-        .save_subtask_specs(task_id, Some(content), path, subtask_specs, covered)
+        .save_subtask_specs(task_id, Some(content), subtask_specs, covered)
         .await
         .map_err(|e| e.to_string())?;
     Ok(json!({
@@ -758,11 +817,40 @@ mod tests {
     #[tokio::test]
     async fn tools_are_declared_with_schemas() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         for tool in &tools {
             assert!(tool.get("name").and_then(Value::as_str).is_some());
             assert!(tool.pointer("/inputSchema/type").is_some());
         }
+        // The old name is gone: `set_spec` is the write half of the pair.
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool["name"].as_str() != Some("save_spec"))
+        );
+    }
+
+    #[tokio::test]
+    async fn get_spec_reads_what_set_spec_wrote() {
+        let mut store = store().await;
+        let (task_id, _) = started_run(&mut store).await;
+        let empty = dispatch(&mut store, "get_spec", json!({ "task_id": task_id }))
+            .await
+            .expect("get spec");
+        assert!(empty["spec"].is_null());
+        dispatch(
+            &mut store,
+            "set_spec",
+            json!({ "task_id": task_id, "content": "# Spec" }),
+        )
+        .await
+        .expect("set spec");
+        let read = dispatch(&mut store, "get_spec", json!({ "task_id": task_id }))
+            .await
+            .expect("get spec");
+        assert_eq!(read["spec"], "# Spec");
+        // An unknown task is a tool error, never a silent null.
+        assert!(dispatch(&mut store, "get_spec", json!({ "task_id": 9999 })).await.is_err());
     }
 
     #[tokio::test]
@@ -778,20 +866,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_spec_advances_to_the_spec_gate() {
+    async fn set_spec_advances_to_the_spec_gate() {
         let mut store = store().await;
         let (task_id, _) = started_run(&mut store).await;
         let saved = dispatch(
             &mut store,
-            "save_spec",
-            json!({ "task_id": task_id, "content": "# Spec", "path": "docs/spec/x.md" }),
+            "set_spec",
+            json!({ "task_id": task_id, "content": "# Spec" }),
         )
         .await
-        .expect("save spec");
+        .expect("set spec");
         assert_eq!(saved["phase_advanced"], "spec");
-        let task = store.get_task(task_id).await.expect("task");
-        assert_eq!(task.spec.as_deref(), Some("# Spec"));
-        assert_eq!(task.spec_path.as_deref(), Some("docs/spec/x.md"));
+        let spec = store.get_task_spec(task_id).await.expect("spec");
+        assert_eq!(spec.as_deref(), Some("# Spec"));
         let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
             .await
             .expect("context");
@@ -928,7 +1015,7 @@ mod tests {
 
         dispatch(
             &mut store,
-            "save_spec",
+            "set_spec",
             json!({
                 "task_id": task_id,
                 "content": "# Umbrella",
@@ -937,7 +1024,7 @@ mod tests {
             }),
         )
         .await
-        .expect("save spec");
+        .expect("set spec");
         let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
             .await
             .expect("context");
@@ -947,13 +1034,13 @@ mod tests {
         // The whole payload advanced the run to the spec gate.
         assert_eq!(context["phase"], "spec");
         assert_eq!(
-            store.get_task(owned).await.expect("task").spec.as_deref(),
+            store.get_task_spec(owned).await.expect("spec").as_deref(),
             Some("Refresh hourly")
         );
     }
 
     #[tokio::test]
-    async fn save_spec_refuses_a_foreign_or_step_id_without_writing() {
+    async fn set_spec_refuses_a_foreign_or_step_id_without_writing() {
         let mut store = store().await;
         let (task_id, _, owned, _) = started_run_with_subtasks(&mut store).await;
         // A step id is not a subtask, so the whole call fails and nothing is
@@ -964,7 +1051,7 @@ mod tests {
         let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
         let refused = dispatch(
             &mut store,
-            "save_spec",
+            "set_spec",
             json!({
                 "task_id": task_id,
                 "content": "# Umbrella",
@@ -974,8 +1061,8 @@ mod tests {
         )
         .await;
         assert!(refused.is_err(), "a step id is refused");
-        assert!(store.get_task(task_id).await.expect("task").spec.is_none());
-        assert!(store.get_task(owned).await.expect("task").spec.is_none());
+        assert!(store.get_task_spec(task_id).await.expect("spec").is_none());
+        assert!(store.get_task_spec(owned).await.expect("spec").is_none());
     }
 
     /// A step id passed as the parent of a new subtask resolves to the run
@@ -1045,8 +1132,12 @@ mod tests {
         let (task_id, _) = started_run(&mut store).await;
         let handle = tokio::runtime::Handle::current();
         let server = start(Store::new(store), handle, None).expect("start server");
+        let coding_token = server
+            .profile_token(CODING_PROFILE)
+            .expect("coding profile token")
+            .to_string();
 
-        let initialize = request(server.url(), server.token(), &json!({
+        let initialize = request(server.url(), &coding_token, &json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
         }));
         assert_eq!(
@@ -1054,15 +1145,15 @@ mod tests {
             Some("2024-11-05")
         );
 
-        let tools = request(server.url(), server.token(), &json!({
+        let tools = request(server.url(), &coding_token, &json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
         }));
         assert_eq!(
             tools.pointer("/result/tools").and_then(Value::as_array).map(Vec::len),
-            Some(8)
+            Some(9)
         );
 
-        let call = request(server.url(), server.token(), &json!({
+        let call = request(server.url(), &coding_token, &json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
@@ -1077,6 +1168,18 @@ mod tests {
             "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}
         }));
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
+
+        // Each profile gets its own token, and both are accepted.
+        let interview_token = server
+            .profile_token(INTERVIEW_PROFILE)
+            .expect("interview profile token")
+            .to_string();
+        assert_ne!(interview_token, coding_token);
+        let interview_tools = request(server.url(), &interview_token, &json!({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}
+        }));
+        assert!(interview_tools.get("result").is_some());
+        assert!(server.profile_token("nope").is_none());
     }
 
     /// One POST with the bearer token, returning the parsed response body.

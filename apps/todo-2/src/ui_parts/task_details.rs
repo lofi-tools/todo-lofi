@@ -175,7 +175,15 @@ fn notes_by_round(notes: &[RunNote]) -> Vec<(usize, RunNote)> {
 /// The final line is the request to interview (`Request to interview: …`).
 const INTERVIEW_BASE_PROMPT: &str = "\
 You are running an interview for a feature request. Your job is to gather context \
-and ask clarifying questions before producing a detailed spec.
+and ask clarifying questions before saving a detailed spec.
+
+## Rules
+
+- This phase cannot change files. Read, search and inspect as much as you \
+   need, but never write, edit or patch a file.
+- Save the finished spec with the `set_spec` tool. Do not write a spec file; \
+   the app stores the spec for you.
+- On a later round, call `get_spec` first to read the spec you are revising.
 
 ## Process
 
@@ -184,28 +192,15 @@ and ask clarifying questions before producing a detailed spec.
    state.
 2. Then ask clarifying questions in several rounds. Ask about edge cases, \
    preferences, constraints, and design decisions — the things you cannot infer \
-   on your own. Write the questions out in the conversation; there is no \
-   question tool, so never wait for one.
-3. When you have enough context, write a detailed spec file.
-
-## Spec file output
-
-- Write the spec to `./docs/spec/<slug>-spec.md` where `<slug>` is derived from \
-   the request (a short kebab-case name).
-- If the request doesn't suggest an obvious slug, use a sensible name in the \
-   same `docs/spec/` location.
-- The spec should be detailed: capture everything you learned during the \
-   interview — requirements, constraints, decisions, open questions, and the \
-   planned approach.
-- Create the `docs/spec/` directory if it doesn't exist.
-- If a `save_spec` tool is available, call it with the final spec so the app \
-   stores it on the task.
+   on your own. Use the `ask_user` tool when it is available; otherwise write \
+   the questions out in the conversation.
+3. When you have enough context, call `set_spec` with the detailed spec: \
+   requirements, constraints, decisions, open questions, and the planned \
+   approach.
 
 ## Final reply
 
-- After writing the spec file, reply with a short summary plus the spec file \
-   path (e.g. `Wrote spec to ./docs/spec/add-oauth-spec.md`).
-- The summary is included even if the interview only produced a spec file.
+- After saving the spec, reply with a short summary of what it covers.
 
 ## Request
 
@@ -227,7 +222,7 @@ fn subtask_coverage_brief(subtasks: &[TaskWithMeta]) -> Option<String> {
         return None;
     }
     let mut brief = format!(
-        "\n\n## Subtasks that must be covered\n\nThis feature has {} open subtasks. For each one, either save its own spec (`save_spec` with `subtasks: [{{ task_id, spec }}]`) or mark it as covered by the feature spec (`covered: [task_id]`). Do not leave one undecided.\n",
+        "\n\n## Subtasks that must be covered\n\nThis feature has {} open subtasks. For each one, either save its own spec (`set_spec` with `subtasks: [{{ task_id, spec }}]`) or mark it as covered by the feature spec (`covered: [task_id]`). Do not leave one undecided.\n",
         open.len()
     );
     for subtask in open {
@@ -1057,6 +1052,17 @@ impl TaskDetails {
                     Vec::new()
                 }
             };
+            // The spec is namespaced data, not a `tasks` column, so a row that
+            // came from a list query does not carry it. Read it here and fold
+            // only the spec into the selection, leaving any in-progress edit
+            // of the other fields alone.
+            let spec = match store.get_task_meta(task_id, cx).await {
+                Ok(fresh) => fresh.spec,
+                Err(error) => {
+                    tracing::error!("Failed to fetch the task spec: {error}");
+                    None
+                }
+            };
             let subtask_parent_run = match parent_id {
                 Some(parent_id) => match store.coding_run_for_task(parent_id, cx).await {
                     Ok(view) => view,
@@ -1074,6 +1080,11 @@ impl TaskDetails {
                 }
                 this.coding = view;
                 this.coding_subtasks = subtasks;
+                if let Some(selected) = this.selected.as_mut()
+                    && selected.id == task_id
+                {
+                    selected.spec = spec;
+                }
                 this.subtask_parent_run = subtask_parent_run;
                 this.step_subtasks = step_subtasks;
                 this.run_worktrees = run_worktrees;
@@ -4246,7 +4257,7 @@ impl TaskDetails {
         if spec.is_empty() {
             return;
         }
-        let action = self.store.save_coding_spec(task_id, spec, None, cx);
+        let action = self.store.save_coding_spec(task_id, spec, cx);
         self.run_coding_action(action, cx);
     }
 
@@ -5186,15 +5197,7 @@ impl TaskDetails {
                                 this.coding_spec_expanded = !this.coding_spec_expanded;
                                 cx.notify();
                             })),
-                    )
-                    .when_some(self.spec_path_hint(task), |this, path| {
-                        this.child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(0x8a8a8a))
-                                .child(path),
-                        )
-                    }),
+                    ),
             )
             .when(self.coding_spec_expanded, |this| {
                 this.child(
@@ -5466,11 +5469,6 @@ impl TaskDetails {
         }
         let _ = window;
         block.into_any_element()
-    }
-
-    /// The spec file path the agent reported, shown next to the spec header.
-    fn spec_path_hint(&self, task: &TaskWithMeta) -> Option<String> {
-        task.spec_path.clone().filter(|path| !path.is_empty())
     }
 
     /// The GitHub source of an issue-backed task: where it came from, the
@@ -6504,13 +6502,12 @@ mod coding_tests {
                 comments: None,
                 workflow_run_id: None,
                 node_id: Some(node_id.to_string()),
-                spec: None,
-                spec_path: None,
                 role: None,
                 spec_covered_at: None,
                 subtasks: storage::prelude::Deferred::default(),
                 parent: storage::prelude::Deferred::default(),
             },
+            spec: None,
             direct_tags: Vec::new(),
             inherited_tags: Vec::new(),
             inferred_tags: Vec::new(),
@@ -6560,7 +6557,7 @@ mod coding_tests {
     #[test]
     fn implement_prompt_names_the_branch_and_the_feedback() {
         let mut task = feature("Add OAuth", None);
-        task.task.spec = Some("Spec body".to_string());
+        task.spec = Some("Spec body".to_string());
         let notes = vec![note("annotation", "Guard the empty-input case.")];
         let prompt = phase_prompt(
             &task,
@@ -6611,13 +6608,13 @@ mod coding_tests {
     #[test]
     fn the_implement_prompt_inlines_subtask_specs() {
         let mut task = feature("Add OAuth", None);
-        task.task.spec = Some("Umbrella spec".to_string());
+        task.spec = Some("Umbrella spec".to_string());
         let mut owned = subtask(41, "Add token refresh", false);
-        owned.task.spec = Some("Refresh the token every hour".to_string());
+        owned.spec = Some("Refresh the token every hour".to_string());
         let mut covered = subtask(42, "Wire the callback URL", false);
         covered.task.spec_covered_at = Some(jiff::Timestamp::now());
         let mut bare = subtask(43, "Bump the changelog", false);
-        bare.task.spec = Some("Add a changelog entry".to_string());
+        bare.spec = Some("Add a changelog entry".to_string());
 
         let prompt = phase_prompt(
             &task,
@@ -6685,7 +6682,7 @@ mod coding_tests {
     fn the_coverage_clause_counts_open_subtasks() {
         assert!(coverage_clause(&[]).is_none(), "no subtasks, no clause");
         let mut owned = subtask(41, "Add token refresh", false);
-        owned.task.spec = Some("spec".to_string());
+        owned.spec = Some("spec".to_string());
         let mut covered = subtask(42, "Wire the callback URL", false);
         covered.task.spec_covered_at = Some(jiff::Timestamp::now());
         let open = subtask(43, "Bump the changelog", false);

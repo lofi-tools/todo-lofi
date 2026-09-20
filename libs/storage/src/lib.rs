@@ -11,6 +11,7 @@ pub mod repeat;
 pub mod tag;
 pub mod tag_settings;
 pub mod task;
+pub mod task_extra;
 pub mod todoist;
 pub mod testing;
 pub mod tracing_setup;
@@ -42,6 +43,7 @@ pub mod prelude {
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
     pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta, factors_between};
+    pub use crate::task_extra::{CODING_NAMESPACE, SPEC_KEY, TaskExtra};
     pub use crate::workflow::{
         CODING_PHASES, CoverageSummary, RECIPE_ROLES, Recipe, RecipeEdge, RecipeMeta, RecipeNode,
         RUN_NOTES_KEY, STEP_ROLE, RunNote, RunStepView, RunView, SubtaskCoverage, SubtaskSpecInput,

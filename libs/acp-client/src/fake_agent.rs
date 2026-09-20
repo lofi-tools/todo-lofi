@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, CreateTerminalRequest,
-    Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
-    PromptResponse, ReadTextFileRequest, RequestPermissionRequest, SessionNotification,
-    SessionUpdate, StopReason, TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate,
-    WaitForTerminalExitRequest, WriteTextFileRequest,
+    HttpHeader, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, McpServer, McpServerHttp, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
+    ReadTextFileRequest, RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason,
+    TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 
 use crate::AcpEvent;
@@ -51,6 +52,7 @@ pub struct FakeObservations {
     pub initialize_count: usize,
     pub new_session_cwds: Vec<PathBuf>,
     pub new_session_additional: Vec<Vec<PathBuf>>,
+    pub new_session_mcp: Vec<Vec<McpServer>>,
     pub load_attempts: Vec<String>,
     pub prompts: Vec<String>,
     pub cancels: Vec<String>,
@@ -88,7 +90,11 @@ fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                     }
                     responder.respond(
                         InitializeResponse::new(initialize.protocol_version)
-                            .agent_capabilities(AgentCapabilities::default())
+                            .agent_capabilities(
+                                AgentCapabilities::default().mcp_capabilities(
+                                    McpCapabilities::new().http(true).sse(true),
+                                ),
+                            )
                             .agent_info(Implementation::new("fake-agent", "1.0")),
                     )
                 },
@@ -101,6 +107,7 @@ fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         state
                             .new_session_additional
                             .push(request.additional_directories.clone());
+                        state.new_session_mcp.push(request.mcp_servers.clone());
                     }
                     responder.respond(NewSessionResponse::new("session-1"))
                 },
@@ -301,7 +308,7 @@ fn allow_all() -> ToolPermissions {
 async fn new_session(connection: &crate::AcpConnection, dir: &tempfile::TempDir) -> acp::schema::v1::SessionId {
     connection
         .requester
-        .new_session(dir.path().to_path_buf(), Vec::new())
+        .new_session(dir.path().to_path_buf(), Vec::new(), Vec::new())
         .await
         .expect("session")
         .0
@@ -340,7 +347,7 @@ async fn new_session_carries_cwd_and_additional_roots() {
     std::fs::create_dir_all(&extra).expect("extra dir");
     let session_id = connection
         .requester
-        .new_session(dir.path().to_path_buf(), vec![extra.clone()])
+        .new_session(dir.path().to_path_buf(), vec![extra.clone()], Vec::new())
         .await
         .expect("session")
         .0;
@@ -348,6 +355,25 @@ async fn new_session_carries_cwd_and_additional_roots() {
     let state = observations.lock().unwrap();
     assert_eq!(state.new_session_cwds, vec![dir.path().to_path_buf()]);
     assert_eq!(state.new_session_additional, vec![vec![extra]]);
+}
+
+/// The client attaches its loopback MCP endpoint as an ACP `McpServer::Http`
+/// when the agent advertises the transport (spec §7.2).
+#[tokio::test]
+async fn new_session_carries_the_mcp_server() {
+    let (connection, observations, dir) = connect_to_fake(FakeScript::default(), confirm_all()).await;
+    assert!(connection.info.mcp_http, "the agent advertises http MCP");
+    let server = McpServer::Http(
+        McpServerHttp::new("todo-2-coding", "http://127.0.0.1:4444/mcp")
+            .headers(vec![HttpHeader::new("Authorization", "Bearer token")]),
+    );
+    connection
+        .requester
+        .new_session(dir.path().to_path_buf(), Vec::new(), vec![server.clone()])
+        .await
+        .expect("session");
+    let state = observations.lock().unwrap();
+    assert_eq!(state.new_session_mcp, vec![vec![server]]);
 }
 
 #[tokio::test]
@@ -365,6 +391,7 @@ async fn load_session_reports_failure_so_the_caller_can_start_fresh() {
         .load_session(
             acp::schema::v1::SessionId::new("stale"),
             dir.path().to_path_buf(),
+            Vec::new(),
             Vec::new(),
         )
         .await;

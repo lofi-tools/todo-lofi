@@ -39,6 +39,7 @@ use ui_parts::task_list::{TaskListEvent, TaskListView};
 use ui_parts::tag_settings::{TagSettingsEvent, TagSettingsPanel};
 use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 
+mod coding_agent;
 mod coding_git;
 mod coding_mcp;
 mod components;
@@ -189,11 +190,61 @@ struct Layout {
     /// Window-wide Escape observer (focus-independent deselect).
     _escape_observer: Subscription,
     /// The loopback MCP endpoint the coding agent attaches to, held for the
-    /// app run (the listener thread lives until the process exits).
-    _coding_mcp: Option<coding_mcp::CodingMcpServer>,
+    /// app run (the listener thread lives until the process exits). Its
+    /// per-profile tokens are what each coding run's processes are given.
+    coding_mcp: Option<coding_mcp::CodingMcpServer>,
 }
 
 impl Layout {
+    /// Put the pane on the profile `phase` runs under, keeping its transcript.
+    ///
+    /// The interview is read-only (its own process, no write tools); every
+    /// other phase runs with the full tool set (spec decisions #2/#16). The
+    /// process is only replaced when the pane is not already on the profile,
+    /// so re-composing a later phase's prompt does not restart an agent that
+    /// is mid-turn.
+    fn start_coding_profile(&mut self, phase: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        let interview = phase == "interview";
+        let desired_id = if interview {
+            "opencode-interview"
+        } else {
+            "opencode"
+        };
+        if self.agent_pane.read(cx).active_agent_id() == Some(desired_id) {
+            return Ok(());
+        }
+        let Some(project) = self.agent_pane.read(cx).active_project().cloned() else {
+            anyhow::bail!("select the project first");
+        };
+        let server = self
+            .coding_mcp
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("the coding MCP endpoint is not running"))?;
+        let profile = if interview {
+            coding_mcp::INTERVIEW_PROFILE
+        } else {
+            coding_mcp::CODING_PROFILE
+        };
+        let token = server
+            .profile_token(profile)
+            .ok_or_else(|| anyhow::anyhow!("no token for the {profile} profile"))?
+            .to_string();
+        let endpoint = coding_agent::McpEndpoint {
+            url: server.url().to_string(),
+            token,
+            profile: profile.to_string(),
+        };
+        let agent: std::sync::Arc<dyn acp_client::AgentServer> = if interview {
+            std::sync::Arc::new(coding_agent::OpenCodeInterviewAgent)
+        } else {
+            std::sync::Arc::new(acp_client::OpenCodeAgent)
+        };
+        self.agent_pane.update(cx, |pane, cx| {
+            pane.start_run_session(project, agent, Some(endpoint), cx)
+        });
+        Ok(())
+    }
+
     fn new(
         input: Entity<InputState>,
         store: Store,
@@ -246,7 +297,10 @@ impl Layout {
             Ok(server) => {
                 tracing::info!(
                     url = server.url(),
-                    token = server.token(),
+                    profiles = ?[
+                        coding_mcp::INTERVIEW_PROFILE,
+                        coding_mcp::CODING_PROFILE
+                    ],
                     "coding MCP endpoint ready"
                 );
                 Some(server)
@@ -654,9 +708,28 @@ impl Layout {
                 TaskDetailsEvent::CodingLaunch { phase, prompt } => {
                     tracing::info!(phase, "coding phase prompt ready in the agent pane");
                     let prompt = prompt.clone();
-                    this.agent_pane
-                        .update(cx, |pane, cx| pane.insert_prompt_text(prompt, window, cx));
-                    this.show_run_split(window, cx);
+                    // The interview runs read-only; the coding phases run with
+                    // full tools. Switching profile replaces the process but
+                    // keeps the transcript (spec decisions #2/#13/#14), so it
+                    // only happens when the pane is not already on that
+                    // profile.
+                    match this.start_coding_profile(phase, cx) {
+                        Ok(()) => {
+                            this.agent_pane.update(cx, |pane, cx| {
+                                pane.insert_prompt_text(prompt, window, cx)
+                            });
+                            this.show_run_split(window, cx);
+                        }
+                        Err(error) => {
+                            // A phase that cannot reach its tools must not run:
+                            // the interview would be read-only with nowhere to
+                            // save a spec (spec decision #21).
+                            window.push_notification(
+                                error_toast(format!("Could not start the {phase} phase: {error}")),
+                                cx,
+                            );
+                        }
+                    }
                 }
                 // Stop on a run step delegates to the agent pane's stop-turn:
                 // the step stays open and the branch keeps what the turn wrote
@@ -819,7 +892,7 @@ impl Layout {
             _add_subtag_subscription: None,
             _toast_layer_refresh: None,
             _escape_observer: escape_observer,
-            _coding_mcp: coding_endpoint,
+            coding_mcp: coding_endpoint,
         }
     }
 

@@ -213,6 +213,7 @@ impl TaskStore {
 
             let mut meta = TaskWithMeta {
                 task,
+                spec: None,
                 direct_tags: Vec::new(),
                 inherited_tags: Vec::new(),
                 inferred_tags: Vec::new(),

@@ -1515,13 +1515,12 @@ impl Store {
         &self,
         task_id: u64,
         spec: String,
-        spec_path: Option<String>,
         cx: &impl AppContext,
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            s.save_task_spec(task_id, Some(spec), spec_path).await?;
+            s.save_task_spec(task_id, Some(spec)).await?;
             let Some(view) = s.coding_run_for_task(task_id).await? else {
                 return Ok(());
             };
@@ -1800,7 +1799,7 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            s.save_task_spec(task_id, Some(spec), None).await?;
+            s.save_task_spec(task_id, Some(spec)).await?;
             Ok(())
         })
     }

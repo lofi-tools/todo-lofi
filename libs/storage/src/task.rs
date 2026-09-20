@@ -57,13 +57,6 @@ pub struct Task {
     /// The recipe node this task materializes (engine bookkeeping for edge
     /// evaluation and event lookup). Only set on workflow steps.
     pub node_id: Option<String>,
-    /// The spec artifact of a coding run's feature task (markdown text saved by
-    /// the agent's interview phase, or pasted by the user in the details panel).
-    /// A real subtask may hold its own spec here too; never written on a step.
-    pub spec: Option<String>,
-    /// Where the spec was written on disk, when the agent reported a path. The
-    /// details panel offers an "open file" affordance for it.
-    pub spec_path: Option<String>,
     /// Coding runs only: `'step'` on an engine-materialized run step, so every
     /// subtask surface can tell scaffolding from work. `NULL` for plain tasks,
     /// user- and model-added subtasks, and nested-run roots.
@@ -153,6 +146,10 @@ pub type TaskCreate = <Task as toasty::schema::Model>::Create;
 #[derive(Debug, Clone)]
 pub struct TaskWithMeta {
     pub task: Task,
+    /// The task's spec markdown, read from the namespaced `task_extra` store
+    /// (`coding` / `spec`). `None` in list queries, which do not load extra
+    /// data; the spec surfaces all go through `get_task_with_meta`.
+    pub spec: Option<String>,
     pub direct_tags: Vec<String>,
     /// Direct tags of the task's ancestor chain, so a subtask is
     /// automatically tagged like its parents. Computed on load, never
@@ -258,10 +255,8 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
     let completed_at = record.get(15).and_then(|v| v.to_u64());
     let workflow_run_id = record.get(16).and_then(|v| v.to_i64()).map(|id| id as u64);
     let node_id = record.get(17).and_then(|v| v.as_str()).map(str::to_owned);
-    // The spec and role columns are only selected by queries that need them,
-    // so these reads are optional rather than positional requirements.
-    let spec = record.get(18).and_then(|v| v.as_str()).map(str::to_owned);
-    let spec_path = record.get(19).and_then(|v| v.as_str()).map(str::to_owned);
+    // The role and coverage columns are only selected by queries that need
+    // them, so these reads are optional rather than positional requirements.
     let role = record.get(20).and_then(|v| v.as_str()).map(str::to_owned);
     let spec_covered_at = record
         .get(21)
@@ -289,8 +284,6 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
         comments: None,
         workflow_run_id,
         node_id,
-        spec,
-        spec_path,
         role,
         spec_covered_at,
         subtasks: Deferred::default(),
@@ -299,6 +292,9 @@ fn parse_task_from_row(record: &toasty::stmt::Value) -> crate::QueryResult<TaskW
 
     Ok(TaskWithMeta {
         task,
+        // Only `get_task_with_meta` loads the namespaced spec; list queries
+        // stay a single round trip.
+        spec: None,
         direct_tags: Vec::new(),
         inherited_tags: Vec::new(),
         inferred_tags: Vec::new(),
@@ -376,29 +372,16 @@ impl TodoStore {
         Ok(())
     }
 
-    /// Store a coding feature task's spec artifact (and the path the agent
-    /// wrote it to, when it reported one). `None` leaves the column alone.
-    /// A step row never carries a spec (decision #31), so it is refused.
+    /// Store a coding feature task's spec artifact in the namespaced
+    /// `task_extra` store. `None` leaves the stored value alone. A step row
+    /// never carries a spec (decision #31), so it is refused.
     #[fastrace::trace]
     pub async fn save_task_spec(
         &mut self,
         id: u64,
         spec: Option<String>,
-        spec_path: Option<String>,
     ) -> crate::QueryResult<()> {
-        self.ensure_not_a_step(id, "spec").await?;
-        let mut update = Task::update_by_id(id);
-        if let Some(spec) = spec {
-            update = update.spec(Some(spec));
-        }
-        if let Some(path) = spec_path {
-            update = update.spec_path(Some(path));
-        }
-        update
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::UpdateTaskSnafu { id })?;
-        Ok(())
+        self.set_task_spec(id, spec).await
     }
 
     /// Reject writes to a run step: a step is scaffolding, never a subtask, so
@@ -448,6 +431,7 @@ impl TodoStore {
         let task = self.get_task(id).await?;
         let mut meta = TaskWithMeta {
             task,
+            spec: self.get_task_spec(id).await?,
             direct_tags: Vec::new(),
             inherited_tags: Vec::new(),
             inferred_tags: Vec::new(),
@@ -478,6 +462,9 @@ impl TodoStore {
         Task::delete_by_id(&mut self.db, id)
             .await
             .context(crate::error::DeleteTaskSnafu { id })?;
+        // The namespaced extension data goes with the row; nothing enforces
+        // the reference in SQL.
+        self.delete_task_extra(id).await?;
         Ok(())
     }
 
