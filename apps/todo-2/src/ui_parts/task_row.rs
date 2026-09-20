@@ -476,7 +476,7 @@ impl Render for TaskRow {
             .child(
                 div()
                     .h_flex()
-                    .items_center()
+                    .items_start()
                     .gap_3()
                     // The header grows with whatever it holds, so the
                     // sub-row stays inside it instead of bleeding past the
@@ -487,7 +487,8 @@ impl Render for TaskRow {
                     .when(has_subrow, |this| this.min_h(px(38.)))
                     .child(
                         Checkbox::new(("checkbox", task_id))
-                    .with_size(px(22.))
+                    .with_size(px(20.))
+                    .mt(px(4.))
                     .checked(done)
                     .disabled(self.task.blocked && !done)
                     .on_click(move |new_done, _window, cx| {
@@ -516,6 +517,12 @@ impl Render for TaskRow {
                     .child(
                         div()
                             .flex_1()
+                            // `min_w_0` lets this column shrink below its own
+                            // min-content width (the unwrapped title), which is
+                            // what gives the title a narrower box to wrap into.
+                            // Without it the column overflows the row and the
+                            // title never wraps.
+                            .min_w_0()
                             .v_flex()
             .child(if let Some(input) = self.edit_input.clone() {
                 div().id(("task-title-edit", task_id)).pt_1().child(
@@ -536,6 +543,11 @@ impl Render for TaskRow {
                     .child(
                         div()
                             .id(("task-title-text", task_id))
+                            // `min_w_0` lets the title shrink below its own
+                            // min-content width, so a long title wraps inside
+                            // the row instead of pushing the badges and chips
+                            // past its edge.
+                            .min_w_0()
                             .text_base()
                             .text_color(if title_muted { rgb(0x666666) } else { rgb(0xe5e5e5) })
                             .when(done, |this| this.line_through())
