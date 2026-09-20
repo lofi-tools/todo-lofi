@@ -2502,6 +2502,12 @@ fn gap_strip(
     }
 }
 
+/// Cap on the tag-view title's width. A long tag (or project label) wraps
+/// within it rather than stretching the title row and squeezing the actions
+/// at its end; short titles are unaffected, and a narrow pane still shrinks
+/// the title below the cap because it also carries `flex_1`.
+const TITLE_MAX_WIDTH: f32 = 640.0;
+
 impl Render for TaskListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.input_needs_clear {
@@ -2547,6 +2553,14 @@ impl Render for TaskListView {
                     .justify_between()
                     .child(
                         div()
+                            // Wraps to multiple lines inside the pane: `flex_1`
+                            // lets it take the row's spare width, `min_w_0`
+                            // lets it shrink below the title's own min-content
+                            // width, and the cap keeps a very long tag from
+                            // spanning the whole row on a wide window.
+                            .flex_1()
+                            .min_w_0()
+                            .max_w(px(TITLE_MAX_WIDTH))
                             .text_2xl()
                             .font_bold()
                             .text_color(rgb(0xe5e5e5))

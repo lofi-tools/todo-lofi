@@ -1,8 +1,8 @@
 use gpui::{
     AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Subscription, Window, deferred, div, hsla, prelude::FluentBuilder, px, relative, rgb,
-    svg,
+    Styled, Subscription, Window, deferred, div, hsla, phi, prelude::FluentBuilder, px, relative,
+    rems, rgb, svg,
 };
 use gpui::Focusable as _;
 use gpui_component::Disableable;
@@ -381,6 +381,14 @@ fn coverage_clause(subtasks: &[TaskWithMeta]) -> Option<(String, bool)> {
 /// toggle button treats a click as a fresh open rather than the same click
 /// that closed it (via `on_mouse_down_out`).
 const OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Diameter of the details header's done checkbox. Kept in one place because
+/// the title's first-line centering is computed from it.
+const CHECKBOX_SIZE: f32 = 22.;
+
+/// Downward nudge applied on top of the first-line centering, so the box's
+/// optical center sits on the title's first line instead of a touch high.
+const CHECKBOX_TOP_NUDGE: f32 = 3.;
 
 #[derive(Clone)]
 pub enum TaskDetailsEvent {
@@ -5702,6 +5710,15 @@ impl Render for TaskDetails {
                 let entity = cx.entity().clone();
                 let blocked = self.computed_blocked();
 
+                // The title renders at `text_xl`, whose default line height is
+                // `phi` times the font size. Knowing one line's height up front
+                // lets the checkbox sit on the title's first line instead of
+                // drifting to the middle of a wrapped title.
+                let title_line_height = phi().to_pixels(rems(1.25).into(), window.rem_size());
+                let checkbox_top_offset = ((title_line_height - CHECKBOX_SIZE.into()) / 2.)
+                    .max(px(0.))
+                    + px(CHECKBOX_TOP_NUDGE);
+
                 let mut details = div().v_flex().gap_3();
                 let mut header = div().v_flex().gap_1();
                 if self.editing_tags {
@@ -5903,39 +5920,55 @@ impl Render for TaskDetails {
                         .items_center()
                         .gap_3()
                         .child(
-                            Checkbox::new(("details-checkbox", task_id))
-                                .with_size(px(22.))
-                                .checked(done)
-                                .disabled(blocked && !done)
-                                .on_click(move |new_done, _window, cx| {
-                                    let store = store.clone();
-                                    let entity = entity.clone();
-                                    let new_done = *new_done;
-                                    cx.spawn(async move |cx| {
-                                        if let Err(e) =
-                                            store.toggle_task_done(task_id, new_done, cx).await
-                                        {
-                                            tracing::error!(?e, "Failed toggle_task_done");
-                                        }
-                                        entity.update(cx, |this, cx| {
-                                            if let Some(selected) = &mut this.selected {
-                                                selected.task.done = new_done;
-                                            }
-                                            cx.emit(TaskDetailsEvent::Toggled {
-                                                task_id,
-                                                done: new_done,
-                                            });
-                                            cx.notify();
-                                        });
-                                    })
-                                    .detach();
-                                }),
+                            // Alignment has to live on a wrapper: `Checkbox`
+                            // renders its own outer `div`, so styling applied to
+                            // the checkbox itself lands on an inner element and
+                            // the row's `items_center` still wins.
+                            div()
+                                .flex_shrink_0()
+                                // While editing the title is a single-line
+                                // input, so the row's own centering is right;
+                                // the offset only matters for the read-only
+                                // title, which can wrap.
+                                .when(self.title_input.is_none(), |this| {
+                                    this.self_start().mt(checkbox_top_offset)
+                                })
+                                .child(
+                                    Checkbox::new(("details-checkbox", task_id))
+                                        .with_size(px(CHECKBOX_SIZE))
+                                        .checked(done)
+                                        .disabled(blocked && !done)
+                                        .on_click(move |new_done, _window, cx| {
+                                            let store = store.clone();
+                                            let entity = entity.clone();
+                                            let new_done = *new_done;
+                                            cx.spawn(async move |cx| {
+                                                if let Err(e) =
+                                                    store.toggle_task_done(task_id, new_done, cx).await
+                                                {
+                                                    tracing::error!(?e, "Failed toggle_task_done");
+                                                }
+                                                entity.update(cx, |this, cx| {
+                                                    if let Some(selected) = &mut this.selected {
+                                                        selected.task.done = new_done;
+                                                    }
+                                                    cx.emit(TaskDetailsEvent::Toggled {
+                                                        task_id,
+                                                        done: new_done,
+                                                    });
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        }),
+                                ),
                         )
                         .child(
                             if let Some(input) = self.title_input.clone() {
                                 div()
                                     .id(("details-title-edit", task_id))
                                     .flex_1()
+                                    .min_w_0()
                                     .child(
                                         Input::new(&input)
                                             .small()
@@ -5948,7 +5981,12 @@ impl Render for TaskDetails {
                             } else {
                                 div()
                                     .id(("details-title", task_id))
+                                    // `min_w_0` lets the flex item shrink below
+                                    // its content width, so a long title wraps
+                                    // inside the pane instead of pushing out
+                                    // past its right edge.
                                     .flex_1()
+                                    .min_w_0()
                                     .text_xl()
                                     .font_bold()
                                     .cursor_pointer()
