@@ -25,6 +25,9 @@ pub enum NavBarEvent {
     /// A tag row's context menu asked for its settings; the parent shows the
     /// tag settings popover for that tag.
     OpenTagSettings(String),
+    /// A tag row's context menu asked for a sub-tag; the parent opens a
+    /// modal to name a tag placed under this one.
+    OpenAddSubTag(String),
 }
 
 /// One place the main panel can be pointed at: a task view (all tasks or one
@@ -231,6 +234,17 @@ impl NavBar {
             .ok();
         }));
     }
+
+    /// The nav path (ancestor chain of tag names) of the row for `tag_name`,
+    /// used to select a tag by name (e.g. the parent after a sub-tag is
+    /// created). A tag placed under several parents appears once per path;
+    /// the first is enough to land on it.
+    pub fn path_for_tag_name(&self, tag_name: &str) -> Option<&[String]> {
+        self.rows
+            .iter()
+            .find(|row| row.tag.name == tag_name)
+            .map(|row| row.path.as_slice())
+    }
 }
 
 /// Whether `row` should render under the expanded path. Top-level rows are
@@ -421,7 +435,20 @@ impl Render for NavBar {
                                     .context_menu(move |menu, _window, _cx| {
                                         let nav = menu_nav.clone();
                                         let tag_name = menu_tag_name.clone();
-                                        menu.item(PopupMenuItem::new("Tag settings…").on_click(
+                                        let sub_nav = nav.clone();
+                                        let sub_tag_name = tag_name.clone();
+                                        menu.item(PopupMenuItem::new("Add sub-tag…").on_click(
+                                            move |_, _window, cx| {
+                                                sub_nav
+                                                    .update(cx, |_this, cx| {
+                                                        cx.emit(NavBarEvent::OpenAddSubTag(
+                                                            sub_tag_name.clone(),
+                                                        ));
+                                                    })
+                                                    .ok();
+                                            },
+                                        ))
+                                        .item(PopupMenuItem::new("Tag settings…").on_click(
                                             move |_, _window, cx| {
                                                 nav.update(cx, |_this, cx| {
                                                     cx.emit(NavBarEvent::OpenTagSettings(

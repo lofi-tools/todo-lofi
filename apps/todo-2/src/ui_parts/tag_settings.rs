@@ -72,6 +72,9 @@ pub struct TagSettingsPanel {
     /// in-flight staged edit.
     placements_reload: bool,
     pending_placement_input_clear: bool,
+    /// The tag label the placements input placeholder was last built for,
+    /// so it is only rebuilt when retargeted.
+    placements_placeholder_for: Option<String>,
     /// Tags that may not be chosen as a parent: this tag and its descendants
     /// (the store would reject a cycle).
     blocked: HashSet<u64>,
@@ -163,6 +166,7 @@ let dir_picker_input = cx.new(|cx| {
             placement_suggest_active: false,
             placements_reload: true,
             pending_placement_input_clear: false,
+            placements_placeholder_for: None,
             blocked: HashSet::new(),
             dir_candidates: Vec::new(),
             dir_picker_open: false,
@@ -502,13 +506,37 @@ let dir_picker_input = cx.new(|cx| {
     }
 
     /// Swap in a fresh, empty field, restarting the draft editor's typing.
+    fn placements_placeholder(&self) -> String {
+        match self.tag.clone() {
+            Some(tag) => format!("add tags to {}", tag.label()),
+            None => "Add parent tag…".to_string(),
+        }
+    }
+
+    /// Sync the placements input placeholder to the current tag, once per
+    /// tag so rendering does not rewrite it every frame.
+    fn sync_placements_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let label = self.tag.clone().map(|tag| tag.label());
+        if label == self.placements_placeholder_for {
+            return;
+        }
+        self.placements_placeholder_for = label;
+        let placeholder = self.placements_placeholder();
+        self.placements_input.update(cx, |state, cx| {
+            state.set_placeholder(&placeholder, window, cx);
+        });
+    }
+
+    /// Swap in a fresh, empty field, restarting the draft editor's typing.
     fn reset_placement_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_placement_input_clear = false;
         self.placement_suggest_cursor = 0;
         self.placement_suggest_active = false;
+        self.placements_placeholder_for = self.tag.clone().map(|tag| tag.label());
+        let placeholder = self.placements_placeholder();
         let input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
-            state.set_placeholder("Add parent tag…", window, cx);
+            state.set_placeholder(&placeholder, window, cx);
             state
         });
         let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
@@ -1113,6 +1141,8 @@ let dir_picker_input = cx.new(|cx| {
     fn placements_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.pending_placement_input_clear {
             self.reset_placement_input(window, cx);
+        } else {
+            self.sync_placements_placeholder(window, cx);
         }
         let input = self.placements_input.clone();
         let query = input.read(cx).text().to_string();
@@ -1426,9 +1456,9 @@ let dir_picker_input = cx.new(|cx| {
                 div()
                     .v_flex()
                     .gap_1()
-                    .child(section_label("Placed under"))
+                    .child(section_label("Implied tags"))
                     .when(placements_empty, |this| {
-                        this.child(hint("Not placed under any tag, so it stays at the top level."))
+                        this.child(hint("No implied tags, so it stays at the top level."))
                     })
                     .child(self.placements_editor(window, cx)),
             )

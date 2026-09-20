@@ -237,7 +237,9 @@ impl TaskListView {
                     | NavDestination::Automations
                     | NavDestination::Settings => {}
                 },
-                NavBarEvent::OpenProjectPicker | NavBarEvent::OpenTagSettings(_) => {
+                NavBarEvent::OpenProjectPicker
+                | NavBarEvent::OpenTagSettings(_)
+                | NavBarEvent::OpenAddSubTag(_) => {
                     // Picker/popover open is handled by the Layout; the task
                     // list is unaffected.
                 }

@@ -424,6 +424,10 @@ impl Layout {
                         .update(cx, |panel, cx| panel.open(name.clone(), candidates, cx));
                     cx.notify();
                 }
+                // A tag row's context menu: name a new tag placed under it.
+                NavBarEvent::OpenAddSubTag(parent) => {
+                    this.open_add_subtag_dialog(parent.clone(), window, cx);
+                }
             },
         );
         let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
@@ -1644,6 +1648,159 @@ async fn lookup_managed_tag(
             .ok();
         })
         .detach();
+    }
+
+    /// Modal to name a tag placed under `parent_name`: creates the tag, then
+    /// sets its parents to the single parent.
+    fn open_add_subtag_dialog(
+        &mut self,
+        parent_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_placeholder("Sub-tag name…", window, cx);
+            state
+        });
+        let input_for_focus = input.clone();
+        window.on_next_frame(move |window, cx| {
+            input_for_focus.update(cx, |state, cx| state.focus(window, cx));
+        });
+        let layout = cx.weak_entity();
+        let store = self.store.clone();
+        let parent_for_title = parent_name.clone();
+        let parent_for_create = parent_name.clone();
+        let input_for_dialog = input.clone();
+
+        let input_for_enter = input.clone();
+        let parent_for_enter = parent_name.clone();
+        let store_for_enter = self.store.clone();
+        let enter_sub = cx.subscribe_in(
+            &input,
+            window,
+            move |_this, _, event, window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let name = input_for_enter.read(cx).value().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                window.close_dialog(cx);
+                let store = store_for_enter.clone();
+                let parent = parent_for_enter.clone();
+                cx.spawn(async move |this, cx| {
+                    let created = match store.create_tag(name, cx).await {
+                        Ok(tag) => tag,
+                        Err(error) => {
+                            tracing::error!("Failed to create sub-tag: {error}");
+                            return;
+                        }
+                    };
+                    if let Err(error) = store
+                        .set_tag_parents(created.id, vec![parent.clone()], cx)
+                        .await
+                    {
+                        tracing::error!("Failed to place sub-tag: {error}");
+                        return;
+                    }
+                    this.update(cx, |this, cx| {
+                        this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                        if let Some(path) = this
+                            .nav_bar
+                            .read(cx)
+                            .path_for_tag_name(&parent)
+                            .map(|p| p.to_vec())
+                        {
+                            this.nav_bar
+                                .update(cx, |nav, cx| nav.navigate_to(NavDestination::Tag(path), cx));
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            },
+        );
+        self._picker_subscription = Some(enter_sub);
+
+        window.open_dialog(cx, move |dialog, _, _| {
+            let input = input_for_dialog.clone();
+            let layout = layout.clone();
+            let store = store.clone();
+            let parent = parent_for_create.clone();
+            dialog.title(format!("Add sub-tag under {parent_for_title}")).content(
+                move |content, _, _| {
+                    let input = input.clone();
+                    let layout = layout.clone();
+                    let store = store.clone();
+                    let parent = parent.clone();
+                    content.child(
+                        div()
+                            .v_flex()
+                            .gap_3()
+                            .child(Input::new(&input).with_size(Size::Medium))
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("create-sub-tag")
+                                            .compact()
+                                            .label("Create")
+                                            .on_click(move |_, window, cx| {
+                                                let name = input
+                                                    .read(cx)
+                                                    .value()
+                                                    .trim()
+                                                    .to_string();
+                                                if name.is_empty() {
+                                                    return;
+                                                }
+                                                window.close_dialog(cx);
+                                                let layout = layout.clone();
+                                                let store = store.clone();
+                                                let parent = parent.clone();
+                                                cx.spawn(async move |cx| {
+                                                    let created = match store.create_tag(name, cx).await {
+                                                        Ok(tag) => tag,
+                                                        Err(error) => {
+                                                            tracing::error!("Failed to create sub-tag: {error}");
+                                                            return;
+                                                        }
+                                                    };
+                                                    if let Err(error) = store
+                                                        .set_tag_parents(created.id, vec![parent.clone()], cx)
+                                                        .await
+                                                    {
+                                                        tracing::error!("Failed to place sub-tag: {error}");
+                                                        return;
+                                                    }
+                                                    layout
+                                                        .update(cx, |this, cx| {
+                                                            this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                                                            if let Some(path) = this
+                                                                .nav_bar
+                                                                .read(cx)
+                                                                .path_for_tag_name(&parent)
+                                                                .map(|p| p.to_vec())
+                                                            {
+                                                                this.nav_bar.update(cx, |nav, cx| {
+                                                                    nav.navigate_to(NavDestination::Tag(path), cx);
+                                                                });
+                                                            }
+                                                        })
+                                                        .ok();
+                                                })
+                                                .detach();
+                                            }),
+                                    ),
+                            ),
+                    )
+                },
+            )
+        });
     }
 
     /// Create the tag backing a Todoist project and link it so re-syncs
