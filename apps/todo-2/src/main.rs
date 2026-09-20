@@ -181,6 +181,8 @@ struct Layout {
     _project_subscription: Subscription,
     /// Subscription to the open project-picker modal, if one is open.
     _picker_subscription: Option<Subscription>,
+    /// Subscription to the Enter key on the open add-subtag dialog's input.
+    _add_subtag_subscription: Option<Subscription>,
     /// Re-render when toasts come and go, so the notification layer below
     /// is only mounted while one is actually showing.
     _toast_layer_refresh: Option<Subscription>,
@@ -810,6 +812,7 @@ impl Layout {
             _projects: Vec::new(),
             _project_subscription: project_subscription,
             _picker_subscription: None,
+            _add_subtag_subscription: None,
             _toast_layer_refresh: None,
             _escape_observer: escape_observer,
             _coding_mcp: coding_endpoint,
@@ -1679,7 +1682,7 @@ async fn lookup_managed_tag(
         let enter_sub = cx.subscribe_in(
             &input,
             window,
-            move |_this, _, event, window, cx| {
+            move |this, _, event, window, cx| {
                 if !matches!(event, InputEvent::PressEnter { .. }) {
                     return;
                 }
@@ -1688,6 +1691,7 @@ async fn lookup_managed_tag(
                     return;
                 }
                 window.close_dialog(cx);
+                this._add_subtag_subscription = None;
                 let store = store_for_enter.clone();
                 let parent = parent_for_enter.clone();
                 cx.spawn(async move |this, cx| {
@@ -1722,7 +1726,7 @@ async fn lookup_managed_tag(
                 .detach();
             },
         );
-        self._picker_subscription = Some(enter_sub);
+        self._add_subtag_subscription = Some(enter_sub);
 
         window.open_dialog(cx, move |dialog, _, _| {
             let input = input_for_dialog.clone();
