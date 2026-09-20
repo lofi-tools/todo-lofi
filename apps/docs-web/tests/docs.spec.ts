@@ -21,7 +21,6 @@ const guides = [
           ['Tasks, tags, and projects', '/tasks'],
           ['Repeat and scheduling', '/repeats'],
           ['Semi-automated workflows', '/workflows'],
-          ['Mini-apps and extensions', '/mini-apps'],
         ],
       },
       {
@@ -29,6 +28,7 @@ const guides = [
         pages: [
           ['Integrated AI agent', '/agent'],
           ['Two-way sync', '/sync'],
+          ['Mini-apps and extensions', '/mini-apps'],
         ],
       },
       {

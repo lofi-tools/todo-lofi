@@ -13,7 +13,9 @@ components (`DocSidebar`, `DocTOC`, `Prose`, `Callout`), and `CodeBlock` that
 The navigation has two levels: the header's tab bar splits the docs into two
 guides, one per audience, and the left nav inside each guide lists only that
 guide's pages, nested under section headings (`Getting started`, `Tasklist`,
-`Integrations`, `Configuration`). Both levels come from `src/data/docs.ts`.
+`Integrations`, `Configuration`). Both levels come from `src/data/docs.ts` —
+`Mini-apps and extensions` is filed under `Integrations`, since a mini-app is
+the app's extension surface rather than part of the everyday tasklist.
 
 | Guide / section | Route | Content |
 | --- | --- | --- |

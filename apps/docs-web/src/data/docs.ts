@@ -52,7 +52,6 @@ export const docGuides: DocGuide[] = [
           { label: 'Tasks, tags, and projects', href: '/tasks' },
           { label: 'Repeat and scheduling', href: '/repeats' },
           { label: 'Semi-automated workflows', href: '/workflows' },
-          { label: 'Mini-apps and extensions', href: '/mini-apps' },
         ],
       },
       {
@@ -60,6 +59,7 @@ export const docGuides: DocGuide[] = [
         items: [
           { label: 'Integrated AI agent', href: '/agent' },
           { label: 'Two-way sync', href: '/sync' },
+          { label: 'Mini-apps and extensions', href: '/mini-apps' },
         ],
       },
       {
