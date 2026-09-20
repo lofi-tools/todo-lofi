@@ -546,7 +546,7 @@ pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
     store: Store,
     editing_title: bool,
-    title_input: Option<Entity<InputState>>,
+    title_input: Option<Entity<TextareaState>>,
     _title_subscription: Option<Subscription>,
     editing_description: bool,
     description_input: Option<Entity<TextareaState>>,
@@ -1607,12 +1607,15 @@ impl TaskDetails {
         }
         let title = task.title.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx);
+            let mut state = TextareaState::new(window, cx).auto_grow(1, TITLE_MAX_LINES);
             state.set_value(&title, window, cx);
             state
         });
+        // Multi-line: Enter belongs to the text and inserts a newline, while
+        // Shift-Enter saves (see `on_intercepted_key`). Losing focus saves too,
+        // the way the description editor does.
         let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
+            if matches!(event, InputEvent::Blur) {
                 this.commit_title_edit(cx);
             }
         });
@@ -1657,17 +1660,14 @@ impl TaskDetails {
     }
 
     /// Handle a key taken ahead of the keymap: Shift-Enter saves the
-    /// description. A plain Enter is untouched, so it keeps inserting a
-    /// newline. Returns whether the key was taken.
+    /// title or the description. A plain Enter is untouched, so it keeps
+    /// inserting a newline. Returns whether the key was taken.
     fn on_intercepted_key(
         &mut self,
         keystroke: &gpui::Keystroke,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(input) = self.description_input.clone() else {
-            return false;
-        };
         if keystroke.key != "enter" {
             return false;
         }
@@ -1680,7 +1680,17 @@ impl TaskDetails {
             return false;
         }
         // The interceptor is window-wide, so the details pane only answers
-        // while the description is the editor that holds the focus.
+        // while the title or the description is the editor that holds the
+        // focus.
+        if let Some(input) = self.title_input.clone()
+            && input.read(cx).focus_handle(cx).is_focused(window)
+        {
+            self.commit_title_edit(cx);
+            return true;
+        }
+        let Some(input) = self.description_input.clone() else {
+            return false;
+        };
         if !input.read(cx).focus_handle(cx).is_focused(window) {
             return false;
         }
@@ -3650,6 +3660,10 @@ impl TaskDetails {
 /// The description editor grows with its text up to this many lines, then
 /// scrolls inside that height.
 const DESCRIPTION_MAX_LINES: usize = 12;
+
+/// The title editor grows with its text from a single line up to this many
+/// lines, then scrolls inside that height.
+const TITLE_MAX_LINES: usize = 8;
 
 /// Lucide `refresh-cw`: two half-circle arrows chasing each other. Drawn
 /// with an opaque stroke; GPUI renders SVG data as an alpha mask tinted by
@@ -5926,10 +5940,11 @@ impl Render for TaskDetails {
                             // the row's `items_center` still wins.
                             div()
                                 .flex_shrink_0()
-                                // While editing the title is a single-line
-                                // input, so the row's own centering is right;
-                                // the offset only matters for the read-only
-                                // title, which can wrap.
+                                // While editing the title is a multiline
+                                // field starting at one line, so the row's
+                                // own centering is right; the offset only
+                                // matters for the read-only title, which can
+                                // wrap.
                                 .when(self.title_input.is_none(), |this| {
                                     this.self_start().mt(checkbox_top_offset)
                                 })
@@ -5970,8 +5985,7 @@ impl Render for TaskDetails {
                                     .flex_1()
                                     .min_w_0()
                                     .child(
-                                        Input::new(&input)
-                                            .small()
+                                        Textarea::new(&input)
                                             .appearance(false)
                                             .bg(rgb(APP_BG))
                                             .border_1()
