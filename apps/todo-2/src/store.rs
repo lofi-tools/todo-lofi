@@ -201,6 +201,71 @@ async fn push_patch(
     Ok(())
 }
 
+/// Push a title/description delta to every GitHub issue linked to `task_id`.
+/// Each `Some` field is pushed; `None` fields are left untouched. No links
+/// (or no credentials) → no-op, so purely local tasks never touch the
+/// network. Must run on the Tokio runtime. A push failure fails the whole
+/// edit so the UI reports it; the local edit itself is already saved. After
+/// a successful push the returned remote values become the link's snapshot
+/// (and the spent local stamps are cleared), so the next pull does not read
+/// the app's own write back as a remote edit.
+async fn push_github_patch(
+    store: &mut TodoStore,
+    task_id: u64,
+    patch: storage::IssuePatch,
+    stamped: &[&str],
+) -> anyhow::Result<()> {
+    let github_ids: std::collections::HashSet<u64> = store
+        .list_integrations()
+        .await?
+        .into_iter()
+        .filter(|i| i.provider == "github")
+        .map(|i| i.id)
+        .collect();
+    let links: Vec<storage::TaskLink> = store
+        .task_links_for_task(task_id)
+        .await?
+        .into_iter()
+        .filter(|link| github_ids.contains(&link.integration_id))
+        .collect();
+    if links.is_empty() {
+        return Ok(());
+    }
+    if !crate::github_auth::has_usable_credentials() {
+        return Ok(());
+    }
+    let token = crate::github_auth::access_token().await?;
+    let client = storage::GithubHttpClient::new(token);
+    for link in links {
+        let Some(issue) = storage::parse_issue_external_id(&link.external_id) else {
+            continue;
+        };
+        let updated = client
+            .update_issue(&issue.owner, &issue.repo, issue.number, &patch)
+            .await?;
+        if let Some(stored) = store
+            .issue_link(link.integration_id, &link.external_id)
+            .await?
+        {
+            let mut state = stored.state;
+            state.adopt_remote(&updated.field_values());
+            for field in stamped {
+                state.local_changed_at.remove(*field);
+            }
+            store
+                .link_issue(
+                    link.integration_id,
+                    &link.external_id,
+                    task_id,
+                    &state,
+                    updated.updated_at.or(stored.external_updated_at),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn new(store: TodoStore) -> Self {
         Store(Arc::new(StoreLock::new(store)))
@@ -307,9 +372,14 @@ impl Store {
             s.update_task_title(task_id, &title).await?;
             s.stamp_local_issue_field(task_id, "title").await?;
             push_patch(&mut s, task_id, storage::todoist::TaskPatch {
-                content: Some(title),
+                content: Some(title.clone()),
                 ..Default::default()
             })
+            .await?;
+            push_github_patch(&mut s, task_id, storage::IssuePatch {
+                title: Some(title),
+                ..Default::default()
+            }, &["title"])
             .await?;
             Ok(())
         })
@@ -328,9 +398,14 @@ impl Store {
                 .await?;
             s.stamp_local_issue_field(task_id, "body").await?;
             push_patch(&mut s, task_id, storage::todoist::TaskPatch {
-                description: Some(description),
+                description: Some(description.clone()),
                 ..Default::default()
             })
+            .await?;
+            push_github_patch(&mut s, task_id, storage::IssuePatch {
+                body: Some(description.clone().unwrap_or_default()),
+                ..Default::default()
+            }, &["body"])
             .await?;
             Ok(())
         })

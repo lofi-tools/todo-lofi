@@ -521,6 +521,10 @@ impl Layout {
                     // removes its worktrees, which moves the agent pane too.
                     this.task_list.update(cx, |list, cx| list.refresh(cx));
                     this.details.update(cx, |details, cx| details.refresh_coding(cx));
+                    // A sync can pull remote field edits (e.g. the
+                    // description) into the selected task: reload the pane
+                    // so it shows what GitHub has.
+                    this.details.update(cx, |details, cx| details.refresh_selected(cx));
                     this.sync_agent_checkout_for_selection(cx);
                 }
                 IntegrationsEvent::Notice(message) => {

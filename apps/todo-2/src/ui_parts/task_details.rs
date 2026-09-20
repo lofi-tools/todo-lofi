@@ -1368,8 +1368,36 @@ impl TaskDetails {
         }
     }
 
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.selected = None;
+    /// Reload the selected task after an outside change (e.g. a GitHub sync
+    /// pulled a remote description), so the pane shows what GitHub has.
+    /// Skipped while a field editor is open, so in-progress edits are never
+    /// clobbered; the emitted event keeps the task list's row in sync too.
+    pub fn refresh_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        if self.is_editing() {
+            return;
+        }
+        let reload = self.store.reload_task(task_id, cx);
+        cx.spawn(async move |this, cx| match reload.await {
+            Ok(fresh) => {
+                this.update(cx, |this, cx| {
+                    if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                        return;
+                    }
+                    this.selected = Some(fresh.clone());
+                    cx.emit(TaskDetailsEvent::TaskRefreshed(fresh));
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => tracing::error!("Failed to reload task after sync: {e}"),
+        })
+        .detach();
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {        self.selected = None;
         self.issue = None;
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
