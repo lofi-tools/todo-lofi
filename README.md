@@ -39,7 +39,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 
 #### Launching
 - `cargo run -p todo-2` — run the desktop app
-- `t2` (or `cargo watch -x "run -p todo-2"`) — run the desktop app with auto-rebuilds
+- `t2` — run the desktop app with auto-rebuilds. It watches todo-2's own sources and its in-workspace dependencies, so editing the web packages does not restart the Rust build (see `flake.nix` for the watched paths)
 #### Testing
 - `ccheck` — cargo check all workspace packages (todo-2, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)

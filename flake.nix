@@ -93,7 +93,25 @@
             # Dev loop: run the raw binary under cargo-watch so logs stream to
             # this terminal and file access keeps the shell's TCC identity
             # (a bundled launch prompts for Documents/Music/Photos instead).
-            t2 = ''cargo watch -x "run -p todo-2"'';
+            #
+            # The watched paths are listed one by one, and passing any `-w`
+            # turns off cargo-watch's own local-dependency discovery. Watching
+            # the repository instead would let the pnpm/Astro side wake the
+            # Rust build on every `node_modules`, `styled-system` or `dist`
+            # write. These are the crates in todo-2's closure, at directory
+            # granularity so a crate's embedded assets (`assets/icons`, reached
+            # by `include_bytes!`) and its migrations (`toasty/migrations`,
+            # reached by `include_dir!`) rebuild too — neither is a `.rs` file.
+            # Add a line here when todo-2 gains an in-workspace dependency.
+            t2 = ''cargo watch \
+              -w apps/todo-2 \
+              -w libs/storage \
+              -w libs/acp-client \
+              -w libs/gpui-tokio \
+              -w libs/derive_entity_id \
+              -w Cargo.toml \
+              -w Cargo.lock \
+              -x "run -p todo-2"'';
 
             # Assemble the macOS bundle (icon, Info.plist, signing,
             # de-quarantine) without launching it. Kept for CI release builds;
