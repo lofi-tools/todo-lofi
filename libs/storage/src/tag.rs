@@ -1749,6 +1749,29 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_task_created_in_subtag_view_inherits_parent_tags() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+
+        let parent = storage.create_tag("todo-lofi").await?;
+        let child = storage.create_tag("bugs").await?;
+        storage.add_tag_implication(child.id, parent.id).await?;
+
+        // The app tags a task created in a subtag view with the subtag only;
+        // the parent tags must come through inference.
+        let task = storage
+            .create_task(Task::create().title("Crash on launch"))
+            .await?;
+        storage.assign_tag_to_task(task.id, &child.name).await?;
+
+        let tasks = storage.list_tasks_by_tag(child.id).await?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].direct_tags, vec![child.label()]);
+        assert!(tasks[0].inferred_tags.contains(&parent.label()));
+
+        Ok(())
+    }
+
     /// Deleting a parent must take its edges with it in both directions.
     /// Otherwise the placed child is neither top-level (it still appears as an
     /// implier) nor rendered (its parent is gone), so it vanishes from the nav

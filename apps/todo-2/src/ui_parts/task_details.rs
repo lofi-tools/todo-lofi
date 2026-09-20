@@ -5641,6 +5641,48 @@ fn metadata_chip(label: String, text: u32) -> Div {
         .child(label)
 }
 
+/// One tag in the details pane's tags row. Directly-assigned tags draw
+/// normally; tags that are only inferred (implied through the tag DAG, or
+/// inherited from an ancestor task) draw grayed out. The editor never sees
+/// the inferred ones — it edits direct tags only.
+struct DetailsTagRow {
+    label: String,
+    is_project: bool,
+    is_inferred: bool,
+}
+
+/// Direct tags first, then the inferred-only ones (sorted, so the grayed
+/// tail does not reshuffle between reloads which return rows unordered).
+fn details_tag_rows(
+    direct_tags: &[String],
+    inferred_tags: &[String],
+    project_tags: &std::collections::HashSet<String>,
+) -> Vec<DetailsTagRow> {
+    let mut rows: Vec<DetailsTagRow> = direct_tags
+        .iter()
+        .map(|label| DetailsTagRow {
+            label: label.clone(),
+            is_project: project_tags.contains(label),
+            is_inferred: false,
+        })
+        .collect();
+    let mut inferred: Vec<&String> = inferred_tags
+        .iter()
+        .filter(|label| {
+            !direct_tags
+                .iter()
+                .any(|direct| direct.eq_ignore_ascii_case(label))
+        })
+        .collect();
+    inferred.sort();
+    rows.extend(inferred.into_iter().map(|label| DetailsTagRow {
+        label: label.clone(),
+        is_project: project_tags.contains(label),
+        is_inferred: true,
+    }));
+    rows
+}
+
 impl Render for TaskDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
@@ -5798,14 +5840,18 @@ impl Render for TaskDetails {
                             ),
                     );
                 } else {
+                    let rows =
+                        details_tag_rows(&task.direct_tags, &task.inferred_tags, &self.project_tags);
+                    let has_rows = !rows.is_empty();
                     header = header.child(
                         div()
                             .h_flex()
                             .gap_1()
                             .flex_wrap()
                             .items_center()
-                            .children(task.leaf_tags.iter().enumerate().map(|(index, tag)| {
-                                tag_chip(tag, self.project_tags.contains(tag))
+                            .children(rows.iter().enumerate().map(|(index, row)| {
+                                tag_chip(&row.label, row.is_project)
+                                    .when(row.is_inferred, |this| this.opacity(0.55))
                                     .id(("details-tag", index))
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))
@@ -5836,10 +5882,10 @@ impl Render for TaskDetails {
                                     .text_color(rgb(0xa3a3a3))
                                     .cursor_pointer()
                                     .hover(|this| this.bg(rgb(0x333333)))
-                                    .child(if task.leaf_tags.is_empty() {
-                                        "+ tags"
-                                    } else {
+                                    .child(if has_rows {
                                         "+"
+                                    } else {
+                                        "+ tags"
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.request_begin_field(
@@ -6256,6 +6302,72 @@ mod tag_match_tests {
         let scattered = rank_tag("wk", "work").unwrap();
         assert!(prefix < scattered);
         assert!(rank_tag("", "work").is_some());
+    }
+}
+
+#[cfg(test)]
+mod tags_row_tests {
+    use super::details_tag_rows;
+    use std::collections::HashSet;
+
+    fn labels(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// A task tagged with a subtag shows the subtag as a direct tag and its
+    /// implied parent grayed out, after it.
+    #[test]
+    fn direct_tag_then_implied_parent() {
+        let rows = details_tag_rows(
+            &labels(&["bugs"]),
+            &labels(&["todo-lofi", "bugs"]),
+            &HashSet::new(),
+        );
+        let rendered: Vec<(String, bool)> = rows
+            .iter()
+            .map(|row| (row.label.clone(), row.is_inferred))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ("bugs".to_string(), false),
+                ("todo-lofi".to_string(), true),
+            ]
+        );
+    }
+
+    /// The inferred-only tail is sorted and matched case-insensitively
+    /// against the direct tags, so a direct tag never shows twice.
+    #[test]
+    fn inferred_tail_is_sorted_and_deduplicated() {
+        let rows = details_tag_rows(
+            &labels(&["Bugs"]),
+            &labels(&["todo-lofi", "bugs", "area"]),
+            &HashSet::new(),
+        );
+        let rendered: Vec<(String, bool)> = rows
+            .iter()
+            .map(|row| (row.label.clone(), row.is_inferred))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ("Bugs".to_string(), false),
+                ("area".to_string(), true),
+                ("todo-lofi".to_string(), true),
+            ]
+        );
+    }
+
+    /// A project tag keeps its folder icon wherever it appears.
+    #[test]
+    fn project_tags_marked() {
+        let project_tags: HashSet<String> = ["about-me".to_string()].into_iter().collect();
+        let rows =
+            details_tag_rows(&labels(&["about-me"]), &labels(&["about-me"]), &project_tags);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_project);
+        assert!(!rows[0].is_inferred);
     }
 }
 
