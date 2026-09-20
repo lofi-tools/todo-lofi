@@ -1,63 +1,76 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
 
+interface Section {
+  heading: string
+  pages: [label: string, path: string][]
+}
+
+interface Guide {
+  heading: string
+  href: string
+  sections: Section[]
+}
+
 /** Mirrors `src/data/docs.ts`: the tabs, and each guide's headed sections. */
-const guides = [
+const guides: Guide[] = [
   {
     heading: 'User guide',
-    href: '/',
+    href: '/docs',
     sections: [
       {
         heading: 'Getting started',
         pages: [
-          ['Overview', '/'],
-          ['Install and run', '/install'],
-          ['Feature status', '/status'],
+          ['Overview', '/docs'],
+          ['Install and run', '/docs/install'],
+          ['Feature status', '/docs/status'],
         ],
       },
       {
         heading: 'Tasklist',
         pages: [
-          ['Tasks, tags, and projects', '/tasks'],
-          ['Repeat and scheduling', '/repeats'],
-          ['Semi-automated workflows', '/workflows'],
+          ['Tasks, tags, and projects', '/docs/tasks'],
+          ['Repeat and scheduling', '/docs/repeats'],
+          ['Semi-automated workflows', '/docs/workflows'],
         ],
       },
       {
         heading: 'Integrations',
         pages: [
-          ['Integrated AI agent', '/agent'],
-          ['Two-way sync', '/sync'],
-          ['Mini-apps and extensions', '/mini-apps'],
+          ['Integrated AI agent', '/docs/agent'],
+          ['Two-way sync', '/docs/sync'],
+          ['Mini-apps and extensions', '/docs/mini-apps'],
         ],
       },
       {
         heading: 'Configuration',
-        pages: [['Configuration', '/configuration']],
+        pages: [['Configuration', '/docs/configuration']],
       },
     ],
   },
   {
     heading: 'Contributor guide',
-    href: '/contributor',
+    href: '/docs/contributor',
     sections: [
       {
         heading: 'Contributor guide',
         pages: [
-          ['Overview', '/contributor'],
-          ['Development setup', '/contributor/development'],
-          ['Architecture', '/contributor/architecture'],
-          ['Integrations', '/contributor/integrations'],
-          ['Contributing', '/contributor/contributing'],
-          ['License', '/contributor/license'],
+          ['Overview', '/docs/contributor'],
+          ['Development setup', '/docs/contributor/development'],
+          ['Architecture', '/docs/contributor/architecture'],
+          ['Integrations', '/docs/contributor/integrations'],
+          ['Contributing', '/docs/contributor/contributing'],
+          ['License', '/docs/contributor/license'],
         ],
       },
     ],
   },
-] as const
+]
 
-const pagesOf = (guide: (typeof guides)[number]) => guide.sections.flatMap((section) => section.pages)
-const routes = guides.flatMap(pagesOf)
+const pagesOf = (guide: Guide) => guide.sections.flatMap((section) => section.pages)
+const docsRoutes = guides.flatMap(pagesOf)
+/** The landing page is not part of either guide, but is still a page we ship. */
+const routes: [label: string, path: string][] = [['Home', '/'], ...docsRoutes]
 
 test.describe('docs routes', () => {
   // Both guides have a page called Overview, so the guide is part of the title.
@@ -79,8 +92,47 @@ test.describe('docs routes', () => {
   }
 })
 
+test('every documented page lives under /docs', () => {
+  for (const [, path] of docsRoutes) expect(path.startsWith('/docs')).toBe(true)
+})
+
+test.describe('landing page', () => {
+  test('renders without console errors and marks / as current', async ({ page }) => {
+    const errors: string[] = []
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text())
+    })
+    page.on('pageerror', (error) => errors.push(error.message))
+
+    const response = await page.goto('/')
+    expect(response?.ok()).toBeTruthy()
+    await expect(page.locator('h1').first()).toBeVisible()
+    await expect(page.locator('header nav[aria-label="Main"] a[aria-current="page"]')).toHaveText(
+      /todo-lofi/,
+    )
+    expect(errors).toEqual([])
+  })
+
+  test('links into both guides, and every docs route is reachable from it', async ({ page }) => {
+    const main = page.locator('main')
+    await page.goto('/')
+
+    await expect(main.getByRole('link', { name: /read the docs/i }).first()).toBeVisible()
+    for (const [, path] of docsRoutes) {
+      await expect(
+        page.locator(`a[href="${path}"]`).first(),
+        `${path} should be linked from the landing page`,
+      ).toHaveCount(1)
+    }
+
+    await main.getByRole('link', { name: /read the docs/i }).first().click()
+    await expect(page).toHaveURL(/\/docs\/?$/)
+    await expect(page.locator('h1').first()).toHaveText('Overview')
+  })
+})
+
 test('the design system stylesheet is applied', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/docs')
   const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor)
   // Must not fall back to the browser default (transparent).
   expect(background).not.toBe('rgba(0, 0, 0, 0)')
@@ -93,7 +145,7 @@ test('the design system stylesheet is applied', async ({ page }) => {
 })
 
 test('theme toggle switches to light and persists', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/docs')
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
 
   await page.getByRole('button', { name: /switch to light theme/i }).first().click()
@@ -106,7 +158,7 @@ test('theme toggle switches to light and persists', async ({ page }) => {
 test('the header has one tab per guide and no page-level entries', async ({ page }) => {
   const header = page.locator('header nav[aria-label="Main"]')
 
-  await page.goto('/tasks')
+  await page.goto('/docs/tasks')
   await expect(header.getByRole('link', { name: 'User guide' })).toHaveAttribute(
     'aria-current',
     'true',
@@ -117,7 +169,7 @@ test('the header has one tab per guide and no page-level entries', async ({ page
   )
   await expect(header.getByRole('link', { name: 'Configuration' })).toHaveCount(0)
 
-  await page.goto('/contributor/architecture')
+  await page.goto('/docs/contributor/architecture')
   await expect(header.getByRole('link', { name: 'Contributor guide' })).toHaveAttribute(
     'aria-current',
     'true',
@@ -132,6 +184,7 @@ test('the left nav nests pages under section headings, scoped to the guide', asy
     await expect(sidebar.locator('h2')).toHaveText(guide.sections.map((section) => section.heading))
     await expect(sidebar.locator('a')).toHaveText(pagesOf(guide).map(([label]) => label))
 
+
     // No leakage from the other guide, and the landing page is marked active.
     await expect(sidebar.locator('a', { hasText: 'License' })).toHaveCount(
       guide.heading === 'Contributor guide' ? 1 : 0,
@@ -143,14 +196,14 @@ test('the left nav nests pages under section headings, scoped to the guide', asy
 })
 
 test('the pager moves within a guide, across sections', async ({ page }) => {
-  await page.goto('/status')
+  await page.goto('/docs/status')
   await expect(page.locator('nav[aria-label="Documentation"] a[aria-current="page"]')).toHaveText(
     'Feature status',
   )
 
   // Last page of "Getting started" → first page of "Tasklist".
   await page.getByRole('link', { name: /next/i }).first().click()
-  await expect(page).toHaveURL(/\/tasks\/?$/)
+  await expect(page).toHaveURL(/\/docs\/tasks\/?$/)
   await expect(page.locator('h1').first()).toHaveText('Tasks, tags, and projects')
 })
 
@@ -180,7 +233,7 @@ test('the layout holds from mobile to desktop without horizontal overflow', asyn
 
 test('narrow viewports get guide tabs and the left nav collapses', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/contributor/development')
+  await page.goto('/docs/contributor/development')
   await expect(page.locator('nav[aria-label="Documentation"]')).toBeVisible()
   await expect(page.locator('nav[aria-label="On this page"]')).toBeVisible()
   await expect(page.locator('nav[aria-label="Guides"]')).toBeHidden()
@@ -194,7 +247,7 @@ test('narrow viewports get guide tabs and the left nav collapses', async ({ page
   await expect(sections.locator('a')).toHaveText(pagesOf(guides[1]).map(([label]) => label))
 })
 
-test('accessibility: WCAG 2.1 AA on every docs route', async ({ page }) => {
+test('accessibility: WCAG 2.1 AA on every route', async ({ page }) => {
   for (const [, path] of routes) {
     await page.goto(path)
     const results = await new AxeBuilder({ page })

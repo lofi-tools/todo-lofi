@@ -3,7 +3,10 @@
  * two guides (one per audience), and each guide's left nav nests its pages
  * under section headings. One source of truth for the tabs, the left nav, and
  * the previous/next links, so a new page is one entry here and one file under
- * `src/pages`.
+ * `src/pages/docs`.
+ *
+ * Every docs route lives under `/docs`; `/` is the landing page and belongs to
+ * no guide.
  */
 
 export interface DocLink {
@@ -32,39 +35,42 @@ export interface DocGuide {
 
 export const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
 
+/** Where the docs start. The landing page and the header's brand link use it. */
+export const DOCS_ROOT = '/docs'
+
 export const docGuides: DocGuide[] = [
   {
     heading: 'User guide',
     summary: 'Install the app, use it, and configure it.',
-    href: '/',
+    href: '/docs',
     sections: [
       {
         heading: 'Getting started',
         items: [
-          { label: 'Overview', href: '/' },
-          { label: 'Install and run', href: '/install' },
-          { label: 'Feature status', href: '/status' },
+          { label: 'Overview', href: '/docs' },
+          { label: 'Install and run', href: '/docs/install' },
+          { label: 'Feature status', href: '/docs/status' },
         ],
       },
       {
         heading: 'Tasklist',
         items: [
-          { label: 'Tasks, tags, and projects', href: '/tasks' },
-          { label: 'Repeat and scheduling', href: '/repeats' },
-          { label: 'Semi-automated workflows', href: '/workflows' },
+          { label: 'Tasks, tags, and projects', href: '/docs/tasks' },
+          { label: 'Repeat and scheduling', href: '/docs/repeats' },
+          { label: 'Semi-automated workflows', href: '/docs/workflows' },
         ],
       },
       {
         heading: 'Integrations',
         items: [
-          { label: 'Integrated AI agent', href: '/agent' },
-          { label: 'Two-way sync', href: '/sync' },
-          { label: 'Mini-apps and extensions', href: '/mini-apps' },
+          { label: 'Integrated AI agent', href: '/docs/agent' },
+          { label: 'Two-way sync', href: '/docs/sync' },
+          { label: 'Mini-apps and extensions', href: '/docs/mini-apps' },
         ],
       },
       {
         heading: 'Configuration',
-        items: [{ label: 'Configuration', href: '/configuration' }],
+        items: [{ label: 'Configuration', href: '/docs/configuration' }],
       },
     ],
   },
@@ -73,17 +79,17 @@ export const docGuides: DocGuide[] = [
     // the guide name itself.
     heading: 'Contributor guide',
     summary: 'How it works, and how to work on it.',
-    href: '/contributor',
+    href: '/docs/contributor',
     sections: [
       {
         heading: 'Contributor guide',
         items: [
-          { label: 'Overview', href: '/contributor' },
-          { label: 'Development setup', href: '/contributor/development' },
-          { label: 'Architecture', href: '/contributor/architecture' },
-          { label: 'Integrations', href: '/contributor/integrations' },
-          { label: 'Contributing', href: '/contributor/contributing' },
-          { label: 'License', href: '/contributor/license' },
+          { label: 'Overview', href: '/docs/contributor' },
+          { label: 'Development setup', href: '/docs/contributor/development' },
+          { label: 'Architecture', href: '/docs/contributor/architecture' },
+          { label: 'Integrations', href: '/docs/contributor/integrations' },
+          { label: 'Contributing', href: '/docs/contributor/contributing' },
+          { label: 'License', href: '/docs/contributor/license' },
         ],
       },
     ],
@@ -131,7 +137,6 @@ export function pageNeighbours(pathname: string): { previous?: DocLink; next?: D
 /** Where the current route's source page lives in the repository. */
 export function pageSourceUrl(pathname: string): string {
   const current = currentPath(pathname)
-  if (current === '/') return `${REPO_URL}/blob/main/apps/docs-web/src/pages/index.astro`
   // A guide's landing page is the index of its directory.
   const isLanding = docGuides.some((guide) => guide.href === current)
   const file = isLanding ? `${current}/index` : current

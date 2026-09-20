@@ -1,217 +1,264 @@
 ---
 import { css } from 'styled-system/css'
-import Docs from '../layouts/Docs.astro'
-import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import Base from '../layouts/Base.astro'
+import SiteHeader from '../components/SiteHeader.astro'
+import DocsFooter from '../components/DocsFooter.astro'
 import { Badge } from 'web-design-system/components'
-import screenshot from '../../../../docs/img/Screenshot 2026-09-19 at 21.20.15.png'
+import AnnouncementPill from 'web-design-system/astro/marketing/AnnouncementPill.astro'
+import Hero from 'web-design-system/astro/marketing/Hero.astro'
+import LogoCloud from 'web-design-system/astro/marketing/LogoCloud.astro'
+import StatsBand from 'web-design-system/astro/marketing/StatsBand.astro'
+import SectionHeading from 'web-design-system/astro/marketing/SectionHeading.astro'
+import FeatureSection from 'web-design-system/astro/marketing/FeatureSection.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import IssueRow from 'web-design-system/astro/product/IssueRow.astro'
+import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
+import Timeline from 'web-design-system/astro/product/Timeline.astro'
+import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
+import screenshot from '../assets/app.png'
 
-const toc = [
-  { label: 'What it is', href: '#what-it-is' },
-  { label: 'Highlights', href: '#highlights' },
-  { label: 'How the pieces fit', href: '#how-the-pieces-fit' },
-  { label: 'Where to start', href: '#where-to-start' },
-]
+import { agentThread, codingColumns, repeatRows, taskRows } from '../../data/landing'
 
-const highlights = [
+const guides = [
   {
-    title: 'Integrated AI agent',
-    href: '/agent',
-    status: 'Available',
-    tone: 'success',
-    body: 'A docked agent pane for doing work, not just answering questions: it can read and change your lists, set up repeats, and run a task through a whole workflow.',
-  },
-  {
-    title: 'Tags, projects, and areas',
-    href: '/tasks',
-    status: 'Available',
-    tone: 'success',
-    body: 'Group and filter tasks with nested tags, organize them into a tree of projects and areas, and reorder by drag and drop.',
-  },
-  {
-    title: 'Repeat and scheduling',
-    href: '/repeats',
-    status: 'Available',
-    tone: 'success',
-    body: 'Recurring tasks are configured in a dedicated picker instead of a syntax you have to remember.',
-  },
-  {
-    title: 'Semi-automated workflows',
-    href: '/workflows',
-    status: 'Available',
-    tone: 'success',
-    body: 'A task can carry a workflow. Coding tasks, for example, move through interview, spec, coding, review, and merge.',
-  },
-  {
-    title: 'Two-way sync',
-    href: '/sync',
-    status: 'Todoist · GitHub preview',
-    tone: 'accent',
-    body: 'Keep working in the task app you already use. Todoist sync is the current target; GitHub issues and projects are in preview.',
-  },
-  {
-    title: 'Mini-apps (extensions)',
-    href: '/mini-apps',
-    status: 'Some coming soon',
-    tone: 'warning',
-    body: 'Small purpose-built panes: travel checklist templates ship today; message follow-ups, birthday reminders, and job application tracking are planned.',
-  },
-] as const
-
-const audiences = [
-  {
-    heading: 'Using the app',
-    body: 'You want to run todo-lofi and get your tasks into it.',
+    heading: 'User guide',
+    tone: 'accent' as const,
+    badge: 'Using the app',
+    body: 'Install it, get your tasks in, and set up the parts that need credentials.',
+    href: '/docs',
+    cta: 'Open the user guide',
     links: [
-      { title: 'Install and run', href: '/install', body: 'What you need, and how to run it from a checkout or build a macOS app.' },
-      { title: 'Tasks, tags, and projects', href: '/tasks', body: 'How the tree works, and what a task carries besides a title.' },
-      { title: 'Feature status', href: '/status', body: 'What is available, what is in preview, and what is only planned.' },
-      { title: 'Configuration', href: '/configuration', body: 'In-app settings, model providers, and connecting Todoist or GitHub.' },
+      { label: 'Install and run', href: '/docs/install' },
+      { label: 'Tasks, tags, and projects', href: '/docs/tasks' },
+      { label: 'Repeat and scheduling', href: '/docs/repeats' },
+      { label: 'Configuration', href: '/docs/configuration' },
     ],
   },
   {
-    heading: 'Working on it',
-    body: 'You want to build, extend, or review the code.',
+    heading: 'Contributor guide',
+    tone: 'success' as const,
+    badge: 'Working on it',
+    body: 'How the workspace is put together, how to run it, and what a change has to pass.',
+    href: '/docs/contributor',
+    cta: 'Open the contributor guide',
     links: [
-      { title: 'Contributor guide', href: '/contributor', body: 'The whole guide: setup, architecture, integrations, checks, and the license.' },
-      { title: 'Development setup', href: '/contributor/development', body: 'Nix and direnv, the dev shell commands, and the web packages.' },
-      { title: 'Architecture', href: '/contributor/architecture', body: 'The workspace layout, the persistence layer, and where each feature lives.' },
-      { title: 'Contributing', href: '/contributor/contributing', body: 'Checks to run, conventions to follow, and how specs drive changes.' },
+      { label: 'Development setup', href: '/docs/contributor/development' },
+      { label: 'Architecture', href: '/docs/contributor/architecture' },
+      { label: 'Integrations', href: '/docs/contributor/integrations' },
+      { label: 'Contributing', href: '/docs/contributor/contributing' },
     ],
   },
 ]
+
+const linkStyle = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  h: '10',
+  px: '5',
+  borderRadius: 'sm',
+  fontSize: 'md',
+  fontWeight: 'medium',
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const ctaSecondary = css({
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  color: 'fg.default',
+  _hover: { bg: 'surface.hover' },
+})
 ---
 
-<Docs title="Overview" description="todo-lofi is a local-first task manager for macOS and Linux, built on GPUI. Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow — all running offline." toc={toc}>
-  <h2 id="what-it-is">What it is</h2>
-  <p>
-    <strong>todo-lofi</strong> keeps your tasks in a local SQLite database and renders them with
-    <a href="https://github.com/zed-industries/zed/tree/main/crates/gpui">GPUI</a>, the GPU-accelerated
-    UI framework behind Zed. <code>apps/todo-2</code> is the desktop app; everything it needs to persist
-    lives in <code>libs/storage</code>.
-  </p>
-  <p>
-    The app runs offline by default. Network features are opt-in: Todoist sync, GitHub issues, and the
-    agent's model providers each bring their own credentials and never gate the core task loop.
-  </p>
+<Base
+  title="todo-lofi"
+  suffix="a local-first task manager"
+  description="todo-lofi is a local-first task manager for macOS and Linux, built on GPUI. Nested tags and projects, repeating tasks, an embedded AI agent, and Todoist sync when you want it."
+>
+  <SiteHeader />
 
-  <figure class={css({ m: '0', my: '6' })}>
-    <img
-      src={screenshot.src}
-      width={screenshot.width}
-      height={screenshot.height}
-      alt="The todo-lofi desktop app: a task list on the left, task details in the middle, and the agent pane on the right."
-      class={css({
-        w: 'full',
-        h: 'auto',
-        borderRadius: 'lg',
-        borderWidth: 'hairline',
-        borderStyle: 'solid',
-        borderColor: 'border',
-        bg: 'surface.subtle',
-      })}
+  <main id="content">
+    <Hero
+      title="Your tasks, on your machine"
+      subtitle="todo-lofi keeps a local database, renders it with the same GPU-accelerated framework as Zed, and stays useful with no network at all. The agent pane, the workflows, and the sync are all opt-in."
+      primaryCta={{ label: 'Read the docs', href: '/docs' }}
+      secondaryCta={{ label: 'Install and run', href: '/docs/install' }}
+    >
+      <AnnouncementPill slot="pill" label="Documentation for users and contributors" href="/docs" />
+
+      <div class={css({ maxW: '980px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <img
+          src={screenshot.src}
+          width={screenshot.width}
+          height={screenshot.height}
+          alt="The todo-lofi desktop app: a task list on the left, task details in the middle, and the agent pane on the right."
+          class={css({
+            w: 'full',
+            h: 'auto',
+            borderRadius: 'lg',
+            borderWidth: 'hairline',
+            borderStyle: 'solid',
+            borderColor: 'border',
+            bg: 'surface.subtle',
+          })}
+        />
+      </div>
+    </Hero>
+
+    <LogoCloud title="Built with" logos={['GPUI', 'Rust', 'SQLite', 'MCP', 'Astro', 'Panda CSS']} />
+
+    <StatsBand
+      value="Local first"
+      label="Tasks, repeats, and workflows live in a SQLite file you own. Network features — Todoist, GitHub, model providers — each bring their own credentials and never gate the core loop."
+      linkLabel="How the storage layer works"
+      linkHref="/docs/contributor/architecture"
     />
-    <figcaption class={css({ mt: '2', fontSize: 'xs', color: 'fg.subtle' })}>
-      The desktop app: task list, task details, and the agent pane.
-    </figcaption>
-  </figure>
 
-  <h2 id="highlights">Highlights</h2>
-  <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
-    {
-      highlights.map((highlight) => (
-        <li>
-          <a
-            href={highlight.href}
-            class={css({
-              display: 'block',
-              p: '5',
-              borderRadius: 'lg',
-              borderWidth: 'hairline',
-              borderStyle: 'solid',
-              borderColor: 'border',
-              bg: 'surface.subtle',
-              _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
-              _focusVisible: { outline: 'none', boxShadow: 'focus' },
-              transitionProperty: 'border-color, background-color',
-              transitionDuration: 'fast',
-            })}
-          >
-            <div class={css({ display: 'flex', alignItems: 'center', gap: '2', mb: '2', flexWrap: 'wrap' })}>
-              <span class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default' })}>
-                {highlight.title}
-              </span>
-              <Badge tone={highlight.tone} variant="subtle">{highlight.status}</Badge>
-            </div>
-            <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
-              {highlight.body}
-            </p>
-          </a>
-        </li>
-      ))
-    }
-  </ul>
+    <div class={css({ mt: { base: '8', md: '12' } })}>
+      <SectionHeading
+        eyebrow="What it does"
+        title="Work that has a shape, kept in one place"
+        description="Four things the app does beyond a list of checkboxes. Each one has a page in the user guide."
+      />
+    </div>
 
-  <h2 id="how-the-pieces-fit">How the pieces fit</h2>
-  <p>
-    The repository is a Cargo workspace plus two web surfaces that share a design system. The Rust side
-    owns the app, the data, and the agent; the web side owns the docs you are reading and the component
-    showcase.
-  </p>
-  <ul>
-    <li><code>apps/todo-2</code> — the GPUI desktop application.</li>
-    <li><code>apps/agent-cli</code> — the terminal agent, an ACP server, and the provider registry.</li>
-    <li><code>libs/storage</code> — SQLite persistence, migrations, and the sync/workflow tables.</li>
-    <li><code>libs/web-design-system</code> — the design system this site is built with.</li>
-  </ul>
-  <p>
-    <a href="/contributor/architecture">Architecture</a> walks through each crate and how they depend on
-    one another.
-  </p>
+    <FeatureSection
+      eyebrow="Tasklist"
+      title="Nested tags, projects, and areas"
+      description="Tasks, tags, and projects are ordinary rows you can move, nest, and filter. A task carries a deadline, importance and urgency, subtasks, and blocking links that the list resolves into what you can actually do next."
+      href="/docs/tasks"
+      linkLabel="Read about the task list"
+    >
+      <div class={css({ display: 'flex', flexDirection: 'column', gap: '2', p: '4' })}>
+        {taskRows.map((issue) => <IssueRow issue={issue} />)}
+      </div>
+    </FeatureSection>
 
-  <Callout tone="tip" title="About this site">
-    This documentation site lives in <code>apps/docs-web</code> and is built with the repository's own
-    design system — Astro, SolidJS, Panda CSS, and Ark UI. Run it with <code>pnpm dev</code> from
-    the repository root; <code>demos/design-system-showcase</code> is the component gallery behind it.
-  </Callout>
+    <FeatureSection
+      eyebrow="Repeat and scheduling"
+      title="Repeats you configure, not syntax you memorise"
+      description="Recurring tasks are set up in a picker — how often, which weekdays or month day, and what time the occurrence becomes doable. That last part matters, because a task that is not due yet stays out of the way until it is."
+      href="/docs/repeats"
+      linkLabel="Read about repeats"
+      reverse
+    >
+      <Timeline months={['Mon', 'Tue', 'Wed', 'Thu', 'Fri']} rows={repeatRows} />
+    </FeatureSection>
 
-  <h2 id="where-to-start">Where to start</h2>
-  {
-    audiences.map((audience) => (
-      <section class={css({ mb: '8' })}>
-        <h3 class={css({ textStyle: 'h4', color: 'fg.default', mb: '1' })}>{audience.heading}</h3>
-        <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '0', mb: '3' })}>{audience.body}</p>
-        <ul class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', listStyle: 'none', p: '0', m: '0' })}>
+    <FeatureSection
+      eyebrow="AI agent"
+      title="An agent that works in your lists"
+      description="The agent pane is docked next to the tasks, not in a separate window. It can set up repeats, add and reshape tasks, and drive a workflow — and you can watch the tools it calls and the files it touches."
+      href="/docs/agent"
+      linkLabel="Read about the agent"
+    >
+      <ChatThread messages={agentThread} />
+    </FeatureSection>
+
+    <FeatureSection
+      eyebrow="Coding workflow"
+      title="Coding work moves through real stages"
+      description="A task can carry a workflow whose stages have their own state — interview, spec, implement, review, merge. The agent does the work inside a stage; you decide when the stage is finished."
+      href="/docs/workflows"
+      linkLabel="Read about workflows"
+      reverse
+    >
+      <KanbanBoard columns={codingColumns} />
+    </FeatureSection>
+
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <SectionHeading
+          eyebrow="Documentation"
+          title="Two guides, one for each job"
+          description="Everything under /docs. Start with the one that matches what you are here to do."
+        />
+
+        <div
+          class={css({
+            display: 'grid',
+            gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+            gap: '4',
+            mt: '10',
+          })}
+        >
           {
-            audience.links.map((item) => (
-              <li>
-                <a
-                  href={item.href}
+            guides.map((guide) => (
+              <div
+                class={css({
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4',
+                  p: '6',
+                  borderRadius: 'lg',
+                  borderWidth: 'hairline',
+                  borderStyle: 'solid',
+                  borderColor: 'border',
+                  bg: 'surface.subtle',
+                })}
+              >
+                <div class={css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })}>
+                  <span class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
+                    {guide.heading}
+                  </span>
+                  <Badge tone={guide.tone} variant="subtle">{guide.badge}</Badge>
+                </div>
+                <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
+                  {guide.body}
+                </p>
+                <ul
                   class={css({
-                    display: 'block',
-                    p: '5',
-                    borderRadius: 'lg',
-                    borderWidth: 'hairline',
-                    borderStyle: 'solid',
-                    borderColor: 'border',
-                    bg: 'surface.subtle',
-                    _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
-                    _focusVisible: { outline: 'none', boxShadow: 'focus' },
-                    transitionProperty: 'border-color, background-color',
-                    transitionDuration: 'fast',
+                    listStyle: 'none',
+                    m: '0',
+                    p: '0',
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '2',
                   })}
                 >
-                  <span class={css({ display: 'block', fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>
-                    {item.title}
-                  </span>
-                  <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
-                    {item.body}
-                  </span>
-                </a>
-              </li>
+                  {
+                    guide.links.map((link) => (
+                      <li>
+                        <a
+                          href={link.href}
+                          class={css({
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            h: '8',
+                            px: '3',
+                            borderRadius: 'full',
+                            borderWidth: 'hairline',
+                            borderStyle: 'solid',
+                            borderColor: 'border',
+                            bg: 'canvas',
+                            fontSize: 'sm',
+                            color: 'fg.muted',
+                            _hover: { color: 'fg.default', borderColor: 'border.strong' },
+                            _focusVisible: { outline: 'none', boxShadow: 'focus' },
+                          })}
+                        >
+                          {link.label}
+                        </a>
+                      </li>
+                    ))
+                  }
+                </ul>
+                <div class={css({ mt: 'auto' })}>
+                  <a href={guide.href} class={`${linkStyle} ${ctaSecondary}`}>{guide.cta}</a>
+                </div>
+              </div>
             ))
           }
-        </ul>
-      </section>
-    ))
-  }
-</Docs>
+        </div>
+      </div>
+    </section>
+
+    <CTASection
+      title="Start with the guide that fits"
+      primaryCta={{ label: 'Read the user guide', href: '/docs' }}
+      secondaryCta={{ label: 'Read the contributor guide', href: '/docs/contributor' }}
+    />
+  </main>
+
+  <DocsFooter />
+</Base>

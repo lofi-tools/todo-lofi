@@ -1,9 +1,9 @@
 ---
-import Docs from '../layouts/Docs.astro'
+import Docs from '../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
 import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
-import TableScroll from '../components/TableScroll.astro'
-import { REPO_URL } from '../data/docs'
+import TableScroll from '../../components/TableScroll.astro'
+import { REPO_URL } from '../../data/docs'
 
 const toc = [
   { label: 'What you need', href: '#what-you-need' },
@@ -59,7 +59,7 @@ const requirements = [
   </TableScroll>
   <p>
     The least fiddly path is the development shell, because it brings the toolchain and every helper
-    command with it. <a href="/contributor/development">Development setup</a> walks through installing Nix and direnv;
+    command with it. <a href="/docs/contributor/development">Development setup</a> walks through installing Nix and direnv;
     if you already have a workable Rust toolchain, you can skip it.
   </p>
 
@@ -81,13 +81,13 @@ const requirements = [
     That is also how release builds are produced, so it is the closest thing to an install today. For
     everyday development, run the raw binary instead (<code>t2</code>, or{' '}
     <code>cargo run -p todo-2</code>) — see{' '}
-    <a href="/contributor/development#command-reference">the command reference</a>.
+    <a href="/docs/contributor/development#command-reference">the command reference</a>.
   </p>
 
   <h2 id="first-launch">First launch</h2>
   <ol>
-    <li><a href="/tasks">Tasks, tags, and projects</a> — the four pages that follow cover the app itself, from the task list to the agent pane.</li>
-    <li><a href="/configuration">Configuration</a> — the in-app settings panes, plus model providers, Todoist, and GitHub credentials.</li>
+    <li><a href="/docs/tasks">Tasks, tags, and projects</a> — the four pages that follow cover the app itself, from the task list to the agent pane.</li>
+    <li><a href="/docs/configuration">Configuration</a> — the in-app settings panes, plus model providers, Todoist, and GitHub credentials.</li>
   </ol>
   <p>
     A task list works offline out of the box; sync and the agent are the parts that need credentials.

@@ -1,8 +1,8 @@
 ---
 import { css } from 'styled-system/css'
-import Docs from '../../layouts/Docs.astro'
+import Docs from '../../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
-import { docGuides, guideLinks, REPO_URL } from '../../data/docs'
+import { docGuides, guideLinks, REPO_URL } from '../../../data/docs'
 
 const toc = [
   { label: "What's in this guide", href: '#in-this-guide' },
@@ -40,7 +40,7 @@ const rules = [
 >
   <Callout tone="note" title="Here to use the app?">
     This guide is about the code. Installing, using, and configuring todo-lofi is the
-    <a href="/">User guide</a>.
+    <a href="/docs">User guide</a>.
   </Callout>
 
   <h2 id="in-this-guide">What's in this guide</h2>
@@ -109,7 +109,7 @@ const rules = [
   <p>
     The repository is also spec-driven: behavior changes get a file in <code>docs/spec/</code> first, and
     that file records the interview decisions behind the design.{' '}
-    <a href="/contributor/architecture#specs">Architecture</a> lists every spec with its status.
+    <a href="/docs/contributor/architecture#specs">Architecture</a> lists every spec with its status.
   </p>
 
   <h2 id="workspaces">Two workspaces</h2>
@@ -131,7 +131,7 @@ const rules = [
     The two are deliberately decoupled: the desktop palette lives in{' '}
     <code>apps/todo-2/src/theme.rs</code> and is not generated from the web tokens. What the web packages
     do share is class-generation settings — if they drift, the design system's components render unstyled
-    with no error. <a href="/contributor/development#web-surfaces">Development setup</a> has the detail.
+    with no error. <a href="/docs/contributor/development#web-surfaces">Development setup</a> has the detail.
   </p>
   <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
     The repository lives at <a href={REPO_URL}>{REPO_URL.replace('https://', '')}</a>.

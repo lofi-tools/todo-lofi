@@ -1,0 +1,90 @@
+---
+import { css } from 'styled-system/css'
+import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
+import { LogoMark } from 'web-design-system/icons'
+import { REPO_URL } from '../data/docs'
+
+const links = [
+  { label: 'User guide', href: '/docs' },
+  { label: 'Contributor guide', href: '/docs/contributor' },
+]
+
+const linkStyle = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  h: '8',
+  px: '3',
+  borderRadius: 'sm',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  transitionProperty: 'color, background-color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default', bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+---
+
+<header
+  class={css({
+    position: 'sticky',
+    top: '0',
+    zIndex: 'sticky',
+    w: 'full',
+    borderBottomWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    backdropFilter: 'blur(12px)',
+    backgroundColor: 'rgba(8, 9, 10, 0.72)',
+    _light: { backgroundColor: 'rgba(255, 255, 255, 0.78)' },
+  })}
+>
+  <nav
+    aria-label="Main"
+    class={css({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4',
+      h: '14',
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+    })}
+  >
+    <a
+      href="/"
+      aria-current="page"
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+        fontWeight: 'semibold',
+        letterSpacing: 'tight',
+        color: 'fg.default',
+        flexShrink: '0',
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+    >
+      <LogoMark size={18} />
+      <span>todo-lofi</span>
+    </a>
+
+    <ul
+      class={css({
+        display: { base: 'none', sm: 'flex' },
+        alignItems: 'center',
+        gap: '0.5',
+        listStyle: 'none',
+        m: '0',
+        p: '0',
+      })}
+    >
+      {links.map((link) => <li><a class={linkStyle} href={link.href}>{link.label}</a></li>)}
+    </ul>
+
+    <div class={css({ flex: '1' })} />
+
+    <a class={linkStyle} href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
+    <ThemeToggle />
+  </nav>
+</header>

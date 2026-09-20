@@ -1,8 +1,8 @@
 ---
-import Docs from '../../layouts/Docs.astro'
+import Docs from '../../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
 import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
-import TableScroll from '../../components/TableScroll.astro'
+import TableScroll from '../../../components/TableScroll.astro'
 import { Badge } from 'web-design-system/components'
 
 const toc = [
@@ -45,7 +45,7 @@ const modules = [
 >
   <Callout tone="note" title="Setting this up for yourself">
     If you want to connect an account or pick a model rather than read the implementation, start at
-    <a href="/configuration">Configuration</a>. This page is the internals.
+    <a href="/docs/configuration">Configuration</a>. This page is the internals.
   </Callout>
 
   <h2 id="sync">How sync works</h2>
@@ -142,7 +142,7 @@ const modules = [
     </table>
   </TableScroll>
   <p>
-    <a href="/contributor/architecture">Architecture</a> covers the crates themselves, and the
-    <a href="/contributor/architecture#specs">spec table</a> lists every spec with its status.
+    <a href="/docs/contributor/architecture">Architecture</a> covers the crates themselves, and the
+    <a href="/docs/contributor/architecture#specs">spec table</a> lists every spec with its status.
   </p>
 </Docs>

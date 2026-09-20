@@ -9,6 +9,14 @@
     },
     "types": ["astro/client"]
   },
-  "include": [".astro/types.d.ts", "src", "styled-system", "panda.config.ts"],
+  "include": [
+    ".astro/types.d.ts",
+    "src",
+    "data",
+    "tests",
+    "styled-system",
+    "panda.config.ts",
+    "playwright.config.ts"
+  ],
   "exclude": ["dist"]
 }

@@ -101,8 +101,11 @@ todo-lofi/
 
 What the app does, how to run it, how the workspace is put together, and the
 integrations it talks to — built with the in-repo web design system. Run it with
-`pnpm dev`. The [deepwiki mirror](https://deepwiki.com/lofi-tools/todo-lofi)
-remains available as a temporary fallback.
+`pnpm dev`: `/` is the landing page, and every page of documentation lives under
+`/docs`, split into a user guide (`/docs`) and a contributor guide
+(`/docs/contributor`). The
+[deepwiki mirror](https://deepwiki.com/lofi-tools/todo-lofi) remains available as
+a temporary fallback.
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.
 

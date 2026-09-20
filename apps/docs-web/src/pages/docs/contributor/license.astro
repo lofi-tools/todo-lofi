@@ -1,9 +1,9 @@
 ---
 import { css } from 'styled-system/css'
-import Docs from '../../layouts/Docs.astro'
+import Docs from '../../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
-import TableScroll from '../../components/TableScroll.astro'
-import { REPO_URL } from '../../data/docs'
+import TableScroll from '../../../components/TableScroll.astro'
+import { REPO_URL } from '../../../data/docs'
 
 const toc = [
   { label: 'What the license gives you', href: '#what-you-get' },
@@ -108,6 +108,6 @@ const toc = [
   </p>
   <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
     See <a href={`${REPO_URL}/blob/main/LICENSE`}>LICENSE</a> for the complete terms, and
-    <a href="/contributor/contributing">Contributing</a> for how to propose a change.
+    <a href="/docs/contributor/contributing">Contributing</a> for how to propose a change.
   </p>
 </Docs>

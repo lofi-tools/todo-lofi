@@ -1,5 +1,5 @@
 ---
-import Docs from '../layouts/Docs.astro'
+import Docs from '../../layouts/Docs.astro'
 import Callout from 'web-design-system/astro/marketing/Callout.astro'
 
 const toc = [
@@ -50,18 +50,18 @@ const toc = [
   </ul>
   <p>
     The protocol and the client that speaks it are covered on the contributor side in
-    <a href="/contributor/integrations#acp">the agent protocol</a>.
+    <a href="/docs/contributor/integrations#acp">the agent protocol</a>.
   </p>
 
   <h2 id="configure">Configuring it</h2>
   <p>
     Nothing needs configuring to use the local lists. To use the agent, pick a provider and give it a key
-    — that is one JSON file, documented in <a href="/configuration#agent">Configuration</a>. Tool servers
+    — that is one JSON file, documented in <a href="/docs/configuration#agent">Configuration</a>. Tool servers
     and hooks live in the same file.
   </p>
 
   <Callout tone="note" title="Workflows are the interesting part">
     A single request is useful; a task that carries its own process is better. See
-    <a href="/workflows">Semi-automated workflows</a> for the staged version of this.
+    <a href="/docs/workflows">Semi-automated workflows</a> for the staged version of this.
   </Callout>
 </Docs>

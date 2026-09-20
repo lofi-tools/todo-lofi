@@ -8,33 +8,38 @@ It is a plain Astro site built with the repository's own design system
 components (`DocSidebar`, `DocTOC`, `Prose`, `Callout`), and `CodeBlock` that
 `demos/design-system-showcase` renders.
 
-## Routes
+## Structure
 
-The navigation has two levels: the header's tab bar splits the docs into two
-guides, one per audience, and the left nav inside each guide lists only that
-guide's pages, nested under section headings (`Getting started`, `Tasklist`,
-`Integrations`, `Configuration`). Both levels come from `src/data/docs.ts` —
-`Mini-apps and extensions` is filed under `Integrations`, since a mini-app is
-the app's extension surface rather than part of the everyday tasklist.
+`/` is the landing page: a marketing-shaped introduction built from the design
+system's marketing and product components, with links into the docs.
+
+**Every documentation page lives under `/docs`.** The docs navigation has two
+levels: the header's tab bar splits the docs into two guides, one per audience,
+and the left nav inside each guide lists only that guide's pages, nested under
+section headings (`Getting started`, `Tasklist`, `Integrations`,
+`Configuration`). Both levels come from `src/data/docs.ts` — `Mini-apps and
+extensions` is filed under `Integrations`, since a mini-app is the app's
+extension surface rather than part of the everyday tasklist.
 
 | Guide / section | Route | Content |
 | --- | --- | --- |
-| User guide | `/` | Overview: what the app is, highlights, and where to start |
-| User guide | `/install` | Requirements, running from a checkout, the macOS app bundle |
-| User guide | `/tasks` | The task list, task details, tags, projects and areas, filtering |
-| User guide | `/agent` | The agent pane: what it does, what it inherits, how to configure it |
-| User guide | `/repeats` | Repeat rules, dates and times, why a picker |
-| User guide | `/workflows` | Workflows as staged state, and the coding workflow |
-| User guide | `/sync` | Offline first, Todoist, GitHub, and what syncs |
-| User guide | `/mini-apps` | Travel checklists today, the planned ones, and the model behind them |
-| User guide | `/status` | Available / preview / planned, per feature |
-| User guide | `/configuration` | In-app settings, providers and keys, Todoist, GitHub |
-| Contributor guide | `/contributor` | Landing: what the guide covers and the reading order |
-| Contributor guide | `/contributor/development` | Nix + direnv setup, the dev shell commands, web packages |
-| Contributor guide | `/contributor/architecture` | Workspace layout, the desktop app, persistence, specs |
-| Contributor guide | `/contributor/integrations` | Sync internals, provider layer, MCP/hooks, agent protocol |
-| Contributor guide | `/contributor/contributing` | Workflow, checks, and the Rust/web conventions |
-| Contributor guide | `/contributor/license` | AGPL-3.0 in practice, third-party code, contributions |
+| Landing | `/` | What the app is, what it does, and the way into both guides |
+| User guide | `/docs` | Overview: what the app is, highlights, and where to start |
+| User guide | `/docs/install` | Requirements, running from a checkout, the macOS app bundle |
+| User guide | `/docs/tasks` | The task list, task details, tags, projects and areas, filtering |
+| User guide | `/docs/repeats` | Repeat rules, dates and times, why a picker |
+| User guide | `/docs/workflows` | Workflows as staged state, and the coding workflow |
+| User guide | `/docs/agent` | The agent pane: what it does, what it inherits, how to configure it |
+| User guide | `/docs/sync` | Offline first, Todoist, GitHub, and what syncs |
+| User guide | `/docs/mini-apps` | Travel checklists today, the planned ones, and the model behind them |
+| User guide | `/docs/status` | Available / preview / planned, per feature |
+| User guide | `/docs/configuration` | In-app settings, providers and keys, Todoist, GitHub |
+| Contributor guide | `/docs/contributor` | Landing: what the guide covers and the reading order |
+| Contributor guide | `/docs/contributor/development` | Nix + direnv setup, the dev shell commands, web packages |
+| Contributor guide | `/docs/contributor/architecture` | Workspace layout, the desktop app, persistence, specs |
+| Contributor guide | `/docs/contributor/integrations` | Sync internals, provider layer, MCP/hooks, agent protocol |
+| Contributor guide | `/docs/contributor/contributing` | Workflow, checks, and the Rust/web conventions |
+| Contributor guide | `/docs/contributor/license` | AGPL-3.0 in practice, third-party code, contributions |
 
 ## Running
 
@@ -63,14 +68,15 @@ server on port 4322 (the showcase suite uses 4321, so both can run at once).
 
 ## Adding a page
 
-1. Create `src/pages/<slug>.astro` and wrap the content in the `Docs` layout,
+1. Create `src/pages/docs/<slug>.astro` (contributor pages under
+   `src/pages/docs/contributor/`) and wrap the content in the `Docs` layout,
    passing `title`, `description`, and a `toc` list whose hrefs match the page's
    heading ids. Reference tables get wrapped in `TableScroll.astro` so wide
    content scrolls instead of widening the page.
-2. Add the page to the matching section in `src/data/docs.ts` (user pages sit at
-   the root, contributor pages under `contributor/`). The header tabs, the left
-   nav, and the previous/next links all read from that file, so one entry is
-   enough. Section headings are only rendered when a guide has more than one.
+2. Add the page to the matching section in `src/data/docs.ts`. The header tabs,
+   the left nav, and the previous/next links all read from that file, so one
+   entry is enough. Section headings are only rendered when a guide has more
+   than one.
 
 ## Notes
 
@@ -81,6 +87,12 @@ server on port 4322 (the showcase suite uses 4321, so both can run at once).
   `libs/web-design-system/panda.config.ts` and the showcase's config, and its
   `include` globs must cover the design system's source — otherwise the design
   system's components render unstyled with no error (`DESIGN.md` §3).
+- The landing page's illustrative data lives in `data/landing.ts`, **outside**
+  `src/`. Panda scans every file under `src/` for style-shaped objects, and
+  those records use keys that are also CSS property names (`title`, `status`,
+  `id`, `priority`, `meta`), which it turned into declarations like
+  `meta: round 1;` and broke the CSS build. Keep mock product data out of the
+  scanned tree.
 - The design system's reset/base stylesheet is imported after the generated
   stylesheet so their cascade layers line up (`DESIGN.md` §2).
 - `src/styles/app.css` holds the only app-level CSS: long file paths and command

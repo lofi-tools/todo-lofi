@@ -9,9 +9,11 @@ import '../styles/app.css'
 interface Props {
   title: string
   description?: string
+  /** What follows the title in the tab: `todo-lofi · <suffix>`. */
+  suffix?: string
 }
 
-const { title, description } = Astro.props
+const { title, description, suffix = 'todo-lofi docs' } = Astro.props
 ---
 
 <!doctype html>
@@ -20,7 +22,7 @@ const { title, description } = Astro.props
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <title>{title} · todo-lofi docs</title>
+    <title>{title} · {suffix}</title>
     {description && <meta name="description" content={description} />}
     <!-- Set the theme before first paint so there is no flash. -->
     <script is:inline>
