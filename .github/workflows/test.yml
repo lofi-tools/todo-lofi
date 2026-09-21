@@ -1,0 +1,76 @@
+name: Test
+
+# Runs on every pull request, and is called by the bundle workflow via
+# `workflow_call` so a push to main or a release tag is tested by this same
+# definition rather than a copy of it.
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+# cache-nix-action purges stale caches, which needs write access to the cache.
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  # A distinct group from the bundle workflow, which calls this one: sharing a
+  # group would make each cancel the other.
+  group: test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    env:
+      # The storage and coding-git suites commit to temporary repositories, which
+      # needs an identity the runner does not have.
+      GIT_AUTHOR_NAME: CI
+      GIT_AUTHOR_EMAIL: ci@todo-lofi.invalid
+      GIT_COMMITTER_NAME: CI
+      GIT_COMMITTER_EMAIL: ci@todo-lofi.invalid
+    steps:
+      - uses: actions/checkout@v4
+
+      # Determinate Nix, the same distribution the direnv setup installs.
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      # The flake's devshell is the build environment, so caching the nix store
+      # is what makes a repeat run skip the toolchain and everything the
+      # devshell pulls in. A new flake.lock changes the primary key and the
+      # prefix restore still reuses whatever is shared.
+      - name: Restore the nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-${{ runner.arch }}-
+          purge-last-accessed: P7D
+          purge-primary-key: never
+          # GitHub allows 10GB of cache per repository, so cap what each save
+          # offers it rather than letting one runner fill the allowance.
+          gc-max-store-size-linux: 4G
+          gc-max-store-size-macos: 4G
+
+      - name: Restore cargo caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # todo-2 and the crates in its build closure, which is what the `t2` watch
+      # list already tracks. `--impure` is what the repo's own .envrc passes: the
+      # shared nix modules resolve one flake input with getFlake, which a pure
+      # evaluation refuses.
+      - name: Test
+        run: nix develop --impure --command cargo test -p todo-2 -p storage -p acp-client -p gpui_tokio

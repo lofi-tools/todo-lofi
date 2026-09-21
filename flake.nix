@@ -89,7 +89,7 @@
 
             # Assemble the macOS bundle for local use. The recipe (icon,
             # Info.plist, signing, de-quarantine) is scripts/package-macos.sh,
-            # which the packaging job in .github/workflows/ci.yml runs over a
+            # which the packaging job in .github/workflows/bundle.yml runs over a
             # release binary: `--link` keeps the bundle tracking rebuilds, and
             # `--register` is what gets the Dock to pick up a new icon.
             t2-bundle = with bash; ''set -e

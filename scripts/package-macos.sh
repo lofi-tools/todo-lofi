@@ -5,7 +5,7 @@
 # Two callers share this. `t2-bundle` (flake.nix) runs it over the debug binary
 # it just built, with --link --no-archives --register, so the local bundle
 # tracks rebuilds and the Dock picks up a new icon. The packaging job in
-# .github/workflows/ci.yml runs it over the release binary `nix build .#todo-2`
+# .github/workflows/bundle.yml runs it over the release binary `nix build .#todo-2`
 # produced, copying that binary in and writing the .zip and .dmg.
 #
 # The icon is generated rather than committed: sips rasterizes an SVG at its
