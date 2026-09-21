@@ -19,7 +19,7 @@
         inputs.my-nix.flakeModules.rust
         (inputs.my-nix.lib.findFlakePartFilesRec ./.)
       ];
-      perSystem = { pkgs, ... }:
+      perSystem = { pkgs, lib, ... }:
         let
           # bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
           buildDeps = [
