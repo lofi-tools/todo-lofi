@@ -28,6 +28,7 @@
       CXX = "${pkgs.llvmPackages_22.clang-unwrapped}/bin/clang++";
       CARGO_BUILD_TARGET = "aarch64-apple-darwin";
       MACOSX_DEPLOYMENT_TARGET = "14.0";
+      SDKROOT = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
     };
   in
   {
