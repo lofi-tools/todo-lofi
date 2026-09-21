@@ -537,15 +537,21 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+/// One inline text editor (title or description): the textarea plus the
+/// blur-to-save subscription. The two editors share begin/commit/abandon
+/// helpers; only the initial value, max lines, and persist step differ.
+struct FieldEditor {
+    input: Entity<TextareaState>,
+    _subscription: Subscription,
+}
+
 pub struct TaskDetails {
     selected: Option<TaskWithMeta>,
     store: Store,
     editing_title: bool,
-    title_input: Option<Entity<TextareaState>>,
-    _title_subscription: Option<Subscription>,
+    title: Option<FieldEditor>,
     editing_description: bool,
-    description_input: Option<Entity<TextareaState>>,
-    _description_subscription: Option<Subscription>,
+    description: Option<FieldEditor>,
     editing_tags: bool,
     tags_input: Option<Entity<InputState>>,
     _tags_subscription: Option<Subscription>,
@@ -684,9 +690,11 @@ pub struct TaskDetails {
     /// the folder icon instead of a hashtag. Refreshed with each selection.
     project_tags: std::collections::HashSet<String>,
     _project_tags_fetch: Option<gpui::Task<()>>,
-    /// Shift-Enter saves the description. A focused `Textarea` binds Enter
-    /// itself, and a binding on the element outranks one an ancestor could
-    /// carry, so the key is taken ahead of the keymap.
+    /// Cmd-Enter (platform modifier) saves the description. Shift-Enter and
+    /// a plain Enter are left alone so the textarea keeps inserting a
+    /// newline. A focused `Textarea` binds Enter itself, and a binding on
+    /// the element outranks one an ancestor could carry, so the key is
+    /// taken ahead of the keymap.
     _key_interceptor: Subscription,
 }
 
@@ -725,11 +733,9 @@ impl TaskDetails {
             selected: None,
             store,
             editing_title: false,
-            title_input: None,
-            _title_subscription: None,
+            title: None,
             editing_description: false,
-            description_input: None,
-            _description_subscription: None,
+            description: None,
             editing_tags: false,
             tags_input: None,
             _tags_subscription: None,
@@ -1243,13 +1249,13 @@ impl TaskDetails {
     fn focus_field_input(&self, field: EditedField, window: &mut Window, cx: &mut Context<Self>) {
         let handle = match field {
             EditedField::Title => self
-                .title_input
+                .title
                 .as_ref()
-                .map(|input| input.read(cx).focus_handle(cx)),
+                .map(|editor| editor.input.read(cx).focus_handle(cx)),
             EditedField::Description => self
-                .description_input
+                .description
                 .as_ref()
-                .map(|input| input.read(cx).focus_handle(cx)),
+                .map(|editor| editor.input.read(cx).focus_handle(cx)),
             EditedField::Tags => self
                 .tags_input
                 .as_ref()
@@ -1455,19 +1461,11 @@ impl TaskDetails {
             return;
         };
         match field {
-            EditedField::Title => {
-                self.editing_title = false;
-                self.title_input = None;
-                self._title_subscription = None;
-            }
-            EditedField::Description => {
-                self.editing_description = false;
-                self.description_input = None;
-                self._description_subscription = None;
+            EditedField::Title | EditedField::Description => {
+                self.abandon_text_edit(field)
             }
             EditedField::Tags => self.abandon_tags(),
         }
-        self.pop_edit(field);
     }
 
     /// Abandon the innermost open field edit, if any. Returns true when an
@@ -1482,24 +1480,11 @@ impl TaskDetails {
     }
 
     fn title_dirty(&self, cx: &App) -> bool {
-        if !self.editing_title {
-            return false;
-        }
-        let (Some(input), Some(task)) = (&self.title_input, &self.selected) else {
-            return false;
-        };
-        input.read(cx).text().to_string().trim() != task.title
+        self.text_dirty(EditedField::Title, cx)
     }
 
     fn description_dirty(&self, cx: &App) -> bool {
-        if !self.editing_description {
-            return false;
-        }
-        let (Some(input), Some(task)) = (&self.description_input, &self.selected) else {
-            return false;
-        };
-        let current = task.description.clone().unwrap_or_default();
-        input.read(cx).text().to_string().trim() != current
+        self.text_dirty(EditedField::Description, cx)
     }
 
     fn tags_dirty(&self, cx: &App) -> bool {
@@ -1526,14 +1511,8 @@ impl TaskDetails {
     }
 
     fn abandon_edits(&mut self) {
-        self.editing_title = false;
-        self.title_input = None;
-        self._title_subscription = None;
-        self.editing_description = false;
-        self.description_input = None;
-        self._description_subscription = None;
-        self.pop_edit(EditedField::Title);
-        self.pop_edit(EditedField::Description);
+        self.abandon_text_edit(EditedField::Title);
+        self.abandon_text_edit(EditedField::Description);
         self.close_time_edit();
     }
 
@@ -1614,12 +1593,8 @@ impl TaskDetails {
 
     pub fn cancel_editing(&mut self, cx: &mut Context<Self>) {
         if self.editing_title || self.editing_description || self.editing_tags {
-            self.editing_title = false;
-            self.title_input = None;
-            self._title_subscription = None;
-            self.editing_description = false;
-            self.description_input = None;
-            self._description_subscription = None;
+            self.abandon_text_edit(EditedField::Title);
+            self.abandon_text_edit(EditedField::Description);
             self.abandon_tags();
             self.focus_stack.clear();
             cx.notify();
@@ -1634,42 +1609,129 @@ impl TaskDetails {
             .is_some_and(|task| task.is_managed_read_only())
     }
 
-    fn begin_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_read_only() {
-            return;
-        }
-        let Some(task) = &self.selected else {
-            return;
+    /// Shared begin for the title/description editors: multi-line, so Enter
+    /// and Shift-Enter insert a newline while Cmd-Enter saves (see
+    /// `on_intercepted_key`). Losing focus saves too.
+    fn begin_text_edit(
+        &mut self,
+        field: EditedField,
+        initial: &str,
+        max_lines: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editing = match field {
+            EditedField::Title => &mut self.editing_title,
+            EditedField::Description => &mut self.editing_description,
+            EditedField::Tags => return,
         };
-        if self.editing_title {
+        if *editing {
             return;
         }
-        let title = task.title.clone();
         let input = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx).auto_grow(1, TITLE_MAX_LINES);
-            state.set_value(&title, window, cx);
+            let mut state = TextareaState::new(window, cx).auto_grow(1, max_lines);
+            state.set_value(initial, window, cx);
             state
         });
-        // Multi-line: Enter belongs to the text and inserts a newline, while
-        // Shift-Enter saves (see `on_intercepted_key`). Losing focus saves too,
-        // the way the description editor does.
-        let subscription = cx.subscribe(&input, |this, _, event, cx| {
+        let subscription = cx.subscribe(&input, move |this, _, event, cx| {
             if matches!(event, InputEvent::Blur) {
-                this.commit_title_edit(cx);
+                match field {
+                    EditedField::Title => this.commit_title_edit(cx),
+                    EditedField::Description => this.commit_description_edit(cx),
+                    EditedField::Tags => {}
+                }
             }
         });
-        self.title_input = Some(input.clone());
-        self._title_subscription = Some(subscription);
-        self.editing_title = true;
-        self.push_edit(EditedField::Title);
+        let editor = FieldEditor {
+            input: input.clone(),
+            _subscription: subscription,
+        };
+        match field {
+            EditedField::Title => self.title = Some(editor),
+            EditedField::Description => self.description = Some(editor),
+            EditedField::Tags => {}
+        }
+        *editing = true;
+        self.push_edit(field);
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
         });
     }
 
+    /// Shared abandon for the title/description editors without notifying.
+    fn abandon_text_edit(&mut self, field: EditedField) {
+        match field {
+            EditedField::Title => {
+                self.editing_title = false;
+                self.title = None;
+            }
+            EditedField::Description => {
+                self.editing_description = false;
+                self.description = None;
+            }
+            EditedField::Tags => return,
+        }
+        self.pop_edit(field);
+    }
+
+    /// Shared dirty check: trimmed editor text against the saved value.
+    fn text_input(&self, field: EditedField) -> Option<Entity<TextareaState>> {
+        match field {
+            EditedField::Title => self.title.as_ref().map(|editor| editor.input.clone()),
+            EditedField::Description => self
+                .description
+                .as_ref()
+                .map(|editor| editor.input.clone()),
+            EditedField::Tags => None,
+        }
+    }
+
+    /// Shared dirty check: trimmed editor text against the saved value.
+    fn text_dirty(&self, field: EditedField, cx: &App) -> bool {
+        let Some(task) = &self.selected else {
+            return false;
+        };
+        let (editing, editor, saved) = match field {
+            EditedField::Title => (
+                self.editing_title,
+                self.title.as_ref(),
+                task.title.clone(),
+            ),
+            EditedField::Description => (
+                self.editing_description,
+                self.description.as_ref(),
+                task.description.clone().unwrap_or_default(),
+            ),
+            EditedField::Tags => return false,
+        };
+        if !editing {
+            return false;
+        }
+        let Some(editor) = editor else {
+            return false;
+        };
+        editor.input.read(cx).text().to_string().trim() != saved
+    }
+
+    fn begin_title_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_read_only() {
+            return;
+        }
+        let Some(task) = self.selected.clone() else {
+            return;
+        };
+        self.begin_text_edit(
+            EditedField::Title,
+            &task.title,
+            TITLE_MAX_LINES,
+            window,
+            cx,
+        );
+    }
+
     fn commit_title_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.title_input.clone() else {
+        let Some(input) = self.text_input(EditedField::Title) else {
             return;
         };
         let Some(task) = &self.selected else {
@@ -1678,10 +1740,7 @@ impl TaskDetails {
         let title = input.read(cx).text().to_string();
         let title = title.trim().to_string();
         if title.is_empty() {
-            self.editing_title = false;
-            self.title_input = None;
-            self._title_subscription = None;
-            self.pop_edit(EditedField::Title);
+            self.abandon_text_edit(EditedField::Title);
             cx.notify();
             return;
         }
@@ -1689,18 +1748,16 @@ impl TaskDetails {
         if let Some(selected) = &mut self.selected {
             selected.task.title = title.clone();
         }
-        self.editing_title = false;
-        self.title_input = None;
-        self._title_subscription = None;
-        self.pop_edit(EditedField::Title);
+        self.abandon_text_edit(EditedField::Title);
         self.store.rename_task(task_id, title.clone(), cx).detach();
         cx.emit(TaskDetailsEvent::TitleCommitted { task_id, title });
         cx.notify();
     }
 
-    /// Handle a key taken ahead of the keymap: Shift-Enter saves the
-    /// title or the description. A plain Enter is untouched, so it keeps
-    /// inserting a newline. Returns whether the key was taken.
+    /// Handle a key taken ahead of the keymap: Cmd-Enter (platform
+    /// modifier) saves the title or the description. A plain Enter or
+    /// Shift-Enter is untouched, so it keeps inserting a newline. Returns
+    /// whether the key was taken.
     fn on_intercepted_key(
         &mut self,
         keystroke: &gpui::Keystroke,
@@ -1710,24 +1767,25 @@ impl TaskDetails {
         if keystroke.key != "enter" {
             return false;
         }
-        // Shift alone: a keystroke carrying other modifiers would not have
-        // matched the keymap's shift-enter either, so it is not this shortcut.
         let modifiers = keystroke.modifiers;
-        let shift_only = modifiers.shift
-            && !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.function);
-        if !shift_only {
+        let platform_only = modifiers.platform
+            && !(modifiers.shift
+                || modifiers.control
+                || modifiers.alt
+                || modifiers.function);
+        if !platform_only {
             return false;
         }
         // The interceptor is window-wide, so the details pane only answers
         // while the title or the description is the editor that holds the
         // focus.
-        if let Some(input) = self.title_input.clone()
+        if let Some(input) = self.text_input(EditedField::Title)
             && input.read(cx).focus_handle(cx).is_focused(window)
         {
             self.commit_title_edit(cx);
             return true;
         }
-        let Some(input) = self.description_input.clone() else {
+        let Some(input) = self.text_input(EditedField::Description) else {
             return false;
         };
         if !input.read(cx).focus_handle(cx).is_focused(window) {
@@ -1741,38 +1799,21 @@ impl TaskDetails {
         if self.selected_read_only() {
             return;
         }
-        let Some(task) = &self.selected else {
+        let Some(task) = self.selected.clone() else {
             return;
         };
-        if self.editing_description {
-            return;
-        }
-        let description = task.description.clone().unwrap_or_default();
-        let input = cx.new(|cx| {
-            let mut state = TextareaState::new(window, cx).auto_grow(1, DESCRIPTION_MAX_LINES);
-            state.set_value(&description, window, cx);
-            state
-        });
-        // Multi-line: Enter belongs to the text and inserts a newline, while
-        // Shift-Enter saves (see `on_intercepted_key`). Losing focus saves too,
-        // the way the tag input does.
-        let subscription = cx.subscribe(&input, |this, _, event, cx| {
-            if matches!(event, InputEvent::Blur) {
-                this.commit_description_edit(cx);
-            }
-        });
-        self.description_input = Some(input.clone());
-        self._description_subscription = Some(subscription);
-        self.editing_description = true;
-        self.push_edit(EditedField::Description);
-        cx.notify();
-        window.on_next_frame(move |window, cx| {
-            input.update(cx, |state, cx| state.focus(window, cx));
-        });
+        let initial = task.description.clone().unwrap_or_default();
+        self.begin_text_edit(
+            EditedField::Description,
+            &initial,
+            DESCRIPTION_MAX_LINES,
+            window,
+            cx,
+        );
     }
 
     fn commit_description_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.description_input.clone() else {
+        let Some(input) = self.text_input(EditedField::Description) else {
             return;
         };
         let Some(task) = &self.selected else {
@@ -1789,10 +1830,7 @@ impl TaskDetails {
                 Some(description.clone())
             };
         }
-        self.editing_description = false;
-        self.description_input = None;
-        self._description_subscription = None;
-        self.pop_edit(EditedField::Description);
+        self.abandon_text_edit(EditedField::Description);
         let value = if description.is_empty() {
             None
         } else {
@@ -5971,7 +6009,7 @@ impl Render for TaskDetails {
                                 // own centering is right; the offset only
                                 // matters for the read-only title, which can
                                 // wrap.
-                                .when(self.title_input.is_none(), |this| {
+                                .when(self.title.is_none(), |this| {
                                     this.self_start().mt(checkbox_top_offset)
                                 })
                                 .child(
@@ -6005,7 +6043,7 @@ impl Render for TaskDetails {
                                 ),
                         )
                         .child(
-                            if let Some(input) = self.title_input.clone() {
+                            if let Some(input) = self.text_input(EditedField::Title) {
                                 div()
                                     .id(("details-title-edit", task_id))
                                     .flex_1()
@@ -6075,7 +6113,7 @@ impl Render for TaskDetails {
                     );
                 }
                 if self.editing_description {
-                    if let Some(input) = self.description_input.clone() {
+                    if let Some(input) = self.text_input(EditedField::Description) {
                         details = details.child(
                             div().id(("details-description-edit", task_id)).child(
                                 Textarea::new(&input)
@@ -6875,12 +6913,12 @@ mod coding_tests {
         }
     }
 
-    /// Shift-Enter saves the description. A plain Enter is left alone so the
-    /// textarea keeps inserting a newline. Driven through the interceptor
-    /// rather than a window keystroke so the shortcut can be asserted without
-    /// depending on the keymap.
+    /// Cmd-Enter saves the description. A plain Enter and Shift-Enter are
+    /// left alone so the textarea keeps inserting a newline. Driven through
+    /// the interceptor rather than a window keystroke so the shortcut can
+    /// be asserted without depending on the keymap.
     #[gpui::test]
-    fn shift_enter_saves_the_description(cx: &mut gpui::TestAppContext) {
+    fn cmd_enter_saves_the_description(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         // One runtime for the whole test: the store is opened on it, and the
@@ -6912,8 +6950,7 @@ mod coding_tests {
                 details.selected = Some(feature("Add OAuth", Some("Sign in with Google.")));
                 details.begin_description_edit(window, cx);
                 let input = details
-                    .description_input
-                    .clone()
+                    .text_input(EditedField::Description)
                     .expect("the description editor opens");
                 input.update(cx, |state, cx| {
                     state.set_value(edited, window, cx);
@@ -6937,7 +6974,7 @@ mod coding_tests {
             );
         });
 
-        // Shift-Enter saves.
+        // Shift-Enter belongs to the text too: not taken, edit stays open.
         let handled = cx.update(|window, cx| {
             details.update(cx, |details, cx| {
                 details.on_intercepted_key(
@@ -6950,11 +6987,32 @@ mod coding_tests {
                 )
             })
         });
-        assert!(handled, "Shift-Enter is taken ahead of the keymap");
+        assert!(!handled, "Shift-Enter stays with the textarea");
+        cx.update(|_, cx| {
+            assert!(
+                details.read(cx).editing_description,
+                "Shift-Enter does not close the editor"
+            );
+        });
+
+        // Cmd-Enter (platform modifier) saves.
+        let handled = cx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.on_intercepted_key(
+                    &enter_keystroke(gpui::Modifiers {
+                        platform: true,
+                        ..Default::default()
+                    }),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert!(handled, "Cmd-Enter is taken ahead of the keymap");
         cx.update(|_, cx| {
             let details = details.read(cx);
             assert!(!details.editing_description, "saving closes the editor");
-            assert!(details.description_input.is_none(), "the editor is dropped");
+            assert!(details.description.is_none(), "the editor is dropped");
             assert_eq!(
                 details
                     .selected
