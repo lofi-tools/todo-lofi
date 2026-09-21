@@ -18,11 +18,14 @@
       ag = ''cargo run -p agent-cli -- "$@" '';
     };
 
-    env = {
-      # bypass Nix's cc-wrapper entirely
+    # Every entry here is about the local macOS toolchain: the unwrapped clang
+    # that bypasses cc-wrapper, the deployment target, and the target that keeps
+    # cc-rs from adding one of its own. `rust.buildEnv` is workspace-wide, so
+    # unconditional values would make every crate build for darwin on any host —
+    # which is exactly what a Linux CI runner must not do.
+    env = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
       CC = "${pkgs.llvmPackages_22.clang-unwrapped}/bin/clang";
       CXX = "${pkgs.llvmPackages_22.clang-unwrapped}/bin/clang++";
-      # Prevent cc-rs from adding --target that triggers wrapper warnings
       CARGO_BUILD_TARGET = "aarch64-apple-darwin";
       MACOSX_DEPLOYMENT_TARGET = "14.0";
     };

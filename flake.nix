@@ -30,36 +30,10 @@
           # showcase under demos/ (see docs/spec/web-design-system-spec.md).
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch pkgs.nodejs_22 pkgs.pnpm ];
 
-          lsRegister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
-
-          infoPlist = pkgs.writeText "Info.plist" ''
-            <?xml version="1.0" encoding="UTF-8"?>
-            <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-            <plist version="1.0">
-            <dict>
-              <key>CFBundleDevelopmentRegion</key><string>English</string>
-              <key>CFBundleDisplayName</key><string>todo-lofi</string>
-              <key>CFBundleExecutable</key><string>todo-2</string>
-              <key>CFBundleIconFile</key><string>todo-lofi.icns</string>
-              <key>CFBundleIdentifier</key><string>io.github.lofi-tools.todo-lofi</string>
-              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-              <key>CFBundleName</key><string>todo-lofi</string>
-              <key>CFBundlePackageType</key><string>APPL</string>
-              <key>CFBundleShortVersionString</key><string>0.1.0</string>
-              <key>CSResourcesFileMapped</key><true/>
-              <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-              <key>LSMinimumSystemVersion</key><string>12.0</string>
-              <key>LSRequiresCarbon</key><true/>
-              <key>NSHighResolutionCapable</key><true/>
-            </dict>
-            </plist>
-          '';
-
-          todoAppWrapper = pkgs.runCommand "todo-lofi-app-wrapper" { } ''
-            mkdir -p $out/Contents/Resources
-            cp ${infoPlist} $out/Contents/Info.plist
-            cp ${./apps/todo-2/assets/icons/do-list-app.svg} $out/Contents/Resources/todo-lofi.svg
-          '';
+          # The macOS bundle's Info.plist is checked in at
+          # apps/todo-2/assets/Info.plist and its assembly recipe (icon,
+          # signing, archives) lives in scripts/package-macos.sh, so the dev
+          # bundle and the CI artifact are produced by one implementation.
 
           bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs pkgs.writeShellScriptBin {
@@ -113,73 +87,18 @@
               -w Cargo.lock \
               -x "run -p todo-2"'';
 
-            # Assemble the macOS bundle (icon, Info.plist, signing,
-            # de-quarantine) without launching it. Kept for CI release builds;
-            # local dev uses `t2` above.
-            t2-bundle = with bash; ''
-              set -e
-              APP_DIR="target/debug/todo-lofi.app"
-              ICON="$APP_DIR/Contents/Resources/todo-lofi.icns"
-              ICON_SVG="${wd}/apps/todo-2/assets/icons/do-list-app.svg"
-
-              mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-              cp -f "${todoAppWrapper}/Contents/Info.plist" "$APP_DIR/Contents/Info.plist"
-
-              # Regenerate whenever the artwork or this recipe changed, so an icon
-              # baked earlier (qlmanage composites the SVG on a white matte) can't stick.
-              ICON_SUM=$(cksum "$ICON" 2>/dev/null | cut -d' ' -f1,2)
-              if [ ! -f "$ICON" ] || [ "$ICON_SVG" -nt "$ICON" ] || [ "${wd}/flake.nix" -nt "$ICON" ]; then
-                # sips rasterizes an SVG at its intrinsic size, so paint the icon
-                # on a 1024px canvas instead of upscaling a 155px bitmap; sips
-                # keeps the canvas transparent where the SVG has no fill.
-                ICON_TMP=$(mktemp -d)
-                ICONSET="$ICON_TMP/icon.iconset"
-                mkdir -p "$ICONSET"
-                sed 's|<svg |<svg width="1024" height="1024" |' "$ICON_SVG" > "$ICON_TMP/icon-1024.svg"
-                sips -s format png "$ICON_TMP/icon-1024.svg" --out "$ICONSET/master.png" >/dev/null
-                # Grain is composited into the raster rather than committed in the SVG,
-                # so the artwork stays clean for other consumers and only the built
-                # icon pays for the texture (cell px at 1024, amplitude, seed).
-                python3 "${wd}/scripts/icon-grain.py" "$ICONSET/master.png" 20 5 11
-                for size in 16 32 128 256 512; do
-                  sips -z "$size" "$size" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}.png" >/dev/null
-                  sips -z "$(( size * 2 ))" "$(( size * 2 ))" "$ICONSET/master.png" --out "$ICONSET/icon_''${size}x''${size}@2x.png" >/dev/null
-                done
-                # The master already is the 1024px rep; copying it keeps the grained
-                # pixels instead of letting sips re-encode noise (which grows it ~20%).
-                cp "$ICONSET/master.png" "$ICONSET/icon_512x512@2x.png"
-                rm -f "$ICONSET/master.png"
-                iconutil -c icns "$ICONSET" -o "$ICON"
-                rm -rf "$ICON_TMP"
-
-                # IconServices caches rendered tiles, so the Dock goes on painting
-                # the previous icon until the bundle is re-registered and the Dock
-                # restarts. Only pay for that when the icon actually changed.
-                if [ "$ICON_SUM" != "$(cksum "$ICON" | cut -d' ' -f1,2)" ]; then
-                  touch "$APP_DIR" "$ICON"
-                  "${lsRegister}" -f "$APP_DIR" 2>/dev/null || true
-                  killall Dock 2>/dev/null || true
-                fi
-              fi
-
-              # The devshell exports CARGO_BUILD_TARGET, so cargo writes to
-              # target/<triple>/debug; without it, to target/debug. The bundle
-              # symlink must point at the artifact cargo actually produces.
+            # Assemble the macOS bundle for local use. The recipe (icon,
+            # Info.plist, signing, de-quarantine) is scripts/package-macos.sh,
+            # which the packaging job in .github/workflows/ci.yml runs over a
+            # release binary: `--link` keeps the bundle tracking rebuilds, and
+            # `--register` is what gets the Dock to pick up a new icon.
+            t2-bundle = with bash; ''set -e
               BIN_DIR="target/debug"
               if [ -n "''${CARGO_BUILD_TARGET:-}" ]; then
                 BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
               fi
-
-              # Build and link the binary into the bundle, then sign.
               cargo build -p todo-2
-              ln -sf "$(pwd)/$BIN_DIR/todo-2" "$APP_DIR/Contents/MacOS/todo-2"
-              # Sign with the self-signed todo-lofi-dev identity so Gatekeeper
-              # doesn't throttle every launch; strip any quarantine flag.
-              if security find-identity -v -p codesigning 2>/dev/null | grep -q "todo-lofi-dev"; then
-                codesign --force --sign "todo-lofi-dev" "$BIN_DIR/todo-2" 2>/dev/null || true
-                codesign --force --deep --sign "todo-lofi-dev" "$APP_DIR" 2>/dev/null || true
-              fi
-              xattr -dr com.apple.quarantine "$APP_DIR" "$BIN_DIR/todo-2" 2>/dev/null || true
+              "${wd}/scripts/package-macos.sh" --binary "$BIN_DIR/todo-2" --out target/debug --link --register --no-archives
             '';
 
             # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
