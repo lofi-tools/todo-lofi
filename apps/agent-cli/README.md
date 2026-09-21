@@ -174,8 +174,9 @@ Providers are OpenAI-compatible and configured under the `providers` object.
 The built-ins are `poolside`, `openrouter`, `groq`, `nvidia`, `tokenrouter`
 (the tokenrouter.com unified gateway), `kiosapi` (kiosapi.com), `google`
 (Google AI Studio's OpenAI-compatible endpoint, `gemini-3.8-flash` at low
-thinking), `ollama` (ollama.com's hosted cloud API) and `opencode-zen`
-(opencode.ai's Zen gateway). A `providers.NAME` entry either
+thinking), `ollama` (ollama.com's hosted cloud API), `opencode-zen`
+(opencode.ai's Zen gateway) and `orcarouter` (orcarouter.ai's zero-markup
+meta-router). A `providers.NAME` entry either
 overrides a built-in (by name) or defines a brand-new provider. All fields are optional; only set what you want to
 override. The default config (`/default-config`) includes every built-in
 provider with its `base_url`, `api_key` spec, and one model, so you can see

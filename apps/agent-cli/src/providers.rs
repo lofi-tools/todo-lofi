@@ -3,9 +3,10 @@
 //!
 //! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
 //! nvidia nim, the tokenrouter gateway, kiosapi, google (AI Studio), ollama
-//! (ollama.com's hosted cloud API), and opencode-zen (opencode.ai's Zen
-//! gateway). Their base URL / api key / models can be overridden — or new
-//! providers added — via the config file's `[providers.NAME]` section.
+//! (ollama.com's hosted cloud API), opencode-zen (opencode.ai's Zen gateway),
+//! and orcarouter (orcarouter.ai's meta-router). Their base URL / api key /
+//! models can be overridden — or new providers added — via the config file's
+//! `[providers.NAME]` section.
 //!
 //! An `api_key` value in config is either:
 //! - `!command` — run the rest as a shell command and use its trimmed stdout,
@@ -410,6 +411,26 @@ fn builtin_providers() -> Vec<Provider> {
             // maps `reasoning_effort` to Gemini's thinking level; this entry
             // is gemini-3.8-flash at low thinking.
             models: vec!["google/gemini-3.8-flash".into()],
+        },
+        Provider {
+            name: "orcarouter".into(),
+            base_url: "https://api.orcarouter.ai/v1".into(),
+            api_key: "env:ORCAROUTER_API_KEY".into(),
+            // OrcaRouter is a zero-markup meta-router over OpenAI, Anthropic,
+            // Google, DeepSeek, xAI, Qwen and others; `orcarouter/auto` picks
+            // the cheapest live model per request. The rest is a curated
+            // subset of its coding-capable models (free and paid).
+            models: vec![
+                "orcarouter/auto".into(),
+                "orcarouter/free".into(),
+                "orcarouter/fusion".into(),
+                "anthropic/claude-sonnet-5".into(),
+                "openai/gpt-5.4".into(),
+                "google/gemini-3.5-flash".into(),
+                "deepseek/deepseek-v4-pro-0813".into(),
+                "z-ai/glm-5.3-flash-free".into(),
+                "tencent/hy3-free".into(),
+            ],
         },
     ]
 }
@@ -1676,6 +1697,22 @@ mod tests {
         assert_eq!(resolved.base_url, "https://ollama.com/v1");
         assert_eq!(resolved.model, "ollama/gpt-oss:120b");
         assert_eq!(resolved.api_key, "ollama-test-key");
+    }
+
+    #[test]
+    fn orcarouter_builtin_provider() {
+        let config = AppConfig::default();
+        let o = provider(&config, "orcarouter").unwrap();
+        assert_eq!(o.base_url, "https://api.orcarouter.ai/v1");
+        assert_eq!(o.api_key, "env:ORCAROUTER_API_KEY");
+        assert_eq!(model_ids(&o)[0], "orcarouter/auto");
+        // Resolution wires up the meta-router base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("ORCAROUTER_API_KEY", "orca-test-key") };
+        let resolved = resolve(&config, "orcarouter", "orcarouter/auto").unwrap();
+        assert_eq!(resolved.base_url, "https://api.orcarouter.ai/v1");
+        assert_eq!(resolved.model, "orcarouter/auto");
+        assert_eq!(resolved.api_key, "orca-test-key");
     }
 
     #[test]
