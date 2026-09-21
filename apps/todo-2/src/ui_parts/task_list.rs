@@ -770,11 +770,12 @@ impl TaskListView {
             })
         } else {
             cx.spawn(async move |this, cx| {
-                let tasks = {
-                    let mut s = store.0.lock().await;
-                    s.list_tasks_by_priority_including_distant()
-                        .await
-                        .unwrap_or_default()
+                let tasks = match store.list_tasks_by_priority_including_distant(cx).await {
+                    Ok(tasks) => tasks,
+                    Err(e) => {
+                        tracing::error!("Failed to fetch tasks: {e}");
+                        return;
+                    }
                 };
                 let (blockers_map, blocking_map, subtasks) =
                     Self::fetch_list_data(&store, &tasks, cx).await;

@@ -501,6 +501,20 @@ impl Store {
         })
     }
 
+    /// All tasks in priority order, including far-future ones (the
+    /// "show all" toggle reveals them from the fetched rows). DB I/O runs
+    /// on the Tokio runtime via `Tokio::spawn_result`.
+    pub fn list_tasks_by_priority_including_distant(
+        &self,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<storage::TaskWithMeta>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            Ok(s.list_tasks_by_priority_including_distant().await?)
+        })
+    }
+
     /// Direct subtasks of any of `task_ids`, keyed by parent id. Used by
     /// the task list to collapse subtask rows under their parent and to
     /// show subtask progress.
