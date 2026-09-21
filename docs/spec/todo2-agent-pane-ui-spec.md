@@ -403,9 +403,13 @@ input — the same technique `main.rs` already documents for the travel popover.
   a whole block of code is not a mid-sentence size change — and the agent's own replies keep their
   code styling, where a mono pill on a path earns its keep. The prompt *sent* to the agent is
   unchanged: only the bubble's rendering is flattened.
-- Typography: markdown/agent text at the gpui-component default size; mono (`ui-monospace`,
-  `SF Mono`, `Menlo`, `monospace`) for arguments, diffs and terminal output at a size one step
-  smaller; notices `text_xs`.
+- Typography: markdown/agent text at the gpui-component default size; the theme's resolved mono
+  family for arguments, diffs and terminal output at a size one step smaller; notices `text_xs`.
+  The token is the CSS generic `ui-monospace`, but GPUI takes one concrete family and has no
+  stack, and naming one the machine lacks is not a silent fallback: the text system caches the
+  failed lookup and rebuilds an `anyhow` error on every per-run font resolution, so the pane reads
+  the theme's mono token instead — gpui-component probes that for a family the machine has. The
+  pane caches the answer for its element helpers (`resolve_mono_font`).
 - Long content: every code/diff/terminal block scrolls horizontally inside its own container
   rather than widening the pane.
 - Markdown code blocks get the panel surface (`PANEL_BG`). Copying is per **message**, not per

@@ -39,6 +39,14 @@ pub trait AgentServer: Send + Sync + 'static {
     /// Arguments selecting ACP mode.
     fn args(&self) -> &'static [&'static str];
 
+    /// The ACP session mode (agent name) this profile must run under. `None`
+    /// keeps whatever agent the process starts in; a profile whose tools are
+    /// part of its contract names its agent here, so the launch switches the
+    /// session before it can be prompted.
+    fn session_mode(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Resolve the launch for `cwd`, failing when the executable is missing.
     fn spawn_spec(&self, cwd: &Path) -> Result<SpawnSpec, AcpError> {
         let program =

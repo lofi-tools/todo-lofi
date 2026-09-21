@@ -210,7 +210,15 @@ impl Layout {
         } else {
             "opencode"
         };
-        if self.agent_pane.read(cx).active_agent_id() == Some(desired_id) {
+        // A session on the right profile is left alone, so re-composing a later
+        // phase's prompt does not restart an agent mid-turn. A *failed* one is
+        // not "already running": the click retries it, which is the only way
+        // back from a launch that did not complete.
+        let running_on_profile = {
+            let pane = self.agent_pane.read(cx);
+            pane.active_agent_id() == Some(desired_id) && !pane.active_session_failed()
+        };
+        if running_on_profile {
             return Ok(());
         }
         let Some(project) = self.agent_pane.read(cx).active_project().cloned() else {

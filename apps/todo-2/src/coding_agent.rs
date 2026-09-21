@@ -79,7 +79,12 @@ pub const READ_ONLY_BASH_RULES: &[(&str, &str)] = &[
     ("git rev-parse *", "allow"),
 ];
 
-/// The inline opencode config defining the read-only interview agent.
+/// The inline opencode config defining the read-only interview agent, and
+/// making it the process's default agent. `opencode acp` has no flag selecting
+/// an agent (`--agent` belongs to `opencode run`; the ACP server prints its
+/// help and exits when given one), so the profile is chosen from the config
+/// itself: `default_agent` names a primary agent, and a session created without
+/// one would otherwise run as `build` with write tools.
 ///
 /// Built by hand rather than through a JSON map so the `bash` rule order is
 /// exactly [`READ_ONLY_BASH_RULES`]: a map would be re-sorted, and the
@@ -96,11 +101,12 @@ pub fn interview_config() -> String {
     }
     format!(
         concat!(
-            r#"{{"$schema":"https://opencode.ai/config.json","agent":{{{}:{{"#,
+            r#"{{"$schema":"https://opencode.ai/config.json","default_agent":{},"agent":{{{}:{{"#,
             r#""mode":"primary","description":{},"prompt":{},"permission":{{"#,
             r#""edit":"deny","bash":{{{}}},"task":"allow","external_directory":"allow","#,
             r#""webfetch":"allow","websearch":"allow"}}}}}}}}"#,
         ),
+        quote(INTERVIEW_AGENT_NAME),
         quote(INTERVIEW_AGENT_NAME),
         quote(INTERVIEW_AGENT_DESCRIPTION),
         quote(INTERVIEW_AGENT_PROMPT),
@@ -114,9 +120,9 @@ fn quote(value: &str) -> String {
     serde_json::Value::String(value.to_string()).to_string()
 }
 
-/// The read-only interview process: `opencode acp --agent todo-interview` with
-/// the profile injected through the environment. Its own agent id means its
-/// persisted session cannot be confused with the coding profile's.
+/// The read-only interview process: `opencode acp` with the profile injected
+/// through the environment. Its own agent id means its persisted session cannot
+/// be confused with the coding profile's.
 pub struct OpenCodeInterviewAgent;
 
 impl AgentServer for OpenCodeInterviewAgent {
@@ -133,7 +139,11 @@ impl AgentServer for OpenCodeInterviewAgent {
     }
 
     fn args(&self) -> &'static [&'static str] {
-        &["acp", "--agent", INTERVIEW_AGENT_NAME]
+        &["acp"]
+    }
+
+    fn session_mode(&self) -> Option<&'static str> {
+        Some(INTERVIEW_AGENT_NAME)
     }
 
     fn spawn_spec(&self, cwd: &Path) -> Result<SpawnSpec, AcpError> {
@@ -185,6 +195,9 @@ mod tests {
             serde_json::from_str(&interview_config()).expect("valid JSON");
         let agent = &config["agent"][INTERVIEW_AGENT_NAME];
         assert_eq!(agent["mode"], "primary");
+        // The config is the only channel selecting the agent, so the process
+        // must default to it.
+        assert_eq!(config["default_agent"], INTERVIEW_AGENT_NAME);
         assert_eq!(agent["permission"]["edit"], "deny");
         // `task` stays allowed (decision #4); read tools are not denied here.
         assert_eq!(agent["permission"]["task"], "allow");
@@ -215,16 +228,20 @@ mod tests {
     fn the_interview_agent_injects_its_config_and_selects_the_profile() {
         let agent = OpenCodeInterviewAgent;
         assert_eq!(agent.id(), "opencode-interview");
-        assert_eq!(
-            agent.args(),
-            &["acp", "--agent", INTERVIEW_AGENT_NAME]
-        );
+        // `opencode acp` takes no `--agent`: passed one it prints its help and
+        // exits, so the handshake dies and no interview can start.
+        assert_eq!(agent.args(), &["acp"]);
+        assert_eq!(agent.session_mode(), Some(INTERVIEW_AGENT_NAME));
         let spec = agent
             .spawn_spec(Path::new("/tmp"))
             .expect("opencode resolves");
-        assert_eq!(spec.args, vec!["acp", "--agent", INTERVIEW_AGENT_NAME]);
+        assert_eq!(spec.args, vec!["acp"]);
         let injected = spec.env.get(OPENCODE_CONFIG_CONTENT).expect("injected");
         assert!(injected.contains(INTERVIEW_AGENT_NAME));
+        // The process's own default agent is the read-only one: a session
+        // created without a mode would otherwise run as `build`.
+        let config: serde_json::Value = serde_json::from_str(injected).expect("valid JSON");
+        assert_eq!(config["default_agent"], INTERVIEW_AGENT_NAME);
     }
 
     #[test]

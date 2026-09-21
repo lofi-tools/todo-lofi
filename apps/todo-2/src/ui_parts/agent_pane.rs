@@ -34,7 +34,7 @@ use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaSta
 use gpui_component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::text::{TextView, TextViewStyle};
-use gpui_component::{Disableable, IconName, Sizable, StyledExt as _};
+use gpui_component::{Disableable, IconName, Sizable, StyledExt as _, Theme};
 
 use crate::coding_agent::McpEndpoint;
 use crate::theme::{
@@ -68,7 +68,35 @@ const TERMINAL_MAX_LINES: usize = 2_000;
 const TOOL_MAX_LINES: usize = 1_000;
 /// Lines of captured stderr shown inside an error card.
 const ERROR_TAIL_LINES: usize = 20;
-const MONO_FONT: &str = "ui-monospace";
+/// The mono family the pane draws code, diffs, keycaps and terminal output in.
+///
+/// The design token for mono is the CSS generic `ui-monospace`, which is not a
+/// family any text system resolves. Naming it is not a cheap silent fallback in
+/// GPUI: the text system caches the failed lookup and rebuilds an `anyhow` error
+/// on every per-run font resolution in `shape_text`, and with `RUST_BACKTRACE`
+/// set each rebuild captures a backtrace — one frame of the run split measured
+/// at ~27s. The theme resolves its own mono token to a family the machine has
+/// (see `gpui_component`'s `mono_font`), so the pane draws with that;
+/// [`resolve_mono_font`] caches the answer for the element helpers, which build
+/// elements without a context.
+static MONO_FONT_FAMILY: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+
+/// The pane's mono family, as cached by [`resolve_mono_font`].
+///
+/// Before the first render there is no theme to read, so this falls back to the
+/// virtual system font: GPUI always resolves that, so an unprimed call can never
+/// become the failed lookup described above.
+fn mono_font_family() -> SharedString {
+    MONO_FONT_FAMILY
+        .get()
+        .cloned()
+        .unwrap_or_else(|| SharedString::new_static(".SystemUIFont"))
+}
+
+/// Cache the theme's mono family for the pane's elements.
+fn resolve_mono_font(cx: &App) {
+    MONO_FONT_FAMILY.get_or_init(|| Theme::global(cx).mono_font_family.clone());
+}
 /// Conversation text sizes, mirroring Zed's agent panel: the prompt bubble
 /// takes its smaller `agent_buffer_font_size` step, replies and tool-call
 /// titles the larger `agent_ui_font_size`/tool-name step.
@@ -237,6 +265,10 @@ impl AgentServer for EnvAgent {
 
     fn args(&self) -> &'static [&'static str] {
         self.inner.args()
+    }
+
+    fn session_mode(&self) -> Option<&'static str> {
+        self.inner.session_mode()
     }
 
     fn spawn_spec(&self, cwd: &std::path::Path) -> Result<SpawnSpec, AcpError> {
@@ -566,6 +598,14 @@ impl AgentPane {
     /// Whether the on-screen project has a turn running.
     pub fn is_busy(&self) -> bool {
         self.active_entry().map(|entry| entry.busy).unwrap_or(false)
+    }
+
+    /// Whether the on-screen project's session failed to start. The layout
+    /// restarts such a session rather than treating the profile as already up:
+    /// a phase button must be able to recover from a launch failure.
+    pub fn active_session_failed(&self) -> bool {
+        self.active_entry()
+            .is_some_and(|entry| matches!(&entry.state, PaneState::Failed { .. }))
     }
 
     /// Stop the on-screen project's streaming turn, as the pane's own Stop
@@ -922,6 +962,9 @@ impl AgentPane {
             None => entry.agent.clone(),
         };
         let agent_id = agent.id().to_string();
+        // The agent this profile must run under, applied to the session below
+        // before the launch task hands it over.
+        let session_mode = agent.session_mode().map(str::to_string);
         let store = self.session_store.clone();
         let endpoint = entry.mcp.clone();
 
@@ -1010,6 +1053,17 @@ impl AgentPane {
                     });
                 }
             };
+            // A profile that must run as one agent is switched here, before the
+            // session reaches the pane: nothing can prompt it until this task
+            // returns, so the switch cannot be raced, and a refusal fails the
+            // launch instead of running the phase under the agent's own
+            // default (for the interview: `build`, with write tools).
+            if let Some(mode) = session_mode.as_deref() {
+                connection
+                    .requester
+                    .set_mode(&session_id, SessionModeId::new(mode))
+                    .await?;
+            }
             let record = StoredSession {
                 project_path: project_path.clone(),
                 tag_id,
@@ -3215,7 +3269,7 @@ impl AgentPane {
                     })
                     .child(
                         div()
-                            .font_family(MONO_FONT)
+                            .font_family(mono_font_family())
                             .text_xs()
                             .text_color(rgb(TEXT_STRONG))
                             .child(format!("/{}", command.name)),
@@ -3453,7 +3507,7 @@ fn keycap(key: &str) -> AnyElement {
         .border_1()
         .border_color(rgb(HAIRLINE))
         .rounded_sm()
-        .font_family(MONO_FONT)
+        .font_family(mono_font_family())
         .text_size(px(10.))
         .text_color(rgb(TEXT_STRONG))
         .child(key.to_string())
@@ -3471,7 +3525,7 @@ fn block(text: &str, max_lines: Option<usize>) -> AnyElement {
         .p_2()
         .bg(rgb(PANEL_BG))
         .rounded_md()
-        .font_family(MONO_FONT)
+        .font_family(mono_font_family())
         .text_xs()
         .text_color(rgb(TEXT_MUTED))
         .child(body)
@@ -3512,7 +3566,7 @@ fn render_diff(diff: &acp_client::thread::FileDiff) -> AnyElement {
         .rounded_md()
         .flex()
         .flex_col()
-        .font_family(MONO_FONT)
+        .font_family(mono_font_family())
         .text_xs();
     for line in shown {
         let (prefix, text, tint, color) = match line {
@@ -3569,7 +3623,7 @@ fn render_terminal(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .font_family(MONO_FONT)
+                        .font_family(mono_font_family())
                         .text_xs()
                         .text_color(rgb(TEXT_MUTED))
                         .child(terminal_id.to_string()),
@@ -3851,7 +3905,7 @@ fn render_error_detail(detail: &str) -> AnyElement {
         .p_2()
         .bg(rgb(PANEL_BG))
         .rounded_md()
-        .font_family(MONO_FONT)
+        .font_family(mono_font_family())
         .text_xs()
         .text_color(rgb(TEXT_MUTED))
         .child(
@@ -3993,6 +4047,9 @@ impl EventEmitter<AgentPaneEvent> for AgentPane {}
 
 impl Render for AgentPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The theme is applied before the pane renders, so this is the earliest
+        // point the resolved mono family can be read.
+        resolve_mono_font(cx);
         let header = self.render_header(cx);
         let body = self.render_body(cx);
         let prompt = self.render_prompt(window, cx);
@@ -4096,6 +4153,25 @@ mod tests {
             id.to_string(),
             title.to_string(),
         )))
+    }
+
+    /// The pane draws its mono blocks in the theme's mono family, never in the
+    /// design token's `ui-monospace`. That token is a CSS generic no machine
+    /// installs, and GPUI does not fall back silently: it caches the failed
+    /// lookup and rebuilds an error for every text run it shapes, which is how
+    /// one frame of the run split came to cost ~27s.
+    #[gpui::test]
+    fn the_pane_draws_mono_text_in_the_themes_family(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (family, theme_family) = cx.update(|cx| {
+            resolve_mono_font(cx);
+            (
+                mono_font_family(),
+                Theme::global(cx).mono_font_family.clone(),
+            )
+        });
+        assert_eq!(family, theme_family);
+        assert_ne!(family, SharedString::from("ui-monospace"));
     }
 
     #[test]

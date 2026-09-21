@@ -175,8 +175,11 @@ spec flow:  get_spec / set_spec  →  task_extra (namespace "coding", key "spec"
   `OPENCODE_CONFIG` (path), `OPENCODE_CONFIG_CONTENT` (inline JSON),
   `OPENCODE_CONFIG_DIR`, and `OPENCODE_PERMISSION` (inline permission JSON).
 - `opencode run` is the non-interactive one-shot mode; `opencode serve` is a
-  long-lived headless backend; `--agent <name>` selects the profile. Binary
-  resolution already exists (`resolve_program`, `agent.rs`).
+  long-lived headless backend; `--agent <name>` selects the profile, but only on
+  `run` — `opencode acp` takes no such flag and exits with its help when given
+  one. A config's `default_agent` (a primary agent's name) is what selects the
+  profile for an ACP session. Binary resolution already exists
+  (`resolve_program`, `agent.rs`).
 
 Conclusions used below: (a) a **named agent with an explicit permission block**
 is the reliable way to get a hard read-only profile; (b) the profile belongs to
@@ -230,15 +233,20 @@ Rules:
   principle be invoked. Subagents inherit the denying agent's permissions in
   opencode, but this is called out as a risk in §14.
 - The config is generated with a small pure builder (`agent` name, prompt,
-  allow-list) so it is unit-testable without launching opencode.
+  allow-list) so it is unit-testable without launching opencode. It also sets
+  `default_agent: "todo-interview"`.
 
 ### 5.3 Launch shape
 
 - A second `AgentServer` implementation (working name `OpenCodeInterviewAgent`)
   reuses `program: "opencode"`, `args: ["acp"]`, and overrides `spawn_spec` to
-  add the `OPENCODE_CONFIG_CONTENT` env var plus `--agent todo-interview` in
-  `args`. `SpawnSpec` already carries `env: BTreeMap<String, String>`, so no
-  transport change is needed to inject it.
+  add the `OPENCODE_CONFIG_CONTENT` env var. `SpawnSpec` already carries
+  `env: BTreeMap<String, String>`, so no transport change is needed to inject
+  it. The process is not told the agent through `args` — `opencode acp` rejects
+  `--agent` — so the injected `default_agent` selects it, and the launch
+  additionally switches the new session to `todo-interview` with
+  `session/set_mode` (an `AgentServer::session_mode`) and fails the launch if
+  the agent refuses: the interview must never run under a writable default.
 - The coding profile gets the **default** launch (today's `OpenCodeAgent`), so
   existing behaviour is untouched for non-coding use (decision #3 in §2 table,
   config scope).
@@ -453,8 +461,9 @@ shows it in the pane. Nothing here auto-sends.
    `NewSessionRequest` with them; thread the parameter through `create_session`
    callers.
 2. `agent.rs`: `OpenCodeInterviewAgent` (or a parameterized `OpenCodeAgent`) that
-   injects `OPENCODE_CONFIG_CONTENT` + `--agent todo-interview` through
-   `SpawnSpec.env`/`args`; keep the default `OpenCodeAgent` untouched for chat.
+   injects `OPENCODE_CONFIG_CONTENT` through `SpawnSpec.env` and names its mode
+   through `AgentServer::session_mode`; keep the default `OpenCodeAgent`
+   untouched for chat.
 3. `acp_client.rs` exports for the new type(s).
 
 **`libs/storage/`**
@@ -515,7 +524,8 @@ shows it in the pane. Nothing here auto-sends.
 - Injected-config builder (pure): the generated JSON has `edit: "deny"`, a
   `bash` map whose first rule is `"*": "deny"`, the named agent, and no writes
   to any user config path; `OPENCODE_CONFIG_CONTENT` is the only config channel.
-- Spawn spec: the interview profile carries the env var and `--agent`; the
+- Spawn spec: the interview profile carries the env var, spawns `opencode acp`
+  with no `--agent`, and reports `todo-interview` as its session mode; the
   coding profile is byte-identical to today's.
 - The reminder prompt fires once when the interview process ends without a spec.
 
