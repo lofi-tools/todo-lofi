@@ -358,7 +358,9 @@ impl Provider for OpenAi {
         let response = self.client.execute(req).await.map_err(CerseiError::Http)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let retry_after = crate::parse_retry_after(response.headers());
+            // `Retry-After` first, then the X-RateLimit-* shapes some gateways
+            // only send on the error response (OpenRouter, OpenAI, Groq).
+            let retry_after = crate::parse_rate_limit_reset(response.headers());
             let body = response.text().await.unwrap_or_default();
             return Err(CerseiError::from_http_status(status, retry_after, body));
         }

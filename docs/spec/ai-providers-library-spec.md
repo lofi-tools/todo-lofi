@@ -29,6 +29,9 @@ two halves meet at.
 | D8 | **Library must work with no store.** `NullStore` (no-op) and `InMemoryStore` (tests) ship in the crate so the library is usable without a database. |
 | D9 | **The library keeps cersei as its transport.** It does not reimplement the OpenAI SSE reader; the vendored `patched/cersei-provider` reasoning-delta behaviour stays the single wire implementation. |
 | D10 | **Wire-shape quirks stay in cersei; stream/loop quirks live here.** cersei's `ProviderQuirks` (thinking form, temperature policy, schema dialect, context window) is not duplicated. This crate owns the *model family* quirks that affect how the agent consumes the stream: reasoning delta field, `no_tool_nudge`, response-format family. |
+| D11 | **429 handling reads `Retry-After` *and* `X-RateLimit-Reset`**, parsed in the vendored `patched/cersei-provider` error branch where the response headers are already in hand. No `cersei-types` change. Success-path rate-limit headers are not relied on (see §5.11). |
+| D12 | **Pacing adapts instead of guessing numbers.** Explicit `PacingSpec` limits are ceilings; with none set the pacer starts unthrottled and uses additive-increase/multiplicative-decrease on observed 429s, plus header hints when a gateway sends them. No hand-maintained RPM table for the built-in providers. |
+| D13 | **An `Auth` failure re-resolves the key spec once and retries once** before the provider is disabled for the process — a rotating key (`!command`) or a re-read `env:` variable recovers, a genuinely bad key does not spin. |
 
 ---
 
@@ -129,7 +132,7 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-path = "ai_providers.rs"
+path = "src/ai_providers.rs"
 
 [dependencies]
 cersei.workspace = true
@@ -145,7 +148,7 @@ parking_lot = "0.12"
 ```
 
 ```
-src/ai_providers.rs   crate root: re-exports + doc
+src/ai_providers.rs   crate root: re-exports + doc (the `[lib] path`)
 src/spec.rs           ProviderSpec, ModelSpec, QuirkSpec, PacingSpec, Resolved
 src/catalog.rs        Catalog: merge specs, lookup, default selection, /models cache
 src/key.rs            resolve_value_spec / resolve_api_key, endpoint resolution
@@ -301,7 +304,9 @@ pub struct PacedProvider {
 5. On `Ok(stream)`: wrap the stream so a mid-stream `StreamEvent::Error` is classified from its
    message and recorded at stream end; usage/latency recorded when `MessageDelta { usage }` or
    `MessageStop` arrives.
-6. Release the permit; assert the bucket against observed `Retry-After` when the error carried one.
+6. Release the permit, then update the pacer (D12): on `RateLimited`/`Overloaded` multiply the
+   effective interval (up to `max_cooldown`); on a success streak of 20, decay it by ×0.8; apply
+   any rate-limit hint observed on the response (§5.11) as an additional ceiling.
 
 ### 5.8 Failure classification (`src/failure.rs`)
 
@@ -344,12 +349,16 @@ requests` → `RateLimited`; `timeout` / `timed out` / `deadline` → `Timeout`;
 
 Policy derived from the kind (normative):
 
-- `RateLimited` with `retry_after`: cooldown `clamp(retry_after, min_cooldown, max_cooldown)`
-  instead of the fixed `fallback.cooldown_seconds`. Without a header, back off
-  `min(max_cooldown, previous * 2)` starting at `min_cooldown`.
-- `QuotaExhausted` / `Auth`: provider-wide cooldown until the process exits, plus a one-line
-  user-facing message naming the provider and the fix (top up the account / fix the key). The
-  agent decides whether that aborts the run; the library only refuses further requests.
+- `RateLimited` with a usable reset hint (`retry_after`, which §5.11 also fills from
+  `X-RateLimit-Reset`): cooldown `clamp(hint, min_cooldown, max_cooldown)` instead of the fixed
+  `fallback.cooldown_seconds`. Without a hint, back off `min(max_cooldown, previous * 2)` starting
+  at `min_cooldown`.
+- `Auth` (D13): re-resolve the api-key spec (only when it is `!command` or `env:VAR`) and retry
+  the request once. If that also fails, the provider is disabled for the process with a one-line
+  message naming the provider and the likely fix (fix or rotate the key).
+- `QuotaExhausted`: provider-wide cooldown until the process exits, plus a one-line user-facing
+  message naming the provider and the fix (top up the account). The agent decides whether that
+  aborts the run; the library only refuses further requests.
 - `Overloaded` / `Timeout` / `Network`: `min(max_cooldown, previous * 2)`.
 - `ModelNotFound`: long cooldown (default 24h) on that `(provider, model)` only.
 - `ContextOverflow` / `RequestRejected` / `Cancelled`: no cooldown, attempt still recorded.
@@ -390,6 +399,53 @@ No table, no fetch. `Resolved` gains `price: Option<Price>` where `Price { input
 output_per_mtok: f64 }`, always `None` in v1; the scoring price term reads `0.0` when it is `None`.
 `cersei::tools::estimate_cost` and the duplicate in `tui/widgets.rs:579` are left alone.
 
+### 5.11 Rate-limit header parsing (D11)
+
+Where the headers exist: the response headers are visible in exactly one place —
+`patched/cersei-provider/src/openai.rs:358–363`, where the status is checked before spawning the
+reader. That is also where `crate::parse_retry_after(response.headers())` is called today, so the
+patch is local and needs no new plumbing and no `cersei-types` change.
+
+```rust
+/// Seconds until the limit resets, from whichever rate-limit header the gateway sent.
+///
+/// Accepts, in order of preference:
+///   retry-after                    — delta seconds (existing behaviour)
+///   x-ratelimit-reset              — unix epoch seconds when the value is > 1e9,
+///                                    otherwise delta seconds (OpenRouter)
+///   x-ratelimit-reset-requests     — Go duration or plain seconds (OpenAI/Groq)
+///   x-ratelimit-reset-tokens       — same shape, used when the request axis is absent
+///   ratelimit-reset                — IETF draft, delta seconds
+pub fn parse_rate_limit_reset(headers: &reqwest::header::HeaderMap) -> Option<Duration>;
+
+/// Remaining/limit counts, for the pacer's hint path (both optional; most gateways
+/// send neither).
+///   x-ratelimit-remaining / x-ratelimit-remaining-requests
+///   x-ratelimit-limit     / x-ratelimit-limit-requests
+pub fn parse_rate_limit_counts(headers: &reqwest::header::HeaderMap) -> RateLimitCounts;
+```
+
+`CerseiError::from_http_status` already accepts `retry_after`, so the vendored provider passes
+`parse_rate_limit_reset(headers)` where it currently passes `parse_retry_after(headers)`. Evidence
+that this matters for a provider agent-cli actually uses: OpenRouter documents its rate-limit state
+as `X-RateLimit-*` **on the error response** and its in-flight-budget 402 with a `Retry-After`
+(https://openrouter.ai/docs/api_reference/limits).
+
+What the probes showed for the rest of the built-in list (unauthenticated request, looking for any
+rate-limit header on a 200/401/404/405):
+
+| Provider | Headers seen |
+|---|---|
+| OpenRouter (`GET /models`, 200) | none |
+| OrcaRouter (`GET /models`, 200) | none |
+| tokenrouter (`GET /models`, 401) | none |
+| kiosapi (`GET /models`, 401) | none |
+| groq (`POST /chat/completions`, 404) | none |
+| NVIDIA (`POST /chat/completions`, 405) | none |
+
+So success-path hints are **not** a foundation to build pacing on (which is why D12 does not depend
+on them), and the header work is scoped to the error path where the data is documented to exist.
+
 ---
 
 ## 6. What stays in agent-cli (D2)
@@ -416,7 +472,7 @@ output_per_mtok: f64 }`, always `None` in v1; the scoring price term reads `0.0`
 | `min_interval` + `requests_per_minute` both set | The tighter of the two wins. |
 | Concurrency cap reached | The request **waits** for a permit (not an error); if the agent's cancel token fires first, fail with `Cancelled`. |
 | `Retry-After: <HTTP-date>` | Ignored (cersei's `parse_retry_after` only reads delta-seconds); fall back to exponential backoff. Documented, not a bug. |
-| `X-RateLimit-*` headers | **Not reachable in v1** — they never leave cersei's provider impls (see §8 open question 2). |
+| `X-RateLimit-*` headers | Read on the error path only, in the vendored provider, and folded into the reset hint (§5.11, D11). Gateways that send none fall back to exponential backoff. |
 | All combo entries in cooldown | Choose the least-recently-cooled entry anyway and surface it; never hard-fail for lack of a candidate. |
 | Model id in the spec is unknown to the provider | Recorded as a failure attempt; discovery-driven flows (`/provider`) show the live list. |
 | Provider returns HTTP 200 then fails mid-stream | Typed classification is unavailable; the string fallback classifies from the message; latency and partial usage still recorded. |
@@ -429,7 +485,7 @@ output_per_mtok: f64 }`, always `None` in v1; the scoring price term reads `0.0`
 
 | File | Change |
 |---|---|
-| `libs/ai_providers/Cargo.toml` | Rewrite: workspace deps, `[lib] path = "ai_providers.rs"`, drop the 0.12 reqwest pin. |
+| `libs/ai_providers/Cargo.toml` | Rewrite: workspace deps, `[lib] path = "src/ai_providers.rs"` (the root lives beside its modules), drop the 0.12 reqwest pin. |
 | `libs/ai_providers/src/*` | New modules per §4; delete `oauth.rs`, `nous_portal.rs`, `poolside.rs`, and the old `lib.rs` `OpenAiCompatible`/`RealRunner`/`CmdErr`. |
 | `apps/agent-cli/src/providers.rs` | Keep config/combos/runtime; delegate registry, resolve, discovery, quirks, cooldowns and transport to the crate; `providers(config) -> Vec<ProviderSpec>`. |
 | `apps/agent-cli/src/model_families.rs` | Re-export from the crate (or delete and update call sites). |
@@ -476,35 +532,125 @@ assert registry/cooldown behaviour move with the code rather than being rewritte
 
 ---
 
-## 11. Open questions and risks
+## 11. Resolved questions (with evidence)
 
-1. **`StreamEvent::Error` is a `String`.** Mid-stream failures (the common case for gateways that
-   return 200 then die) can only be classified by text. Fixing this properly means teaching
-   cersei-provider to emit a typed error — a `patched/cersei-provider` change this repo already has
-   the machinery for. Recommended follow-up, not v1.
-2. **`X-RateLimit-*` headers are invisible.** They are read inside cersei's provider impls and
-   dropped. Surfacing them needs either a `patched/cersei-provider` side-channel (e.g. an
-   `Arc<Mutex<Option<RateLimitSnapshot>>>` handed to `OpenAi`) or a `cersei-types` patch to carry
-   them on `ProviderStatus` (cersei-types is *not* vendored today, so that is the larger change).
-   v1 therefore honors `Retry-After` only.
-3. **Proactive limits need numbers.** `requests_per_minute` / `max_concurrency` have no sane
-   default across ~12 gateways; unset means unlimited, so pacing only helps once the user (or a
-   future provider-catalog field) supplies them. Should the built-in provider list carry starter
-   limits for providers whose published limits are known?
-4. **Cooldown on a 429 that `is_retryable() == false`.** The library treats quota exhaustion as
-   provider-disabling for the session; confirm that is the desired UX versus letting the agent fall
-   back and retry other providers only.
-5. **Where does `Resolver` split?** `default_selection`'s `auto` policy (empty `provider` → the
-   `model` prefix if known, else the first provider) currently lives in `providers.rs:639`. It needs
-   both the catalog and the config's `auto` semantics; the spec keeps it in the agent, but if a
-   second consumer appears it should move.
-6. **Crate name.** `ai_providers` was chosen because the path exists; if the crate is meant to be
-   published or shared beyond this workspace, a name like `llm_providers` or `provider_catalog`
-   describes it better.
+### 11.1 `X-RateLimit-*` headers → **error path only, via the vendored provider** (D11, §5.11)
+
+*As built:* the parsers live in the vendored provider, not in this crate —
+`patched/cersei-provider/src/lib.rs` gained `parse_rate_limit_reset` (and the
+`parse_go_duration` helper) next to the existing `parse_retry_after`, and
+`openai.rs`'s non-2xx branch calls it where it used to call
+`parse_retry_after`. §5.11 originally placed them in this crate, but the crate
+never sees a response header: it receives a typed `CerseiError` or a
+`StreamEvent`, and cersei's provider is the only place `reqwest::HeaderMap` is
+in hand. Putting the parser there avoids both a `cersei-types` change and a
+second, unreachable copy. The library consumes the result the same way either
+way — the reset hint arrives as `CerseiError::RateLimit { retry_after }`, which
+`FailureKind::retry_after()` reads into the cooldown policy. `parse_rate_limit_counts`
+was dropped: with success-path headers unreachable, nothing could call it.
+
+Resolved as: parse them where they are already reachable (`openai.rs:358–363`) and fold the reset
+hint into `retry_after`; do not build pacing on success-path headers. Backing evidence: OpenRouter
+documents `X-RateLimit-*` on rate-limit *errors*; every probe of the other built-in gateways found
+no rate-limit headers at all on a 200/401/404/405. A `cersei-types` patch is therefore **not**
+needed. Provider-specific budget inspection (OpenRouter's `GET /api/v1/key` exposing
+`limit_remaining` and `free_model_daily_requests`) is deliberately out of scope — it is one
+gateway's bespoke API, and the library stays open-format.
+
+### 11.2 `StreamEvent::Error` carries a `String` → **accepted; no cersei-types patch**
+
+Resolved as: keep the string fallback permanently. A mid-stream failure by definition has no HTTP
+status (the response was 200), so there is nothing more accurate to carry; the classifier's
+rate-limit/timeout/network wording covers the provider-health cases that score. HTTP-level
+failures, which are the ones that drive cooldowns, are already typed via
+`CerseiError::from_http_status`. Attempt attribution (see the telemetry spec §5.1) is unaffected:
+the attempt is opened before the stream starts, so a mid-stream failure is recorded against the
+right provider, model and turn.
+
+### 11.3 Proactive limits with no numbers → **adaptive pacing, explicit config as ceiling** (D12)
+
+Resolved as: no invented per-provider RPM table. Unset `PacingSpec` means "start unthrottled"; the
+pacer then learns — multiplicative decrease on 429/overload, slow additive recovery, plus header
+hints when a gateway sends them. Explicit `requests_per_minute` / `min_interval` values (from
+config, later optionally from the built-in list) act as ceilings the pacer never exceeds. This is
+strictly more informative than a guess, and it is the same information the score already collects.
+
+### 11.4 `Auth` on a rotating key → **re-resolve once, then disable** (D13)
+
+Resolved as: re-resolve the key spec (only for `!command` / `env:VAR`) and retry the request once;
+only a second failure disables the provider for the process. Rotation is a normal proxy-setup
+pattern and a stale cached key must not look like a dead provider.
+
+### 11.5 Where `default_selection` lives → **agent**
+
+Resolved as: stays in agent-cli (`providers.rs:639`), because `auto` is config policy ("empty
+provider → the `model` prefix if known, else the first provider"). The library exposes
+`Catalog::default_model` only. If a second consumer ever needs the `auto` rule it moves then.
+
+### 11.6 Crate name → **keep `ai_providers`**
+
+Resolved as: keep it (D1 — the path exists and agent-cli already declares the dependency). Renaming
+is mechanical and can happen any time before the crate leaves this workspace.
 
 ---
 
-## 12. Implementation order
+## 12. Accepted risks → decisions (no open questions remain)
+
+Each remaining risk is closed by a decision taken here, so implementation has no forks left.
+
+| # | Risk | Decision |
+|---|------|----------|
+| D14 | Gates emit header shapes we do not parse (`X-RateLimit-Reset` is epoch-seconds at OpenRouter, delta-seconds in the IETF draft; OpenAI/Groq use Go durations) | §5.11's parser covers those four shapes with tests; **an unrecognised shape yields `None` and falls through to exponential backoff.** No per-gateway special cases, no warning spam — a missing hint is strictly better than a wrong sleep. |
+| D15 | Pacing state assumed one provider instance per agent instance | **Limiters are keyed by provider name and owned by the `Catalog`**, so parent and sub-agents share one limiter per provider. An in-flight cap therefore means "across this process for this provider", which is what the cap should mean anyway; the header observer writes into that shared limiter, so instances cannot race. Nothing depends on per-instance state. |
+| D16 | AIMD constants (`×2` down, `×0.8` up after 20 successes, `max_cooldown` cap) are untuned | Constants live in `pacing.rs` (`DECREASE = 2.0`, `RECOVER = 0.8`, `RECOVER_AFTER = 20`) with tests asserting monotonic behaviour; **no config surface in v1**. Tuning is a one-line change once real 429 data exists. |
+| D17 | Quota exhaustion disables a provider mid-run | **Intended behaviour:** the library refuses further requests to that provider and returns `RateLimit`-class errors, so the agent's existing fallback walks to the next combo entry. The run only fails if every entry is exhausted, and the message names the provider and the fix. |
+| D18 | `Auth` disabling is process-wide, not session-wide | Accepted: agent-cli is a per-invocation process, so "for the process" and "for the session" coincide. If a long-lived server ever embeds the crate, the disabled set becomes a constructor argument rather than a global. |
+
+---
+
+## 13. Implementation notes (as built)
+
+Deviations from the prose above, each deliberate and each tested:
+
+- **§4 layout** — the crate root is `src/ai_providers.rs` (so the module list
+  in §4 holds), not `ai_providers.rs` at the package root.
+- **§5.2 `provider_impl`** takes one extra argument, the shared
+  `Arc<AttemptScope>`, and one convenience argument, the
+  `cersei::provider::ReasoningField` the agent resolved from its model-family
+  config. Both are per-agent values the library cannot derive.
+- **§5.7 step 2** — the in-flight cooldown check reads the in-process
+  `CooldownRegistry` rather than awaiting a store read per request. The
+  registry *is* the store's mirror: the agent seeds it from
+  `TelemetryStore::active_cooldowns()` at startup and the transport writes both
+  on every failure, so nothing is lost and the hot path stays synchronous.
+- **§5.7 step 5** — a successful response is wrapped by forwarding the inner
+  stream through a spawned task that tracks usage and a mid-stream error, holds
+  the concurrency permit for the stream's life, and records the attempt when the
+  stream ends. `CompletionStream` is a concrete struct over a channel, so a
+  wrapper must own both ends.
+- **§5.8 cooldowns** — `FailureKind::ModelNotFound` uses a 24h cooldown; the
+  `Auth` re-resolve retries only for `!cmd`/`env:VAR` specs (a literal key
+  cannot change) and on a second failure disables the provider.
+- **§5.8 / §5.10 pricing** — `Resolved.price` is always `None`; the router's
+  price term and weight exist and evaluate to `0`.
+- **§5.6 `Family`** — kept in `quirks.rs` as `name`/`markers`/`reasoning_field`/
+  `no_tool_nudge`; the response-format family resolution (`format_for`,
+  `reasoning_field_for`, `classify_delta`, `parse_sse`) lives in the same module
+  so agent-cli's `response_format` can forward to one place.
+- **AIMD base** — with no configured floor, the first 429 buys
+  `LEARNED_BASE_INTERVAL` (500ms) and each further one doubles it, capped at
+  `MAX_LEARNED_INTERVAL` (30s); `RECOVER_AFTER` successes multiply by
+  `RECOVER`. Constants are in `pacing.rs` with behaviour tests (D16).
+- **Router ties** — equal penalties prefer the configured order, except that
+  among cooling candidates the one whose cooldown lifts sooner wins (so an
+  all-cooling combo still tries the least-cooled entry, per §7).
+- **Router latency term** — the mean of the last five latencies per candidate,
+  relative to the fastest candidate, only when its weight is `> 0`.
+- **`TelemetryStore::active_cooldowns`** returns
+  `(ModelKey, SystemTime, String)` — the cause tag is kept so a seeded
+  cooldown can be explained, which the §5.9 sketch dropped.
+
+## 14. Implementation order
 
 1. Rewrite the crate skeleton (Cargo.toml + module files + `NullStore`), move `quirks.rs`
    (model families) and the response-format families across with their tests — no behaviour change

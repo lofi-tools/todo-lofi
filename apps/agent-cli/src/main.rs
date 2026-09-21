@@ -16,6 +16,8 @@ pub mod providers;
 pub mod response_format;
 pub mod signals;
 pub mod subagents;
+pub mod telemetry;
+pub mod telemetry_migrations;
 pub mod tools;
 pub mod tui;
 
@@ -63,19 +65,32 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `sessions` subcommand: the read side of the telemetry database.
+    if let Some(Commands::Sessions { action }) = &cli.command {
+        return telemetry::run_sessions_command(action).await;
+    }
+
     // ACP server mode: speak Agent Client Protocol over stdio.
     if cli.acp {
         return acp::run_server(cli, config).await;
     }
 
-    let runtime = Arc::new(AgentRuntime::new(&config)?);
+    // Telemetry is best-effort: a broken database degrades to the no-op store
+    // with one warning and never stops a run.
+    let (store, telemetry_store) = telemetry::AgentStore::open_configured(&config).await;
+    let runtime = Arc::new(AgentRuntime::with_telemetry(&config, store, telemetry_store).await?);
+    runtime.start_session().await;
 
     let prompt = cli.prompt.as_deref().filter(|p| *p != ".");
-    if let Some(prompt_text) = prompt {
-        run_single_shot(runtime, prompt_text).await?;
+    let outcome = if let Some(prompt_text) = prompt {
+        run_single_shot(runtime.clone(), prompt_text).await
     } else {
-        run_tui_app(cli, config, runtime).await?;
-    }
+        run_tui_app(cli, config, runtime.clone()).await
+    };
+    runtime
+        .finish_session(if outcome.is_ok() { "ok" } else { "error" }, None)
+        .await;
+    outcome?;
 
     // fastrace::flush();
     Ok(())
@@ -98,11 +113,17 @@ struct SingleShotRun {
 /// Retry `run` on the next combo entry if it errored before producing any
 /// output. Returns true when the error was handled by a fallback (and should
 /// be swallowed by the caller).
-fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
+///
+/// The entry is chosen by the library's router when routing is on, so the retry
+/// can land on the healthiest candidate rather than the next listed one.
+async fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime.next_fallback_entry(&run.provider, &run.model) else {
+    let Some(next) = runtime
+        .choose_next_entry(&run.provider, &run.model)
+        .await
+    else {
         return false;
     };
     runtime.record_failure(&run.provider, &run.model);
@@ -113,9 +134,13 @@ fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
                 crate::providers::display_model_id(&run.provider, &run.model),
                 crate::providers::display_model_id(&next.provider, &next.model),
             );
+            if let Some(line) = runtime.last_decision().and_then(|d| d.summary_line()) {
+                eprintln!("\x1b[2m{line}\x1b[0m");
+            }
             run.provider = next.provider;
             run.model = next.model;
             run.stream = runtime.agent().run_stream(&run.prompt);
+            runtime.begin_turn(&run.provider, &run.model).await;
             true
         }
         Err(_) => false,
@@ -136,6 +161,7 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
         model: effective_model,
         produced_output: false,
     };
+    runtime.begin_turn(&run.provider, &run.model).await;
 
     while let Some(event) = run.stream.next().await {
         match event {
@@ -168,14 +194,19 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
                 if is_error {
                     eprintln!("    {}", result.lines().next().unwrap_or(""));
                 }
+                runtime.note_tool_call().await;
             }
             cersei::events::AgentEvent::Error(msg) => {
-                if !try_fallback(&runtime, &mut run) {
+                if !try_fallback(&runtime, &mut run).await {
+                    runtime.end_turn("error", Some("provider_error"), 0, 0).await;
                     eprintln!("\x1b[31mError: {msg}\x1b[0m");
                     anyhow::bail!("{msg}");
                 }
             }
-            cersei::events::AgentEvent::Complete(_) => break,
+            cersei::events::AgentEvent::Complete(_) => {
+                runtime.end_turn("ok", None, 0, 0).await;
+                break;
+            }
             _ => {}
         }
     }

@@ -144,11 +144,17 @@ Then pick it like any other model: `/model combos/coding` in the TUI, or set
   skipped with a warning.
 - `fallback.cooldown_seconds` is the "long cooldown" (default 300s = 5
   minutes): once an entry fails it is excluded from fallback for this long, so
-  a rate-limited provider isn't hammered again immediately.
-- Cooldowns **persist across restarts** in a small JSON file (`~/.abstract/
-  cooldowns.json` by default) — just a few minutes of rate-limit state, so a
-  tiny file is all it takes (no database). Relocate or disable it via
-  `fallback.cooldowns_file` (an empty string disables persistence).
+  a rate-limited provider isn't hammered again immediately. A failure the
+  transport classified itself (a 429 with a `Retry-After`, an overloaded
+  provider) gets its own, kind-specific cooldown from the provider library.
+- Cooldowns **persist across restarts** in the telemetry database
+  (`~/.abstract/agent.db`, the `cooldowns` table) — see *Telemetry and
+  routing* below. `fallback.cooldowns_file` is deprecated and ignored; a
+  leftover `~/.abstract/cooldowns.json` is imported once and renamed to
+  `cooldowns.json.migrated`.
+- **Routing**: with `routing.enabled` (the default), the entry that a failed
+  run falls back to is *scored* rather than simply next in the list — the
+  healthiest candidate wins. `/why` shows the terms behind the last choice.
 - `fallback.enabled: false` turns combo fallback off (combos then just run on
   their first entry).
 - `combos` entries can also be written as objects:
@@ -167,6 +173,47 @@ differs from `currentModelId`, i.e. while a combo runs on a fallback entry),
 and each switch emits a `model_changed` session/update notification carrying
 both the selection (`modelId`) and the new effective model
 (`effectiveModelId`).
+
+### Telemetry and routing
+
+Every provider attempt is recorded to a local SQLite database, and that history
+drives which combo entry a run retries on.
+
+```jsonc
+"telemetry": {
+  "enabled": true,
+  "db_path": null,          // null → ~/.abstract/agent.db
+  "retention_days": 30
+},
+"routing": {
+  "enabled": true,
+  "window_hours": 24,       // history the score reads
+  "half_life_hours": 6,     // decay inside that window
+  "min_samples": 3,         // below this, history doesn't outrank the prior
+  "weight_failure": 1.0,
+  "weight_pacing": 0.25,    // provider load, when a concurrency cap is set
+  "weight_latency": 0.0,    // off by default
+  "weight_price": 0.0       // no pricing data in v1
+}
+```
+
+- The database holds **no prompt or response text**: sessions, turns (with
+  `parent_turn_id`, so sub-agent work hangs off the turn that spawned it),
+  attempts (provider, model, ok, error kind, latency, tokens), cooldowns and
+  every routing decision with its inputs. `/why` renders the last decision;
+  `ag sessions list|show|rm` reads the rest.
+- **Self rate-limiting** happens in the provider library: an optional
+  per-provider `pacing` block (`requests_per_minute`, `max_concurrency`,
+  `min_interval_ms`, `min_cooldown_seconds`, `max_cooldown_seconds`) sets
+  ceilings. Unset means "start unthrottled": the limiter only slows down after
+  a provider actually pushes back, and recovers after a run of successes.
+- **Telemetry never breaks a run.** A database that cannot be opened or written
+  logs one warning, degrades to a no-op for the rest of the process, and the
+  agent continues. `telemetry.enabled: false` (or `routing.enabled: false`)
+  restores the plain ordered walk.
+- Sessions are recorded for TUI, single-shot (`-p`) and ACP runs. Sub-agent
+  requests currently run outside the paced transport, so they are not yet
+  recorded as attempts.
 
 ### Providers
 
@@ -292,9 +339,15 @@ docs), and `SyntheticOutput` (structured output).
   comments and per-field docs; the same content `/default-config` opens in
   your editor)
 - `ag config show` — same as `ag config`
+- `ag sessions list [--limit 20]` — recent sessions with turns, tokens and
+  outcome
+- `ag sessions show <id>` — one session's turns and per-provider attempt
+  failures (a unique id prefix is accepted)
+- `ag sessions rm <id>` — delete a session (its turns go too; its attempts
+  keep their row, unattributed)
 
-Other declared subcommands (`sessions`, `memory`, `mcp`, `init`, `login`,
-`logout`) are not implemented yet.
+Other declared subcommands (`memory`, `mcp`, `init`, `login`, `logout`) are
+not implemented yet.
 
 ## Sub-agents
 

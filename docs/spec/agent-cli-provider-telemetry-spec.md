@@ -26,6 +26,10 @@ agent-cli does with it: the database it owns, what it writes, and how it chooses
 | D7 | **Self rate-limiting** (implemented in the library, configured here): proactive pacing, `429`/`Retry-After` handling, and a per-provider in-flight cap. |
 | D8 | **Telemetry never breaks a run.** Any storage error degrades to `NullStore` for the rest of the process, with a single warning. |
 | D9 | **No behaviour change when disabled.** `telemetry.enabled = false` and `routing.enabled = false` restore today's ordered walk. |
+| D10 | **Attempts are attributed with a shared `AttemptScope`**, not a SQL backfill: one scope per built agent, holding the session id plus the current turn id, handed to the library at `provider_impl` time and updated by the agent at turn boundaries and on fallback switches. |
+| D11 | **Sub-agents get their own scope** carrying their parent turn id; their attempts and turns therefore hang off the spawning turn in the history tree. |
+| D12 | **The store is raw SQL** — `toasty::sql::statement(..)` for writes and `toasty::sql::query(..).column_types([..])` for reads, over a `tokio::sync::Mutex<toasty::db::Db>`. No `#[derive(Model)]` schema: the library's trait is the interface, and typed models would add a parallel definition of the same tables. |
+| D13 | **The migration runner is copied from `libs/storage/src/migrations.rs`** (embed + checksum + statement splitter), not shared: extracting a crate would touch todo-2, which D1 excludes. |
 
 ---
 
@@ -72,19 +76,43 @@ agent-cli does with it: the database it owns, what it writes, and how it chooses
 and its assertions in `config.rs` (the same template test that today asserts 10 providers and 13 env
 vars must gain the new sections/counts).
 
-### 4.2 Wiring
+### 4.2 Wiring (D12, D13)
 
-Mirrors `libs/storage` but stays inside agent-cli:
+Mirrors `libs/storage` but stays inside agent-cli, and uses **raw SQL** rather than deriving toasty
+models — the tables exist to serve `TelemetryStore`, so a second typed definition of them would be
+pure duplication:
 
-- `apps/agent-cli/src/telemetry.rs` — `AgentStore { db: toasty::db::Db }`, constructed with
-  `toasty_driver_turso::Turso::new(&db_uri)`, models registered with `toasty::models!(…)`.
-- `apps/agent-cli/migrations/*.sql` — the schema, embedded with `include_dir!` and applied by a
-  runner that records `(id, name, checksum)` per file, so an edited migration fails loudly instead
-  of silently diverging (same contract as `libs/storage/src/migrations.rs`, which is the template to
-  copy; whether to copy that runner or drive `toasty-cli` migrations is an implementation detail —
-  copying keeps agent-cli's behaviour identical to the todo-2 app it was proven on).
-- Startup order in `main.rs`: load config → open the store (best-effort) → build `Catalog` with
-  `Arc<dyn TelemetryStore>` → run. Opening failure logs once and hands back `NullStore` (D8).
+```rust
+pub struct AgentStore {
+    /// `toasty::sql::{statement, query}` take `&mut Db` while `TelemetryStore` is `&self`,
+    /// so the handle is behind an async mutex. One writer, short critical sections.
+    db: tokio::sync::Mutex<toasty::db::Db>,
+}
+
+// write
+ toasty::sql::statement("INSERT INTO attempts (at, provider, model, ok) VALUES (?1, ?2, ?3, ?4)")
+    .bind(at_ms).bind(&provider).bind(&model).bind(ok as i64)
+    .exec(&mut *self.db.lock().await).await?;
+
+// read (column types are explicit, as in libs/storage/src/managed.rs:367)
+let rows = toasty::sql::query("SELECT at, ok, error_kind, latency_ms, input_tokens, output_tokens \
+                               FROM attempts WHERE provider = ?1 AND model = ?2 AND at >= ?3 \
+                               ORDER BY at")
+    .column_types([Type::I64, Type::I64, Type::String, Type::I64, Type::I64, Type::I64])
+    .bind(&provider).bind(&model).bind(since_ms)
+    .exec(&mut *self.db.lock().await).await?;
+```
+
+- `apps/agent-cli/src/telemetry_migrations.rs` — the runner copied from
+  `libs/storage/src/migrations.rs` (embed via `include_dir!`, per-file SHA-256 checksum recorded in
+  `_migrations_history`, `split_sql` for multi-statement files, checksum mismatch = hard error).
+  `apps/agent-cli/migrations/0001_telemetry.sql` holds the schema in §4.3. Copying rather than
+  sharing is D13: a shared crate would mean touching todo-2.
+- The DB URL is `turso:<path>`; for tests,  `turso::memory:` (as `libs/storage/src/lib.rs:114` does
+  with `StorageConfig { db_uri: "turso::memory:" }`).
+- Startup order in `main.rs`: load config → open the store (best-effort) → apply migrations → build
+  `Catalog` with `Arc<dyn TelemetryStore>` → run. Opening or migrating failure logs once and hands
+  back `NullStore` (D8).
 
 ### 4.3 Schema — `migrations/0001_telemetry.sql`
 
@@ -178,10 +206,10 @@ turns; attempts' `session_id` becomes NULL, which is why the FK is `SET NULL`).
 
 ### 4.4 Implementing `TelemetryStore`
 
-- `record_attempt` → one `attempts` insert. `session_id` comes from the run scope (see §5.1);
-  `turn_id` is filled in by the agent after the turn row exists (an `UPDATE attempts SET turn_id`
-  for rows with that session and a NULL turn id, or the library's record carries the turn id when
-  the agent sets it — implementation detail, prefer the latter as it avoids an update).
+- `record_attempt` → one `attempts` insert. Both `session_id` and `turn_id` come from the
+  `AttemptScope` the agent handed to the library when it built the provider (see §5.1), so there is
+  no post-hoc update and no guessing. The turn row itself is inserted by the agent at `TurnStart`,
+  before the first attempt of that turn.
 - `set_cooldown` / `cooldown_until` → upsert/select on `cooldowns`. `active_cooldowns` returns
   every row with `until_ms > now`.
 - `attempts_since` → the rows the score reads, over `attempts_key_at`.
@@ -201,13 +229,33 @@ A read-only or locked database must never abort a run.
 
 ## 5. What gets recorded, when
 
-### 5.1 Run scope
+### 5.1 Run scope and attempt attribution (D10, D11)
 
-`AgentRuntime::new` (and each ACP `session/new`) opens a session row and keeps
-`{ session_id, turn_seq }` in `AgentRuntimeInner`. The session id is handed to the library so
-attempts can be attributed: `Catalog::provider_impl(provider, model, session_id: Option<&str>)`
-(see the library spec §5.2), with the agent passing it when it builds or rebuilds the agent for a
-run.
+`AgentRuntime::new` (and each ACP `session/new`) opens a session row and keeps `turn_seq` plus an
+`AttemptScope` in `AgentRuntimeInner`:
+
+```rust
+/// Shared between the agent and the library: the library reads it when it writes an
+/// attempt, the agent writes it at turn boundaries.
+pub struct AttemptScope {
+    pub session_id: Option<String>,
+    /// The turn in flight. `None` means "not inside a turn" (attempts then record NULL).
+    pub turn: parking_lot::Mutex<Option<String>>,
+    /// For a sub-agent: the turn that spawned it (D11).
+    pub parent_turn_id: Option<String>,
+}
+```
+
+- Created by the agent when it builds the provider for a run, and passed down:
+  `Catalog::provider_impl(provider, model, Arc<AttemptScope>)` (library spec §5.2).
+- Written by the agent: on `TurnStart` (new turn id) and on a fallback switch (a new turn id, since
+the retry is a new turn — see the recording table below).
+- Read by the library at attempt start/end; it never guesses. A `None` turn records `NULL`, and the
+attempt still counts for the score.
+- Sub-agents build their own provider (`subagents.rs:751`) and therefore their own scope, with
+`parent_turn_id` filled from the spawning turn — so concurrent child requests cannot mis-attribute
+the parent's turn. This is why a single shared cell is safe: one provider instance per agent
+instance, and the cersei runner awaits each stream.
 
 | Event | Write |
 |---|---|
@@ -378,7 +426,8 @@ resume be wanted, it needs its own decision on storing message history.
 
 | File | Change |
 |---|---|
-| `apps/agent-cli/src/telemetry.rs` (new) | `AgentStore` (toasty + turso), migrations embedding + runner, `impl TelemetryStore`, session/turn/attempt/routing writes, retention, legacy cooldown import. |
+| `apps/agent-cli/src/telemetry.rs` (new) | `AgentStore` (toasty + turso over raw SQL, D12), `impl TelemetryStore`, session/turn/attempt/routing writes, retention, legacy cooldown import. |
+| `apps/agent-cli/src/telemetry_migrations.rs` (new) | The runner copied from `libs/storage/src/migrations.rs` (D13): embed, checksum, split, apply. |
 | `apps/agent-cli/migrations/0001_telemetry.sql` (new) | The schema in §4.3. |
 | `apps/agent-cli/src/routing.rs` (new, thin) | Builds candidates from a combo, calls the library's `Router`, records the decision, formats the explanation. |
 | `apps/agent-cli/src/main.rs` | Store init + degraded mode; `Commands::Sessions` dispatch; session open/close around single-shot and TUI runs. |
@@ -430,34 +479,126 @@ Agent-side (`cargo test -p agent-cli`):
 
 ---
 
-## 12. Open questions and risks
+## 12. Resolved questions (with evidence)
 
-1. **Attempt→turn attribution.** The library writes attempts when the HTTP call ends; the turn row
-   is agent-owned. If the agent supplies the turn id at construction time, a mid-turn fallback
-   (which starts a *new* turn) needs a rebuilt agent; otherwise attempts land with `turn_id NULL`.
-   Decide while implementing step 5 of §13.
-2. **Sub-agent attribution.** Sub-agents spawn their own providers (`subagents.rs:751`); they need
-   the same store + session id, and ideally the parent turn id. v1 records them session-scoped only.
-3. **Hard-coded weights.** `w_failure = 1.0` vs `w_pacing = 0.25` is a guess. If it proves wrong the
-   fix is a constant, not a redesign — but the first week of data should be looked at before
-   trusting the ordering.
-4. **Cooldown semantics for `Auth`.** Disabling a provider for the whole process is right for a bad
-   key, but a *rotating* key (proxy setups) would want a re-read. Confirm before shipping.
-5. **`retention_days = 30`** is arbitrary; the score only needs 24h, so retention is about history
-   browsing. Fine for v1, worth revisiting if `sessions list` becomes load-bearing.
-6. **Migration runner duplication.** Copying `libs/storage/src/migrations.rs` (309 lines) into
-   agent-cli is the fastest path but duplicates a runner. Extracting it to a tiny shared crate is
-   tempting and would touch todo-2 — explicitly not in scope here.
+### 12.1 Attempt→turn attribution → **shared `AttemptScope`, no rebuild, no backfill** (D10)
+
+Resolved as §5.1. The three rejected alternatives, for the record:
+
+- *Re-pass the turn id through `CompletionRequest`* — nothing on the request carries an opaque tag;
+  `ProviderOptions` is a JSON map that cersei's OpenAi reads key-by-key, so smuggling a `_turn_id`
+  there would be invisible to the wire but also untyped and fragile.
+- *Backfill with `UPDATE attempts SET turn_id = ? WHERE session_id = ? AND turn_id IS NULL AND at >= ?`*
+  — raced by sub-agents and by any concurrent session sharing the DB, and it needs the turn's start
+  timestamp to be exact.
+- *Rebuild the agent per turn* — would discard the cersei agent's state on every turn; a non-starter.
+
+The scope costs one `Arc` and two mutex writes per turn; the library reads it once per attempt.
+
+### 12.2 Sub-agent attribution → **own scope, parent turn id filled at the spawn site** (D11)
+
+Resolved as §5.1: `subagents.rs` already builds a fresh provider per sub-agent (`:751`), so it hands
+each child a fresh `AttemptScope` whose `parent_turn_id` is the turn that called `spawn_agents`.
+Turns rows for the child get `parent_turn_id`, and attempts inherit the tree through `turn_id` — so
+no `attempts.parent_turn_id` column is needed.
+
+### 12.3 Hard-coded weights → **accepted, with an explicit review checkpoint**
+
+Resolved as: keep `1.0 / 0.25 / 0.0 / 0.0` as defaults, but treat the first real telemetry as the
+validation. Mitigations that come free: `min_samples` keeps thin history from mattering, the
+cooldown term (+10.0) dominates everything else, and `/why` plus the `routing_decisions` rows make
+the terms inspectable rather than mysterious. If the ordering ever looks wrong in practice, the
+check is "which term moved the choice" — answerable from the stored decision. No ML, no fitting.
+
+### 12.4 `Auth` with a rotating key → **re-resolve once, then disable**
+
+Resolved in the library spec (D13 there): re-resolve `!command` / `env:VAR` key specs and retry the
+request once; only a second failure disables the provider for the process. The telemetry side needs
+nothing extra — both outcomes are recorded as attempts with their `error_kind`.
+
+### 12.5 `retention_days = 30` → **keep 30 days, prune only closed history**
+
+Resolved as: prune `attempts` / `routing_decisions` older than the window on open; prune `sessions`
+only when `ended_at` is set and older than the window (never an open session, never a row with no
+`ended_at`). `sessions rm <id>` stays the manual control. Revisit if `sessions list` becomes
+load-bearing for long-range history.
+
+### 12.6 Migration runner duplication → **copy it, extract later** (D13)
+
+Resolved as: copy `libs/storage/src/migrations.rs` — `MigrationEntry` + `split_sql` + checksum
+apply, ~200 lines of substance with its own tests — into `apps/agent-cli/src/telemetry_migrations.rs`.
+The statement splitter is the risky part to rewrite (quotes, comments, `BEGIN…END` bodies), so
+reusing proven code beats a minimal reimplementation. Extraction into a shared crate is deferred
+until a third consumer exists, precisely because it would touch todo-2.
 
 ---
 
-## 13. Implementation order
+## 12A. Implementation notes (as built)
+
+What differs from the prose, and what is knowingly not done yet:
+
+- **§4.2 raw SQL binds** — every bound value goes through `bind_typed` with a
+  database type, not plain `bind`: the turso driver refuses an inferred type for
+  `NULL` (`cannot infer raw SQL bind type for Null`), which would otherwise
+  degrade the store on the first attempt with no session or turn id. The type
+  is derived from the value (`I64` → `Integer(8)`, `String`/`Null` → `Text`,
+  `F64` → `Float(8)`).
+- **§4.4 session deletion** — `sessions rm` and the retention pass delete
+  explicitly (`UPDATE attempts SET session_id = NULL, turn_id = NULL`, then
+  `DELETE FROM turns`, then `DELETE FROM sessions`) instead of relying on
+  `ON DELETE CASCADE`. The turso driver does not enable `PRAGMA foreign_keys`
+  for every pooled connection, so a cascade would silently leave turns behind;
+  the explicit deletes reproduce exactly the documented semantics.
+- **§4.3 schema** is unchanged, including the `REFERENCES` clauses, which are
+  now documentation of intent plus a hint for any future FK-enabled path.
+- **§5.1 attribution** — the shared `AttemptScope` is created per runtime and
+  per ACP run, and is handed to the library at `provider_impl` time. The TUI and
+  single-shot paths open a turn before the first request and close it on
+  `Complete`/`Error`; ACP records the session and the attempts, but not turn
+  rows, so its attempts carry `session_id` with `turn_id NULL`.
+- **Sub-agents** — §5.1's "own scope" is now wired. `SpawnAgentsTool` takes a
+  `SubAgentProviders` factory (`Arc<dyn Fn() -> Result<Box<dyn Provider>>>`)
+  built by the runtime (`AgentRuntime::build`/`retry`/`switch`, and the ACP
+  builder) from its catalog and parent scope; `run_sub_agent` calls it per
+  spawn and only falls back to a plain provider when the factory is absent
+  (tests, read-only builds). The factory snapshots the parent turn at *call*
+  time and gives each sub-agent a fresh `AttemptScope` with the runtime's
+  session, so concurrent children share nothing but the session id.
+- **Abandoned prompt before an attempt** — a run that Fails before any attempt
+  (a resolution error) leaves the turn `running`; the session close marks the
+  session, and `sessions list` shows such turns by their turn rows. Not a
+  correctness issue, but a turn row can outlive the process that wrote it.
+- **Token counts** — the TUI rolls usage into the turn and the session from
+  `CostUpdate`; the single-shot path has no usage events, so its turn rows carry
+  `0/0`. `cost_usd` is written as `0` everywhere (D6).
+- **§6.3 `/why`** renders the last decision of the *current* process. It reports
+  "no routing decision recorded" when routing or telemetry is off, or when no
+  combo run has happened yet (D19).
+- **`sessions show`** prints the turn table, then per-`(provider, model)`
+  failure tallies derived from `attempts` (top `FAILURE_SUMMARY_LIMIT` = 10).
+- **§7 CLI** — `sessions list --limit` (default 20) exists; `show`/`rm` accept a
+  unique id prefix and reject an ambiguous one.
+
+## 13. Accepted risks → decisions (no open questions remain)
+
+| # | Risk | Decision |
+|---|------|----------|
+| D14 | The SQL in §4.3 and the hand-written row decoders can drift | **One decode site:** all row→struct conversion lives in `telemetry.rs` next to the `INSERT`/`SELECT` strings for that table, so a column change is one edit; the migration checksum makes the SQL side fail loudly if edited after being applied. |
+| D15 | `tokio::sync::Mutex<Db>` serializes writes | Accepted for v1: one attempt per turn, sub-second writes, and the critical section only covers the statement. If write contention ever shows up, move to a channel + single writer task — a change local to `AgentStore`. |
+| D16 | Attempts are recorded even when no session row exists (single-shot helpers, tests, `-p` without a session) | Accepted: the attempt still counts for the score, the tree view shows it unattributed (`session_id NULL`). No synthetic sessions. |
+| D17 | Clock skew or a future timestamp distorts decay | Timestamps are clamped to `now` on write, and the scorer clamps negative ages to zero; both are cheap guards, not a clock service. |
+| D18 | `routing_decisions` grows with every choice, not just fallbacks | **Record every choice** — that is what makes "/why" and "did routing help?" answerable. Growth is bounded by `telemetry.retention_days` and the table is one row per turn, not per token. |
+| D19 | `/why` has nothing to show when telemetry is disabled or a run has not chosen yet | Accepted: `/why` reports "no routing decision recorded" instead of an empty table; it never errors. |
+
+---
+
+## 14. Implementation order
 
 1. `telemetry.rs` + `0001_telemetry.sql` + migration runner; open/create/degrade + tests (§10.1–4).
 2. Implement `TelemetryStore` over it (attempts + cooldowns), including the legacy import;
    wire it into `Catalog` in the agent. Nothing is scored yet.
 3. Record sessions and turns (TUI + ACP + single-shot), including outcome and usage on
-   `Complete`/cancel; verify with `sessions list/show` after implementing the CLI (§13.5 alongside).
+   `Complete`/cancel; verify with `sessions list/show` once the CLI step below lands.
 4. Implement the `sessions list|show|rm` dispatch and its tests.
 5. Routing: score function + tests (§10.5–6), then the combo walk in `AgentRuntime` using it, then
    the `routing_decisions` insert.

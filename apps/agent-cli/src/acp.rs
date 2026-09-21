@@ -698,6 +698,14 @@ struct AcpServer {
     ask_user_answer_rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::providers::AskUserAnswer>>,
     >,
+    /// Provider catalog: registry, per-provider limiters, discovery cache.
+    catalog: Arc<ai_providers::Catalog>,
+    /// Process-wide cooldowns, shared with every session's fallback manager.
+    cooldowns: Arc<ai_providers::CooldownRegistry>,
+    /// The telemetry store the transport records attempts through.
+    store: ai_providers::StoreHandle,
+    /// The database handle for session rows, when telemetry is on.
+    telemetry: Option<Arc<crate::telemetry::AgentStore>>,
 }
 
 pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
@@ -717,6 +725,14 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserRequest>();
     let (ask_user_answer_tx, ask_user_answer_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::providers::AskUserAnswer>();
+    let (store, telemetry) = crate::telemetry::AgentStore::open_configured(&config).await;
+    let cooldowns = Arc::new(ai_providers::CooldownRegistry::new());
+    crate::telemetry::seed_registry(&store, &cooldowns).await;
+    let catalog = Arc::new(crate::providers::catalog_with_cooldowns(
+        &config,
+        store.clone(),
+        cooldowns.clone(),
+    ));
     let server = Arc::new(AcpServer {
         connection,
         sessions: Mutex::new(HashMap::new()),
@@ -729,6 +745,10 @@ pub async fn run_server(_cli: Cli, config: AppConfig) -> anyhow::Result<()> {
         ask_user_tx: ask_user_tx.clone(),
         ask_user_answer_tx: ask_user_answer_tx.clone(),
         ask_user_answer_rx: std::sync::Arc::new(tokio::sync::Mutex::new(ask_user_answer_rx)),
+        catalog,
+        cooldowns,
+        store,
+        telemetry,
     });
 
     // Drain `ask_user` tool calls: forward each question set to the client via
@@ -1087,7 +1107,9 @@ impl AcpServer {
                 &self.config,
                 &self.default_provider,
                 &self.default_model,
-            ),
+            )
+            .with_store(&self.config, self.store.clone(), self.cooldowns.clone())
+            .with_decision_sink(self.telemetry.clone(), Some(session_id.clone())),
             _mcp_servers: mcp_servers,
             active_interview_id: None,
         };
@@ -1382,12 +1404,14 @@ impl AcpServer {
         // The agent's Read tool consults this server (the ACP client's fs)
         // before the local disk, so unsaved editor buffers are visible.
         let fs_reader: Arc<dyn crate::subagents::AcpFs> = Arc::clone(self) as Arc<_>;
+        let reasoning = crate::response_format::reasoning_field_for(&self.config, &resolved.model);
+        let scope = Arc::new(ai_providers::AttemptScope::new(Some(session_id.clone())));
         providers::build_agent(
             &resolved,
             providers::BuildParams {
                 working_dir: cwd,
                 max_turns: self.max_turns,
-                session_id: Some(session_id),
+                session_id: Some(session_id.clone()),
                 messages,
                 cancel_token,
                 readonly: mode == "readonly",
@@ -1396,10 +1420,7 @@ impl AcpServer {
                 // No TUI consumer for sub-agent activity in ACP mode.
                 subagent_events: None,
                 fs_reader: Some(fs_reader),
-                reasoning: crate::response_format::reasoning_field_for(
-                    &self.config,
-                    &resolved.model,
-                ),
+                reasoning,
                 // When the client advertises elicitation form support, wire
                 // the ask_user tool to the elicitation drainer so the user is
                 // actually asked (via `elicitation/create`). Otherwise the
@@ -1420,6 +1441,29 @@ impl AcpServer {
                 } else {
                     None
                 },
+                // The paced transport: cooldowns, self rate-limiting and one
+                // attempt row per HTTP call, attributed to the ACP session.
+                provider: Some(self.catalog.provider_impl(
+                    provider,
+                    model,
+                    scope.clone(),
+                    reasoning,
+                )?),
+                // Sub-agents get their own paced provider and attempt scope,
+                // attributed to the same session with this turn as the parent.
+                subagent_providers: Some({
+                    let catalog = self.catalog.clone();
+                    let scope = scope.clone();
+                    let provider = provider.to_string();
+                    let model = model.to_string();
+                    Arc::new(move || {
+                        let child = Arc::new(
+                            ai_providers::AttemptScope::new(scope.session_id.clone())
+                                .with_parent_turn(scope.turn()),
+                        );
+                        catalog.provider_impl(&provider, &model, child, reasoning)
+                    })
+                }),
             },
         )
     }
@@ -2343,6 +2387,7 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
+                pacing: None,
             },
         );
         config.combos.insert(
@@ -2417,6 +2462,17 @@ mod tests {
         );
     }
 
+    /// A catalog over the built-in providers with no store. These tests exercise
+    /// the ACP protocol, not provider selection, and none of them builds an
+    /// agent — so a no-op store is exactly right and nothing touches the user's
+    /// database.
+    fn test_catalog() -> Arc<ai_providers::Catalog> {
+        Arc::new(crate::providers::catalog(
+            &AppConfig::default(),
+            Arc::new(ai_providers::NullStore),
+        ))
+    }
+
     /// Unused-but-alive ask_user channels for test servers. Keeping the
     /// receiver halves alive in the returned tuple mirrors a real server;
     /// otherwise sends from tools would fail on a closed channel.
@@ -2454,6 +2510,10 @@ mod tests {
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
             client_elicitation: Mutex::new(false),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx,
             ask_user_answer_tx,
             ask_user_answer_rx,
@@ -2811,6 +2871,10 @@ mod tests {
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
             client_elicitation: Mutex::new(true),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx: ask_user_tx.clone(),
             ask_user_answer_tx: ask_user_answer_tx.clone(),
             ask_user_answer_rx: ask_user_answer_rx.clone(),
@@ -2877,6 +2941,10 @@ mod tests {
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
             client_elicitation: Mutex::new(true),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx: ask_user_tx.clone(),
             ask_user_answer_tx: ask_user_answer_tx.clone(),
             ask_user_answer_rx: ask_user_answer_rx.clone(),
@@ -2937,6 +3005,10 @@ mod tests {
                 write_text_file: false,
             }),
             client_elicitation: Mutex::new(false),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx,
             ask_user_answer_tx,
             ask_user_answer_rx,
@@ -2974,6 +3046,10 @@ mod tests {
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
             client_elicitation: Mutex::new(false),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx,
             ask_user_answer_tx,
             ask_user_answer_rx,
@@ -2997,6 +3073,10 @@ mod tests {
             max_turns: 10,
             client_fs: Mutex::new(FileSystemCapabilities::default()),
             client_elicitation: Mutex::new(false),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx,
             ask_user_answer_tx,
             ask_user_answer_rx,
@@ -3025,6 +3105,10 @@ mod tests {
                 write_text_file: true,
             }),
             client_elicitation: Mutex::new(false),
+            catalog: test_catalog(),
+            cooldowns: Arc::new(ai_providers::CooldownRegistry::new()),
+            store: Arc::new(ai_providers::NullStore),
+            telemetry: None,
             ask_user_tx,
             ask_user_answer_tx,
             ask_user_answer_rx,

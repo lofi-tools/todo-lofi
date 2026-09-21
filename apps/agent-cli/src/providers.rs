@@ -14,15 +14,19 @@
 //! - a literal key.
 
 use crate::config::AppConfig;
+use ai_providers::{
+    AttemptScope, Catalog, CooldownRegistry, FailureKind, ModelKey, ModelSpec, NullStore,
+    ProviderSpec, RoutingDecision, StoreHandle,
+};
 use anyhow::Context as _;
 use cersei::tools::permissions::{AllowAll, AllowReadOnly};
 use cersei::types::{Message, Role};
 use cersei::{Agent, OpenAi};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 /// A configured provider (built-in defaults merged with the config file).
@@ -95,6 +99,9 @@ pub fn model_ids(provider: &Provider) -> Vec<String> {
 }
 
 /// Find a model on a provider by wire id (bare or `provider/`-prefixed).
+/// Kept for the explorer's id matching (bare, `provider/`-prefixed, or exactly
+/// matching ids) — the library's resolver uses the same three forms.
+#[allow(dead_code)]
 fn find_model<'a>(provider: &'a Provider, model: &str) -> Option<&'a ConfiguredModel> {
     provider.models.iter().find(|m| {
         m.id == model
@@ -118,6 +125,7 @@ pub fn agent_tools(
     reasoning: cersei::provider::ReasoningField,
     ask_user_tool: Option<Box<dyn cersei::tools::Tool>>,
     followup_ask_user: Option<AskUserBridge>,
+    subagent_providers: Option<crate::subagents::SubAgentProviders>,
 ) -> Vec<Box<dyn cersei::tools::Tool>> {
     let mut tools = cersei::tools::coding();
     // Replace the built-in Grep with our ripgrep version (raw `rg` flag
@@ -171,9 +179,30 @@ pub fn agent_tools(
             parent,
             events,
             reasoning,
+            subagent_providers,
         )));
     }
     tools
+}
+
+/// A factory for the providers spawned sub-agents run on. Each call builds a
+/// paced provider on `(provider, model)` with a *fresh* attempt scope: the same
+/// session, the spawning turn as `parent_turn_id`, and its own turn slot, so
+/// concurrent sub-agents can't overwrite each other's attribution.
+fn subagent_provider_factory(
+    catalog: Arc<Catalog>,
+    scope: Arc<AttemptScope>,
+    provider: &str,
+    model: &str,
+    reasoning: cersei::provider::ReasoningField,
+) -> crate::subagents::SubAgentProviders {
+    let provider = provider.to_string();
+    let model = model.to_string();
+    Arc::new(move || {
+        let child =
+            Arc::new(AttemptScope::new(scope.session_id.clone()).with_parent_turn(scope.turn()));
+        catalog.provider_impl(&provider, &model, child, reasoning)
+    })
 }
 
 /// Build the OpenAI-compatible provider for a resolved selection, carrying the
@@ -304,6 +333,15 @@ pub struct BuildParams {
     /// Optional ACP bridge that makes `suggest_followups` wait for a clickable
     /// multi-select response instead of only storing suggestions locally.
     pub followup_ask_user: Option<AskUserBridge>,
+    /// A pre-built provider — the library's paced transport, carrying cooldowns
+    /// and per-attempt telemetry. `None` builds the plain provider from
+    /// `resolved`.
+    pub provider: Option<Box<dyn cersei::provider::Provider>>,
+    /// Factory for the providers that spawned sub-agents run on, so a sub-agent
+    /// request is paced, cooldown-aware and attributed to its own attempt scope
+    /// (parent session, spawning turn as `parent_turn_id`). `None` leaves
+    /// sub-agents on the plain provider.
+    pub subagent_providers: Option<crate::subagents::SubAgentProviders>,
 }
 
 // ─── Provider registry ──────────────────────────────────────────────────────
@@ -455,6 +493,7 @@ pub(crate) fn builtin_provider_entries() -> Vec<(String, crate::config::Provider
                     base_url: Some(p.base_url),
                     api_key: Some(p.api_key),
                     models,
+                    pacing: None,
                 },
             )
         })
@@ -696,45 +735,66 @@ pub fn entries(config: &AppConfig) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The provider set as the library wants it: the same merge (built-ins, the
+/// virtual `combos` provider, then config additions) mapped into spec structs,
+/// with each model's response-format family attached from `model_families` and
+/// each provider's pacing ceilings from its config entry.
+pub fn provider_specs(config: &AppConfig) -> Vec<ProviderSpec> {
+    providers(config)
+        .into_iter()
+        .map(|provider| {
+            let pacing = config
+                .providers
+                .get(&provider.name)
+                .and_then(|entry| entry.pacing.as_ref())
+                .map(|pacing| pacing.to_library())
+                .unwrap_or_default();
+            let models = provider
+                .models
+                .into_iter()
+                .map(|model| ModelSpec {
+                    family: config.model_families.get(&model.id).cloned(),
+                    id: model.id,
+                    max_tokens: model.max_tokens,
+                    temperature: model.temperature,
+                    top_p: model.top_p,
+                    extra_body: model.extra_body,
+                })
+                .collect();
+            ProviderSpec {
+                name: provider.name,
+                base_url: provider.base_url,
+                api_key: provider.api_key,
+                models,
+                pacing,
+            }
+        })
+        .collect()
+}
+
+/// Build the library catalog for a config. The agent keeps its own
+/// config-shaped `Provider` type (tools and combos are built from it) and hands
+/// the library this spec view at the boundary.
+pub fn catalog(config: &AppConfig, store: StoreHandle) -> Catalog {
+    Catalog::new(provider_specs(config), store)
+}
+
+/// The catalog with a pre-seeded cooldown registry — the runtime's variant, so
+/// the walk, the router and the transport share one "what is cooling" view.
+pub fn catalog_with_cooldowns(
+    config: &AppConfig,
+    store: StoreHandle,
+    cooldowns: Arc<CooldownRegistry>,
+) -> Catalog {
+    Catalog::with_cooldowns(provider_specs(config), store, cooldowns)
+}
+
 /// Fetch the full available model list from a provider's OpenAI-compatible
 /// `/models` endpoint. Used by the `/provider` explorer to show models the
-/// config doesn't list (so the user can discover and switch live). The
-/// endpoint shape is `{base_url}/models` returning `{ "data": [{"id": ...}] }`.
-/// Returns model ids sorted and de-duplicated.
+/// config doesn't list (so the user can discover and switch live). Returns
+/// model ids sorted and de-duplicated.
 pub async fn fetch_models(base_url: &str, api_key: &str) -> anyhow::Result<Vec<String>> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
-    let resp = client
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await?
-        .error_for_status()
-        .with_context(|| format!("GET {url} failed"))?;
-    let body: ModelsResponse = resp.json().await?;
-    Ok(parse_model_ids(&body))
-}
-
-/// OpenAI-compatible `/models` response shape.
-#[derive(serde::Deserialize)]
-struct ModelsResponse {
-    #[serde(default)]
-    data: Vec<ModelEntry>,
-}
-
-#[derive(serde::Deserialize)]
-struct ModelEntry {
-    id: String,
-}
-
-/// Extract, sort, and de-duplicate model ids from a parsed response.
-fn parse_model_ids(resp: &ModelsResponse) -> Vec<String> {
-    let mut models: Vec<String> = resp.data.iter().map(|m| m.id.clone()).collect();
-    models.sort();
-    models.dedup();
-    models
+    ai_providers::fetch_models(base_url, api_key).await
 }
 
 // ─── API key resolution ─────────────────────────────────────────────────────
@@ -744,37 +804,11 @@ fn parse_model_ids(resp: &ModelsResponse) -> Vec<String> {
 /// value. `what` names the setting in error messages (e.g. "api_key" or
 /// "env"). Used by provider api keys and the config `env` map.
 pub fn resolve_value_spec(spec: &str, what: &str) -> anyhow::Result<String> {
-    if let Some(cmd) = spec.strip_prefix('!') {
-        let cmd = cmd.trim();
-        if cmd.is_empty() {
-            anyhow::bail!("empty {what} command in config");
-        }
-        let output = std::process::Command::new("sh")
-            .args(["-c", cmd])
-            .output()
-            .with_context(|| format!("failed to run {what} command: {cmd}"))?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "{what} command failed ({status}): {stderr}",
-                status = output.status,
-                stderr = String::from_utf8_lossy(&output.stderr).trim(),
-            );
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            anyhow::bail!("{what} command produced no output: {cmd}");
-        }
-        Ok(value)
-    } else if let Some(var) = spec.strip_prefix("env:") {
-        std::env::var(var.trim())
-            .with_context(|| format!("environment variable '{var}' is not set (used for {what})"))
-    } else {
-        Ok(spec.to_string())
-    }
+    ai_providers::resolve_value_spec(spec, what)
 }
 
 pub fn resolve_api_key(spec: &str) -> anyhow::Result<String> {
-    resolve_value_spec(spec, "api_key")
+    ai_providers::resolve_api_key(spec)
 }
 
 /// Resolve a provider + model into concrete base URL and API key. The virtual
@@ -787,28 +821,16 @@ pub fn resolve(config: &AppConfig, provider_name: &str, model: &str) -> anyhow::
             .ok_or_else(|| anyhow::anyhow!("unknown combo '{model}'"))?;
         return resolve(config, &entry.provider, &entry.model);
     }
-    let p = provider(config, provider_name).ok_or_else(|| {
-        let known = providers(config)
-            .into_iter()
-            .map(|p| p.name)
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow::anyhow!("unknown provider '{provider_name}'; known providers: {known}")
-    })?;
-    let api_key = resolve_api_key(&p.api_key)
-        .with_context(|| format!("resolving api_key for provider '{provider_name}'"))?;
-    let (max_tokens, temperature, top_p, extra_body) = find_model(&p, model)
-        .map(|m| (m.max_tokens, m.temperature, m.top_p, m.extra_body.clone()))
-        .unwrap_or((None, None, None, None));
+    let library = catalog(config, Arc::new(NullStore)).resolve(provider_name, model)?;
     Ok(Resolved {
-        provider: p.name.clone(),
-        model: model.to_string(),
-        base_url: p.base_url.clone(),
-        api_key,
-        max_tokens,
-        temperature,
-        top_p,
-        extra_body,
+        provider: library.provider,
+        model: library.model,
+        base_url: library.base_url,
+        api_key: library.api_key,
+        max_tokens: library.max_tokens,
+        temperature: library.temperature,
+        top_p: library.top_p,
+        extra_body: library.extra_body,
     })
 }
 
@@ -842,141 +864,233 @@ pub struct FallbackManager {
     enabled: bool,
     /// Entries in priority order (most preferred first).
     priority: Vec<FallbackEntry>,
-    state: Arc<FallbackState>,
-}
-
-struct FallbackState {
+    /// The process-wide cooldown mirror, shared with the catalog so the walk,
+    /// the router and the transport all read one view of "what is cooling".
+    cooldowns: Arc<CooldownRegistry>,
+    /// Durable cooldowns and attempt history. `NullStore` until a runtime
+    /// attaches the telemetry store, so a manager built outside a run still
+    /// works in-process.
+    store: StoreHandle,
+    /// The routing score. `None` until a store is attached, and permanently
+    /// `None` when `routing.enabled` is false — which is exactly the ordered
+    /// walk this code did before scoring existed.
+    router: Option<Arc<ai_providers::Router>>,
+    /// How long a locally recorded failure cools an entry down. This is the
+    /// walk's fallback policy; the transport's per-kind policy is richer and
+    /// writes the same registry.
     cooldown: Duration,
-    /// Where expiries are persisted across restarts.
-    cooldown_file: PathBuf,
-    /// "provider\0model" → cooldown expiry (wall clock).
-    failures: Mutex<HashMap<String, SystemTime>>,
+    last_decision: Arc<Mutex<Option<RoutingDecision>>>,
+    decision_sink: Arc<Mutex<Option<Arc<crate::telemetry::AgentStore>>>>,
+    session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl FallbackManager {
     /// `entries` is the combo's fallback list in order. An empty list (a
     /// non-combo selection) means fallback is disabled.
     pub fn new(config: &AppConfig, entries: Vec<FallbackEntry>) -> Self {
-        let cooldown_file = match &config.fallback.cooldowns_file {
-            Some(path) if !path.as_os_str().is_empty() => path.clone(),
-            // Empty string disables persistence.
-            Some(_) => PathBuf::new(),
-            None => crate::config::cooldowns_path(),
-        };
-        let failures = if cooldown_file.as_os_str().is_empty() {
-            Mutex::new(HashMap::new())
-        } else {
-            Mutex::new(load_persisted_failures(&cooldown_file))
-        };
         Self {
             enabled: config.fallback.enabled && !entries.is_empty(),
             priority: entries,
-            state: Arc::new(FallbackState {
-                cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
-                cooldown_file,
-                failures,
-            }),
+            cooldowns: Arc::new(CooldownRegistry::new()),
+            store: Arc::new(NullStore),
+            router: None,
+            cooldown: Duration::from_secs(config.fallback.cooldown_seconds),
+            last_decision: Arc::new(Mutex::new(None)),
+            decision_sink: Arc::new(Mutex::new(None)),
+            session_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach the telemetry store (and the catalog's cooldown registry), which
+    /// turns on durable cooldowns and the routing score. Called by the runtime
+    /// once, at construction.
+    pub fn with_store(
+        mut self,
+        config: &AppConfig,
+        store: StoreHandle,
+        cooldowns: Arc<CooldownRegistry>,
+    ) -> Self {
+        let routing = config.routing.to_library();
+        self.router = routing.enabled.then(|| {
+            Arc::new(ai_providers::Router::new(
+                routing,
+                store.clone(),
+                cooldowns.clone(),
+            ))
+        });
+        self.store = store;
+        self.cooldowns = cooldowns;
+        self
+    }
+
+    /// Attach the database the routing decisions are written to, plus the
+    /// session they belong to.
+    pub fn with_decision_sink(
+        mut self,
+        store: Option<Arc<crate::telemetry::AgentStore>>,
+        session_id: Option<String>,
+    ) -> Self {
+        self.decision_sink = Arc::new(Mutex::new(store));
+        self.session_id = Arc::new(Mutex::new(session_id));
+        self
     }
 
     pub fn enabled(&self) -> bool {
         self.enabled
     }
 
-    fn key(provider: &str, model: &str) -> String {
-        format!("{provider}\0{model}")
+    /// Whether entries are reordered by the score rather than walked in order.
+    pub fn routing_enabled(&self) -> bool {
+        self.router.is_some()
     }
 
     /// Mark an entry as failed; it won't be selected for fallback again until
-    /// the cooldown expires. The new expiry is persisted so it survives a
-    /// restart (best-effort: a failed write only logs a warning).
+    /// the cooldown expires. The expiry is mirrored in-process immediately and
+    /// written to the store in the background (best-effort: losing a cooldown
+    /// is not fatal).
     pub fn record_failure(&self, provider: &str, model: &str) {
-        let mut failures = self.state.failures.lock();
-        failures.insert(
-            Self::key(provider, model),
-            SystemTime::now() + self.state.cooldown,
-        );
-        if !self.state.cooldown_file.as_os_str().is_empty() {
-            persist_failures(&self.state.cooldown_file, &failures);
+        let key = ModelKey::new(provider, model);
+        let until = SystemTime::now() + self.cooldown;
+        self.cooldowns.set(&key, until, "failed");
+        let store = self.store.clone();
+        // The call site is synchronous (the TUI/one-shot fallback walk), so the
+        // write is detached. Without a runtime (unit tests) it stays in-process.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = store
+                    .set_cooldown(
+                        &key,
+                        until,
+                        FailureKind::Unknown {
+                            message: "fallback".into(),
+                        },
+                    )
+                    .await
+                {
+                    eprintln!("warning: failed to persist cooldown for {key}: {error}");
+                }
+            });
         }
     }
 
     /// The most preferred entry to fall back to after `(provider, model)`
     /// failed, skipping the current entry and any still cooling down.
     pub fn next_entry(&self, provider: &str, model: &str) -> Option<FallbackEntry> {
-        let now = SystemTime::now();
-        let mut failures = self.state.failures.lock();
-        failures.retain(|_, until| *until > now);
         self.priority
             .iter()
-            .find(|e| {
-                (e.provider != provider || e.model != model)
-                    && !failures.contains_key(&Self::key(&e.provider, &e.model))
+            .find(|entry| {
+                (entry.provider != provider || entry.model != model)
+                    && !self
+                        .cooldowns
+                        .is_cooling(&ModelKey::new(&entry.provider, &entry.model))
             })
             .cloned()
     }
-}
 
-/// Read persisted expiries from `path` (unix-epoch millis), dropping expired
-/// and unreadable entries. A missing file just means no state yet.
-fn load_persisted_failures(path: &Path) -> HashMap<String, SystemTime> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return HashMap::new(),
-    };
-    let parsed: HashMap<String, u64> = match serde_json::from_str(&content) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            eprintln!(
-                "warning: ignoring unreadable cooldown state {}: {e}",
-                path.display()
-            );
-            return HashMap::new();
-        }
-    };
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    parsed
-        .into_iter()
-        .filter_map(|(key, expires_at)| {
-            (expires_at > now_ms).then(|| (key, UNIX_EPOCH + Duration::from_millis(expires_at)))
-        })
-        .collect()
-}
-
-/// Write the non-expired expiries to `path` as a JSON map of "key" →
-/// unix-epoch millis. Written atomically (temp file + rename) so a crash can't
-/// corrupt the state; failures only log a warning since losing a cooldown is
-/// not fatal.
-fn persist_failures(path: &Path, failures: &HashMap<String, SystemTime>) {
-    let now = SystemTime::now();
-    let map: HashMap<String, u64> = failures
-        .iter()
-        .filter(|(_, until)| **until > now)
-        .map(|(key, until)| {
-            let millis = until
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            (key.clone(), millis)
-        })
-        .collect();
-    let content = match serde_json::to_string(&map) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("warning: failed to serialize cooldown state: {e}");
-            return;
-        }
-    };
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp, content).and_then(|_| std::fs::rename(&tmp, path)) {
-        eprintln!(
-            "warning: failed to persist cooldown state to {}: {e}",
-            path.display()
-        );
+    /// Score the combo's entries and remember the choice.
+    ///
+    /// Returns `None` when routing is off or there is nothing to choose from;
+    /// the caller then walks `next_entry` in order, exactly as before.
+    pub async fn choose(
+        &self,
+        combo: Option<&str>,
+        candidates: Vec<ai_providers::Candidate>,
+    ) -> Option<RoutingDecision> {
+        let router = self.router.clone()?;
+        let decision = router.choose(combo, &candidates).await?;
+        *self.last_decision.lock() = Some(decision.clone());
+        self.persist_decision(&decision);
+        Some(decision)
     }
+
+    /// The most recent decision (for `/why`).
+    pub fn last_decision(&self) -> Option<RoutingDecision> {
+        self.last_decision.lock().clone()
+    }
+
+    fn persist_decision(&self, decision: &RoutingDecision) {
+        let store = self.decision_sink.lock().clone();
+        let Some(store) = store else {
+            return;
+        };
+        let session_id = self.session_id.lock().clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let decision = decision.clone();
+            handle.spawn(async move {
+                if let Err(error) = store
+                    .record_routing_decision(session_id.as_deref(), &decision)
+                    .await
+                {
+                    eprintln!("warning: failed to record the routing decision: {error}");
+                }
+            });
+        }
+    }
+}
+
+/// Render a routing decision as the table `/why` shows: every candidate with
+/// the terms that produced its penalty, and which one won.
+pub fn explain_decision(decision: &RoutingDecision) -> String {
+    let mut out = format!(
+        "last routing decision at {:?}",
+        decision
+            .at
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default()
+    );
+    if let Some(combo) = &decision.combo {
+        out.push_str(&format!("\ncombo: {combo} → {}\n", decision.chosen));
+    } else {
+        out.push_str(&format!("\nchosen: {}\n", decision.chosen));
+    }
+    out.push_str(&format!(
+        "\n  {:<34} {:>6} {:>9} {:>10} {:>7} {:>8}\n",
+        "candidate", "fail", "attempts", "cooldown", "pacing", "penalty"
+    ));
+    for candidate in &decision.candidates {
+        let marker = if candidate.key == decision.chosen {
+            "*"
+        } else {
+            " "
+        };
+        let cooldown = match candidate.in_cooldown {
+            Some(_) => "cooling".to_string(),
+            None => "-".to_string(),
+        };
+        out.push_str(&format!(
+            "{marker} {:<34} {:>6.2} {:>9.1} {:>10} {:>7.2} {:>8.2}\n",
+            candidate.key.to_string(),
+            candidate.failure_rate,
+            candidate.weighted_attempts,
+            cooldown,
+            candidate.pacing_pressure,
+            candidate.penalty,
+        ));
+    }
+    out.push_str("(* = chosen; ties keep the configured order)");
+    out
+}
+
+/// The candidates a combo's entries make, in configured order, each carrying
+/// the load of its provider (the routing score's pacing term).
+pub fn candidates_for_combo(config: &AppConfig, combo_name: &str) -> Vec<ai_providers::Candidate> {
+    let catalog = catalog(config, Arc::new(NullStore));
+    combo(config, combo_name)
+        .map(|combo| {
+            combo
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    let pressure = catalog.limiter(&entry.provider).pressure();
+                    ai_providers::Candidate::new(
+                        ModelKey::new(&entry.provider, &entry.model),
+                        pressure,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve a user-facing reference like "groq", "openrouter/auto", or a bare
@@ -1038,7 +1152,10 @@ pub fn resolve_selection(
 // ─── Agent construction ─────────────────────────────────────────────────────
 
 pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<Arc<Agent>> {
-    let provider = openai_provider(resolved, params.reasoning)?;
+    let provider = match params.provider {
+        Some(provider) => provider,
+        None => Box::new(openai_provider(resolved, params.reasoning)?),
+    };
 
     let tools = agent_tools(
         resolved,
@@ -1050,6 +1167,7 @@ pub fn build_agent(resolved: &Resolved, params: BuildParams) -> anyhow::Result<A
         params.reasoning,
         params.ask_user_tool,
         params.followup_ask_user,
+        params.subagent_providers.clone(),
     );
     let mut builder = Agent::builder()
         .provider(provider)
@@ -1170,6 +1288,18 @@ struct AgentRuntimeInner {
     subagent_tx: tokio::sync::broadcast::Sender<crate::subagents::SubAgentActivity>,
     /// Fallback state for the current selection (a combo, or empty = disabled).
     fallback: FallbackManager,
+    /// The provider catalog: registry, limiters, discovery cache.
+    catalog: Arc<Catalog>,
+    /// The database handle for session/turn writes, when telemetry is on.
+    telemetry: Option<Arc<crate::telemetry::AgentStore>>,
+    /// The session row this runtime writes, when telemetry is on.
+    session: Option<crate::telemetry::SessionStart>,
+    /// The turn in flight, plus how many turns this session has run.
+    turn: Option<String>,
+    turn_seq: u32,
+    turn_started: Option<std::time::Instant>,
+    /// Shared attempt attribution handed to every provider this runtime builds.
+    scope: Arc<AttemptScope>,
     /// In-memory cache of each provider's `/models` response, kept for the
     /// whole run so the `/provider` explorer never re-fetches a provider it
     /// already browsed. Successes are cached; failures are retried.
@@ -1184,7 +1314,31 @@ struct AgentRuntimeInner {
 }
 
 impl AgentRuntime {
+    /// A runtime with no telemetry: in-process cooldowns, no database, the
+    /// ordered walk. Used by tests and by anything that runs without a store.
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
+        Self::build(config, Arc::new(NullStore), None, Arc::new(CooldownRegistry::new()))
+    }
+
+    /// A runtime backed by the telemetry store: durable cooldowns, a session
+    /// row, shared attempt attribution and scored combo selection. Cooldowns
+    /// still in effect from earlier runs are seeded from the database first.
+    pub async fn with_telemetry(
+        config: &AppConfig,
+        store: StoreHandle,
+        telemetry: Option<Arc<crate::telemetry::AgentStore>>,
+    ) -> anyhow::Result<Self> {
+        let cooldowns = Arc::new(CooldownRegistry::new());
+        crate::telemetry::seed_registry(&store, &cooldowns).await;
+        Self::build(config, store, telemetry, cooldowns)
+    }
+
+    fn build(
+        config: &AppConfig,
+        store: StoreHandle,
+        telemetry: Option<Arc<crate::telemetry::AgentStore>>,
+        cooldowns: Arc<CooldownRegistry>,
+    ) -> anyhow::Result<Self> {
         let (provider, model) = default_selection(config)?;
         let (effective_provider, effective_model) = effective_selection(config, &provider, &model)?;
         let resolved = resolve(config, &effective_provider, &effective_model)?;
@@ -1200,6 +1354,41 @@ impl AgentRuntime {
                 ask_user_tx.clone(),
                 Arc::new(tokio::sync::Mutex::new(answer_rx)),
             )));
+
+        // One cooldown registry per runtime, shared by the catalog (transport
+        // and limiters) and the fallback manager (walk + router).
+        let catalog = Arc::new(catalog_with_cooldowns(
+            config,
+            store.clone(),
+            cooldowns.clone(),
+        ));
+        let session = telemetry.as_ref().map(|_| {
+            crate::telemetry::SessionStart::capture(
+                config.working_dir.clone(),
+                &provider,
+                &model,
+                &effective_provider,
+                &effective_model,
+            )
+        });
+        let scope = Arc::new(match &session {
+            Some(session) => AttemptScope::new(Some(session.id.clone())),
+            None => AttemptScope::anonymous(),
+        });
+        let reasoning = crate::response_format::reasoning_field_for(config, &resolved.model);
+        let provider_impl = catalog.provider_impl(
+            &effective_provider,
+            &effective_model,
+            scope.clone(),
+            reasoning,
+        )?;
+        let subagent_providers = subagent_provider_factory(
+            catalog.clone(),
+            scope.clone(),
+            &effective_provider,
+            &effective_model,
+            reasoning,
+        );
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -1213,12 +1402,16 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
-                reasoning: crate::response_format::reasoning_field_for(config, &resolved.model),
+                reasoning,
                 ask_user_tool,
                 followup_ask_user: None,
+                provider: Some(provider_impl),
+                subagent_providers: Some(subagent_providers),
             },
         )?;
-        let fallback = fallback_for(config, &provider, &model);
+        let fallback = fallback_for(config, &provider, &model)
+            .with_store(config, store.clone(), cooldowns)
+            .with_decision_sink(telemetry.clone(), session.as_ref().map(|s| s.id.clone()));
         Ok(Self {
             inner: Mutex::new(AgentRuntimeInner {
                 agent,
@@ -1231,6 +1424,13 @@ impl AgentRuntime {
                 followups,
                 subagent_tx,
                 fallback,
+                catalog,
+                telemetry,
+                session,
+                turn: None,
+                turn_seq: 0,
+                turn_started: None,
+                scope,
                 model_cache: Mutex::new(HashMap::new()),
                 ask_user_tx,
                 ask_user_rx,
@@ -1241,6 +1441,207 @@ impl AgentRuntime {
 
     pub fn agent(&self) -> Arc<Agent> {
         self.inner.lock().agent.clone()
+    }
+
+    // ── Session + turn recording ────────────────────────────────────────
+
+    /// The session row id, when telemetry is on.
+    pub fn session_id(&self) -> Option<String> {
+        self.inner.lock().session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// Write the session row. Callers invoke this once, before the first run;
+    /// a no-op when telemetry is off.
+    pub async fn start_session(&self) {
+        let (store, session) = {
+            let inner = self.inner.lock();
+            (inner.telemetry.clone(), inner.session.clone())
+        };
+        let (Some(store), Some(session)) = (store, session) else {
+            return;
+        };
+        if let Err(error) = store.start_session(&session).await {
+            eprintln!("warning: could not record the session: {error}");
+        }
+    }
+
+    /// Open a turn: a new row, a fresh attempt attribution, a start clock.
+    /// Returns the turn id when telemetry is on.
+    pub async fn begin_turn(&self, provider: &str, model: &str) -> Option<String> {
+        let (store, session_id, seq) = {
+            let mut inner = self.inner.lock();
+            let session_id = inner.session.as_ref().map(|s| s.id.clone())?;
+            let seq = inner.turn_seq;
+            inner.turn_seq += 1;
+            (inner.telemetry.clone(), session_id, seq)
+        };
+        let turn = crate::telemetry::TurnStart::new(&session_id, seq, provider, model);
+        if let Some(store) = &store
+            && let Err(error) = store.start_turn(&turn).await
+        {
+            eprintln!("warning: could not record the turn: {error}");
+        }
+        let mut inner = self.inner.lock();
+        inner.scope.set_turn(Some(turn.id.clone()));
+        inner.turn = Some(turn.id.clone());
+        inner.turn_started = Some(std::time::Instant::now());
+        Some(turn.id)
+    }
+
+    /// Record token counts for the turn in flight (and roll them up into the
+    /// session, so `sessions list` shows live totals).
+    pub async fn note_usage(&self, input_tokens: u64, output_tokens: u64) {
+        let (store, turn, session_id) = {
+            let inner = self.inner.lock();
+            (
+                inner.telemetry.clone(),
+                inner.turn.clone(),
+                inner.session.as_ref().map(|s| s.id.clone()),
+            )
+        };
+        let (Some(store), Some(turn), Some(session_id)) = (store, turn, session_id) else {
+            return;
+        };
+        if let Err(error) = store
+            .note_usage(&turn, &session_id, input_tokens, output_tokens)
+            .await
+        {
+            eprintln!("warning: could not record token usage: {error}");
+        }
+    }
+
+    /// Count a completed tool call against the turn in flight.
+    pub async fn note_tool_call(&self) {
+        let (store, turn) = {
+            let inner = self.inner.lock();
+            (inner.telemetry.clone(), inner.turn.clone())
+        };
+        let (Some(store), Some(turn)) = (store, turn) else {
+            return;
+        };
+        if let Err(error) = store.note_tool_call(&turn).await {
+            eprintln!("warning: could not count the tool call: {error}");
+        }
+    }
+
+    /// Close the turn in flight with its outcome.
+    pub async fn end_turn(
+        &self,
+        outcome: &str,
+        error_kind: Option<&str>,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let (store, turn, started) = {
+            let mut inner = self.inner.lock();
+            let turn = inner.turn.take();
+            let started = inner.turn_started.take();
+            inner.scope.set_turn(None);
+            (inner.telemetry.clone(), turn, started)
+        };
+        let (Some(store), Some(turn)) = (store, turn) else {
+            return;
+        };
+        if let Err(error) = store
+            .finish_turn(
+                &turn,
+                outcome,
+                error_kind,
+                started.map(|started| started.elapsed()),
+                input_tokens,
+                output_tokens,
+            )
+            .await
+        {
+            eprintln!("warning: could not finish the turn: {error}");
+        }
+    }
+
+    /// Close the session row (process exit, completion, or cancel).
+    pub async fn finish_session(&self, outcome: &str, error_kind: Option<&str>) {
+        let (store, session) = {
+            let inner = self.inner.lock();
+            (inner.telemetry.clone(), inner.session.clone())
+        };
+        let (Some(store), Some(session)) = (store, session) else {
+            return;
+        };
+        if let Err(error) = store
+            .finish_session(&session.id, outcome, error_kind)
+            .await
+        {
+            eprintln!("warning: could not close the session: {error}");
+        }
+    }
+
+    /// The most recent routing decision, for `/why`.
+    pub fn last_decision(&self) -> Option<RoutingDecision> {
+        self.inner.lock().fallback.last_decision()
+    }
+
+    /// The next entry to fall back to after a failure.
+    ///
+    /// With routing on and a combo selected, this is the entry the score picks
+    /// (which may not be the next one in the list); otherwise it is the
+    /// configured walk, skipping entries that are cooling down.
+    pub async fn choose_next_entry(
+        &self,
+        current_provider: &str,
+        current_model: &str,
+    ) -> Option<FallbackEntry> {
+        let (manager, combo_name) = {
+            let inner = self.inner.lock();
+            let combo_name = (inner.provider == "combos").then(|| inner.model.clone());
+            (inner.fallback.clone(), combo_name)
+        };
+        if !manager.enabled() {
+            return None;
+        }
+        let Some(combo_name) = combo_name.filter(|_| manager.routing_enabled()) else {
+            return manager.next_entry(current_provider, current_model);
+        };
+        let config = { self.inner.lock().config.clone() };
+        let candidates = candidates_for_combo(&config, &combo_name);
+        let Some(decision) = manager.choose(Some(&combo_name), candidates).await else {
+            return manager.next_entry(current_provider, current_model);
+        };
+        let current = ModelKey::new(current_provider, current_model);
+        if decision.chosen != current
+            && let Some(entry) = combo(&config, &combo_name).and_then(|combo| {
+                combo
+                    .entries
+                    .into_iter()
+                    .find(|entry| {
+                        entry.provider == decision.chosen.provider
+                            && entry.model == decision.chosen.model
+                    })
+            })
+        {
+            return Some(FallbackEntry {
+                provider: entry.provider,
+                model: entry.model,
+            });
+        }
+        manager.next_entry(current_provider, current_model)
+    }
+
+    /// A provider transport for `(provider, model)` with pacing, cooldowns and
+    /// telemetry attached, sharing this runtime's limiter and session.
+    fn paced_provider(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> anyhow::Result<Box<dyn cersei::provider::Provider>> {
+        let (catalog, scope, config) = {
+            let inner = self.inner.lock();
+            (
+                inner.catalog.clone(),
+                inner.scope.clone(),
+                inner.config.clone(),
+            )
+        };
+        let reasoning = crate::response_format::reasoning_field_for(&config, model);
+        catalog.provider_impl(provider, model, scope, reasoning)
     }
 
     /// Subscribe to the sub-agent activity stream (rendered by the TUI as
@@ -1400,7 +1801,7 @@ impl AgentRuntime {
     /// preserving the conversation (minus the failed run's just-pushed prompt)
     /// and the user-facing selection (the combo stays selected).
     pub fn fallback_to(&self, provider: &str, model: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns, parent, followups, subagent_tx) = {
+        let (config, working_dir, max_turns, parent, followups, subagent_tx, catalog, scope) = {
             let g = self.inner.lock();
             (
                 g.config.clone(),
@@ -1409,9 +1810,15 @@ impl AgentRuntime {
                 g.parent.clone(),
                 g.followups.clone(),
                 g.subagent_tx.clone(),
+                g.catalog.clone(),
+                g.scope.clone(),
             )
         };
         let resolved = resolve(&config, provider, model)?;
+        let reasoning = crate::response_format::reasoning_field_for(&config, &resolved.model);
+        let provider_impl = self.paced_provider(provider, model)?;
+        let subagent_providers =
+            subagent_provider_factory(catalog, scope, provider, model, reasoning);
         let mut messages = self.inner.lock().agent.messages();
         drop_trailing_user_message(&mut messages);
         let agent = build_agent(
@@ -1427,9 +1834,11 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
-                reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
+                reasoning,
                 ask_user_tool: None,
                 followup_ask_user: None,
+                provider: Some(provider_impl),
+                subagent_providers: Some(subagent_providers),
             },
         )?;
         let mut g = self.inner.lock();
@@ -1441,7 +1850,7 @@ impl AgentRuntime {
 
     /// Rebuild the agent with a new provider/model.
     pub fn switch(&self, provider: &str, model: &str) -> anyhow::Result<()> {
-        let (config, working_dir, max_turns, parent, followups, subagent_tx) = {
+        let (config, working_dir, max_turns, parent, followups, subagent_tx, catalog, scope) = {
             let g = self.inner.lock();
             (
                 g.config.clone(),
@@ -1450,10 +1859,21 @@ impl AgentRuntime {
                 g.parent.clone(),
                 g.followups.clone(),
                 g.subagent_tx.clone(),
+                g.catalog.clone(),
+                g.scope.clone(),
             )
         };
         let (effective_provider, effective_model) = effective_selection(&config, provider, model)?;
         let resolved = resolve(&config, &effective_provider, &effective_model)?;
+        let reasoning = crate::response_format::reasoning_field_for(&config, &resolved.model);
+        let provider_impl = self.paced_provider(&effective_provider, &effective_model)?;
+        let subagent_providers = subagent_provider_factory(
+            catalog,
+            scope,
+            &effective_provider,
+            &effective_model,
+            reasoning,
+        );
         let agent = build_agent(
             &resolved,
             BuildParams {
@@ -1467,9 +1887,11 @@ impl AgentRuntime {
                 followups: followups.clone(),
                 subagent_events: Some(subagent_tx.clone()),
                 fs_reader: None,
-                reasoning: crate::response_format::reasoning_field_for(&config, &resolved.model),
+                reasoning,
                 ask_user_tool: None,
                 followup_ask_user: None,
+                provider: Some(provider_impl),
+                subagent_providers: Some(subagent_providers),
             },
         )?;
         let fallback = fallback_for(&config, provider, model);
@@ -1564,6 +1986,7 @@ mod tests {
                     crate::config::ModelRef::Simple("acme/big".into()),
                     crate::config::ModelRef::Simple("acme/small".into()),
                 ],
+                pacing: None,
             },
         );
         // Custom provider is listed and resolved.
@@ -1599,6 +2022,7 @@ mod tests {
                     }),
                     ModelRef::Simple("z-ai/glm4.7".into()),
                 ],
+                pacing: None,
             },
         );
         // SAFETY: test-only mutation of a dedicated env var.
@@ -1731,13 +2155,13 @@ mod tests {
         assert_eq!(resolved.api_key, "opencode-test-key");
     }
 
-    /// A config whose cooldowns persist to a unique temp file, so tests never
-    /// touch (or depend on) the real `~/.abstract/cooldowns.json`.
+    /// A config with telemetry off and routing off, so a test exercises the
+    /// walk exactly as it behaved before scoring existed and never touches the
+    /// real database.
     fn isolated_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.fallback.cooldowns_file = Some(
-            std::env::temp_dir().join(format!("agent-cooldowns-{}.json", uuid::Uuid::new_v4())),
-        );
+        config.telemetry.enabled = false;
+        config.routing.enabled = false;
         config
     }
 
@@ -1836,11 +2260,8 @@ mod tests {
         assert!(fb.next_entry("groq", "groq/compound").is_none());
     }
 
-    #[test]
-    fn cooldowns_persist_across_instances() {
-        let config = isolated_config();
-        let path = config.fallback.cooldowns_file.clone().unwrap();
-        let entries = vec![
+    fn combo_entries() -> Vec<FallbackEntry> {
+        vec![
             FallbackEntry {
                 provider: "groq".into(),
                 model: "groq/compound".into(),
@@ -1853,25 +2274,69 @@ mod tests {
                 provider: "poolside".into(),
                 model: "poolside/laguna-xs-2.1".into(),
             },
-        ];
-        let fb = FallbackManager::new(&config, entries.clone());
+        ]
+    }
+
+    #[tokio::test]
+    async fn cooldowns_persist_through_the_store() {
+        let config = isolated_config();
+        let store: StoreHandle = Arc::new(ai_providers::InMemoryStore::new());
+        let cooldowns = Arc::new(CooldownRegistry::new());
+        let fb = FallbackManager::new(&config, combo_entries())
+            .with_store(&config, store.clone(), cooldowns.clone());
         fb.record_failure("groq", "groq/compound");
-        drop(fb);
+        // The write is detached (the walk is synchronous), so let it run.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let stored = store
+            .cooldown_until(&ModelKey::new("groq", "groq/compound"))
+            .await
+            .unwrap();
+        assert!(stored.is_some(), "the failure must reach the store");
 
-        // The failure was written to the cooldown file as a future timestamp.
-        let persisted: HashMap<String, u64> =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let expiry = persisted["groq\0groq/compound"];
-        assert!(expiry > now_ms);
-
-        // A fresh manager (simulating a restart) still skips groq: starting
-        // from nvidia, the next candidate skips groq (cooling down) → poolside.
-        let fb2 = FallbackManager::new(&config, entries);
+        // A restart: a fresh registry seeded from the store skips groq.
+        let seeded = Arc::new(CooldownRegistry::new());
+        crate::telemetry::seed_registry(&store, &seeded).await;
+        assert!(seeded.is_cooling(&ModelKey::new("groq", "groq/compound")));
+        let fb2 = FallbackManager::new(&config, combo_entries())
+            .with_store(&config, store.clone(), seeded);
         let next = fb2
+            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+            .unwrap();
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("poolside", "poolside/laguna-xs-2.1"),
+            "the cooling entry is skipped after a restart"
+        );
+    }
+
+    #[test]
+    fn expired_cooldowns_are_ignored() {
+        let config = isolated_config();
+        let cooldowns = Arc::new(CooldownRegistry::new());
+        let key = ModelKey::new("groq", "groq/compound");
+        cooldowns.set(&key, SystemTime::now() - Duration::from_secs(1), "failed");
+        let fb = FallbackManager::new(&config, combo_entries())
+            .with_store(&config, Arc::new(ai_providers::InMemoryStore::new()), cooldowns);
+        let next = fb
+            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
+            .unwrap();
+        assert_eq!(
+            (next.provider.as_str(), next.model.as_str()),
+            ("groq", "groq/compound"),
+            "an expired cooldown does not exclude the entry"
+        );
+    }
+
+    #[test]
+    fn without_a_store_cooldowns_still_work_in_process() {
+        let config = isolated_config();
+        let fb = FallbackManager::new(&config, combo_entries());
+        fb.record_failure("groq", "groq/compound");
+        // groq is cooling and nvidia is the current entry, so the walk lands on
+        // poolside — no store needed for that.
+        let next = fb
             .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
             .unwrap();
         assert_eq!(
@@ -1881,58 +2346,84 @@ mod tests {
     }
 
     #[test]
-    fn persisted_cooldowns_expire() {
-        let config = isolated_config();
-        let path = config.fallback.cooldowns_file.clone().unwrap();
-        // A stale expiry from a previous run (already past) is dropped on load.
-        let expired_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            - 1_000;
-        let map = HashMap::from([("groq\0groq/compound".to_string(), expired_ms)]);
-        std::fs::write(&path, serde_json::to_string(&map).unwrap()).unwrap();
+    fn routing_is_off_unless_a_store_is_attached() {
+        let config = AppConfig::default();
+        let plain = FallbackManager::new(&config, combo_entries());
+        assert!(!plain.routing_enabled(), "no store, no scoring");
+        let with_store = FallbackManager::new(&config, combo_entries()).with_store(
+            &config,
+            Arc::new(ai_providers::InMemoryStore::new()),
+            Arc::new(CooldownRegistry::new()),
+        );
+        assert!(with_store.routing_enabled());
 
-        let entries = vec![
-            FallbackEntry {
-                provider: "groq".into(),
-                model: "groq/compound".into(),
-            },
-            FallbackEntry {
-                provider: "nvidia".into(),
-                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
-            },
-        ];
-        let fb = FallbackManager::new(&config, entries);
-        // groq is no longer cooling down, so it's picked again.
-        let next = fb
-            .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
-            .unwrap();
-        assert_eq!(
-            (next.provider.as_str(), next.model.as_str()),
-            ("groq", "groq/compound")
+        let mut disabled = AppConfig::default();
+        disabled.routing.enabled = false;
+        let ordered = FallbackManager::new(&disabled, combo_entries()).with_store(
+            &disabled,
+            Arc::new(ai_providers::InMemoryStore::new()),
+            Arc::new(CooldownRegistry::new()),
+        );
+        assert!(
+            !ordered.routing_enabled(),
+            "routing.enabled = false restores the ordered walk"
         );
     }
 
-    #[test]
-    fn empty_cooldowns_file_disables_persistence() {
-        let mut config = AppConfig::default();
-        config.fallback.cooldowns_file = Some(std::path::PathBuf::new());
-        let entries = vec![
-            FallbackEntry {
-                provider: "groq".into(),
-                model: "groq/compound".into(),
-            },
-            FallbackEntry {
-                provider: "nvidia".into(),
-                model: "nvidia/llama-3.3-nemotron-super-49b-v1".into(),
-            },
-        ];
-        let fb = FallbackManager::new(&config, entries);
-        // In-memory cooldown still works without persistence.
-        fb.record_failure("groq", "groq/compound");
-        let next = fb.next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1");
-        assert!(next.is_none()); // groq cooling down, nvidia current
+    /// The score picks the healthy entry, and the decision is explainable.
+    #[tokio::test]
+    async fn the_router_prefers_the_healthier_combo_entry() {
+        use ai_providers::TelemetryStore as _;
+        let config = AppConfig {
+            combos: HashMap::from([(
+                "coding".to_string(),
+                vec![
+                    crate::config::ComboEntry {
+                        provider: "groq".into(),
+                        model: "groq/compound".into(),
+                    },
+                    crate::config::ComboEntry {
+                        provider: "poolside".into(),
+                        model: "poolside/laguna-xs-2.1".into(),
+                    },
+                ],
+            )]),
+            ..Default::default()
+        };
+        let store = Arc::new(ai_providers::InMemoryStore::new());
+        // groq has been failing all window; poolside has no history.
+        for _ in 0..10 {
+            store
+                .record_attempt(&ai_providers::AttemptRecord {
+                    provider: "groq".into(),
+                    model: "groq/compound".into(),
+                    at: SystemTime::now(),
+                    outcome: ai_providers::Outcome::Failed(FailureKind::Overloaded),
+                    latency: None,
+                    session_id: None,
+                    turn_id: None,
+                })
+                .await
+                .unwrap();
+        }
+        let fb = FallbackManager::new(&config, combo_entries()).with_store(
+            &config,
+            store,
+            Arc::new(CooldownRegistry::new()),
+        );
+        let candidates = candidates_for_combo(&config, "coding");
+        assert_eq!(candidates.len(), 2);
+        let decision = fb.choose(Some("coding"), candidates).await.unwrap();
+        assert_eq!(
+            decision.chosen.provider,
+            "poolside",
+            "the failing entry must lose"
+        );
+        assert!(!decision.is_configured_order());
+        assert_eq!(fb.last_decision().unwrap().chosen, decision.chosen);
+        let table = explain_decision(&decision);
+        assert!(table.contains("candidate"), "{table}");
+        assert!(table.contains("* poolside/poolside/laguna-xs-2.1"), "{table}");
     }
 
     #[test]
@@ -2046,6 +2537,7 @@ mod tests {
                 base_url: None,
                 api_key: None,
                 models: vec![crate::config::ModelRef::Simple("openrouter/auto".into())],
+                pacing: None,
             },
         );
         // A config-file `models` list is shown verbatim, even when the free
@@ -2336,6 +2828,7 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
+                pacing: None,
             },
         );
 
@@ -2396,6 +2889,7 @@ mod tests {
                 base_url: Some(base_url),
                 api_key: Some("test-key".into()),
                 models: vec!["mock/test-model".into()],
+                pacing: None,
             },
         );
 
@@ -2674,6 +3168,7 @@ mod tests {
             cersei::provider::ReasoningField::Auto,
             None,
             None,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"Read"), "built-in Read should be present");
@@ -2759,6 +3254,7 @@ mod tests {
             cersei::provider::ReasoningField::Auto,
             None,
             None,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // The wrappers register under the same Read/Write/Edit names, so the
@@ -2791,34 +3287,71 @@ mod tests {
         );
     }
 
+    // `/models` parsing moved to `ai_providers::discovery` with its own tests.
+
     #[test]
-    fn parse_model_ids_extracts_sorts_dedups() {
-        // Sample OpenAI-compatible /models response body.
-        let body = serde_json::json!({
-            "data": [
-                {"id": "gpt-oss-20b"},
-                {"id": "llama-3.3-70b"},
-                {"id": "llama-3.3-70b"}, // duplicate
-                {"id": "compound"}
-            ]
-        });
-        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
-        let ids = parse_model_ids(&resp);
-        assert_eq!(ids, vec!["compound", "gpt-oss-20b", "llama-3.3-70b"]);
+    fn catalog_is_built_from_the_merged_config() {
+        let config = isolated_config();
+        let merged = catalog(&config, Arc::new(ai_providers::NullStore));
+        // The built-ins and the model families from the config reach the
+        // library as specs, in the same order the agent displays them.
+        let names: Vec<&str> = merged
+            .providers()
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            providers(&config)
+                .iter()
+                .map(|provider| provider.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        let groq = merged.provider("groq").expect("groq is built in");
+        assert_eq!(groq.models[0].id, "groq/compound");
+        assert_eq!(groq.models[0].family, None);
+
+        let mut with_family = config.clone();
+        with_family
+            .model_families
+            .insert("groq/compound".into(), "plain".into());
+        let family_catalog = catalog(&with_family, Arc::new(ai_providers::NullStore));
+        assert_eq!(
+            family_catalog
+                .provider("groq")
+                .unwrap()
+                .models[0]
+                .family
+                .as_deref(),
+            Some("plain")
+        );
     }
 
     #[test]
-    fn parse_model_ids_empty_data() {
-        let body = serde_json::json!({"data": []});
-        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
-        assert!(parse_model_ids(&resp).is_empty());
-    }
-
-    #[test]
-    fn parse_model_ids_missing_data_field_defaults_empty() {
-        // A well-formed response with no `data` key deserializes to empty.
-        let body = serde_json::json!({"object": "list"});
-        let resp: ModelsResponse = serde_json::from_value(body).unwrap();
-        assert!(parse_model_ids(&resp).is_empty());
+    fn provider_pacing_ceilings_reach_the_library() {
+        let mut config = isolated_config();
+        config.providers.insert(
+            "groq".into(),
+            ProviderConfigEntry {
+                pacing: Some(crate::config::PacingEntryConfig {
+                    requests_per_minute: Some(60),
+                    max_concurrency: Some(2),
+                    min_interval_ms: Some(500),
+                    min_cooldown_seconds: None,
+                    max_cooldown_seconds: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let catalog = catalog(&config, Arc::new(ai_providers::NullStore));
+        let pacing = &catalog.provider("groq").unwrap().pacing;
+        assert_eq!(pacing.requests_per_minute, Some(60));
+        assert_eq!(pacing.max_concurrency, Some(2));
+        assert_eq!(pacing.min_interval, Some(Duration::from_millis(500)));
+        assert_eq!(
+            catalog.limiter("groq").effective_interval(),
+            Duration::from_secs(1),
+            "60rpm is one second per request"
+        );
     }
 }

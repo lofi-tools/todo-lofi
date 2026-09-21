@@ -42,6 +42,14 @@ pub type FollowupSink = Arc<Mutex<Vec<Followup>>>;
 /// receiver and the sends are dropped.
 pub type SubAgentEventSink = Option<broadcast::Sender<SubAgentActivity>>;
 
+/// Builds one provider for a spawned sub-agent. The runtime supplies this
+/// because only it knows the catalog, the pacing/cooldown state and the attempt
+/// scope the requests should be attributed to; the spawn site does not. Each
+/// call builds a fresh provider. When `None`, sub-agents fall back to an
+/// un-paced plain provider (tests, read-only and ACP builds).
+pub type SubAgentProviders =
+    Arc<dyn Fn() -> anyhow::Result<Box<dyn cersei::provider::Provider>> + Send + Sync>;
+
 /// Bridges the agent's filesystem tools to the ACP client's environment.
 /// `fs/read_text_file` returns unsaved editor buffers; `fs/write_text_file`
 /// lets the client track edits the agent made during a run. Implemented by
@@ -457,6 +465,9 @@ pub struct SpawnAgentsTool {
     /// Which delta field sub-agent providers read thinking from (same model
     /// family as the parent; see `response_format::reasoning_field_for`).
     reasoning: cersei::provider::ReasoningField,
+    /// Factory for sub-agent providers: paced, cooldown-aware and attributed to
+    /// the parent's session, with the spawning turn as `parent_turn_id`.
+    providers: Option<SubAgentProviders>,
     /// Unique ids handed out per spawned sub-agent, so the UI can tell the
     /// sub-agents of one `spawn_agents` call apart (and across calls).
     run_counter: AtomicU64,
@@ -468,6 +479,7 @@ impl SpawnAgentsTool {
         parent: ParentHandle,
         events: SubAgentEventSink,
         reasoning: cersei::provider::ReasoningField,
+        providers: Option<SubAgentProviders>,
     ) -> Self {
         let defs = sub_agent_defs();
         let run_counter = AtomicU64::new(0);
@@ -489,6 +501,7 @@ impl SpawnAgentsTool {
             description,
             events,
             reasoning,
+            providers,
             run_counter,
         }
     }
@@ -619,6 +632,7 @@ impl Tool for SpawnAgentsTool {
             let working_dir = ctx.working_dir.clone();
             let events = self.events.clone();
             let reasoning = self.reasoning;
+            let providers = self.providers.clone();
             set.spawn(async move {
                 (
                     i,
@@ -631,6 +645,7 @@ impl Tool for SpawnAgentsTool {
                         events,
                         run_id,
                         reasoning,
+                        providers,
                     )
                     .await,
                 )
@@ -747,9 +762,15 @@ async fn run_sub_agent(
     events: SubAgentEventSink,
     run_id: u64,
     reasoning: cersei::provider::ReasoningField,
+    providers: Option<SubAgentProviders>,
 ) -> Result<String, String> {
-    let provider = crate::providers::openai_provider(&resolved, reasoning)
-        .map_err(|e| format!("failed to build sub-agent provider: {e}"))?;
+    let provider: Box<dyn cersei::provider::Provider> = match &providers {
+        Some(build) => build().map_err(|e| format!("failed to build sub-agent provider: {e}"))?,
+        None => Box::new(
+            crate::providers::openai_provider(&resolved, reasoning)
+                .map_err(|e| format!("failed to build sub-agent provider: {e}"))?,
+        ),
+    };
 
     let events = events.clone();
     // The event-forwarding closure owns its own clone; `events` stays behind
@@ -1056,6 +1077,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
@@ -1100,6 +1122,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let ctx = test_context(dir.clone());
         let result = tool
@@ -1230,6 +1253,7 @@ mod tests {
             parent.clone(),
             Some(tx),
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
@@ -1276,6 +1300,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_llm_sub_agent_prefers_the_supplied_provider() {
+        // `resolved` points at a port nothing listens on, and only the factory
+        // knows the live mock. A sub-agent that ran on the plain provider
+        // would fail, so success proves the factory's provider is the one used.
+        let base_url = text_mock_server("Paced answer.").await;
+        let dead = Resolved {
+            provider: "mock".into(),
+            model: "mock/model".into(),
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: "test-key".into(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            extra_body: None,
+        };
+        let factory: SubAgentProviders = Arc::new(move || {
+            Ok(Box::new(crate::providers::openai_provider(
+                &Resolved {
+                    provider: "mock".into(),
+                    model: "mock/model".into(),
+                    base_url: base_url.clone(),
+                    api_key: "test-key".into(),
+                    max_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    extra_body: None,
+                },
+                cersei::provider::ReasoningField::Auto,
+            )?))
+        });
+        let tool = SpawnAgentsTool::new(
+            dead,
+            Arc::new(Mutex::new(None)),
+            None,
+            cersei::provider::ReasoningField::Auto,
+            Some(factory),
+        );
+        let ctx = test_context(std::env::temp_dir());
+        let result = tool
+            .execute(
+                json!({
+                    "agents": [{
+                        "agent_type": "researcher-web",
+                        "prompt": "What is the answer?"
+                    }]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("Paced answer."),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_thinker_strips_think_tags() {
         // The thinker replies with <think> reasoning then a concise answer;
         // the tags must be stripped from what the parent sees (and from the
@@ -1299,6 +1381,7 @@ mod tests {
             parent.clone(),
             Some(tx),
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let ctx = test_context(std::env::temp_dir());
         let result = tool
@@ -1356,6 +1439,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             cersei::provider::ReasoningField::Auto,
+            None,
         );
         let ctx = test_context(std::env::temp_dir());
         let result = tool

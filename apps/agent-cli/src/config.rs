@@ -52,6 +52,15 @@ pub struct AppConfig {
     /// the rest on errors / rate limits.
     #[serde(default)]
     pub combos: std::collections::HashMap<String, Vec<ComboEntry>>,
+    /// Durable telemetry: provider attempts, sessions and turns recorded to a
+    /// local SQLite database so routing can learn from what actually happened.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    /// Combo-entry selection: a deterministic score over the recorded history,
+    /// with the inputs (failure rate, cooldowns, pacing) logged for every
+    /// choice so `/why` can explain it.
+    #[serde(default)]
+    pub routing: RoutingConfig,
     /// Per-model response format families: model id (e.g. "stealth/ox-alpha")
     /// → family name ("reasoning", "reasoning_content", "plain"). The family
     /// determines how a model's streamed thinking is delimited from its
@@ -103,6 +112,8 @@ impl Default for AppConfig {
             hooks: Vec::new(),
             proxy: ProxyConfig::default(),
             fallback: FallbackConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            routing: RoutingConfig::default(),
             providers: std::collections::HashMap::new(),
             combos: std::collections::HashMap::new(),
             model_families: std::collections::HashMap::new(),
@@ -163,7 +174,15 @@ pub fn default_config_jsonc() -> String {
         ),
         ("hooks", "Lifecycle hooks: [{ \"event\", \"command\" }]"),
         ("proxy", "Proxy routing (VibeProxy or compatible)"),
-        ("fallback", "Combo fallback tuning"),
+        (
+            "fallback",
+            "Combo fallback tuning (cooldowns now live in the telemetry database; `cooldowns_file` is deprecated and ignored)",
+        ),
+        (
+            "telemetry",
+            "Durable provider/session history: database path, retention",
+        ),
+        ("routing", "Model-selection score over the recorded history"),
         (
             "providers",
             "Per-provider overrides (base_url, api_key, models; models entries are ids or { id, max_tokens, temperature, top_p, extra_body })",
@@ -220,6 +239,50 @@ pub fn default_config_jsonc() -> String {
                     (
                         "cooldowns_file",
                         "Cooldown persistence path, or null to disable (path | null)",
+                    ),
+                ],
+            ),
+            "telemetry" => append_nested_jsonc(
+                &mut out,
+                field_value,
+                &[
+                    (
+                        "enabled",
+                        "Record attempts, sessions and turns to SQLite (true/false)",
+                    ),
+                    (
+                        "db_path",
+                        "Database path, or null for ~/.abstract/agent.db (path | null)",
+                    ),
+                    (
+                        "retention_days",
+                        "Delete history older than this on startup (u64)",
+                    ),
+                ],
+            ),
+            "routing" => append_nested_jsonc(
+                &mut out,
+                field_value,
+                &[
+                    (
+                        "enabled",
+                        "Score combo entries instead of walking them in order (true/false)",
+                    ),
+                    ("window_hours", "History window the score reads (f64)"),
+                    ("half_life_hours", "Decay half-life inside that window (f64)"),
+                    (
+                        "min_samples",
+                        "Weighted attempts before history outranks the prior (f64)",
+                    ),
+                    ("weight_failure", "Weight of the failure rate (f64)"),
+                    ("weight_pacing", "Weight of provider load (f64)"),
+                    (
+                        "weight_latency",
+                        "Weight of relative latency, 0 = off (f64)",
+                    ),
+                    (
+                        "weight_price",
+                        "Weight of price, 0 = off; no pricing data in v1 (f64)",
                     ),
                 ],
             ),
@@ -332,6 +395,52 @@ pub struct ProviderConfigEntry {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<ModelRef>,
+    /// Proactive pacing for this provider. Unset means "no limit imposed":
+    /// the limiter starts unthrottled and only slows down after a provider
+    /// says "too many requests".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pacing: Option<PacingEntryConfig>,
+}
+
+/// Client-side pacing ceilings for one provider. Every field is optional and
+/// only ever *tightens* pacing — the adaptive limiter may still back off
+/// further when the provider pushes back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PacingEntryConfig {
+    /// Floor on the gap implied by requests-per-minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<u32>,
+    /// Ceiling on concurrent in-flight requests for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<u32>,
+    /// Minimum gap between two requests, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_interval_ms: Option<u64>,
+    /// Shortest cooldown after a failure, in seconds (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_cooldown_seconds: Option<u64>,
+    /// Longest cooldown after a transient failure, in seconds (default 900).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cooldown_seconds: Option<u64>,
+}
+
+impl PacingEntryConfig {
+    /// The library's view of the same limits.
+    pub fn to_library(&self) -> ai_providers::PacingSpec {
+        ai_providers::PacingSpec {
+            requests_per_minute: self.requests_per_minute,
+            max_concurrency: self.max_concurrency,
+            min_interval: self
+                .min_interval_ms
+                .map(std::time::Duration::from_millis),
+            min_cooldown: self
+                .min_cooldown_seconds
+                .map(std::time::Duration::from_secs),
+            max_cooldown: self
+                .max_cooldown_seconds
+                .map(std::time::Duration::from_secs),
+        }
+    }
 }
 
 /// One entry of a provider's `models` list: either a bare model id string
@@ -443,6 +552,116 @@ impl Default for FallbackConfig {
     }
 }
 
+fn default_retention_days() -> u64 {
+    30
+}
+
+/// Durable telemetry. `enabled: false` forces the no-op store: nothing is
+/// written and no database file is created.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Database path; `null`/empty uses `~/.abstract/agent.db`.
+    #[serde(default)]
+    pub db_path: Option<PathBuf>,
+    /// Retention window for attempts, routing decisions and closed sessions.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            db_path: None,
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+impl TelemetryConfig {
+    /// The database file to open. A relative path is resolved against the
+    /// working directory, as written.
+    pub fn database_path(&self) -> PathBuf {
+        match &self.db_path {
+            Some(path) if !path.as_os_str().is_empty() => path.clone(),
+            _ => global_config_dir().join("agent.db"),
+        }
+    }
+}
+
+fn default_window_hours() -> f64 {
+    24.0
+}
+fn default_half_life_hours() -> f64 {
+    6.0
+}
+fn default_min_samples() -> f64 {
+    3.0
+}
+fn default_weight_failure() -> f64 {
+    1.0
+}
+fn default_weight_pacing() -> f64 {
+    0.25
+}
+
+/// Routing tuning. These are the library's defaults, restated here so the
+/// config file documents them; `to_library()` is the only conversion point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_window_hours")]
+    pub window_hours: f64,
+    #[serde(default = "default_half_life_hours")]
+    pub half_life_hours: f64,
+    #[serde(default = "default_min_samples")]
+    pub min_samples: f64,
+    #[serde(default = "default_weight_failure")]
+    pub weight_failure: f64,
+    #[serde(default = "default_weight_pacing")]
+    pub weight_pacing: f64,
+    /// Latency weighting is off by default: a slow provider is not a broken one.
+    #[serde(default)]
+    pub weight_latency: f64,
+    /// Price weighting is a seam: models are assumed free in v1.
+    #[serde(default)]
+    pub weight_price: f64,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_hours: default_window_hours(),
+            half_life_hours: default_half_life_hours(),
+            min_samples: default_min_samples(),
+            weight_failure: default_weight_failure(),
+            weight_pacing: default_weight_pacing(),
+            weight_latency: 0.0,
+            weight_price: 0.0,
+        }
+    }
+}
+
+impl RoutingConfig {
+    /// The library's view of the same knobs.
+    pub fn to_library(&self) -> ai_providers::RoutingConfig {
+        ai_providers::RoutingConfig {
+            enabled: self.enabled,
+            window_hours: self.window_hours,
+            half_life_hours: self.half_life_hours,
+            min_samples: self.min_samples,
+            weight_failure: self.weight_failure,
+            weight_pacing: self.weight_pacing,
+            weight_latency: self.weight_latency,
+            weight_price: self.weight_price,
+        }
+    }
+}
+
 /// One (provider, model) entry inside a `combos` list. In JSON it can be
 /// written either as a two-element array `["provider", "model"]` or as an
 /// object `{ "provider": ..., "model": ... }`.
@@ -540,6 +759,8 @@ pub fn graph_db_path() -> PathBuf {
 
 /// ~/.abstract/cooldowns.json — combo cooldown state persisted across
 /// restarts (override via `fallback.cooldowns_file`).
+/// The legacy cooldown file. Superseded by the telemetry database's
+/// `cooldowns` table; still read once by the legacy import in `telemetry.rs`.
 pub fn cooldowns_path() -> PathBuf {
     global_config_dir().join("cooldowns.json")
 }
@@ -865,6 +1086,15 @@ mod tests {
         assert_eq!(
             parsed.fallback.cooldown_seconds,
             defaults.fallback.cooldown_seconds
+        );
+        assert_eq!(parsed.telemetry, defaults.telemetry);
+        assert_eq!(parsed.routing, defaults.routing);
+        assert!(parsed.telemetry.enabled);
+        assert_eq!(parsed.telemetry.retention_days, 30);
+        assert_eq!(parsed.routing.weight_pacing, 0.25);
+        assert_eq!(
+            parsed.telemetry.database_path(),
+            crate::config::global_config_dir().join("agent.db")
         );
         // The providers/env sections are template content (the runtime
         // defaults keep empty maps), so assert the rendered entries parse

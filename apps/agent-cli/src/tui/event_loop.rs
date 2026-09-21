@@ -47,7 +47,7 @@ struct AgentRun {
 /// If `event` is a provider error from a run that hasn't produced output yet,
 /// retry the run on the next combo entry in the list. Returns true when the
 /// error was handled by a fallback (and the event should be swallowed).
-fn try_fallback(
+async fn try_fallback(
     state: &mut AppState,
     runtime: &Arc<AgentRuntime>,
     run: &mut AgentRun,
@@ -68,7 +68,10 @@ fn try_fallback(
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime.next_fallback_entry(&run.provider, &run.model) else {
+    let Some(next) = runtime
+        .choose_next_entry(&run.provider, &run.model)
+        .await
+    else {
         return false;
     };
     runtime.record_failure(&run.provider, &run.model);
@@ -80,6 +83,11 @@ fn try_fallback(
                 msg,
                 crate::providers::display_model_id(&next.provider, &next.model),
             ));
+            // Why this entry: the routing decision that moved the choice off
+            // the configured order, if one did.
+            if let Some(line) = runtime.last_decision().and_then(|d| d.summary_line()) {
+                state.push_system(line);
+            }
             state.effective_model = Some(crate::providers::display_model_id(
                 &next.provider,
                 &next.model,
@@ -87,9 +95,18 @@ fn try_fallback(
             run.provider = next.provider;
             run.model = next.model;
             run.stream = runtime.agent().run_stream(&run.prompt);
+            runtime.begin_turn(&run.provider, &run.model).await;
             true
         }
         Err(_) => false,
+    }
+}
+
+/// Fire-and-forget telemetry: the event loop must never wait on the database,
+/// and the store already degrades to a no-op on its own.
+fn spawn_telemetry(write: impl std::future::Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(write);
     }
 }
 
@@ -143,7 +160,7 @@ pub async fn run(
                 match event {
                     Some(agent_event) => {
                         let fell_back = if let Some(run) = agent_run.as_mut() {
-                            try_fallback(&mut state, &runtime, run, &agent_event)
+                            try_fallback(&mut state, &runtime, run, &agent_event).await
                         } else {
                             false
                         };
@@ -203,6 +220,9 @@ pub async fn run(
                                 state.hovered_followup = None;
                                 state.scroll.scroll_to_bottom();
                                 let (effective_provider, effective_model) = runtime.effective();
+                                runtime
+                                    .begin_turn(&effective_provider, &effective_model)
+                                    .await;
                                 agent_run = Some(AgentRun {
                                     stream: runtime.agent().run_stream(&prompt),
                                     prompt: prompt.clone(),
@@ -222,6 +242,9 @@ pub async fn run(
                                 state.stream_start = Some(Instant::now());
                                 state.scroll.scroll_to_bottom();
                                 let (effective_provider, effective_model) = runtime.effective();
+                                runtime
+                                    .begin_turn(&effective_provider, &effective_model)
+                                    .await;
                                 agent_run = Some(AgentRun {
                                     stream: runtime.agent().run_stream(&prompt),
                                     prompt: prompt.clone(),
@@ -2281,6 +2304,8 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 tool.duration_ms = Some(duration.as_millis() as u64);
                 tool.output_preview = Some(result.chars().take(200).collect());
             }
+            let runtime = runtime.clone();
+            spawn_telemetry(async move { runtime.note_tool_call().await });
         }
         AgentEvent::CostUpdate {
             cumulative_cost,
@@ -2296,6 +2321,8 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
             } else {
                 cersei::tools::estimate_cost(&state.model, input_tokens, output_tokens)
             };
+            let runtime = runtime.clone();
+            spawn_telemetry(async move { runtime.note_usage(input_tokens, output_tokens).await });
         }
         AgentEvent::TurnComplete { usage, .. } => {
             state.input_tokens = usage.input_tokens;
@@ -2316,10 +2343,18 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 blocks: Vec::new(),
                 followups: Vec::new(),
             });
+            let runtime = runtime.clone();
+            spawn_telemetry(async move {
+                runtime.end_turn("error", Some("error"), 0, 0).await
+            });
         }
         AgentEvent::Complete(_) => {
             state.commit_turn();
             state.is_streaming = false;
+            {
+                let runtime = runtime.clone();
+                spawn_telemetry(async move { runtime.end_turn("ok", None, 0, 0).await });
+            }
             // Render the followup suggestions the agent proposed via the
             // suggest_followups tool as clickable rows; clicking one sends
             // its prompt to the model (see `handle_mouse`).
@@ -2566,6 +2601,13 @@ fn handle_slash_command(
         "help" | "h" | "?" => {
             state.overlay = Overlay::Help;
         }
+        "why" => match runtime.last_decision() {
+            Some(decision) => state.push_system(crate::providers::explain_decision(&decision)),
+            None => state.push_system(
+                "No routing decision recorded yet — routing is off (`routing.enabled`), \
+                 telemetry is off, or no combo run has happened this session.",
+            ),
+        },
         "clear" => {
             state.turns.clear();
             state.active_blocks.clear();
@@ -3362,6 +3404,7 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into()],
+                pacing: None,
             },
         );
         Arc::new(AgentRuntime::new(&config).unwrap())
@@ -3382,6 +3425,7 @@ mod tests {
                 base_url: Some("http://127.0.0.1:1".into()),
                 api_key: Some("test-key".into()),
                 models: vec!["test/test-model".into(), "test/test-2".into()],
+                pacing: None,
             },
         );
         config.combos.insert(

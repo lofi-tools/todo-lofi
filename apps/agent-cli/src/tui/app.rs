@@ -404,6 +404,7 @@ pub struct CommandSelectorState {
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "Switch provider/model"),
     ("combos", "List/switch combos"),
+    ("why", "Explain the last model choice"),
     ("provider", "Browse provider models"),
     ("interview", "Run an interview and write a spec"),
     ("default-config", "Show default config in editor"),

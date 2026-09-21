@@ -46,6 +46,170 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::ti
         .map(std::time::Duration::from_secs)
 }
 
+/// Seconds until the rate limit resets, from whichever rate-limit header the
+/// gateway sent.
+///
+/// The exact same headers are read for every provider; only the shapes differ:
+///
+/// * `retry-after` — delta seconds (checked first, it is the most specific).
+/// * `x-ratelimit-reset` / `ratelimit-reset` — unix epoch seconds when the
+///   value is far in the future, otherwise delta seconds (OpenRouter, IETF
+///   draft).
+/// * `x-ratelimit-reset-requests` / `-tokens` — Go durations or plain seconds
+///   (OpenAI, Groq).
+///
+/// An unrecognised shape yields `None` so the caller falls back to exponential
+/// backoff: a missing hint is strictly better than a wrong sleep.
+pub fn parse_rate_limit_reset(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    if let Some(delta) = parse_retry_after(headers) {
+        return Some(delta);
+    }
+    let value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_string())
+    };
+    for name in ["x-ratelimit-reset", "ratelimit-reset"] {
+        if let Some(parsed) = value(name).and_then(|value| parse_reset_value(&value)) {
+            return Some(parsed);
+        }
+    }
+    for name in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"] {
+        if let Some(parsed) = value(name).and_then(|value| parse_reset_value(&value)) {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+/// Parse one reset value: unix epoch seconds, delta seconds, or a Go duration.
+fn parse_reset_value(value: &str) -> Option<std::time::Duration> {
+    if let Ok(number) = value.parse::<f64>() {
+        if !number.is_finite() || number <= 0.0 {
+            return None;
+        }
+        if number > 1_000_000_000.0 {
+            // Epoch seconds: how long until that instant.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let delta = number - now;
+            return (delta > 0.0).then(|| std::time::Duration::from_secs_f64(delta));
+        }
+        return Some(std::time::Duration::from_secs_f64(number));
+    }
+    parse_go_duration(value)
+}
+
+/// Parse a Go duration string (`250ms`, `1m30s`, `2h`). Returns `None` for
+/// anything else, including `Retry-After`'s HTTP-date form (cersei only ever
+/// spoke the delta-seconds shape, and guessing at dates is worse than backing
+/// off exponentially).
+fn parse_go_duration(value: &str) -> Option<std::time::Duration> {
+    let mut total = std::time::Duration::ZERO;
+    let mut number = String::new();
+    let mut matched = false;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+        let magnitude: f64 = match ch {
+            'n' => {
+                chars.next_if_eq(&'s');
+                1e-9
+            }
+            'u' | 'µ' => {
+                chars.next_if_eq(&'s');
+                1e-6
+            }
+            'm' => {
+                if chars.peek() == Some(&'s') {
+                    chars.next();
+                    1e-3
+                } else {
+                    60.0
+                }
+            }
+            's' => 1.0,
+            'h' => 3600.0,
+            _ => return None,
+        };
+        let count: f64 = number.parse().ok()?;
+        number.clear();
+        total += std::time::Duration::from_secs_f64(count * magnitude);
+        matched = true;
+    }
+    if matched && number.is_empty() {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+    use reqwest::header::HeaderMap;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn retry_after_wins_and_reads_delta_seconds() {
+        let map = headers(&[("retry-after", "12"), ("x-ratelimit-reset", "999")]);
+        assert_eq!(parse_rate_limit_reset(&map), Some(std::time::Duration::from_secs(12)));
+    }
+
+    #[test]
+    fn reads_the_openrouter_epoch_shape() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let map = headers(&[("x-ratelimit-reset", &(now + 30).to_string())]);
+        let parsed = parse_rate_limit_reset(&map).expect("epoch seconds must parse");
+        assert!(
+            parsed >= std::time::Duration::from_secs(25)
+                && parsed <= std::time::Duration::from_secs(35),
+            "got {parsed:?}"
+        );
+        // A reset in the past is not a hint to sleep for zero seconds.
+        let map = headers(&[("x-ratelimit-reset", &(now - 30).to_string())]);
+        assert_eq!(parse_rate_limit_reset(&map), None);
+    }
+
+    #[test]
+    fn reads_the_go_duration_shape() {
+        let map = headers(&[("x-ratelimit-reset-requests", "1m30s")]);
+        assert_eq!(parse_rate_limit_reset(&map), Some(std::time::Duration::from_secs(90)));
+        let map = headers(&[("x-ratelimit-reset-tokens", "250ms")]);
+        assert_eq!(
+            parse_rate_limit_reset(&map),
+            Some(std::time::Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn unknown_shapes_and_garbage_fall_back_to_none() {
+        let map = headers(&[("x-ratelimit-reset", "Wed, 21 Oct 2026 07:28:00 GMT")]);
+        assert_eq!(parse_rate_limit_reset(&map), None);
+        let map = headers(&[("x-ratelimit-reset", ""), ("x-ratelimit-reset-tokens", "nope")]);
+        assert_eq!(parse_rate_limit_reset(&map), None);
+        assert_eq!(parse_rate_limit_reset(&HeaderMap::new()), None);
+        assert_eq!(parse_go_duration("1m30"), None);
+        assert_eq!(parse_go_duration("30"), None, "bare numbers are seconds elsewhere");
+    }
+}
+
 // ─── Provider trait ──────────────────────────────────────────────────────────
 
 #[async_trait]

@@ -29,6 +29,11 @@ syntect = { version = "5", features = ["default-syntaxes", "default-themes"] }
 # Errors, logs
 anyhow = "1"
 fastrace = "0.7.17"
+# Telemetry database (separate from libs/storage and todo-2's database)
+toasty = { version = "0.7", features = ["turso", "serde", "jiff"] }
+toasty-driver-turso = { version = "0.7" }
+sha2 = { workspace = true }
+include_dir = "0.7.4"
 
 # System
 dirs = { workspace = true }

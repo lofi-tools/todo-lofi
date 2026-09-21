@@ -120,8 +120,12 @@ pub enum Commands {
 pub enum SessionAction {
     /// List all sessions
     #[command(alias = "ls")]
-    List,
-    /// Show a session transcript
+    List {
+        /// How many sessions to show, newest first
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show a session's turns and attempt failures
     Show { id: String },
     /// Delete a session
     Rm { id: String },
