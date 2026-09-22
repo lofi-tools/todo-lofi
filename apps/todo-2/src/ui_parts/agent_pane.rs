@@ -445,6 +445,22 @@ struct TerminalRow {
     exit_code: Option<Option<u32>>,
 }
 
+/// Where the mode on screen comes from.
+///
+/// A session's modes reach the client two ways, and a change is writable in
+/// only one of them: modes the agent advertises in session state change with
+/// `session/set_mode`, while a mode it reports as a `mode`-category config
+/// option (opencode does) changes through that option alone, whose response
+/// carries the mode the agent took. Reading both through one type keeps the
+/// picker's values and the request a pick sends from disagreeing about which
+/// one is in force.
+enum ModeSource {
+    /// The modes the agent advertises in session state.
+    Session(SessionModeState),
+    /// The config option standing in for them, with its own id.
+    Config(SelectChip),
+}
+
 /// A select-valued session config option, flattened for the chip UI.
 #[derive(Clone, Debug)]
 struct SelectChip {
@@ -1860,31 +1876,19 @@ impl AgentPane {
                     .find(|chip| chip.is_model)?;
                 (chip.name.clone(), chip.values.clone(), chip.current.clone())
             }
-            Overlay::Mode => {
-                if let Some(mode) = self
-                    .active_entry()
-                    .and_then(|entry| entry.transcript.controls().mode.clone())
-                {
-                    (
-                        "Mode".to_string(),
-                        mode.available_modes
-                            .iter()
-                            .map(|available| {
-                                (available.id.0.to_string(), available.name.clone())
-                            })
-                            .collect(),
-                        mode.current_mode_id.0.to_string(),
-                    )
-                } else {
-                    // Agents like opencode report session mode as a
-                    // `mode`-category config option instead of session modes.
-                    let chip = self
-                        .select_chips()
-                        .into_iter()
-                        .find(|chip| chip.is_mode)?;
+            Overlay::Mode => match self.mode_source()? {
+                ModeSource::Session(mode) => (
+                    "Mode".to_string(),
+                    mode.available_modes
+                        .iter()
+                        .map(|available| (available.id.0.to_string(), available.name.clone()))
+                        .collect(),
+                    mode.current_mode_id.0.to_string(),
+                ),
+                ModeSource::Config(chip) => {
                     (chip.name.clone(), chip.values.clone(), chip.current.clone())
                 }
-            }
+            },
             Overlay::Config(id) => {
                 let chip = self
                     .select_chips()
@@ -1927,8 +1931,10 @@ impl AgentPane {
     }
 
     /// Route a picked dropdown value to the session: modes go through
-    /// `select_mode`, everything else (models included) is a select-valued
-    /// config option on its chip.
+    /// `select_mode` when the agent advertises them as session modes and
+    /// through the option standing in for them when it reports mode that way,
+    /// everything else (models included) is a select-valued config option on
+    /// its chip.
     fn select_overlay_value(
         &mut self,
         overlay: Overlay,
@@ -1936,7 +1942,15 @@ impl AgentPane {
         cx: &mut Context<Self>,
     ) {
         match overlay {
-            Overlay::Mode => self.select_mode(value, cx),
+            // A pick is the change the mode actually came from: advertised
+            // session modes go through `session/set_mode`, and a mode the agent
+            // reports as a config option goes through that option, whose
+            // response is what reports the new mode back.
+            Overlay::Mode => match self.mode_source() {
+                Some(ModeSource::Session(_)) => self.select_mode(value, cx),
+                Some(ModeSource::Config(chip)) => self.select_config_value(chip.id, value, cx),
+                None => {}
+            },
             Overlay::Config(config_id) => self.select_config_value(config_id, value, cx),
             Overlay::Model => {
                 if let Some(chip) = self
@@ -2092,15 +2106,25 @@ impl AgentPane {
             return;
         };
         self.overlay = None;
+        // `session/set_mode` answers with an empty result and an agent need
+        // not announce the change, so the mode is taken here, at the click: a
+        // label that waits for a notification that may never come names the
+        // mode the user just left. A `current_mode_update` sent afterwards
+        // still replaces it.
+        let previous = self.show_mode(&tag_name, &mode_id);
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = requester
-                .set_mode(&session_id, SessionModeId::new(mode_id))
+                .set_mode(&session_id, SessionModeId::new(mode_id.clone()))
                 .await;
             this.update(cx, |pane, cx| {
                 if let Err(error) = result {
                     let message = format!("Could not change the mode: {error}");
                     notifications::report(cx, Severity::Error, message.clone());
-                    if let Some(entry) = pane.active_entry_mut() {
+                    // The session still runs the mode it had, so the label
+                    // goes back — unless a later pick owns it by now.
+                    pane.restore_mode(&tag_name, &mode_id, previous.as_deref());
+                    if let Some(entry) = pane.projects.get_mut(&tag_name) {
                         entry.transcript.push_error(message);
                     }
                     pane.sync_scroller(cx);
@@ -2110,6 +2134,69 @@ impl AgentPane {
             .ok();
         })
         .detach();
+    }
+
+    /// Show `mode_id` as the mode of `tag_name`'s session, and report the mode
+    /// that was current before, so a refused request can put that one back.
+    ///
+    /// The transcript's own mode pass is told as well: a mode this pane moved
+    /// is not news for the next event batch to announce as the agent's.
+    fn show_mode(&mut self, tag_name: &str, mode_id: &str) -> Option<String> {
+        let entry = self.projects.get_mut(tag_name)?;
+        let previous = entry
+            .transcript
+            .controls()
+            .mode
+            .as_ref()
+            .map(|mode| mode.current_mode_id.0.to_string());
+        entry
+            .transcript
+            .set_current_mode(SessionModeId::new(mode_id));
+        entry.mode_seen = Some(mode_id.to_string());
+        previous
+    }
+
+    /// Put the mode shown for `tag_name` back to `previous` if it is still
+    /// `chosen`: a later pick owns the label by the time a refusal lands. A
+    /// session that reported no mode before the pick has none to go back to,
+    /// and the state the pick made names no modes, so it shows as no mode.
+    fn restore_mode(&mut self, tag_name: &str, chosen: &str, previous: Option<&str>) {
+        let Some(previous) = previous else {
+            return;
+        };
+        let Some(entry) = self.projects.get_mut(tag_name) else {
+            return;
+        };
+        let shown = entry
+            .transcript
+            .controls()
+            .mode
+            .as_ref()
+            .map(|mode| mode.current_mode_id.0.to_string());
+        if shown.as_deref() != Some(chosen) {
+            return;
+        }
+        entry
+            .transcript
+            .set_current_mode(SessionModeId::new(previous));
+        entry.mode_seen = Some(previous.to_string());
+    }
+
+    /// Where the mode on screen comes from, if the agent reports one at all.
+    fn mode_source(&self) -> Option<ModeSource> {
+        if let Some(mode) = self
+            .active_entry()
+            .and_then(|entry| entry.transcript.controls().mode.clone())
+            .filter(|mode| !mode.available_modes.is_empty())
+        {
+            return Some(ModeSource::Session(mode));
+        }
+        // Agents like opencode report session mode as a `mode`-category
+        // config option instead of session modes.
+        self.select_chips()
+            .into_iter()
+            .find(|chip| chip.is_mode)
+            .map(ModeSource::Config)
     }
 
     /// The select-valued config options of the on-screen project, the
@@ -2134,6 +2221,23 @@ impl AgentPane {
             .into_iter()
             .find(|chip| chip.is_model)
             .map(|chip| chip.current_label)
+    }
+
+    /// The label of the mode button: the *name* of the mode in force, from
+    /// whichever source reports it, since a session mode id is not meant for
+    /// reading (a mode the source does not name falls back to its id).
+    fn mode_label(&self) -> Option<String> {
+        self.mode_source().map(|source| match source {
+            ModeSource::Session(mode) => {
+                let current = mode.current_mode_id.0.to_string();
+                mode.available_modes
+                    .iter()
+                    .find(|available| available.id.0.to_string() == current)
+                    .map(|available| available.name.clone())
+                    .unwrap_or_else(|| current.clone())
+            }
+            ModeSource::Config(chip) => chip.current_label.clone(),
+        })
     }
 }
 
@@ -3118,27 +3222,7 @@ impl AgentPane {
             .filter(|chip| !chip.is_model && !chip.is_mode)
             .cloned()
             .collect();
-        // Session mode comes from session `modes` when the agent sends them;
-        // opencode reports it as a `mode`-category config option instead, so
-        // that chip backs the same dedicated button.
-        let mode_label: Option<String> = self
-            .active_entry()
-            .and_then(|entry| entry.transcript.controls().mode.clone())
-            .filter(|mode| !mode.available_modes.is_empty())
-            .map(|mode| {
-                let current = mode.current_mode_id.0.to_string();
-                mode.available_modes
-                    .iter()
-                    .find(|available| available.id.0.to_string() == current)
-                    .map(|available| available.name.clone())
-                    .unwrap_or_else(|| current.clone())
-            })
-            .or_else(|| {
-                chips
-                    .iter()
-                    .find(|chip| chip.is_mode)
-                    .map(|chip| chip.current_label.clone())
-            });
+        let mode_label = self.mode_label();
 
         div()
             .flex()
@@ -4110,7 +4194,8 @@ impl Render for AgentPane {
 mod tests {
     use super::*;
     use acp_client::schema::{
-        ContentBlock, ContentChunk, SessionNotification, SessionUpdate, TextContent, ToolCall,
+        ContentBlock, ContentChunk, SessionMode, SessionNotification, SessionUpdate, TextContent,
+        ToolCall,
     };
 
     /// The tag name the pane fixtures key their project under, and the one the
@@ -4184,6 +4269,35 @@ mod tests {
             ]
         }))
         .expect("model option")
+    }
+
+    /// opencode's session mode: not a session-mode list at all, but a
+    /// `mode`-category select option whose current value is the mode in force.
+    fn mode_option(current: &str) -> SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": current,
+            "options": [
+                {"value": "ask", "name": "Ask"},
+                {"value": "plan", "name": "Plan"}
+            ]
+        }))
+        .expect("mode option")
+    }
+
+    /// Session modes as an agent that keeps them in session state advertises
+    /// them at `session/new`.
+    fn session_modes(current: &str) -> SessionModeState {
+        SessionModeState::new(
+            SessionModeId::new(current),
+            vec![
+                SessionMode::new(SessionModeId::new("ask"), "Ask"),
+                SessionMode::new(SessionModeId::new("plan"), "Plan"),
+            ],
+        )
     }
 
     fn calling_tool(id: &str, title: &str) -> AcpEvent {
@@ -4987,6 +5101,144 @@ mod tests {
                 )),
                 "the refusal is a row in the project's transcript"
             );
+        });
+    }
+
+    /// A mode the agent reports as a config option — opencode's shape, and the
+    /// only place it takes a mode change from — is read from that option: the
+    /// button names the mode the option holds, the picker lists the option's
+    /// values, and the mode the agent's answer carries moves the button.
+    #[gpui::test]
+    fn a_mode_reported_as_a_config_option_is_read_from_it(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("mode-option"), window, cx);
+            let mut entry = project_entry(PROJECT);
+            entry.transcript.seed_controls(None, vec![mode_option("plan")]);
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).mode_label()),
+            Some("Plan".to_string()),
+            "the button names the mode the option holds"
+        );
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                assert!(
+                    matches!(pane.mode_source(), Some(ModeSource::Config(chip)) if chip.id == "mode"),
+                    "the option stands in for the session modes the agent never sends"
+                );
+                let (title, values, current) = pane
+                    .overlay_rows(&Overlay::Mode, cx)
+                    .expect("the agent reports a mode");
+                assert_eq!(title, "Session Mode");
+                assert_eq!(current, "plan");
+                assert_eq!(
+                    values,
+                    vec![
+                        ("ask".to_string(), "Ask".to_string()),
+                        ("plan".to_string(), "Plan".to_string())
+                    ]
+                );
+            });
+        });
+
+        // The answer to a mode change is the set the agent returned, which is
+        // what opencode sends: its `session/set_mode` answers with nothing.
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_config_answer(PROJECT, Ok(vec![mode_option("ask")]), cx)
+            });
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).mode_label()),
+            Some("Ask".to_string()),
+            "the button follows the mode the agent reports"
+        );
+    }
+
+    /// Modes the agent advertises in session state move at the click:
+    /// `session/set_mode` answers with an empty result and no announcement is
+    /// promised, so a button that waits for one names the mode the user just
+    /// left. The move is the pane's own, so the transcript has nothing to
+    /// report afterwards as the agent's.
+    #[gpui::test]
+    fn a_mode_the_agent_advertises_moves_at_the_click(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("mode-click"), window, cx);
+            let mut entry = project_entry(PROJECT);
+            entry.transcript.seed_controls(Some(session_modes("ask")), Vec::new());
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).mode_label()),
+            Some("Ask".to_string())
+        );
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, _| pane.show_mode(PROJECT, "plan"));
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).mode_label()),
+            Some("Plan".to_string()),
+            "the button names the mode the user picked"
+        );
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, _| {
+                let entry = pane.projects.get_mut(PROJECT).expect("the project entry");
+                assert!(
+                    entry.mode_notice().is_none(),
+                    "a move the pane made is not the agent's to announce later"
+                );
+            });
+        });
+    }
+
+    /// A refused mode change leaves the session on the mode it had, so the
+    /// button goes back — unless a later pick owns it by the time the refusal
+    /// lands.
+    #[gpui::test]
+    fn a_refused_mode_change_puts_the_mode_back(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("mode-refusal"), window, cx);
+            let mut entry = project_entry(PROJECT);
+            entry.transcript.seed_controls(Some(session_modes("ask")), Vec::new());
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, _| {
+                let previous = pane.show_mode(PROJECT, "plan");
+                assert_eq!(previous.as_deref(), Some("ask"));
+                assert_eq!(pane.mode_label(), Some("Plan".to_string()));
+                // The request came back refused, so the session still runs
+                // `ask` and the button says so again.
+                pane.restore_mode(PROJECT, "plan", previous.as_deref());
+                assert_eq!(pane.mode_label(), Some("Ask".to_string()));
+            });
+        });
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, _| {
+                let previous = pane.show_mode(PROJECT, "plan");
+                pane.show_mode(PROJECT, "build");
+                assert_eq!(pane.mode_label(), Some("build".to_string()));
+                pane.restore_mode(PROJECT, "plan", previous.as_deref());
+                assert_eq!(
+                    pane.mode_label(),
+                    Some("build".to_string()),
+                    "the later pick owns the button"
+                );
+            });
         });
     }
 

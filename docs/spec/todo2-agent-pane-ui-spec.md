@@ -348,8 +348,16 @@ input — the same technique `main.rs` already documents for the travel popover.
 - **Model chip**: `Button` ghost/compact + `IconName::ChevronsUpDown`, label = current model id
   (truncated), opens a list of the values of the agent's model-shaped `SessionConfigOption`
   (§9.2 of the main spec). Selection sends `SetSessionConfigOptionRequest`.
-- **Mode chip**: same affordance for the advertised session modes; selection sends
-  `SetSessionModeRequest`. Hidden when the agent advertises no modes.
+- **Mode chip**: same affordance for the modes the agent reports, from whichever source it
+  reports them: session modes (`SessionModeState`, selection sends `SetSessionModeRequest`) or,
+  as opencode does, a `mode`-category `SessionConfigOption` (selection sends
+  `SetSessionConfigOptionRequest`, and the option's response is what names the mode taken).
+  Hidden when the agent advertises no modes.
+- **Mode chip label**: the *name* of the mode in force, from that same source (a mode the source
+  does not name falls back to its id). A pick moves the label at the click: `session/set_mode`
+  answers with an empty result and no announcement is promised, so waiting for one would name
+  the mode the user just left. A `CurrentModeUpdate` sent afterwards still replaces it, and a
+  refused change puts the previous mode back — unless a later pick owns the label by then.
 - **Auto-approve toggle**: a `Switch` (or the app's `components/Checkbox` for visual
   consistency) with the tooltip "Automatically approve tool calls for this project". Default
   off, persisted per project (main spec §5.8 / §9.5).

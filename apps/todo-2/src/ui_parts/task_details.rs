@@ -6,7 +6,7 @@ use gpui::{
 };
 use gpui::Focusable as _;
 use gpui_component::Disableable;
-use gpui_component::IconName;
+use gpui_component::{Icon, IconName};
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
@@ -377,6 +377,14 @@ fn coverage_clause(subtasks: &[TaskWithMeta]) -> Option<(String, bool)> {
 /// that closed it (via `on_mouse_down_out`).
 const OUTSIDE_CLOSE_IGNORE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// How long the "Copied" note stays beside the control that copied.
+const COPIED_HINT_WINDOW: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// The description's hover group: its copy control stays hidden until the
+/// description is hovered, so the pane's main body of text is not permanently
+/// decorated.
+const DESCRIPTION_HOVER_GROUP: &str = "details-description";
+
 /// Diameter of the details header's done checkbox. Kept in one place because
 /// the title's first-line centering is computed from it.
 const CHECKBOX_SIZE: f32 = 22.;
@@ -452,6 +460,17 @@ impl EditedField {
             EditedField::Tags => "tags",
         }
     }
+}
+
+/// Which copy control last put something on the clipboard. The pane says
+/// "Copied" beside that one and not beside the other, so a pair of copy
+/// buttons cannot both claim the same click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Copied {
+    /// The whole task as JSON, from the header's button.
+    Task,
+    /// The description on its own, from the description block.
+    Description,
 }
 
 /// Key context for the inline tag editor, so Tab/Up/Down act on the
@@ -690,6 +709,13 @@ pub struct TaskDetails {
     /// the folder icon instead of a hashtag. Refreshed with each selection.
     project_tags: std::collections::HashSet<String>,
     _project_tags_fetch: Option<gpui::Task<()>>,
+    /// The copy control that last reached the clipboard, and the timer that
+    /// takes its "Copied" note down. Held so the work is not cancelled by
+    /// being dropped.
+    copied: Option<Copied>,
+    _copied_timer: Option<gpui::Task<()>>,
+    /// The task read behind a JSON copy, held while it is in flight.
+    _copy_task: Option<gpui::Task<()>>,
     /// Cmd-Enter (platform modifier) saves the description. Shift-Enter and
     /// a plain Enter are left alone so the textarea keeps inserting a
     /// newline. A focused `Textarea` binds Enter itself, and a binding on
@@ -813,6 +839,9 @@ impl TaskDetails {
             github_comments_expanded: false,
             project_tags: std::collections::HashSet::new(),
             _project_tags_fetch: None,
+            copied: None,
+            _copied_timer: None,
+            _copy_task: None,
             _key_interceptor,
         }
     }
@@ -3257,6 +3286,134 @@ impl TaskDetails {
             })
     }
 
+    /// Copy the whole task as JSON: what the pane shows, in one object a
+    /// prompt or another tool can take as it stands.
+    ///
+    /// The spec is namespaced data the selection does not carry (see
+    /// [`Self::load_coding`]), so the copy reads it fresh; a read that fails is
+    /// reported instead of copied around, since a spec-less object would look
+    /// like a task that has no spec.
+    fn copy_task_json(&mut self, cx: &mut Context<Self>) {
+        let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
+            return;
+        };
+        let store = self.store.clone();
+        self._copy_task = Some(cx.spawn(async move |this, cx| {
+            let task = match store.get_task_meta(task_id, cx).await {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::error!("Failed to read the task to copy: {error}");
+                    return;
+                }
+            };
+            this.update(cx, |this, cx| {
+                // The read outlived the click: only copy for the task that is
+                // still on screen.
+                if this.selected.as_ref().map(|task| task.id) == Some(task_id) {
+                    this.copy_task(&task, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Put the task's JSON on the clipboard, for a selection already in hand.
+    fn copy_task(&mut self, task: &TaskWithMeta, cx: &mut Context<Self>) {
+        let json = task_json(task, &self.project_tags);
+        self.copy_text(Copied::Task, json, cx);
+    }
+
+    /// Copy the description on its own, without the task around it.
+    fn copy_description(&mut self, cx: &mut Context<Self>) {
+        let Some(description) = self
+            .selected
+            .as_ref()
+            .and_then(|task| task.description.clone())
+            .filter(|description| !description.is_empty())
+        else {
+            return;
+        };
+        self.copy_text(Copied::Description, description, cx);
+    }
+
+    /// Put `text` on the clipboard and say so beside the control that asked.
+    fn copy_text(&mut self, copied: Copied, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.copied = Some(copied);
+        cx.notify();
+        self._copied_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_HINT_WINDOW).await;
+            this.update(cx, |this, cx| {
+                // A later copy owns the note by now if it replaced this one.
+                if this.copied == Some(copied) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The header's copy control: the task as JSON, with the "Copied" note
+    /// beside it once it has copied. It ends the title row, which puts it at
+    /// the pane's top right without the close button's corner (that one is
+    /// painted outside the scrolling body).
+    fn json_copy_control(&self, task_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .debug_selector(|| "details-copy-json".to_string())
+            .flex_shrink_0()
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .child(
+                Button::new(("details-copy-json-button", task_id))
+                    .ghost()
+                    .compact()
+                    .icon(Icon::default().data(COPY_JSON_ICON_SVG))
+                    .tooltip("Copy the task as JSON (title, description, spec, context)")
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_task_json(cx))),
+            )
+            .when(self.copied == Some(Copied::Task), |this| {
+                this.child(copied_hint())
+            })
+            .into_any_element()
+    }
+
+    /// The description's copy control, revealed on hover: the description is
+    /// the pane's largest block of prose, so it gets its own button rather
+    /// than a trip through the JSON. A sibling of the text, not a layer over
+    /// it, so no line is ever covered.
+    fn description_copy_control(&self, task_id: u64, cx: &mut Context<Self>) -> AnyElement {
+        let copied = self.copied == Some(Copied::Description);
+        div()
+            .debug_selector(|| "details-copy-description".to_string())
+            .flex_shrink_0()
+            .h_flex()
+            .items_center()
+            .gap_1()
+            .when(!copied, |this| {
+                // Hidden until the description is hovered; the note is what
+                // keeps it on screen once it has copied.
+                this.opacity(0.0)
+                    .group_hover(DESCRIPTION_HOVER_GROUP, |style| style.opacity(1.0))
+            })
+            .child(
+                Button::new(("details-copy-description-button", task_id))
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Copy)
+                    .tooltip("Copy the description")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.copy_description(cx);
+                        // The block underneath opens the editor on a click;
+                        // copying is not that click.
+                        cx.stop_propagation();
+                    })),
+            )
+            .when(copied, |this| this.child(copied_hint()))
+            .into_any_element()
+    }
+
     /// Deadline and repeats on one inline row. A set property renders as
     /// its icon plus the value (the deadline keeps its text in a hover
     /// tooltip); an unset one renders as a "+ …" button opening its picker.
@@ -3760,9 +3917,24 @@ const GIT_BRANCH_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/git_branch
 /// Zed's `git_worktree` icon (Lucide, ISC), same opaque-stroke conversion.
 const GIT_WORKTREE_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/git_worktree.svg");
 
+/// Copying a task as JSON: Lucide's `copy` page (ISC) with JSON braces inside
+/// the front page. The panel has no bundled icon for "as data", and two copy
+/// buttons whose only difference is a tooltip are indistinguishable.
+const COPY_JSON_ICON_SVG: &[u8] = include_bytes!("../../assets/icons/copy_json.svg");
+
 /// Description placeholder mark: the `file-text` strokes without the file
 /// outline. The first two strokes are full width; the third is half width.
 const DESCRIPTION_ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h4"/></svg>"##;
+
+/// The note a copy control shows once it has copied, for
+/// [`COPIED_HINT_WINDOW`].
+fn copied_hint() -> AnyElement {
+    div()
+        .text_xs()
+        .text_color(rgb(0xa3a3a3))
+        .child("Copied")
+        .into_any_element()
+}
 
 /// Small transparent relationship button: gray text with a gray hairline
 /// outline, shared by the buttons in the relationships section.
@@ -5769,6 +5941,40 @@ fn details_tag_rows(
     rows
 }
 
+/// The task as the JSON the header's copy control takes: a title, a
+/// description, a spec, and the context the pane puts around them.
+///
+/// `context.tags` is exactly the chips the pane shows — the direct tags in
+/// their own order, then the inferred ones, sorted and never repeated — and
+/// `context.folders` names the directory-backed tags among them, the ones
+/// whose chip carries the folder icon. A description or spec the task does
+/// not have stays a key with `null`: the shape is what a reader or a tool
+/// parses, so it does not move with the task's contents.
+fn task_json(task: &TaskWithMeta, project_tags: &std::collections::HashSet<String>) -> String {
+    let rows = details_tag_rows(&task.direct_tags, &task.inferred_tags, project_tags);
+    let tags: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
+    let folders: Vec<String> = rows
+        .iter()
+        .filter(|row| row.is_project)
+        .map(|row| row.label.clone())
+        .collect();
+    let json = serde_json::json!({
+        "title": task.title,
+        "description": task.description,
+        "spec": task.spec,
+        "context": { "tags": tags, "folders": folders },
+    });
+    match serde_json::to_string_pretty(&json) {
+        Ok(pretty) => pretty,
+        // A `Value` built from strings cannot fail to serialize; the compact
+        // form is the same object, so the copy still says something true.
+        Err(error) => {
+            tracing::error!("Failed to format the task as JSON: {error}");
+            json.to_string()
+        }
+    }
+}
+
 impl Render for TaskDetails {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.selected {
@@ -6085,7 +6291,8 @@ impl Render for TaskDetails {
                                         );
                                     }))
                             },
-                        ),
+                        )
+                        .child(self.json_copy_control(task_id, cx)),
                 );
                 details = details.child(header);
                 // The GitHub issue's details sit on one row directly under the
@@ -6131,12 +6338,22 @@ impl Render for TaskDetails {
                     details = details.child(
                         div()
                             .id(("details-description", task_id))
+                            .group(DESCRIPTION_HOVER_GROUP)
+                            .h_flex()
+                            .items_start()
+                            .gap_1()
                             .w_full()
                             .min_w_0()
-                            .text_sm()
-                            .text_color(rgb(0xe5e5e5))
                             .cursor_pointer()
-                            .child(desc.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .text_color(rgb(0xe5e5e5))
+                                    .child(desc.clone()),
+                            )
+                            .child(self.description_copy_control(task_id, cx))
                             // A single click opens the editor here, as on the
                             // title: the description is the pane's main body of
                             // text, so reading it and editing it are the same
@@ -7022,5 +7239,190 @@ mod coding_tests {
                 "what was typed is saved, newline and all"
             );
         });
+    }
+
+    /// An in-memory store holding one task with the given description and
+    /// spec, on a Tokio runtime the pane's own reads can reach. The runtime
+    /// comes back with the store: the pane was handed its handle, so dropping
+    /// it here would leave the copy's read with nothing to run on.
+    fn store_with_task(
+        cx: &mut gpui::TestAppContext,
+        description: Option<&str>,
+        spec: Option<&str>,
+    ) -> (Store, tokio::runtime::Runtime, TaskWithMeta) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, runtime.handle().clone()));
+        let (store, task) = runtime.block_on(async {
+            let mut store = storage::TodoStore::new(&storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            })
+            .await
+            .expect("the in-memory store");
+            let task = store
+                .create_task(
+                    storage::task::TaskCreate::default()
+                        .title("Add OAuth".to_string())
+                        .description(description.map(str::to_owned)),
+                )
+                .await
+                .expect("the task");
+            if let Some(spec) = spec {
+                store
+                    .save_task_spec(task.id, Some(spec.to_string()))
+                    .await
+                    .expect("the spec");
+            }
+            let meta = store
+                .get_task_with_meta(task.id)
+                .await
+                .expect("the task meta");
+            (Store::new(store), meta)
+        });
+        (store, runtime, task)
+    }
+
+    /// The header's copy control puts the task on the clipboard as JSON, spec
+    /// included. The spec is namespaced data the selection does not carry, so
+    /// the copy reads it fresh; that read runs on Tokio and lands back on a
+    /// GPUI task, so the test pumps in real time until it does.
+    #[gpui::test]
+    fn the_header_copy_control_copies_the_task_as_json(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let spec = "# Add OAuth\n\nSign in with Google.";
+        let (store, _runtime, task) =
+            store_with_task(cx, Some("Sign in with Google."), Some(spec));
+        let (details, cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
+        cx.update(|_, cx| {
+            details.update(cx, |details, cx| {
+                details.selected = Some(task);
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let copy = cx
+            .debug_bounds("details-copy-json")
+            .expect("the header carries a copy control");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+
+        cx.executor().allow_parking();
+        let mut copied = None;
+        for _ in 0..400 {
+            copied = cx.read_from_clipboard().and_then(|item| item.text());
+            if copied.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&copied.expect("the copy landed")).expect("the copy is JSON");
+        assert_eq!(json["title"], "Add OAuth");
+        assert_eq!(json["description"], "Sign in with Google.");
+        assert_eq!(
+            json["spec"], spec,
+            "the spec is read from the store, not taken off the selection"
+        );
+        assert_eq!(json["context"]["tags"], serde_json::json!([]));
+        assert_eq!(json["context"]["folders"], serde_json::json!([]));
+        cx.update(|_, cx| {
+            assert_eq!(
+                details.read(cx).copied,
+                Some(Copied::Task),
+                "the pane says so beside the control that copied"
+            );
+        });
+    }
+
+    /// The description's copy control copies the description on its own. It
+    /// stays hidden until the description is hovered, and it is found here by
+    /// its selector, which needs no hover to be laid out; it must not open the
+    /// editor the description itself opens on a click.
+    #[gpui::test]
+    fn the_description_copy_control_copies_the_description(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (store, _runtime, _task) =
+            store_with_task(cx, Some("Sign in with Google."), None);
+        let (details, cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
+        cx.update(|_, cx| {
+            details.update(cx, |details, cx| {
+                details.selected = Some(feature("Add OAuth", Some("Sign in with Google.")));
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let copy = cx
+            .debug_bounds("details-copy-description")
+            .expect("the description carries a copy control");
+        cx.simulate_click(copy.center(), gpui::Modifiers::none());
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("Sign in with Google.".to_string()),
+            "the description alone is copied"
+        );
+        cx.update(|_, cx| {
+            let details = details.read(cx);
+            assert_eq!(details.copied, Some(Copied::Description));
+            assert!(
+                !details.editing_description,
+                "copying is not the click that opens the editor"
+            );
+        });
+
+        // The note comes down on its own: a copy reads as done once, not as a
+        // permanent state of the pane.
+        cx.executor().allow_parking();
+        cx.executor().advance_clock(COPIED_HINT_WINDOW);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            assert_eq!(details.read(cx).copied, None);
+        });
+    }
+
+    /// The copy is the pane as data: what a reader sees, in the shape the
+    /// four fields ask for. The tag list is the chips (direct tags in their
+    /// own order, then the inferred ones, sorted and never repeated), and
+    /// `folders` names the directory-backed tags among them, so the folder
+    /// icon a chip carries has a counterpart in the data.
+    #[test]
+    fn the_copy_json_is_the_pane_read_as_data() {
+        let mut task = feature("Add OAuth", Some("Sign in with Google."));
+        task.spec = Some("# Add OAuth".to_string());
+        task.direct_tags = vec!["about-me".to_string()];
+        task.inferred_tags = vec!["todo-lofi".to_string(), "about-me".to_string()];
+        let project_tags: std::collections::HashSet<String> =
+            ["about-me".to_string()].into_iter().collect();
+
+        let json: serde_json::Value = serde_json::from_str(&task_json(&task, &project_tags))
+            .expect("the copy is JSON");
+        assert_eq!(json["title"], "Add OAuth");
+        assert_eq!(json["description"], "Sign in with Google.");
+        assert_eq!(json["spec"], "# Add OAuth");
+        assert_eq!(
+            json["context"]["tags"],
+            serde_json::json!(["about-me", "todo-lofi"])
+        );
+        assert_eq!(json["context"]["folders"], serde_json::json!(["about-me"]));
+    }
+
+    /// A task with no description and no spec keeps both keys, as `null`: the
+    /// shape is what a reader or a tool parses, so it does not move with the
+    /// task's contents.
+    #[test]
+    fn the_copy_json_keeps_the_keys_a_task_has_no_value_for() {
+        let task = feature("Add OAuth", None);
+        let json: serde_json::Value =
+            serde_json::from_str(&task_json(&task, &std::collections::HashSet::new()))
+                .expect("the copy is JSON");
+        assert!(json["description"].is_null());
+        assert!(json["spec"].is_null());
+        assert_eq!(json["context"]["tags"], serde_json::json!([]));
+        assert_eq!(json["context"]["folders"], serde_json::json!([]));
     }
 }

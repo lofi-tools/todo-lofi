@@ -597,7 +597,16 @@ impl Transcript {
         }
     }
 
-    fn set_current_mode(&mut self, mode_id: SessionModeId) {
+    /// Move the current mode id, and nothing else.
+    ///
+    /// Two callers reach this: the `current_mode_update` an agent may send,
+    /// and the pane, which moves the id itself when the user picks a mode.
+    /// A pick has to be taken here because `session/set_mode` answers with an
+    /// empty result and an agent need not announce the change, so a label that
+    /// waits for a notification that may never come names the mode the user
+    /// just left. A later update lands on the same field either way, so the
+    /// agent's word replaces the pick if the two disagree.
+    pub fn set_current_mode(&mut self, mode_id: SessionModeId) {
         match &mut self.controls.mode {
             Some(state) => state.current_mode_id = mode_id,
             None => {
@@ -813,7 +822,9 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ContentChunk, SessionConfigKind, TextContent};
+    use agent_client_protocol::schema::v1::{
+        ContentChunk, CurrentModeUpdate, SessionConfigKind, TextContent,
+    };
 
     /// A `model`-shaped select option, the way an agent advertises one.
     fn model_option(current: &str) -> SessionConfigOption {
@@ -829,6 +840,17 @@ mod tests {
             ]
         }))
         .expect("model option")
+    }
+
+    fn current_mode(transcript: &Transcript) -> String {
+        transcript
+            .controls()
+            .mode
+            .as_ref()
+            .expect("a mode state")
+            .current_mode_id
+            .0
+            .to_string()
     }
 
     fn current_model(transcript: &Transcript) -> String {
@@ -876,6 +898,32 @@ mod tests {
 
         transcript.set_config_options(Vec::new());
         assert_eq!(current_model(&transcript), "b");
+    }
+
+    /// A mode taken at the click — `session/set_mode` answers with nothing, so
+    /// the pane is the only source of the new id — still gives way to an agent
+    /// that reports the mode it actually took.
+    #[test]
+    fn a_mode_taken_at_the_click_gives_way_to_the_one_reported() {
+        let mut transcript = Transcript::default();
+        transcript.seed_controls(
+            Some(SessionModeState::new(SessionModeId::new("ask"), Vec::new())),
+            Vec::new(),
+        );
+        assert_eq!(current_mode(&transcript), "ask");
+
+        transcript.set_current_mode(SessionModeId::new("plan"));
+        assert_eq!(current_mode(&transcript), "plan");
+
+        let reported =
+            SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(SessionModeId::new("build")));
+        let delta = transcript.apply_update(&reported);
+        assert!(delta.controls_changed);
+        assert_eq!(
+            current_mode(&transcript),
+            "build",
+            "the agent's report wins over the choice"
+        );
     }
 
     #[test]
