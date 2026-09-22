@@ -243,7 +243,11 @@ fn phase_prompt(
     let context = build_task_context(task);
     match phase {
         "interview" => {
-            let mut target = task.title.clone();
+            // The id travels with the title: this is where the coding tools are
+            // first called, and every one of them resolves a run from a task
+            // id. A prompt that names the task by title alone leaves the model
+            // to invent the id they ask for.
+            let mut target = format!("Task #{}: {}", task.id, task.title.trim());
             if let Some(description) = task.description.as_deref()
                 && !description.is_empty()
             {
@@ -420,10 +424,13 @@ pub enum TaskDetailsEvent {
     /// panel reload (steps may have spawned or completed).
     CodingChanged,
     /// Put a composed phase prompt into the agent pane and switch to it. The
-    /// user still edits and sends it.
+    /// user still edits and sends it. `task_id` travels with it so the app can
+    /// hand the launched process a session bound to that task: the prompt names
+    /// the task, and the coding tools resolve their run from it.
     CodingLaunch {
         phase: String,
         prompt: String,
+        task_id: u64,
     },
     /// Stop the current phase's agent turn from the run's Workflow row
     /// (decision #27). The layout forwards it to the agent pane's stop-turn.
@@ -4495,6 +4502,7 @@ impl TaskDetails {
         cx.emit(TaskDetailsEvent::CodingLaunch {
             phase: phase.to_string(),
             prompt,
+            task_id: task.id,
         });
     }
 
@@ -6794,8 +6802,8 @@ mod coding_tests {
             "the interview prompt is expanded in the app: {prompt}"
         );
         assert!(
-            prompt.contains("Request to interview: Add OAuth"),
-            "{prompt}"
+            prompt.contains("Request to interview: Task #1: Add OAuth"),
+            "the request names the task and its id: {prompt}"
         );
         assert!(prompt.contains("Sign in with Google."), "{prompt}");
     }
@@ -7105,16 +7113,23 @@ mod coding_tests {
         });
 
         let launched = logged.borrow().iter().find_map(|event| match event {
-            TaskDetailsEvent::CodingLaunch { phase, prompt } => {
-                Some((phase.clone(), prompt.clone()))
-            }
+            TaskDetailsEvent::CodingLaunch {
+                phase,
+                prompt,
+                task_id,
+            } => Some((phase.clone(), prompt.clone(), *task_id)),
             _ => None,
         });
-        let (phase, prompt) = launched.expect("the phase action pushes the interview prompt");
+        let (phase, prompt, launched_task) =
+            launched.expect("the phase action pushes the interview prompt");
         assert_eq!(phase, "interview");
+        assert_eq!(
+            launched_task, task.id,
+            "the launched session is bound to the task on screen"
+        );
         assert!(
-            prompt.contains("Request to interview: Add OAuth"),
-            "the prompt names the task on screen: {prompt}"
+            prompt.contains("Request to interview: Task #1: Add OAuth"),
+            "the prompt names the task and its id, so a tool call can mean it: {prompt}"
         );
         assert!(
             prompt.contains("Sign in with Google."),

@@ -377,11 +377,20 @@ today, which is already a subtask of the root).
 - The pane passes the resolved URL + token to the agent. This uses the ACP
   `mcpServers` field the client already sends (`apps/agent-cli/src/acp.rs`,
   currently parsed into the ignored `_mcp_servers`).
+- The token is **per session**: `CodingMcpServer::open_session(profile, task_id)`
+  mints one at each coding launch, bound to the task that launch is for, and the
+  app retires it (`close_session`) when the session is replaced or torn down. A
+  token shared per profile cannot say which task the caller is working on, and
+  the model has no way to learn the feature task's id on its own.
 - Required agent-side change: build a real `cersei::mcp::McpManager` from the
   client-supplied servers into `ToolContext.mcp_manager` instead of `None`.
-- Attached **always** (decision #20). Tool calls carry explicit `task_id` /
-  `run_id`, and validate that a coding run is active for that id, returning a
-  clear tool error otherwise.
+- Attached **always** (decision #20). Every tool that resolves a run takes
+  `task_id?` / `run_id?`: an explicit id wins, and a call that names neither is
+  about the session's task. A task id resolves by walking up its parents to the
+  nearest run at or above it (`find_run_in_task_chain`), so a phase step's id or
+  a sub-task's id is as good as the feature task's; a finished run is found too
+  ("this run is completed"), and only a task with no run anywhere above it is a
+  clear tool error.
 - Permission policy: read-only tools (`get_coding_context`) allowed; mutating
   tools surface through the existing per-project tool-permission card
   (`libs/acp-client/src/permissions.rs`), whose "Always allow" writes a rule
@@ -391,14 +400,14 @@ today, which is already a subtask of the root).
 
 | Tool | Kind | Input | Effect |
 | --- | --- | --- | --- |
-| `get_coding_context` | read | `task_id?`, `run_id?` | Returns phase, spec, cycle, branch, annotation log, sub-tasks, and the phase prompt hints. |
-| `save_spec` | write | `task_id`, `path`, `content` | Stores `tasks.spec` / `tasks.spec_path`, appends a `spec` note, **completes the `interview` step** (agent signal → mixed auto-advance). |
+| `get_coding_context` | read | `task_id?`, `run_id?` | Returns the task the call is about (`task`) and its parent chain up to the run root (`task_chain`), plus phase, spec, cycle, branch, annotation log, sub-tasks, and the phase prompt hints. |
+| `save_spec` | write | `task_id?`, `path`, `content` | Stores `tasks.spec` / `tasks.spec_path`, appends a `spec` note, **completes the `interview` step** (agent signal → mixed auto-advance). |
 | `create_sub_task` | write | `parent_task_id`, `title`, `description`, `nested: bool` | Creates a subtask under the given step (or the feature task); when `nested` is true also starts a child `coding-task` run rooted at the subtask (exempt from the per-project guard). |
 | `request_sub_task_interview` | write | `sub_task_id`, `reason?` | Creates an interview step for the sub-task (a `coding-sub-interview` run rooted at the sub-task) and flags it "needs input" in the UI. |
-| `append_note` | write | `task_id`, `kind`, `body` | Appends an `@notes` entry (annotation, finding, decision). |
-| `propose_branch` | write | `task_id`, `name`, `summary?` | Records the proposed branch name on the run; the app creates the branch after spec approval. |
-| `complete_phase` | write | `task_id`, `phase`, `summary?` | Agent-side completion signal for the current phase: auto-completes `interview`; for `implement` shows "Agent reports done" (user still confirms); ignored for `review`/`merge`. |
-| `propose_summary` | write | `task_id`, `commit_message`, `pr_summary?` | Records a merge/commit summary for the merge step (PR creation is out of scope). |
+| `append_note` | write | `task_id?`, `kind`, `body` | Appends an `@notes` entry (annotation, finding, decision). |
+| `propose_branch` | write | `task_id?`, `name`, `summary?` | Records the proposed branch name on the run; the app creates the branch after spec approval. |
+| `complete_phase` | write | `task_id?`, `phase`, `summary?` | Agent-side completion signal for the current phase: auto-completes `interview`; for `implement` shows "Agent reports done" (user still confirms); ignored for `review`/`merge`. |
+| `propose_summary` | write | `task_id?`, `commit_message`, `pr_summary?` | Records a merge/commit summary for the merge step (PR creation is out of scope). |
 
 ### 7.3 Guard behaviour
 
@@ -471,7 +480,8 @@ Built from `build_task_context(root_task)` plus phase-specific material, then
 inserted with `AgentPane::insert_prompt_text`:
 
 - **interview**: the full interview prompt is **expanded in the app**
-  (`INTERVIEW_BASE_PROMPT` + title + description + re-spec notes) and sent as an
+  (`INTERVIEW_BASE_PROMPT` + `Task #<id>: <title>` + description + re-spec
+  notes) and sent as an
   ordinary prompt. **Not** the raw `/interview <target>` slash form: the pane's
   ACP agent is `opencode`, which registers no `interview` command and silently
   drops unknown `/`-prefixed prompts (opencode issue #27528), so a leading slash
@@ -483,7 +493,8 @@ inserted with `AgentPane::insert_prompt_text`:
 - **review**: "summarise what you changed, then call `complete_phase`; wait for
   the user's annotation".
 - **sub-interview**: the same expanded interview prompt
-  (`title + description`), sent against the sub-task's project session.
+  (`Task #<id>: <title>` + description), sent against the sub-task's project
+  session.
 
 The templates live next to the `TaskDetails` stepper (one function per phase,
 `&str` built from the run view) so they are unit-testable.
@@ -492,6 +503,11 @@ The templates live next to the `TaskDetails` stepper (one function per phase,
 
 - **Prompt-driven phases** (decision #13): the pane only receives a composed
   prompt; the user sends it. No changes to the send path.
+- **One session per project, bound to its task** (§7.1): a phase action for a
+  different task replaces the process — the transcript is kept, the model's
+  context is not — so the session's token always names the task at hand. A
+  launch that would replace a *busy* session belonging to another task is
+  refused with a notice instead of killing the running turn.
 - **Run strip (optional, cheap):** a slim line in the agent pane header showing
   `Coding run · Round 2 · Implement` when the project has an active coding run,
   so the two panels stay associated when the user is in the agent view.
@@ -823,9 +839,11 @@ Decline).
 - **Root task syncing:** should the feature task sync to Todoist? Today
   `workflow_run_id.is_some()` excludes it. Recommend excluding until the run
   completes, then clearing `workflow_run_id` (or keeping it, TBD).
-- **MCP scoping:** one app-wide server with explicit ids (chosen) vs a per-run
-  URL/token. The per-run token would let the server reject cross-run writes
-  outright.
+- **MCP scoping:** one app-wide server, with a per-session token bound to the
+  task that session was launched for (chosen). A call may still name a task of
+  another run and be taken at its word — the loopback process is the user's own —
+  so rejecting cross-run writes outright would need the binding to be the only
+  source of the task.
 - **Cost/loop guardrails:** no cap in v1; do we at least surface a "Round N"
   warning and the round count in the run card?
 - **`base_branch` in a repo with untracked-only changes:** `status --porcelain`
@@ -922,9 +940,10 @@ storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
 - `src/coding_mcp.rs`: the tool surface — 8 tools with JSON schemas and a
   `dispatch` into the store, served over a minimal loopback HTTP/1.1 JSON-RPC
   endpoint (`initialize`, `tools/list`, `tools/call`) bound to `127.0.0.1:0`
-  with a per-process bearer token, started with the app and logged at startup.
-  Tested in-process and over a real socket (initialize / tools-list / tool call
-  / rejected token).
+  with a per-session bearer token bound to the task that session was launched
+  for, started with the app and logged at startup, retired when the session is
+  replaced or torn down. Tested in-process and over a real socket (initialize /
+  tools-list / tool call / rejected token / retired token).
 
 **Still open (in addition to §17.2)**
 
@@ -939,8 +958,9 @@ storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
    builds `NewSessionRequest::new(cwd).additional_directories(…)` with no
    `mcp_servers`, and agent-cli's MCP client (`cersei::mcp`) only speaks stdio,
    so the loopback endpoint needs an HTTP client transport (or a stdio shim)
-   before it can be attached. The URL and token are logged at startup so an
-   external MCP client can use it today.
+   before it can be attached. The URL is logged at startup, and a token now
+   comes from a launch — one per session, bound to its task — so an external MCP
+   client has to be handed one rather than reading it off the log.
 3. Git merge conflicts report the git error inline but do not yet compose a
    "resolve in agent" prompt; the optional agent-pane run strip is not built;
    the stepper has no GPUI/widget tests (only the pure helpers are covered).

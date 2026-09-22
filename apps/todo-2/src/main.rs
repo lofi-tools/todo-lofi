@@ -203,7 +203,12 @@ impl Layout {
     /// process is only replaced when the pane is not already on the profile,
     /// so re-composing a later phase's prompt does not restart an agent that
     /// is mid-turn.
-    fn start_coding_profile(&mut self, phase: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn start_coding_profile(
+        &mut self,
+        phase: &str,
+        task_id: u64,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         let interview = phase == "interview";
         let desired_id = if interview {
             "opencode-interview"
@@ -214,42 +219,75 @@ impl Layout {
         // phase's prompt does not restart an agent mid-turn. A *failed* one is
         // not "already running": the click retries it, which is the only way
         // back from a launch that did not complete.
+        //
+        // It must also be bound to *this* task: a session started for another
+        // feature of the same project carries a token bound to that feature, so
+        // a tool call that names none would read the wrong run. A session that
+        // is not bound at all (a plain chat) is replaced too — the phase needs
+        // the tools the endpoint carries.
         let running_on_profile = {
             let pane = self.agent_pane.read(cx);
-            pane.active_agent_id() == Some(desired_id) && !pane.active_session_failed()
+            pane.active_agent_id() == Some(desired_id)
+                && !pane.active_session_failed()
+                && pane.active_mcp_task() == Some(task_id)
         };
         if running_on_profile {
             return Ok(());
         }
+        // The session this launch replaces is dropped whole, so replacing one
+        // whose task differs while it is mid-turn would kill that turn without
+        // saying so. Stopping it first is the user's call (the phase rows make
+        // the same demand before rewind).
+        {
+            let pane = self.agent_pane.read(cx);
+            if pane.is_busy() && pane.active_mcp_task() != Some(task_id) {
+                anyhow::bail!(
+                    "an agent turn is still running for another task; stop it before starting \
+                     this phase"
+                );
+            }
+        }
         let Some(project) = self.agent_pane.read(cx).active_project().cloned() else {
             anyhow::bail!("select the project first");
         };
-        let server = self
-            .coding_mcp
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("the coding MCP endpoint is not running"))?;
-        let profile = if interview {
-            coding_mcp::INTERVIEW_PROFILE
-        } else {
-            coding_mcp::CODING_PROFILE
+        // The session is bound to the task this launch is for, so a tool call
+        // that names no task is still about the right one.
+        let (url, token, profile) = {
+            let server = self
+                .coding_mcp
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("the coding MCP endpoint is not running"))?;
+            let profile = if interview {
+                coding_mcp::INTERVIEW_PROFILE
+            } else {
+                coding_mcp::CODING_PROFILE
+            };
+            (
+                server.url().to_string(),
+                server.open_session(profile, task_id),
+                profile.to_string(),
+            )
         };
-        let token = server
-            .profile_token(profile)
-            .ok_or_else(|| anyhow::anyhow!("no token for the {profile} profile"))?
-            .to_string();
         let endpoint = coding_agent::McpEndpoint {
-            url: server.url().to_string(),
+            url,
             token,
-            profile: profile.to_string(),
+            profile,
+            task_id,
         };
         let agent: std::sync::Arc<dyn acp_client::AgentServer> = if interview {
             std::sync::Arc::new(coding_agent::OpenCodeInterviewAgent)
         } else {
             std::sync::Arc::new(acp_client::OpenCodeAgent)
         };
-        self.agent_pane.update(cx, |pane, cx| {
+        let replaced = self.agent_pane.update(cx, |pane, cx| {
             pane.start_run_session(project, agent, Some(endpoint), cx)
         });
+        // The process this launch replaces must not keep a usable token.
+        if let Some(replaced) = replaced
+            && let Some(server) = self.coding_mcp.as_ref()
+        {
+            server.close_session(&replaced);
+        }
         Ok(())
     }
 
@@ -305,10 +343,7 @@ impl Layout {
             Ok(server) => {
                 tracing::info!(
                     url = server.url(),
-                    profiles = ?[
-                        coding_mcp::INTERVIEW_PROFILE,
-                        coding_mcp::CODING_PROFILE
-                    ],
+                    profiles = ?[coding_mcp::INTERVIEW_PROFILE, coding_mcp::CODING_PROFILE],
                     "coding MCP endpoint ready"
                 );
                 Some(server)
@@ -349,6 +384,13 @@ impl Layout {
                     nav_for_agent.update(cx, |nav, cx| {
                         nav.set_agent_busy(&tag_name, busy, cx)
                     });
+                }
+                // A session that is gone leaves no usable token behind: the
+                // binding died with the process.
+                AgentPaneEvent::McpSessionClosed { token } => {
+                    if let Some(server) = this.coding_mcp.as_ref() {
+                        server.close_session(token);
+                    }
                 }
                 // "Attach task" fills the prompt box; sending stays manual so
                 // the message can be edited first.
@@ -714,7 +756,11 @@ impl Layout {
                 // A phase prompt is ready: drop it into the agent pane and
                 // dock that pane inside the details pane, widened to its run
                 // maximum. Sending stays manual so it can be edited.
-                TaskDetailsEvent::CodingLaunch { phase, prompt } => {
+                TaskDetailsEvent::CodingLaunch {
+                    phase,
+                    prompt,
+                    task_id,
+                } => {
                     tracing::info!(phase, "coding phase prompt ready in the agent pane");
                     let prompt = prompt.clone();
                     // The interview runs read-only; the coding phases run with
@@ -722,7 +768,7 @@ impl Layout {
                     // keeps the transcript (spec decisions #2/#13/#14), so it
                     // only happens when the pane is not already on that
                     // profile.
-                    match this.start_coding_profile(phase, cx) {
+                    match this.start_coding_profile(phase, *task_id, cx) {
                         Ok(()) => {
                             this.agent_pane.update(cx, |pane, cx| {
                                 pane.insert_prompt_text(prompt, window, cx)

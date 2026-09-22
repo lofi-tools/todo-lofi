@@ -286,6 +286,9 @@ pub enum AgentPaneEvent {
     BusyChanged { tag_name: String, busy: bool },
     /// The prompt box asked for the selected task's context to be inserted.
     AttachTaskRequested,
+    /// A session was torn down, so the app can retire the MCP token it was
+    /// handed. The pane does not own that registry; the layout does.
+    McpSessionClosed { token: String },
 }
 
 /// Build the prompt text for the currently selected task.
@@ -293,11 +296,24 @@ pub enum AgentPaneEvent {
 /// Single seam for "what the agent is told about the task": a later revision
 /// can widen this to several tasks without touching the caller.
 pub fn build_task_context(task: &storage::TaskWithMeta) -> String {
-    task_context_text(&task.title, task.description.as_deref(), &task.direct_tags)
+    task_context_text(
+        task.id,
+        &task.title,
+        task.description.as_deref(),
+        &task.direct_tags,
+    )
 }
 
-fn task_context_text(title: &str, description: Option<&str>, tags: &[String]) -> String {
-    let mut context = format!("Task: {}", title.trim());
+/// `id` is the task's own id, stated so a tool call can name the task it means
+/// instead of guessing: the coding tools resolve a run from a task id, and a
+/// prompt that gives the title alone leaves the model to invent one.
+fn task_context_text(
+    id: u64,
+    title: &str,
+    description: Option<&str>,
+    tags: &[String],
+) -> String {
+    let mut context = format!("Task #{id}: {}", title.trim());
     if let Some(description) = description
         .map(str::trim)
         .filter(|description| !description.is_empty())
@@ -633,17 +649,24 @@ impl AgentPane {
     /// Open a coding run's session for `project` under a specific profile,
     /// keeping the transcript already on screen (spec decision #14). The
     /// layout calls this when the user starts the interview or the coding
-    /// phase; the process is replaced, not the history.
+    /// phase; the process is replaced, not the history. Returns the MCP token
+    /// of the session it replaced, which the caller retires: a session's token
+    /// is bound to the task it was launched for, so a stale one must not stay
+    /// usable.
     pub fn start_run_session(
         &mut self,
         project: AgentProject,
         agent: Arc<dyn AgentServer>,
         mcp: Option<McpEndpoint>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<String> {
         let tag_name = project.tag_name.clone();
         let tool_permissions = self.stored_tool_permissions(&project);
         let existing = self.projects.remove(&tag_name);
+        let replaced = existing
+            .as_ref()
+            .and_then(|entry| entry.mcp.as_ref())
+            .map(|mcp| mcp.token.clone());
         let mut entry = ProjectEntry::new(project, tool_permissions, agent, mcp);
         if let Some(existing) = existing {
             // Keep the history and the answers the user already gave; the
@@ -657,6 +680,15 @@ impl AgentPane {
         self.start_session(&tag_name, false, true, cx);
         self.sync_scroller(cx);
         cx.notify();
+        replaced
+    }
+
+    /// The task the on-screen project's session is bound to, if it has one.
+    /// A session started for another task is not this launch's: its token is
+    /// bound to that task, so a tool call that names none would read the wrong
+    /// run.
+    pub fn active_mcp_task(&self) -> Option<u64> {
+        self.active_entry()?.mcp.as_ref().map(|mcp| mcp.task_id)
     }
 
     /// Number of prompts queued for the on-screen project.
@@ -1673,6 +1705,11 @@ impl AgentPane {
         let Some(entry) = self.projects.remove(tag_name) else {
             return;
         };
+        // The token outlives the entry's removal unless the layout retires it,
+        // and the layout is the side that owns the registry.
+        if let Some(token) = entry.mcp.as_ref().map(|mcp| mcp.token.clone()) {
+            cx.emit(AgentPaneEvent::McpSessionClosed { token });
+        }
         if let Some(live) = entry.live() {
             if let Some(session_id) = &live.session_id {
                 if let Err(error) = live.connection.requester.cancel(session_id) {
@@ -4329,11 +4366,15 @@ mod tests {
     #[test]
     fn task_context_includes_title_and_description() {
         let context = task_context_text(
+            41,
             "Ship the pane",
             Some("Needs a transcript"),
             &["work".to_string()],
         );
-        assert!(context.starts_with("Task: Ship the pane"));
+        assert!(
+            context.starts_with("Task #41: Ship the pane"),
+            "the task is named by id, so a tool call can mean it: {context}"
+        );
         assert!(context.contains("Needs a transcript"));
         assert!(context.contains("Tags: work"));
     }
@@ -4341,8 +4382,8 @@ mod tests {
     #[test]
     fn task_context_skips_empty_description() {
         assert_eq!(
-            task_context_text("Only a title", Some("   "), &[]),
-            "Task: Only a title"
+            task_context_text(41, "Only a title", Some("   "), &[]),
+            "Task #41: Only a title"
         );
     }
 

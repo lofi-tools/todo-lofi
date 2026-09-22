@@ -163,14 +163,17 @@ impl AgentServer for OpenCodeInterviewAgent {
     }
 }
 
-/// The app's loopback MCP endpoint plus the bearer token of one agent profile.
-/// Each profile gets its own token, so a tool call can be attributed to the
-/// process that made it (spec decision #11).
+/// The app's loopback MCP endpoint plus the bearer token of one session.
+/// A token is minted per launch and bound to the task that launch is for, so a
+/// tool call can be attributed — and resolved — to the session that made it
+/// (spec decision #11). `task_id` is that binding, kept here as well so the app
+/// can tell whether the session it already has is the one this launch wants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct McpEndpoint {
     pub url: String,
     pub token: String,
     pub profile: String,
+    pub task_id: u64,
 }
 
 impl McpEndpoint {
@@ -250,6 +253,7 @@ mod tests {
             url: "http://127.0.0.1:9/mcp".to_string(),
             token: "secret".to_string(),
             profile: "interview".to_string(),
+            task_id: 7,
         };
         let McpServer::Http(http) = endpoint.server() else {
             panic!("an HTTP server");

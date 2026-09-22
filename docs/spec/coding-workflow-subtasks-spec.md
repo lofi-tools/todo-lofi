@@ -132,13 +132,16 @@ so the transcript is not misleading:
 ### 3.2 The interview never sees subtasks
 
 - `phase_prompt("interview")` (`task_details.rs`) is `INTERVIEW_BASE_PROMPT` +
-  the task's title + description (+ re-spec notes on later rounds).
-- `build_task_context` (`agent_pane.rs:197`) returns `Task: <title>`,
+  `Task #<id>: <title>` + description (+ re-spec notes on later rounds). The id
+  is what the coding tools resolve a run from, and the launch's session is bound
+  to it as well.
+- `build_task_context` (`agent_pane.rs`) returns `Task #<id>: <title>`,
   description, `Tags:` — nothing else, and its doc comment calls it "the single
   seam for what the agent is told about the task".
 - `get_coding_context` does return `sub_tasks[]` (`coding_mcp.rs`, built from
   `list_subtasks(root).filter(node_id.is_none())`), but only for a run that
-  already exists and only if the model asks — the prompt never points at it.
+  already exists and only if the model asks — the prompt names the task's id,
+  not the tool that reads it.
 
 ### 3.3 What exists to build on
 

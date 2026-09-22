@@ -4,9 +4,9 @@
 //! attach the spec it interviewed out, create and interview sub-tasks, log
 //! annotations, propose the feature branch, and report phase completion. The
 //! transport is a minimal HTTP/1.1 listener bound to `127.0.0.1:0` with a
-//! per-process bearer token; only the `initialize`, `tools/list`, and
-//! `tools/call` methods are implemented, which is the subset the coding
-//! workflow uses.
+//! per-session bearer token, bound to the task that session was launched for;
+//! only the `initialize`, `tools/list`, and `tools/call` methods are
+//! implemented, which is the subset the coding workflow uses.
 //!
 //! Tool calls mutate the same `TodoStore` the UI uses, and each mutating call
 //! signals the foreground app so the stepper reloads.
@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use storage::prelude::*;
@@ -26,14 +27,30 @@ pub const INTERVIEW_PROFILE: &str = "interview";
 /// The full-tools coding process's profile.
 pub const CODING_PROFILE: &str = "coding";
 
+/// What a session's bearer token is bound to: the profile it may call tools
+/// as, and the task its process was launched for.
+///
+/// A tool call names the task it means when it can, but the pane knows which
+/// task it launched the session for, so the binding is what a call falls back
+/// on. That is what lets a model act on a coding run at all: the feature task's
+/// id is nowhere in the prompt it was given, so a call that has to invent one
+/// invents it wrong.
+#[derive(Clone, Debug)]
+pub struct SessionScope {
+    /// The agent profile that owns this session ([`allows_tool`] scopes by it).
+    pub profile: String,
+    /// The task the session was launched for.
+    pub task_id: u64,
+}
+
 /// A running loopback MCP endpoint. Dropping it leaves the listener thread
 /// running for the life of the process (there is nothing to release).
 pub struct CodingMcpServer {
     url: String,
-    /// Bearer token per agent profile. Each process gets its own, so a tool
-    /// call can be attributed (and, later, scoped) to the profile that made
-    /// it (spec decision #11).
-    tokens: BTreeMap<String, String>,
+    /// Bearer token per session, bound to the task it was launched for. Each
+    /// process gets its own, so a tool call can be attributed — and resolved —
+    /// to the session that made it (spec decision #11).
+    sessions: Arc<Mutex<BTreeMap<String, SessionScope>>>,
 }
 
 impl CodingMcpServer {
@@ -41,10 +58,34 @@ impl CodingMcpServer {
         &self.url
     }
 
-    /// The bearer token a process of `profile` must send. `None` for an
-    /// unknown profile, which another agent must never be handed.
-    pub fn profile_token(&self, profile: &str) -> Option<&str> {
-        self.tokens.get(profile).map(String::as_str)
+    /// Mint the token for a process launched for `task_id` under `profile`.
+    /// The caller gives this token to that process alone, and retires it with
+    /// [`Self::close_session`] when the session is replaced or torn down.
+    pub fn open_session(&self, profile: &str, task_id: u64) -> String {
+        let token = random_token();
+        self.sessions().insert(
+            token.clone(),
+            SessionScope {
+                profile: profile.to_string(),
+                task_id,
+            },
+        );
+        token
+    }
+
+    /// Retire a token: its process is gone or was replaced. Retiring a token
+    /// that is already gone is not an error — the app retires sessions it may
+    /// have replaced already.
+    pub fn close_session(&self, token: &str) -> bool {
+        self.sessions().remove(token).is_some()
+    }
+
+    /// The registry, taken even if a previous holder panicked: the map is still
+    /// consistent, only the lock guard was abandoned mid-update.
+    fn sessions(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, SessionScope>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -58,10 +99,9 @@ pub fn start(
 ) -> anyhow::Result<CodingMcpServer> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?;
-    let mut tokens = BTreeMap::new();
-    tokens.insert(INTERVIEW_PROFILE.to_string(), random_token());
-    tokens.insert(CODING_PROFILE.to_string(), random_token());
-    let server_tokens = tokens.clone();
+    let sessions: Arc<Mutex<BTreeMap<String, SessionScope>>> =
+        Arc::new(Mutex::new(BTreeMap::new()));
+    let server_sessions = sessions.clone();
     std::thread::Builder::new()
         .name("coding-mcp".to_string())
         .spawn(move || {
@@ -69,24 +109,28 @@ pub fn start(
                 let Ok(stream) = stream else {
                     continue;
                 };
-                if let Err(error) = serve(stream, &store, &handle, &server_tokens, &notify) {
+                if let Err(error) = serve(stream, &store, &handle, &server_sessions, &notify) {
                     tracing::warn!("coding MCP request failed: {error}");
                 }
             }
         })?;
     Ok(CodingMcpServer {
         url: format!("http://{address}/mcp"),
-        tokens,
+        sessions,
     })
 }
 
-/// Which profile a bearer token belongs to, for the `tools/call` scope check.
-fn profile_for_token<'a>(tokens: &'a BTreeMap<String, String>, header: &str) -> Option<&'a str> {
+/// The session a bearer token belongs to: what scopes the `tools/call`, and the
+/// task the call falls back on when it names none.
+fn session_for_token(
+    sessions: &Mutex<BTreeMap<String, SessionScope>>,
+    header: &str,
+) -> Option<SessionScope> {
     let token = header.strip_prefix("Bearer ")?;
-    tokens
-        .iter()
-        .find(|(_, candidate)| candidate.as_str() == token)
-        .map(|(profile, _)| profile.as_str())
+    let sessions = sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    sessions.get(token).cloned()
 }
 
 /// The tools a profile may call. Both profiles expose the whole surface today
@@ -123,7 +167,7 @@ fn serve(
     stream: TcpStream,
     store: &Store,
     handle: &tokio::runtime::Handle,
-    tokens: &BTreeMap<String, String>,
+    sessions: &Mutex<BTreeMap<String, SessionScope>>,
     notify: &Option<tokio::sync::mpsc::UnboundedSender<()>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -159,10 +203,9 @@ fn serve(
     if !request_line.starts_with("POST ") {
         return write_response(&mut stream, 405, None);
     }
-    let Some(profile) = profile_for_token(tokens, &authorization) else {
+    let Some(scope) = session_for_token(sessions, &authorization) else {
         return write_response(&mut stream, 401, None);
     };
-    let profile = profile.to_string();
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return write_response(&mut stream, 400, Some(error_response(Value::Null, -32700, "parse error")));
     };
@@ -198,13 +241,16 @@ fn serve(
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let outcome = if allows_tool(&profile, name) {
+            let outcome = if allows_tool(&scope.profile, name) {
                 handle.block_on(async {
                     let mut store = store.0.lock().await;
-                    dispatch(&mut store, name, arguments).await
+                    dispatch(&mut store, name, arguments, Some(&scope)).await
                 })
             } else {
-                Err(format!("the {profile} profile may not call `{name}`"))
+                Err(format!(
+                    "the {} profile may not call `{name}`",
+                    scope.profile
+                ))
             };
             match outcome {
                 Ok(value) => {
@@ -259,16 +305,29 @@ fn write_response(stream: &mut TcpStream, status: u16, body: Option<Value>) -> a
     Ok(())
 }
 
+/// The `task_id` property every run-resolving tool shares.
+///
+/// One wording for all of them, because it is one rule: a call may name any
+/// task of the run and the run that owns it is found by walking up parents, and
+/// a call that names none is taken to mean the task this session was launched
+/// for.
+fn task_id_property() -> Value {
+    json!({
+        "type": "integer",
+        "description": "Any task of the run — the feature task, one of its steps, or a sub-task; the run that owns it is found by walking up its parents. Optional: the task this session was launched for is used when it is omitted."
+    })
+}
+
 /// The coding tools exposed to the agent, per §7.2 of the spec.
 pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_coding_context",
-            "description": "Read the current coding run: phase, spec, cycle, branch, annotation log and steps. `phases[].task_id` is the task id of each step (and `open_task_id` the one being worked on); pass it as `parent_task_id` to nest work under that step. Call this before acting on a phase.",
+            "description": "Read the current coding run: the task it is about, that task's parent chain up to the run's root, phase, spec, cycle, branch, annotation log and steps. `task_id` may be omitted (the task this session was launched for is used) and may name any task of the run — a step or a sub-task resolves to the run that owns it. `phases[].task_id` is the task id of each step (and `open_task_id` the one being worked on); pass it as `parent_task_id` to nest work under that step. Call this before acting on a phase.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer", "description": "The feature task id." },
+                    "task_id": task_id_property(),
                     "run_id": { "type": "integer", "description": "The workflow run id, when known." }
                 }
             }
@@ -290,7 +349,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer" },
+                    "task_id": task_id_property(),
                     "content": { "type": "string", "description": "The umbrella spec markdown." },
                     "subtasks": {
                         "type": "array",
@@ -310,7 +369,7 @@ pub fn tool_definitions() -> Vec<Value> {
                         "items": { "type": "integer" }
                     }
                 },
-                "required": ["task_id", "content"]
+                "required": ["content"]
             }
         }),
         json!({
@@ -345,11 +404,11 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer" },
+                    "task_id": task_id_property(),
                     "kind": { "type": "string", "description": "annotation | finding | decision" },
                     "body": { "type": "string" }
                 },
-                "required": ["task_id", "body"]
+                "required": ["body"]
             }
         }),
         json!({
@@ -358,11 +417,11 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer" },
+                    "task_id": task_id_property(),
                     "name": { "type": "string" },
                     "summary": { "type": "string" }
                 },
-                "required": ["task_id", "name"]
+                "required": ["name"]
             }
         }),
         json!({
@@ -371,11 +430,11 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer" },
+                    "task_id": task_id_property(),
                     "phase": { "type": "string", "description": "interview | spec | implement | review | merge" },
                     "summary": { "type": "string" }
                 },
-                "required": ["task_id", "phase"]
+                "required": ["phase"]
             }
         }),
         json!({
@@ -384,11 +443,11 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "integer" },
+                    "task_id": task_id_property(),
                     "commit_message": { "type": "string" },
                     "pr_summary": { "type": "string" }
                 },
-                "required": ["task_id", "commit_message"]
+                "required": ["commit_message"]
             }
         }),
     ]
@@ -396,22 +455,27 @@ pub fn tool_definitions() -> Vec<Value> {
 
 /// Dispatch one JSON-RPC `tools/call` into the store. Errors are returned as
 /// strings so the server can answer with `isError: true` instead of failing
-/// the transport.
+/// the transport. `session` is the calling process's scope, which every tool
+/// that resolves a run falls back on when the call names no task.
+///
+/// `get_spec`, `create_sub_task` and `request_sub_task_interview` take ids of
+/// their own (a task to read, a parent, a sub-task) and resolve no run.
 pub async fn dispatch(
     store: &mut TodoStore,
     tool: &str,
     arguments: Value,
+    session: Option<&SessionScope>,
 ) -> Result<Value, String> {
     match tool {
-        "get_coding_context" => get_coding_context(store, &arguments).await,
+        "get_coding_context" => get_coding_context(store, &arguments, session).await,
         "get_spec" => get_spec(store, &arguments).await,
-        "set_spec" => set_spec(store, &arguments).await,
+        "set_spec" => set_spec(store, &arguments, session).await,
         "create_sub_task" => create_sub_task(store, &arguments).await,
         "request_sub_task_interview" => request_sub_task_interview(store, &arguments).await,
-        "append_note" => append_note(store, &arguments).await,
-        "propose_branch" => propose_branch(store, &arguments).await,
-        "complete_phase" => complete_phase(store, &arguments).await,
-        "propose_summary" => propose_summary(store, &arguments).await,
+        "append_note" => append_note(store, &arguments, session).await,
+        "propose_branch" => propose_branch(store, &arguments, session).await,
+        "complete_phase" => complete_phase(store, &arguments, session).await,
+        "propose_summary" => propose_summary(store, &arguments, session).await,
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -430,39 +494,85 @@ fn arg_str(arguments: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Resolve the run a tool call targets: by explicit `run_id`, else by the
-/// root feature task. A task in no run is an error rather than a silent no-op.
+/// A resolved run, with the tasks the resolution passed through: the task the
+/// call named first (or the run's root, when the call named a run directly),
+/// the task the run is rooted at last.
+struct Resolved {
+    run: WorkflowRun,
+    view: RunView,
+    chain: Vec<Task>,
+}
+
+/// Resolve the run a tool call targets: an explicit `run_id` first, then an
+/// explicit `task_id`, then the task the session was launched for.
+///
+/// A task names the run that owns it, found by walking up its parents, so a
+/// phase step or a sub-task is as good an id as the feature task itself. The
+/// argument wins when it disagrees with the session's task: a session outlives
+/// one call, and a call that names what it means is taken at its word. A task
+/// in no run — and with no run above it — is an error rather than a silent
+/// no-op.
 async fn resolve(
     store: &mut TodoStore,
     arguments: &Value,
-) -> Result<(WorkflowRun, RunView), String> {
-    let run = match arguments.get("run_id").and_then(Value::as_u64) {
-        Some(run_id) => Some(
-            store
-                .find_run(run_id)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("no workflow run {run_id}"))?,
-        ),
-        None => {
-            let task_id = arg_u64(arguments, "task_id")?;
-            store
-                .find_run_by_root_task(task_id)
-                .await
-                .map_err(|e| e.to_string())?
-        }
+    session: Option<&SessionScope>,
+) -> Result<Resolved, String> {
+    if let Some(run_id) = arguments.get("run_id").and_then(Value::as_u64) {
+        let run = store
+            .find_run(run_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no workflow run {run_id}"))?;
+        let view = store
+            .workflow_run_view(run.id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("workflow run {} is not visible", run.id))?;
+        // The call named a run, so the task it is about is that run's root.
+        let chain = match run.root_task_id {
+            Some(root) => vec![store.get_task(root).await.map_err(|e| e.to_string())?],
+            None => Vec::new(),
+        };
+        return Ok(Resolved { run, view, chain });
+    }
+    let task_id = arguments
+        .get("task_id")
+        .and_then(Value::as_u64)
+        .or_else(|| session.map(|session| session.task_id));
+    let Some(task_id) = task_id else {
+        return Err("no `task_id` was given and this session is not bound to a task".to_string());
     };
-    let run = run.ok_or_else(|| "this task has no coding run".to_string())?;
+    let (run, chain) = store
+        .find_run_in_task_chain(task_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("task {task_id} has no coding run (nor does any parent of it)"))?;
     let view = store
         .workflow_run_view(run.id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("workflow run {} is not visible", run.id))?;
-    Ok((run, view))
+    Ok(Resolved { run, view, chain })
 }
 
-async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, view) = resolve(store, arguments).await?;
+/// One task of the chain as the model reads it: enough to tell which task it
+/// is, and where it sits.
+fn task_json(task: &Task) -> Value {
+    json!({
+        "id": task.id,
+        "title": task.title,
+        "done": task.done,
+        "role": task.role,
+        "parent_id": task.parent_id,
+    })
+}
+
+async fn get_coding_context(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { run, view, chain } = resolve(store, arguments, session).await?;
     let notes: Vec<Value> = run_notes(&run.step_results.0)
         .into_iter()
         .map(|note| note.to_json())
@@ -515,6 +625,10 @@ async fn get_coding_context(store: &mut TodoStore, arguments: &Value) -> Result<
         "run_id": run.id,
         "status": run.status,
         "root_task_id": root_task_id,
+        // The task this call is about, and the road it took: the named task (or
+        // the run's root) first, the run's root last.
+        "task": chain.first().map(task_json),
+        "task_chain": chain.iter().map(task_json).collect::<Vec<Value>>(),
         "phase": open.and_then(|step| step.node.phase.clone()),
         "open_task_id": open.map(|step| step.task.id),
         "round": 1 + notes.iter().filter(|note| note.get("kind").and_then(Value::as_str) == Some("reject")).count(),
@@ -541,8 +655,12 @@ async fn get_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, Str
     Ok(json!({ "task_id": task_id, "spec": spec }))
 }
 
-async fn set_spec(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (_run, view) = resolve(store, arguments).await?;
+async fn set_spec(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { view, .. } = resolve(store, arguments, session).await?;
     let task_id = view
         .run
         .root_task_id
@@ -680,8 +798,12 @@ async fn request_sub_task_interview(store: &mut TodoStore, arguments: &Value) ->
     Ok(json!({ "run_id": run.id, "awaiting_user": true }))
 }
 
-async fn append_note(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, _) = resolve(store, arguments).await?;
+async fn append_note(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { run, .. } = resolve(store, arguments, session).await?;
     let body = arg_str(arguments, "body").ok_or_else(|| "`body` is required".to_string())?;
     let kind = arg_str(arguments, "kind").unwrap_or_else(|| "annotation".to_string());
     // The phase the run is in, so the log reads correctly when it is grouped
@@ -704,8 +826,12 @@ async fn append_note(store: &mut TodoStore, arguments: &Value) -> Result<Value, 
     Ok(json!({ "appended": true }))
 }
 
-async fn propose_branch(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, _) = resolve(store, arguments).await?;
+async fn propose_branch(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { run, .. } = resolve(store, arguments, session).await?;
     let name = arg_str(arguments, "name").ok_or_else(|| "`name` is required".to_string())?;
     let kept = store
         .propose_run_branch(run.id, &name)
@@ -720,8 +846,12 @@ async fn propose_branch(store: &mut TodoStore, arguments: &Value) -> Result<Valu
     Ok(json!({ "branch": kept }))
 }
 
-async fn complete_phase(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, view) = resolve(store, arguments).await?;
+async fn complete_phase(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { run, view, .. } = resolve(store, arguments, session).await?;
     let phase = arg_str(arguments, "phase").ok_or_else(|| "`phase` is required".to_string())?;
     let summary = arg_str(arguments, "summary");
     let Some(step) = view
@@ -766,8 +896,12 @@ async fn complete_phase(store: &mut TodoStore, arguments: &Value) -> Result<Valu
     }
 }
 
-async fn propose_summary(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
-    let (run, _) = resolve(store, arguments).await?;
+async fn propose_summary(
+    store: &mut TodoStore,
+    arguments: &Value,
+    session: Option<&SessionScope>,
+) -> Result<Value, String> {
+    let Resolved { run, .. } = resolve(store, arguments, session).await?;
     let commit_message = arg_str(arguments, "commit_message")
         .ok_or_else(|| "`commit_message` is required".to_string())?;
     let mut body = commit_message;
@@ -812,6 +946,26 @@ mod tests {
             .await
             .expect("start run");
         (task.id, run.id)
+    }
+
+    /// `dispatch` in these tests: a call from a session that is not bound to a
+    /// task, so each test names its own `task_id` and proves the tools still
+    /// work unbound. The bound-session tests call [`super::dispatch`] with a
+    /// scope instead.
+    async fn dispatch(
+        store: &mut TodoStore,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, String> {
+        super::dispatch(store, tool, arguments, None).await
+    }
+
+    /// The scope the pane hands a process it launched for a task.
+    fn bound(task_id: u64) -> SessionScope {
+        SessionScope {
+            profile: CODING_PROFILE.to_string(),
+            task_id,
+        }
     }
 
     #[tokio::test]
@@ -1115,6 +1269,165 @@ mod tests {
         assert_eq!(context["phase"], "spec");
     }
 
+    /// The session knows the task it was launched for, so a call that names no
+    /// task still resolves. This is the fix for a model that cannot know the
+    /// feature task's id: it no longer has to guess one.
+    #[tokio::test]
+    async fn a_bound_session_resolves_without_a_task_id() {
+        let mut store = store().await;
+        let (task_id, run_id) = started_run(&mut store).await;
+        let context = super::dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({}),
+            Some(&bound(task_id)),
+        )
+        .await
+        .expect("context");
+        assert_eq!(context["run_id"].as_u64(), Some(run_id));
+        assert_eq!(context["phase"], "interview");
+        assert_eq!(context["task"]["id"].as_u64(), Some(task_id));
+        assert_eq!(
+            context["task_chain"].as_array().map(Vec::len),
+            Some(1),
+            "the feature task is its own chain"
+        );
+    }
+
+    /// A step's id (what `phases[].task_id` hands out) and a sub-task's id
+    /// resolve to the run that owns them, and the reply names the task the call
+    /// was about plus the road it took to the run's root.
+    #[tokio::test]
+    async fn a_step_or_subtask_id_resolves_to_the_run_above_it() {
+        let mut store = store().await;
+        let (task_id, run_id) = started_run(&mut store).await;
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
+        let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
+
+        let from_step = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": step_id }),
+        )
+        .await
+        .expect("a step id is a task of the run");
+        assert_eq!(from_step["run_id"].as_u64(), Some(run_id));
+        assert_eq!(from_step["task"]["id"].as_u64(), Some(step_id));
+        assert_eq!(from_step["task"]["role"].as_str(), Some("step"));
+        let chain: Vec<u64> = from_step["task_chain"]
+            .as_array()
+            .expect("chain")
+            .iter()
+            .map(|task| task["id"].as_u64().expect("id"))
+            .collect();
+        assert_eq!(
+            chain,
+            vec![step_id, task_id],
+            "the chain runs from the named task to the run's root"
+        );
+
+        let created = dispatch(
+            &mut store,
+            "create_sub_task",
+            json!({ "parent_task_id": task_id, "title": "Token refresh" }),
+        )
+        .await
+        .expect("create sub-task");
+        let sub_task_id = created["sub_task_id"].as_u64().expect("sub-task id");
+        let from_sub = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": sub_task_id }),
+        )
+        .await
+        .expect("a sub-task id is a task of the run");
+        assert_eq!(from_sub["run_id"].as_u64(), Some(run_id));
+        assert_eq!(from_sub["task"]["id"].as_u64(), Some(sub_task_id));
+        assert_eq!(from_sub["task"]["role"], Value::Null);
+
+        // A finished run is an answer: the model is told the run is over, not
+        // that it does not exist. The branch is what keeps its view on screen.
+        store
+            .set_run_branch(run_id, "feature/1-add-oauth", Some("main"))
+            .await
+            .expect("branch");
+        store.cancel_run(run_id).await.expect("cancel the run");
+        let finished = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": step_id }),
+        )
+        .await
+        .expect("a finished run answers");
+        assert_eq!(finished["status"], "cancelled");
+    }
+
+    /// An explicit id wins over the session's task: a call that names a task is
+    /// taken at its word, and an id in no run anywhere is refused rather than
+    /// quietly resolved to the session's.
+    #[tokio::test]
+    async fn the_named_task_wins_over_the_session() {
+        let mut store = store().await;
+        let (first, _) = started_run(&mut store).await;
+        let recipe_id = store
+            .recipe_id_by_slug("coding-task")
+            .await
+            .expect("recipe lookup")
+            .expect("coding-task recipe");
+        let second = store
+            .create_task(TaskCreate::default().title("Add billing".to_string()))
+            .await
+            .expect("second feature task");
+        let second_run = store
+            .create_task_run(second.id, recipe_id, json!({}))
+            .await
+            .expect("second run");
+
+        let named = super::dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": second.id }),
+            Some(&bound(first)),
+        )
+        .await
+        .expect("context");
+        assert_eq!(named["run_id"].as_u64(), Some(second_run.id));
+        assert_eq!(named["task"]["id"].as_u64(), Some(second.id));
+
+        let lonely = store
+            .create_task(TaskCreate::default().title("Loose".to_string()))
+            .await
+            .expect("lonely task");
+        let refused = super::dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": lonely.id }),
+            Some(&bound(first)),
+        )
+        .await
+        .expect_err("the named task is answered, not the session's");
+        assert!(refused.contains("has no coding run"), "{refused}");
+    }
+
+    /// A call that names no task and comes from an unbound session says which
+    /// is missing rather than resolving to something arbitrary.
+    #[tokio::test]
+    async fn an_unbound_call_with_no_task_id_says_so() {
+        let mut store = store().await;
+        // A run exists; the call simply names nothing and has no session.
+        started_run(&mut store).await;
+        let error = dispatch(&mut store, "get_coding_context", json!({}))
+            .await
+            .expect_err("nothing to resolve");
+        assert!(error.contains("not bound"), "{error}");
+    }
+
     #[tokio::test]
     async fn unknown_tool_is_an_error() {
         let mut store = store().await;
@@ -1132,10 +1445,7 @@ mod tests {
         let (task_id, _) = started_run(&mut store).await;
         let handle = tokio::runtime::Handle::current();
         let server = start(Store::new(store), handle, None).expect("start server");
-        let coding_token = server
-            .profile_token(CODING_PROFILE)
-            .expect("coding profile token")
-            .to_string();
+        let coding_token = server.open_session(CODING_PROFILE, task_id);
 
         let initialize = request(server.url(), &coding_token, &json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
@@ -1153,15 +1463,22 @@ mod tests {
             Some(9)
         );
 
+        // No `task_id`: the token this session was handed names the task.
         let call = request(server.url(), &coding_token, &json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": { "name": "get_coding_context", "arguments": { "task_id": task_id } }
+            "params": { "name": "get_coding_context", "arguments": {} }
         }));
         assert!(call.get("result").is_some(), "{call}");
         let text = call.pointer("/result/content/0/text").and_then(Value::as_str).expect("text");
-        assert!(text.contains("\"interview\""), "{text}");
+        let context: Value = serde_json::from_str(text).expect("the payload is JSON");
+        assert_eq!(context["phase"], "interview");
+        assert_eq!(
+            context["task"]["id"].as_u64(),
+            Some(task_id),
+            "the session's task is what the call is about"
+        );
 
         // A wrong token is rejected before any tool runs.
         let unauthorized = raw_request(server.url(), "not-the-token", &json!({
@@ -1169,17 +1486,25 @@ mod tests {
         }));
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
 
-        // Each profile gets its own token, and both are accepted.
-        let interview_token = server
-            .profile_token(INTERVIEW_PROFILE)
-            .expect("interview profile token")
-            .to_string();
+        // Every session gets its own token, and each is accepted.
+        let interview_token = server.open_session(INTERVIEW_PROFILE, task_id);
         assert_ne!(interview_token, coding_token);
         let interview_tools = request(server.url(), &interview_token, &json!({
             "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}
         }));
         assert!(interview_tools.get("result").is_some());
-        assert!(server.profile_token("nope").is_none());
+        assert!(
+            !server.close_session("nope"),
+            "retiring a token that was never handed out is not an error"
+        );
+
+        // Retiring a session takes its token with it: a replaced or torn-down
+        // process cannot call tools afterwards.
+        assert!(server.close_session(&coding_token));
+        let retired = raw_request(server.url(), &coding_token, &json!({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}
+        }));
+        assert!(retired.starts_with("HTTP/1.1 401"), "{retired}");
     }
 
     /// One POST with the bearer token, returning the parsed response body.

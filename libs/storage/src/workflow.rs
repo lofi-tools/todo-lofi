@@ -2224,6 +2224,34 @@ impl TodoStore {
         Ok(rows.first().and_then(parse_run_row))
     }
 
+    /// The nearest run at or above `task_id`, with the tasks the walk passed
+    /// through: the named task first, the task the run is rooted at last.
+    ///
+    /// A coding run is rooted at a feature task, but a caller may name any task
+    /// in that tree — a phase step, or a sub-task — so the run is found by
+    /// walking up parents. A run of any status is a hit: a finished run is an
+    /// answer ("this run is complete"), not an absent one.
+    pub async fn find_run_in_task_chain(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Option<(WorkflowRun, Vec<crate::Task>)>> {
+        let mut current = Some(task_id);
+        let mut chain = Vec::new();
+        // Bounded so a corrupt parent chain cannot loop forever.
+        for _ in 0..32 {
+            let Some(id) = current else {
+                break;
+            };
+            let task = self.get_task(id).await?;
+            current = task.parent_id;
+            chain.push(task);
+            if let Some(run) = self.find_run_by_root_task(id).await? {
+                return Ok(Some((run, chain)));
+            }
+        }
+        Ok(None)
+    }
+
 }
 
 impl TodoStore {
@@ -3269,6 +3297,95 @@ mod tests {
             .create_task_run(first.id, recipe_id, serde_json::json!({}))
             .await;
         assert!(blocked.is_err(), "a second run on one task is blocked");
+        Ok(())
+    }
+
+    /// A run is found from any task in its tree, not only its root: the named
+    /// task first, then each parent, nearest winning. A finished run is an
+    /// answer ("this run is complete"), not an absence.
+    #[tokio::test]
+    async fn test_run_is_found_up_the_task_chain() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let subtask = store
+            .create_task(
+                crate::Task::create()
+                    .title("Token refresh")
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+
+        let (found, chain) = store
+            .find_run_in_task_chain(subtask.id)
+            .await?
+            .expect("the run above the subtask");
+        assert_eq!(found.id, run.id);
+        assert_eq!(
+            chain.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![subtask.id, feature_id],
+            "the walk reports the named task first and the run's root last"
+        );
+
+        // The root itself, with nothing to walk past.
+        let (found, chain) = store
+            .find_run_in_task_chain(feature_id)
+            .await?
+            .expect("the run at the root");
+        assert_eq!(found.id, run.id);
+        assert_eq!(chain.len(), 1);
+
+        // A task in no run anywhere is still nothing.
+        let lonely = store
+            .create_task(crate::Task::create().title("Loose"))
+            .await?;
+        assert!(store.find_run_in_task_chain(lonely.id).await?.is_none());
+
+        // A finished run still answers.
+        store.cancel_run(run.id).await?;
+        assert!(
+            store.find_run_in_task_chain(subtask.id).await?.is_some(),
+            "a cancelled run is an answer, not an absence"
+        );
+        Ok(())
+    }
+
+    /// A nested run sits closer than the feature run above it, so the walk
+    /// stops there: work under a nested root belongs to that root's run.
+    #[tokio::test]
+    async fn test_the_nearest_run_up_the_chain_wins() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let recipe_id = coding_recipe_id(&mut store).await;
+        let (feature_id, feature_run) = start_coding_run(&mut store, "Add OAuth").await?;
+        let subtask = store
+            .create_task(
+                crate::Task::create()
+                    .title("Token refresh")
+                    .parent_id(Some(feature_id)),
+            )
+            .await?;
+        let nested = store
+            .create_task_run(subtask.id, recipe_id, serde_json::json!({}))
+            .await?;
+        let step = store
+            .create_task(
+                crate::Task::create()
+                    .title("Refresh")
+                    .parent_id(Some(subtask.id)),
+            )
+            .await?;
+
+        let (found, chain) = store
+            .find_run_in_task_chain(step.id)
+            .await?
+            .expect("a run");
+        assert_eq!(found.id, nested.id, "the nested run is nearer than the feature's");
+        assert_eq!(chain.len(), 2, "the walk stopped at the nested root");
+
+        let (found, _) = store
+            .find_run_in_task_chain(feature_id)
+            .await?
+            .expect("the feature run");
+        assert_eq!(found.id, feature_run.id);
         Ok(())
     }
 
