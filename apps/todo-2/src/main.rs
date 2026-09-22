@@ -494,7 +494,8 @@ impl Layout {
                 }
             },
         );
-        let task_list = cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), cx));
+        let task_list =
+            cx.new(|cx| TaskListView::new(input, store.clone(), nav_bar.clone(), window, cx));
         let details = cx.new(|cx| TaskDetails::new(store.clone(), cx));
         // Whether the phase's agent turn is running is a pane fact (decisions
         // #27/#28): the details pane reads it to disable the rewind and to put

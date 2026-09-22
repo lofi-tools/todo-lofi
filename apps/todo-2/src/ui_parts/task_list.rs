@@ -166,7 +166,6 @@ pub struct TaskListView {
     back: Vec<TaskWithMeta>,
     forward: Vec<TaskWithMeta>,
     editing: bool,
-    input_needs_clear: bool,
     /// An inline insert input open in an interstitial gap, if any: the ids
     /// of the rows above/below the gap (`None` at the list edges).
     inserting: Option<PendingInsert>,
@@ -199,19 +198,27 @@ impl TaskListView {
         input: Entity<InputState>,
         store: Store,
         nav_bar: Entity<NavBar>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let input_clone = input.clone();
-        let input_subscription = cx.subscribe(&input, move |this, _, event, cx| {
-            if let gpui_component::input::InputEvent::PressEnter { .. } = event {
-                let title = input_clone.read(cx).text().to_string();
-                let title = title.trim().to_string();
-                if title.is_empty() {
-                    return;
+        // With the window, so Enter empties the field in the same event that
+        // reads it. Left to the save's completion instead, the clear is lost
+        // whenever a reload replaces that save's task (`refresh`, a sync, the
+        // periodic re-sort all store their own task over it), and the field
+        // keeps the title that was already added to the list.
+        let input_subscription =
+            cx.subscribe_in(&input, window, move |this, _, event, window, cx| {
+                if let gpui_component::input::InputEvent::PressEnter { .. } = event {
+                    let title = input_clone.read(cx).text().to_string();
+                    let title = title.trim().to_string();
+                    if title.is_empty() {
+                        return;
+                    }
+                    input_clone.update(cx, |state, cx| state.set_value("", window, cx));
+                    this.insert_task(title, cx);
                 }
-                this.insert_task(title, cx);
-            }
-        });
+            });
 
         let nav_subscription =
             cx.subscribe(&nav_bar, move |this, _nav_bar, event, cx| match event {
@@ -277,7 +284,6 @@ impl TaskListView {
             back: Vec::new(),
             forward: Vec::new(),
             editing: false,
-            input_needs_clear: false,
             inserting: None,
             hovered_gap: None,
             locked_until: None,
@@ -1002,7 +1008,6 @@ impl TaskListView {
                 if let Some(task) = created {
                     this.select(task, true, cx);
                 }
-                this.input_needs_clear = true;
                 cx.notify();
             })
             .ok();
@@ -2510,13 +2515,6 @@ const TITLE_MAX_WIDTH: f32 = 640.0;
 
 impl Render for TaskListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.input_needs_clear {
-            self.input_needs_clear = false;
-            self.input.update(cx, |state, cx| {
-                state.set_value("", window, cx);
-            });
-        }
-
         // Prefer the fetched display label (e.g. a managed tag's
         // "Travel checklists") over the raw tag name.
         let heading = self
