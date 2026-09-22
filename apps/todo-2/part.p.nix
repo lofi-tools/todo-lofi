@@ -8,7 +8,7 @@
     # dpkg-deb) are not in the base shell: the icon step degrades without the
     # first, the .deb step fails without the second.
     myDevShell.buildInputs =
-      [ pkgs.opencode ]
+      [ /*pkgs.opencode*/ ] # TODO opencode path should be specified via config file. Include example config file in repo
       ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
         pkgs.binutils
         pkgs.dpkg
