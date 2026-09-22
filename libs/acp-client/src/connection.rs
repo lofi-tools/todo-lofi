@@ -162,12 +162,16 @@ impl Requester {
     }
 
     /// Set a session config option; select-valued options take a value id.
+    ///
+    /// The response carries the full current option set. An agent is not
+    /// required to also announce the change, so the returned options are the
+    /// only report of it a caller can rely on.
     pub async fn set_config_option(
         &self,
         session_id: &SessionId,
         config_id: SessionConfigId,
         value: SessionConfigOptionValue,
-    ) -> Result<(), AcpError> {
+    ) -> Result<Vec<SessionConfigOption>, AcpError> {
         self.connection
             .send_request(SetSessionConfigOptionRequest::new(
                 session_id.clone(),
@@ -176,7 +180,7 @@ impl Requester {
             ))
             .block_task()
             .await
-            .map(|_| ())
+            .map(|response| response.config_options)
             .map_err(AcpError::from)
     }
 

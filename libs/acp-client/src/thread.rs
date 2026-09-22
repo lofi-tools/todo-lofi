@@ -325,6 +325,18 @@ impl Transcript {
         }
     }
 
+    /// Replace the controls' config options with the set a
+    /// `session/set_config_option` response returned: that response is the
+    /// authoritative set, and an agent need not also announce the change, so a
+    /// model switch opencode answers this way would otherwise be seen nowhere.
+    /// An empty set is ignored — dropping every chip would be worse than
+    /// showing the set the picker last had.
+    pub fn set_config_options(&mut self, config_options: Vec<SessionConfigOption>) {
+        if !config_options.is_empty() {
+            self.controls.config_options = config_options;
+        }
+    }
+
     /// Row index of the tool call owning `terminal_id`, so streamed terminal
     /// output remeasures its row.
     pub fn index_of_terminal(&self, terminal_id: &str) -> Option<usize> {
@@ -801,7 +813,35 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ContentChunk, TextContent};
+    use agent_client_protocol::schema::v1::{ContentChunk, SessionConfigKind, TextContent};
+
+    /// A `model`-shaped select option, the way an agent advertises one.
+    fn model_option(current: &str) -> SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": current,
+            "options": [
+                {"value": "a", "name": "A"},
+                {"value": "b", "name": "B"}
+            ]
+        }))
+        .expect("model option")
+    }
+
+    fn current_model(transcript: &Transcript) -> String {
+        let option = transcript
+            .controls()
+            .config_options
+            .first()
+            .expect("a config option");
+        let SessionConfigKind::Select(select) = &option.kind else {
+            panic!("a select option");
+        };
+        select.current_value.0.to_string()
+    }
 
     fn thought(text: &str) -> SessionUpdate {
         SessionUpdate::AgentThoughtChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
@@ -819,6 +859,23 @@ mod tests {
         SessionUpdate::ToolCall(
             ToolCall::new(id.to_string(), title.to_string()).status(status),
         )
+    }
+
+    /// A `session/set_config_option` answer carries the full current set, and
+    /// an agent need not announce the change, so folding the answer in is the
+    /// only way a switch reported that way reaches the UI. An answer that
+    /// carries nothing leaves the set alone.
+    #[test]
+    fn a_config_answer_replaces_the_set_it_returned() {
+        let mut transcript = Transcript::default();
+        transcript.seed_controls(None, vec![model_option("a")]);
+        assert_eq!(current_model(&transcript), "a");
+
+        transcript.set_config_options(vec![model_option("b")]);
+        assert_eq!(current_model(&transcript), "b");
+
+        transcript.set_config_options(Vec::new());
+        assert_eq!(current_model(&transcript), "b");
     }
 
     #[test]

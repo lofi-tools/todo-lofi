@@ -12,7 +12,9 @@ use agent_client_protocol::schema::v1::{
     HttpHeader, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
     LoadSessionResponse, McpCapabilities, McpServer, McpServerHttp, NewSessionRequest,
     NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-    ReadTextFileRequest, RequestPermissionRequest, SessionNotification, SessionUpdate, StopReason,
+    ReadTextFileRequest, RequestPermissionRequest, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
     WriteTextFileRequest,
 };
@@ -53,6 +55,8 @@ pub struct FakeObservations {
     pub new_session_cwds: Vec<PathBuf>,
     pub new_session_additional: Vec<Vec<PathBuf>>,
     pub new_session_mcp: Vec<Vec<McpServer>>,
+    /// `session/set_config_option` requests, as they went over the wire.
+    pub config_changes: Vec<serde_json::Value>,
     pub load_attempts: Vec<String>,
     pub prompts: Vec<String>,
     pub cancels: Vec<String>,
@@ -73,6 +77,7 @@ fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
 
     let initialize_observations = observations.clone();
     let new_session_observations = observations.clone();
+    let config_observations = observations.clone();
     let load_observations = observations.clone();
     let load_script = script.clone();
     let prompt_observations = observations.clone();
@@ -109,7 +114,26 @@ fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                             .push(request.additional_directories.clone());
                         state.new_session_mcp.push(request.mcp_servers.clone());
                     }
-                    responder.respond(NewSessionResponse::new("session-1"))
+                    responder.respond(
+                        NewSessionResponse::new("session-1").config_options(advertised_options()),
+                    )
+                },
+                acp::on_receive_request!(),
+            )
+            // A config change is answered with the new set and no
+            // `config_option_update` notification, the way opencode answers a
+            // model pick.
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    if let Ok(mut state) = config_observations.lock() {
+                        state.config_changes.push(
+                            serde_json::to_value(&request)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    responder.respond(SetSessionConfigOptionResponse::new(
+                        options_after_a_switch(),
+                    ))
                 },
                 acp::on_receive_request!(),
             )
@@ -292,6 +316,64 @@ async fn connect_to_fake(
     (connection, observations, dir)
 }
 
+/// The option set opencode advertises when a session is created: a model, with
+/// `a` selected.
+fn advertised_options() -> Vec<SessionConfigOption> {
+    serde_json::from_value(serde_json::json!([{
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "a",
+        "options": [
+            {"value": "a", "name": "A"},
+            {"value": "b", "name": "B"}
+        ]
+    }]))
+    .expect("advertised options")
+}
+
+/// What an agent answers a switch to `b` with: the same model set, plus an
+/// option that only exists for the model switched to.
+fn options_after_a_switch() -> Vec<SessionConfigOption> {
+    serde_json::from_value(serde_json::json!([
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "b",
+            "options": [
+                {"value": "a", "name": "A"},
+                {"value": "b", "name": "B"}
+            ]
+        },
+        {
+            "id": "effort",
+            "name": "Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "default",
+            "options": [{"value": "default", "name": "Default"}]
+        }
+    ]))
+    .expect("options after a switch")
+}
+
+/// The value id the transcript's model-shaped option is set to.
+fn selected_model(transcript: &Transcript) -> String {
+    let option = transcript
+        .controls()
+        .config_options
+        .iter()
+        .find(|option| matches!(option.category, Some(SessionConfigOptionCategory::Model)))
+        .expect("a model option");
+    let SessionConfigKind::Select(select) = &option.kind else {
+        panic!("a select option");
+    };
+    select.current_value.0.to_string()
+}
+
 /// Ask for everything: the default policy.
 fn confirm_all() -> ToolPermissions {
     ToolPermissions::default()
@@ -374,6 +456,62 @@ async fn new_session_carries_the_mcp_server() {
         .expect("session");
     let state = observations.lock().unwrap();
     assert_eq!(state.new_session_mcp, vec![vec![server]]);
+}
+
+/// A model switch is reported by the response to it and nowhere else: opencode
+/// answers `session/set_config_option` with the new set and sends no
+/// `config_option_update`. This drives the pane's own sequence — take the
+/// advertised set, ask for a model, fold the answer in — over the real
+/// connection path, so the option the UI shows is the agent's answer rather
+/// than a local guess, and the request is the shape opencode validates (a
+/// config id and a plain value id).
+#[tokio::test]
+async fn a_config_change_is_reported_by_its_response_alone() {
+    let (mut connection, observations, dir) =
+        connect_to_fake(FakeScript::default(), confirm_all()).await;
+    let (session_id, _modes, advertised) = connection
+        .requester
+        .new_session(dir.path().to_path_buf(), Vec::new(), Vec::new())
+        .await
+        .expect("session");
+    let mut transcript = Transcript::default();
+    transcript.seed_controls(None, advertised);
+    assert_eq!(selected_model(&transcript), "a");
+
+    let answer = connection
+        .requester
+        .set_config_option(
+            &session_id,
+            SessionConfigId::new("model"),
+            SessionConfigOptionValue::value_id("b"),
+        )
+        .await
+        .expect("config change");
+
+    let observed = observations.lock().expect("observations");
+    let request = observed.config_changes.first().expect("a config request");
+    assert_eq!(request["configId"], "model");
+    assert_eq!(
+        request["value"], "b",
+        "opencode rejects a value that is not a string"
+    );
+    drop(observed);
+
+    transcript.set_config_options(answer);
+    assert_eq!(selected_model(&transcript), "b");
+    assert!(
+        transcript
+            .controls()
+            .config_options
+            .iter()
+            .any(|option| option.id.0.as_ref() == "effort"),
+        "the whole answered set is taken, not just the model"
+    );
+
+    // Nothing else reports it: the transcript knows only what the response
+    // said, and the connection stays silent.
+    drain(&mut connection, &mut transcript);
+    assert_eq!(selected_model(&transcript), "b");
 }
 
 #[tokio::test]

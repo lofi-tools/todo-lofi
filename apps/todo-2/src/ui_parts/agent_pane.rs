@@ -2032,27 +2032,48 @@ impl AgentPane {
         };
         self.overlay = None;
         cx.spawn(async move |this, cx| {
-            let result = requester
+            let answer = requester
                 .set_config_option(
                     &session_id,
                     SessionConfigId::new(config_id),
                     SessionConfigOptionValue::value_id(value_id),
                 )
                 .await;
-            this.update(cx, |pane, cx| {
-                if let Err(error) = result {
-                    let message = format!("Could not change the option: {error}");
-                    notifications::report(cx, Severity::Error, message.clone());
-                    if let Some(entry) = pane.active_entry_mut() {
-                        entry.transcript.push_error(message);
-                    }
-                    pane.sync_scroller(cx);
-                }
-                cx.notify();
-            })
-            .ok();
+            this.update(cx, |pane, cx| pane.on_config_answer(&tag_name, answer, cx))
+                .ok();
         })
         .detach();
+    }
+
+    /// Fold the answer to a config change into the project that asked for it:
+    /// the set the agent returned, or an error notice and a re-measured list.
+    ///
+    /// The returned set is where a switch is reported — an agent is not
+    /// required to also announce it, and opencode answers a model pick with
+    /// the new set and nothing else — so a pane that dropped the answer would
+    /// keep naming the model the user just left.
+    fn on_config_answer(
+        &mut self,
+        tag_name: &str,
+        answer: Result<Vec<SessionConfigOption>, AcpError>,
+        cx: &mut Context<Self>,
+    ) {
+        match answer {
+            Ok(config_options) => {
+                if let Some(entry) = self.projects.get_mut(tag_name) {
+                    entry.transcript.set_config_options(config_options);
+                }
+            }
+            Err(error) => {
+                let message = format!("Could not change the option: {error}");
+                notifications::report(cx, Severity::Error, message.clone());
+                if let Some(entry) = self.projects.get_mut(tag_name) {
+                    entry.transcript.push_error(message);
+                }
+                self.sync_scroller(cx);
+            }
+        }
+        cx.notify();
     }
 
     /// Change the session mode.
@@ -4148,6 +4169,23 @@ mod tests {
         text_chunk(SessionUpdate::AgentMessageChunk, text)
     }
 
+    /// A `model`-shaped select option, the way opencode advertises one: two
+    /// models, with `current` selected.
+    fn model_option(current: &str) -> SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": current,
+            "options": [
+                {"value": "a", "name": "A"},
+                {"value": "b", "name": "B"}
+            ]
+        }))
+        .expect("model option")
+    }
+
     fn calling_tool(id: &str, title: &str) -> AcpEvent {
         session_update(SessionUpdate::ToolCall(ToolCall::new(
             id.to_string(),
@@ -4886,6 +4924,69 @@ mod tests {
             let pane = pane.read(cx);
             assert_eq!(pane.overlay_query.read(cx).value().to_string(), "");
             assert!(pane.overlay_query.read(cx).focus_handle(cx).is_focused(window));
+        });
+    }
+
+    /// A model switch is confirmed by the option set the agent returns, not by
+    /// a notification: opencode answers `session/set_config_option` with the
+    /// new set and never announces it. Folding that answer back in is what
+    /// makes the picker — and the header beside it — name the new model.
+    #[gpui::test]
+    fn a_model_switch_shows_the_model_the_agent_answers_with(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            let mut pane = AgentPane::new(test_store("model-set"), window, cx);
+            let mut entry = project_entry(PROJECT);
+            entry.transcript.seed_controls(None, vec![model_option("a")]);
+            pane.projects.insert(PROJECT.to_string(), entry);
+            pane.active = Some(PROJECT.to_string());
+            pane
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).model_label()),
+            Some("A".to_string())
+        );
+
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_config_answer(PROJECT, Ok(vec![model_option("b")]), cx);
+            });
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).model_label()),
+            Some("B".to_string()),
+            "the picker shows the model the agent reported"
+        );
+
+        // An answer that carries no options leaves the chips as they were
+        // rather than emptying them.
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| pane.on_config_answer(PROJECT, Ok(Vec::new()), cx));
+        });
+        assert_eq!(
+            cx.update(|_, cx| pane.read(cx).model_label()),
+            Some("B".to_string())
+        );
+
+        // A refusal is reported where the change was asked for; the chips are
+        // left naming the model the agent still runs.
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.on_config_answer(PROJECT, Err(AcpError::Protocol("boom".to_string())), cx);
+            });
+        });
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.model_label(), Some("B".to_string()));
+            let entry = pane.projects.get(PROJECT).expect("the project entry");
+            assert!(
+                entry.transcript.entries().iter().any(|row| matches!(
+                    &row.kind,
+                    EntryKind::Notice { text, .. }
+                        if text.contains("Could not change the option")
+                )),
+                "the refusal is a row in the project's transcript"
+            );
         });
     }
 
