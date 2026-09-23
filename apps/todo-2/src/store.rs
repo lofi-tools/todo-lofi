@@ -201,6 +201,45 @@ async fn push_patch(
     Ok(())
 }
 
+/// Every GitHub issue link of a task. Empty for a task no GitHub issue backs,
+/// so a purely local edit never reaches the network.
+async fn github_links_for_task(
+    store: &mut TodoStore,
+    task_id: u64,
+) -> anyhow::Result<Vec<storage::TaskLink>> {
+    let github_ids: std::collections::HashSet<u64> = store
+        .list_integrations()
+        .await?
+        .into_iter()
+        .filter(|i| i.provider == "github")
+        .map(|i| i.id)
+        .collect();
+    Ok(store
+        .task_links_for_task(task_id)
+        .await?
+        .into_iter()
+        .filter(|link| github_ids.contains(&link.integration_id))
+        .collect())
+}
+
+/// Close the issue behind a completed task and say so in its thread (§5.6).
+/// No link (or no credentials) → no-op, so a purely local completion never
+/// touches the network. Must run on the Tokio runtime. A push failure fails
+/// the whole edit so the UI reports it; the local completion is already
+/// saved.
+async fn push_github_completion(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
+    if github_links_for_task(store, task_id).await?.is_empty() {
+        return Ok(());
+    }
+    if !crate::github_auth::has_usable_credentials() {
+        return Ok(());
+    }
+    let token = crate::github_auth::access_token().await?;
+    let client = storage::GithubHttpClient::new(token);
+    store.close_issue_for_completed_task(&client, task_id).await?;
+    Ok(())
+}
+
 /// Push a title/description delta to every GitHub issue linked to `task_id`.
 /// Each `Some` field is pushed; `None` fields are left untouched. No links
 /// (or no credentials) → no-op, so purely local tasks never touch the
@@ -215,19 +254,7 @@ async fn push_github_patch(
     patch: storage::IssuePatch,
     stamped: &[&str],
 ) -> anyhow::Result<()> {
-    let github_ids: std::collections::HashSet<u64> = store
-        .list_integrations()
-        .await?
-        .into_iter()
-        .filter(|i| i.provider == "github")
-        .map(|i| i.id)
-        .collect();
-    let links: Vec<storage::TaskLink> = store
-        .task_links_for_task(task_id)
-        .await?
-        .into_iter()
-        .filter(|link| github_ids.contains(&link.integration_id))
-        .collect();
+    let links = github_links_for_task(store, task_id).await?;
     if links.is_empty() {
         return Ok(());
     }
@@ -360,6 +387,17 @@ impl Store {
                 ..Default::default()
             })
             .await?;
+            if done {
+                // Completing closes the issue, and the close carries a comment
+                // saying why (§5.6).
+                push_github_completion(&mut s, task_id).await?;
+            } else {
+                push_github_patch(&mut s, task_id, storage::IssuePatch {
+                    state: Some("open".to_string()),
+                    ..Default::default()
+                }, &["state"])
+                .await?;
+            }
             Ok(())
         })
     }

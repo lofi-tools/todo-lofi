@@ -292,7 +292,7 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 
 | Event | Effect |
 | --- | --- |
-| Local task completed | `PATCH state=closed` |
+| Local task completed | `PATCH state=closed` and a comment saying the linked task was marked as completed — GitHub gives a plain close no reason of its own, so the thread is what distinguishes "done" from "abandoned" |
 | Issue closed on GitHub | Local task completed (never tombstoned) |
 | Issued reopened | Local task reopened (unless tombstoned) |
 | Local task deleted | Tombstone locally **and** close the issue (GitHub has no delete); the link is marked tombstoned so later pulls cannot resurrect it |

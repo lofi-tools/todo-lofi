@@ -18,6 +18,11 @@ use std::collections::BTreeMap;
 /// [`IssueFieldState::local_changed_at`].
 pub const ISSUE_FIELDS: [&str; 4] = ["title", "body", "state", "labels"];
 
+/// The comment left on an issue the app closes because its task was completed:
+/// GitHub gives a plain close no reason of its own (§5.6).
+const COMPLETED_ISSUE_COMMENT: &str =
+    "This issue was closed because the linked task was marked as completed.";
+
 /// `open` / `merged` / `closed` / `waived` for `run_pull_requests.state`.
 /// `waived` is the user giving up on a repo's PR so a multi-repo run can
 /// still complete (decision 25); the other three mirror GitHub.
@@ -1408,6 +1413,16 @@ pub trait GithubClient {
         number: u64,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<ExternalComment>>> + Send + 'a;
 
+    /// Post a comment on an issue. Used to record why the app closed one, since
+    /// GitHub gives a plain `state=closed` no reason of its own (§5.6).
+    fn create_issue_comment<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        body: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
     fn update_issue<'a>(
         &'a self,
         owner: &'a str,
@@ -1749,6 +1764,20 @@ impl GithubClient for GithubHttpClient {
                 .as_array()
                 .map(|items| items.iter().filter_map(comment_from_json).collect())
                 .unwrap_or_default())
+        }
+    }
+
+    fn create_issue_comment<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        body: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            let path = format!("/repos/{owner}/{repo}/issues/{number}/comments");
+            self.post_json(&path, serde_json::json!({ "body": body }))
+                .await
         }
     }
 
@@ -2816,6 +2845,65 @@ impl TodoStore {
         );
         self.tombstone_issue_link(task_issue.integration_id, &external_id, "deleted locally")
             .await?;
+        Ok(true)
+    }
+
+    /// §5.6: completing a synced task closes its issue and leaves a comment
+    /// saying why. GitHub records no reason for a plain `state=closed`, so the
+    /// comment is what makes the thread read as "done", not "abandoned".
+    /// Returns whether the task was issue-backed at all. The caller decides
+    /// what a failed push means; the local completion is already saved.
+    pub async fn close_issue_for_completed_task<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<bool> {
+        let Some(task_issue) = self.issue_link_for_task(task_id).await? else {
+            return Ok(false);
+        };
+        // Already closed on GitHub: there is nothing to push, and a second
+        // comment would only be noise.
+        if task_issue.state.remote.state == "closed" {
+            return Ok(true);
+        }
+        let TaskIssue {
+            integration_id,
+            issue,
+            mut state,
+            external_updated_at,
+        } = task_issue;
+        let (owner, repo, number) = (issue.owner, issue.repo, issue.number);
+        let updated = client
+            .update_issue(
+                &owner,
+                &repo,
+                number,
+                &IssuePatch {
+                    state: Some("closed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        client
+            .create_issue_comment(&owner, &repo, number, COMPLETED_ISSUE_COMMENT)
+            .await?;
+        let external_id = issue_external_id(&owner, &repo, number);
+        // The pushed values are the remote's now and the local stamp is spent,
+        // so the next pull does not read the app's own close back as a remote
+        // edit (§5.4).
+        state.adopt_remote(&updated.field_values());
+        state.local_changed_at.remove("state");
+        if let Some(at) = updated.closed_at {
+            state.closed_at = Some(at.as_second());
+        }
+        self.link_issue(
+            integration_id,
+            &external_id,
+            task_id,
+            &state,
+            updated.updated_at.or(external_updated_at),
+        )
+        .await?;
         Ok(true)
     }
 
@@ -3908,6 +3996,8 @@ mod tests {
         issues: std::sync::Mutex<std::collections::HashMap<String, Vec<RemoteIssue>>>,
         comments: std::sync::Mutex<std::collections::HashMap<String, Vec<ExternalComment>>>,
         updates: std::sync::Mutex<Vec<(String, u64, IssuePatch)>>,
+        /// `(repo, number, body)` per comment posted through the API.
+        posted_comments: std::sync::Mutex<Vec<(String, u64, String)>>,
         /// `(repo, title, body)` per issue opened through the API, so a test
         /// can assert that a capture opened exactly one.
         created_issues: std::sync::Mutex<Vec<(String, String, String)>>,
@@ -4045,6 +4135,13 @@ mod tests {
                 .map(|(_, _, patch)| patch.clone())
                 .unwrap_or_default()
         }
+
+        fn posted_comments(&self) -> Vec<(String, u64, String)> {
+            self.posted_comments
+                .lock()
+                .expect("posted comments lock")
+                .clone()
+        }
     }
 
     impl GithubClient for FakeGithub {
@@ -4099,6 +4196,23 @@ mod tests {
                     .get(&format!("{owner}/{repo}#{number}"))
                     .cloned()
                     .unwrap_or_default())
+            }
+        }
+
+        fn create_issue_comment<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+            body: &'a str,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.posted_comments.lock().expect("posted comments lock").push((
+                    format!("{owner}/{repo}"),
+                    number,
+                    body.to_string(),
+                ));
+                Ok(())
             }
         }
 
@@ -4589,6 +4703,57 @@ mod tests {
             .await?;
         assert_eq!(summary.imported, 0);
         assert_eq!(fake.push_count(), 1, "only the close was pushed");
+        Ok(())
+    }
+
+    /// Completing a synced task closes its issue and leaves a comment saying
+    /// why (§5.6): GitHub's own `closed` says nothing about intent, and the
+    /// comment is what makes the thread read as done rather than abandoned.
+    #[tokio::test]
+    async fn completing_a_task_closes_its_issue_and_says_so() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Fix login", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+
+        storage.update_task_done(task_id, true).await?;
+        assert!(storage.close_issue_for_completed_task(&fake, task_id).await?);
+        assert_eq!(fake.last_patch().state.as_deref(), Some("closed"));
+        assert_eq!(
+            fake.posted_comments(),
+            vec![("o/r".to_string(), 1, COMPLETED_ISSUE_COMMENT.to_string())]
+        );
+
+        // The pushed close became the snapshot, so the next pull does not read
+        // the app's own write back as a remote edit — and a second completion
+        // has nothing left to close or explain.
+        let link = storage.issue_link(integration.id, "o/r#1").await?.unwrap();
+        assert_eq!(link.state.remote.state, "closed");
+        assert!(storage.close_issue_for_completed_task(&fake, task_id).await?);
+        assert_eq!(fake.push_count(), 1, "the close is pushed once");
+        assert_eq!(fake.posted_comments().len(), 1, "and commented once");
+
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, true)
+            .await?;
+        assert_eq!(summary.pushed, 0, "the app's own close is not pushed again");
+        assert!(storage.get_task(task_id).await?.done);
+        Ok(())
+    }
+
+    /// A completion with no issue behind it leaves GitHub alone: no link (and
+    /// no credentials) means no work.
+    #[tokio::test]
+    async fn completing_a_task_without_an_issue_touches_nothing() -> anyhow::Result<()> {
+        let (mut storage, _, _) = bound_store("o", "r").await?;
+        let task = storage.create_task(Task::create().title("Local only")).await?;
+        let fake = FakeGithub::default();
+
+        assert!(!storage.close_issue_for_completed_task(&fake, task.id).await?);
+        assert_eq!(fake.push_count(), 0);
+        assert!(fake.posted_comments().is_empty());
         Ok(())
     }
 
