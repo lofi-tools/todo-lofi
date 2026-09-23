@@ -12,7 +12,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Sizable, Size, StyledExt};
+use gpui_component::{Icon, IconName, Sizable, Size, StyledExt};
 use std::collections::HashMap;
 
 use crate::store::Store;
@@ -123,6 +123,45 @@ struct AppEntry {
     slug: String,
     label: String,
     kind: String,
+    /// Integration provider (`github`, `todoist`), if this app is an
+    /// integration. The nav names the submenu after the provider, not the
+    /// account, so the raw `provider-id` slug never shows.
+    provider: Option<String>,
+    /// Connected account login for integrations, shown as "Connected as …"
+    /// on the leaf instead of the account-named submenu.
+    account: Option<String>,
+    /// Integration id behind an integration app, for per-account queries
+    /// such as the GitHub tag mapping.
+    integration_id: Option<u64>,
+}
+
+/// One line of the GitHub settings mapping: the local tag, the remote repos
+/// linked to it, and the tag's local directories.
+#[derive(Clone)]
+struct GithubMapRow {
+    tag_label: String,
+    repos: Vec<String>,
+    dirs: Vec<String>,
+}
+
+/// The nav label for an app: integrations are named after their provider
+/// (`Github`), with the account appended only when several accounts of one
+/// provider are connected.
+fn nav_label(entry: &AppEntry, provider_counts: &HashMap<String, usize>) -> String {
+    if entry.kind == "integration"
+        && let Some(provider) = entry.provider.as_deref()
+    {
+        let name = display_name(provider);
+        let shared = provider_counts.get(provider).copied().unwrap_or(0) > 1;
+        if shared
+            && let Some(account) = entry.account.as_deref()
+            && !account.is_empty()
+        {
+            return format!("{name} ({account})");
+        }
+        return name;
+    }
+    display_name(&entry.label)
 }
 
 pub struct SettingsView {
@@ -134,6 +173,8 @@ pub struct SettingsView {
     app_list: Vec<AppEntry>,
     tag_pickers: HashMap<String, Entity<TagAttachPicker>>,
     sync_pickers: HashMap<String, Entity<TodoistSyncPicker>>,
+    /// GitHub tag mapping rows per app id, loaded with the app list.
+    github_maps: HashMap<u64, Vec<GithubMapRow>>,
     status: Option<String>,
     _load: Option<Task<()>>,
 }
@@ -149,6 +190,7 @@ impl SettingsView {
             app_list: Vec::new(),
             tag_pickers: HashMap::new(),
             sync_pickers: HashMap::new(),
+            github_maps: HashMap::new(),
             status: None,
             _load: None,
         };
@@ -170,22 +212,118 @@ impl SettingsView {
         let store = self.store.clone();
         self._load = Some(cx.spawn(async move |this, cx| {
             let apps = store.list_apps(cx).await.unwrap_or_default();
+            // The integration behind each app, so the nav can name the
+            // submenu after the provider and the leaf can name the account.
+            // The map carries the integration id for per-account queries.
+            let mut accounts: HashMap<u64, (String, Option<String>, u64)> = HashMap::new();
+            if let Ok(integrations) = store.list_integrations(cx).await {
+                for integration in integrations {
+                    if let Ok(Some(app)) = store
+                        .app_for_integration(integration.id, cx)
+                        .await
+                    {
+                        accounts.insert(
+                            app.id,
+                            (
+                                integration.provider,
+                                integration.account_label.filter(|label| !label.is_empty()),
+                                integration.id,
+                            ),
+                        );
+                    }
+                }
+            }
             this.update(cx, |this: &mut Self, cx| {
                 this.app_list = apps
                     .iter()
-                    .map(|(app, _)| AppEntry {
-                        id: app.id,
-                        slug: app.slug.clone(),
-                        label: app.label.clone(),
-                        kind: app.kind.clone(),
+                    .map(|(app, _)| {
+                        let (provider, account, integration_id) = accounts
+                            .remove(&app.id)
+                            .map(|(provider, account, id)| (Some(provider), account, Some(id)))
+                            .unwrap_or((None, None, None));
+                        AppEntry {
+                            id: app.id,
+                            slug: app.slug.clone(),
+                            label: app.label.clone(),
+                            kind: app.kind.clone(),
+                            provider,
+                            account,
+                            integration_id,
+                        }
                     })
                     .collect();
-                this.app_list.sort_by(|a, b| a.label.cmp(&b.label));
+                this.app_list.sort_by(|a, b| {
+                    Self::nav_sort_key(a).cmp(&Self::nav_sort_key(b))
+                });
+                this.github_maps
+                    .retain(|app_id, _| this.app_list.iter().any(|app| &app.id == app_id));
                 this._load = None;
                 cx.notify();
             })
             .ok();
+            // The GitHub tag mapping loads after the list (it needs the
+            // integration ids): a separate task, so a slow map never holds
+            // the list load open.
+            this.update(cx, |this, cx| this.load_github_maps(cx))
+                .ok();
         }));
+    }
+
+    /// Fetch the GitHub tag mapping for every connected GitHub account, from
+    /// the current app list. Spawned after the list lands; each account's
+    /// rows land as they arrive.
+    fn load_github_maps(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let github_apps: Vec<(u64, u64)> = self
+            .app_list
+            .iter()
+            .filter(|app| app.kind == "integration" && app.provider.as_deref() == Some("github"))
+            .filter_map(|app| app.integration_id.map(|id| (app.id, id)))
+            .collect();
+        self.github_maps
+            .retain(|app_id, _| github_apps.iter().any(|(id, _)| id == app_id));
+        cx.spawn(async move |this, cx| {
+            for (app_id, integration_id) in github_apps {
+                let rows = store
+                    .github_tag_map(integration_id, cx)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(tag_label, repos, dirs)| GithubMapRow {
+                        tag_label,
+                        repos,
+                        dirs,
+                    })
+                    .collect();
+                this.update(cx, |this: &mut Self, cx| {
+                    this.github_maps.insert(app_id, rows);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Sort key matching the rendered nav label, so the tree stays
+    /// alphabetical after integrations take their provider names.
+    fn nav_sort_key(entry: &AppEntry) -> String {
+        match (&entry.kind as &str, &entry.provider) {
+            ("integration", Some(provider)) => display_name(provider),
+            _ => display_name(&entry.label),
+        }
+    }
+
+    fn provider_counts(&self) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        for app in &self.app_list {
+            if app.kind == "integration"
+                && let Some(provider) = app.provider.as_deref()
+            {
+                *counts.entry(provider.to_string()).or_insert(0) += 1;
+            }
+        }
+        counts
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -194,6 +332,20 @@ impl SettingsView {
 
     fn select(&mut self, id: &str, cx: &mut Context<Self>) {
         self.selected = id.to_string();
+        // The map is read once per app-list load, which lands before any tag
+        // is connected, and repo- or directory-bound tags raise no picker
+        // event. Re-read it whenever a GitHub leaf is opened, so the mapping
+        // reflects what is connected now.
+        if let Some(slug) = id.strip_prefix("app:") {
+            let is_github = self.app_list.iter().any(|app| {
+                app.slug == slug
+                    && app.kind == "integration"
+                    && app.provider.as_deref() == Some("github")
+            });
+            if is_github {
+                self.load_github_maps(cx);
+            }
+        }
         cx.notify();
     }
 }
@@ -219,10 +371,11 @@ impl SettingsView {
             self.nav_row("sync", "Sync", 0, cx),
             self.nav_parent_row(cx),
         ];
+        let counts = self.provider_counts();
         let app_rows: Vec<(String, String)> = self
             .app_list
             .iter()
-            .map(|app| (format!("app:{}", app.slug), display_name(&app.label)))
+            .map(|app| (format!("app:{}", app.slug), nav_label(app, &counts)))
             .collect();
         if self.apps_expanded {
             for (id, label) in &app_rows {
@@ -349,6 +502,103 @@ impl SettingsView {
                     .p_3()
                     .children(rows),
             )
+            .into_any_element()
+    }
+
+    /// One mapping line per connected tag: the local tag with a folder icon,
+    /// the remote repo short url with a GitHub icon, and the tag's local
+    /// directories as a vertical sub-list.
+    fn github_map(rows: &[GithubMapRow]) -> AnyElement {
+        if rows.is_empty() {
+            return div()
+                .text_xs()
+                .text_color(rgb(0x737373))
+                .child("No tags connected yet.")
+                .into_any_element();
+        }
+        div()
+            .v_flex()
+            .gap_1()
+            .children(rows.iter().map(|row| {
+                let repos: AnyElement = if row.repos.is_empty() {
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x737373))
+                        .child("No repo bound")
+                        .into_any_element()
+                } else {
+                    div()
+                        .v_flex()
+                        .children(row.repos.iter().map(|repo| {
+                            div()
+                                .h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    Icon::new(
+                                        gpui_component_assets::IconName::Github,
+                                    )
+                                    .with_size(Size::Small),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(rgb(0xd4d4d4))
+                                        .child(repo.clone()),
+                                )
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                };
+                let dirs: AnyElement = if row.dirs.is_empty() {
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x737373))
+                        .child("No local directories")
+                        .into_any_element()
+                } else {
+                    div()
+                        .v_flex()
+                        .children(row.dirs.iter().map(|dir| {
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xd4d4d4))
+                                .child(dir.clone())
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                };
+                div()
+                    .h_flex()
+                    .items_start()
+                    .gap_3()
+                    .py_1()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(170.))
+                            .h_flex()
+                            .items_center()
+                            .gap_1p5()
+                            .overflow_hidden()
+                            .child(Icon::new(IconName::Folder).with_size(Size::Small))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(0xd4d4d4))
+                                    .child(row.tag_label.clone()),
+                            ),
+                    )
+                    .child(div().flex_1().min_w_0().child(repos))
+                    .child(div().flex_1().min_w_0().child(dirs))
+                    .into_any_element()
+            }))
             .into_any_element()
     }
 
@@ -618,8 +868,24 @@ impl SettingsView {
                 .into_any_element();
         };
         let app_id = entry.id;
-        let label = display_name(&entry.label);
         let kind = entry.kind.clone();
+        // Integrations are titled with the provider; the connected account
+        // reads as "Connected as …" underneath instead of naming the submenu.
+        let (label, subtitle) = if kind == "integration"
+            && let Some(provider) = entry.provider.as_deref()
+        {
+            let title = display_name(provider);
+            let subtitle = match entry.account.as_deref().filter(|name| !name.is_empty()) {
+                Some(account) => format!("Connected as {account}"),
+                None => format!("{} app", display_name(&kind)),
+            };
+            (title, subtitle)
+        } else {
+            (
+                display_name(&entry.label),
+                format!("{} app · {}", display_name(&kind), display_name(&slug)),
+            )
+        };
         let is_demo = slug == "demo" || kind == "builtin";
         let is_integration = kind == "integration";
         let notify = self.file.app_notify.get(&slug).copied().unwrap_or(true);
@@ -632,7 +898,7 @@ impl SettingsView {
                 div()
                     .text_sm()
                     .text_color(rgb(0xa3a3a3))
-                    .child(format!("{} app · {}", display_name(&kind), display_name(&slug))),
+                    .child(subtitle),
             );
         let preferences = Self::section(
             "Preferences",
@@ -693,21 +959,28 @@ impl SettingsView {
                 }
                 page = page.child(Self::section("Synced tags", rows));
             } else {
+                let is_github = entry.provider.as_deref() == Some("github");
+                let github_rows = is_github
+                    .then(|| self.github_maps.get(&app_id).cloned().unwrap_or_default());
                 let picker_id = format!("settings-tags-{slug}");
                 let picker = self.tag_picker(&slug, app_id, true, window, cx);
-                page = page.child(Self::section(
-                    "Synced tags",
-                    vec![
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x737373))
-                            .child("Tags this integration syncs. Type to find one, Enter to attach.")
-                            .into_any_element(),
-                        picker.update(cx, |picker, cx| {
-                            picker.render_picker(&picker_id, window, cx)
-                        }),
-                    ],
-                ));
+                let mut synced = vec![
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x737373))
+                        .child("Tags this integration syncs. Type to find one, Enter to attach.")
+                        .into_any_element(),
+                    picker.update(cx, |picker, cx| {
+                        picker.render_picker(&picker_id, window, cx)
+                    }),
+                ];
+                // GitHub names its remote per tag, so the leaf maps each
+                // connected tag to its repos and local directories instead
+                // of repeating the plain tag list below.
+                if let Some(rows) = github_rows {
+                    synced.push(Self::github_map(&rows));
+                }
+                page = page.child(Self::section("Synced tags", synced));
             }
         }
         let block = self.apps.update(cx, |settings, cx| {
@@ -788,5 +1061,284 @@ impl SettingsView {
                 )],
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(kind: &str, label: &str, provider: Option<&str>, account: Option<&str>) -> AppEntry {
+        AppEntry {
+            id: 1,
+            slug: "github-2".to_string(),
+            label: label.to_string(),
+            kind: kind.to_string(),
+            provider: provider.map(str::to_string),
+            account: account.map(str::to_string),
+            integration_id: None,
+        }
+    }
+
+    #[test]
+    fn integration_submenus_use_the_provider_name() {
+        let counts = HashMap::new();
+        let github = entry("integration", "nmrshll", Some("github"), Some("nmrshll"));
+        assert_eq!(nav_label(&github, &counts), "Github");
+    }
+
+    #[test]
+    fn repeated_provider_accounts_are_disambiguated() {
+        let counts = HashMap::from([("github".to_string(), 2)]);
+        let github = entry("integration", "nmrshll", Some("github"), Some("nmrshll"));
+        assert_eq!(nav_label(&github, &counts), "Github (nmrshll)");
+    }
+
+    #[test]
+    fn non_integrations_keep_their_label() {
+        let counts = HashMap::new();
+        let recipe = entry("recipe", "coding-task", None, None);
+        assert_eq!(nav_label(&recipe, &counts), "Coding-task");
+    }
+
+    /// `refresh_apps` fills the GitHub map for the integration's app: a tag
+    /// attached through the picker (binding only) still yields a row. Pumps
+    /// the executor until the background loads land.
+    #[gpui::test]
+    fn refresh_apps_loads_the_github_map(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let store = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let mut store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            let integration = store
+                .create_integration("github", Some("nmrshll".to_string()))
+                .await
+                .expect("the integration");
+            let app = store
+                .app_for_integration(integration.id)
+                .await
+                .expect("the integration's app")
+                .expect("an app");
+            let tag = store.create_tag("todo-lofi").await.expect("the tag");
+            store
+                .attach_app_to_tag(app.id, tag.id, storage::BindingRole::Partial, false)
+                .await
+                .expect("the picker attachment");
+            Store::new(store)
+        });
+        let view = cx.update(|cx| {
+            let apps = cx.new(|cx| crate::ui_parts::apps::AppSettings::new(store.clone(), cx));
+            cx.new(|cx| SettingsView::new(store.clone(), apps, cx))
+        });
+        cx.executor().allow_parking();
+        for _ in 0..400 {
+            let has_row = cx.update(|cx| {
+                view.read(cx)
+                    .github_maps
+                    .values()
+                    .flatten()
+                    .any(|row| row.tag_label == "todo-lofi")
+            });
+            if has_row {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        panic!("the github map never loaded");
+    }
+
+    /// Opening a GitHub leaf re-reads the mapping. The app-list load runs
+    /// before any tag is connected and repo-bound tags raise no picker event,
+    /// so without a reload on selection the mapping stayed empty.
+    #[gpui::test]
+    fn selecting_the_github_leaf_reloads_the_tag_map(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let (store, app_id, tag_id, slug) = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let mut store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            let integration = store
+                .create_integration("github", Some("octocat".to_string()))
+                .await
+                .expect("the integration");
+            let app = store
+                .app_for_integration(integration.id)
+                .await
+                .expect("the integration's app")
+                .expect("an app");
+            let tag = store.create_tag("later-bound").await.expect("the tag");
+            (Store::new(store), app.id, tag.id, app.slug)
+        });
+        let view = cx.update(|cx| {
+            let apps = cx.new(|cx| crate::ui_parts::apps::AppSettings::new(store.clone(), cx));
+            cx.new(|cx| SettingsView::new(store.clone(), apps, cx))
+        });
+        cx.executor().allow_parking();
+        // The first load lands with nothing connected yet.
+        for _ in 0..400 {
+            if cx.update(|cx| view.read(cx).github_maps.contains_key(&app_id)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        let initial_rows = cx.update(|cx| {
+            view.read(cx)
+                .github_maps
+                .get(&app_id)
+                .map(Vec::len)
+                .unwrap_or(0)
+        });
+        assert_eq!(initial_rows, 0, "nothing is connected before the tag is bound");
+
+        // Bind the tag after that load, the way repo detection does: no
+        // picker event announces it, so only re-opening the leaf refreshes it.
+        let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = attached.clone();
+        cx.spawn(move |cx: gpui::AsyncApp| async move {
+            if store
+                .attach_app_to_tag(app_id, tag_id, storage::BindingRole::Partial, false, &cx)
+                .await
+                .is_ok()
+            {
+                flag.set(true);
+            }
+        })
+        .detach();
+        for _ in 0..400 {
+            if attached.get() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        assert!(attached.get(), "the tag attachment never landed");
+
+        cx.update(|cx| {
+            view.update(cx, |view, cx| view.select(&format!("app:{slug}"), cx));
+        });
+        for _ in 0..400 {
+            let has_row = cx.update(|cx| {
+                view.read(cx)
+                    .github_maps
+                    .get(&app_id)
+                    .is_some_and(|rows| rows.iter().any(|row| row.tag_label == "later-bound"))
+            });
+            if has_row {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        panic!("re-opening the github leaf did not reload the tag map");
+    }
+
+    /// The mapping unions both connection shapes: a repo-bound tag, a tag
+    /// attached through the picker (binding only, no repo), and a tag with
+    /// only a sync target. The store reads run on Tokio while the answer
+    /// comes back on a GPUI task, so the test pumps until it lands.
+    #[gpui::test]
+    fn the_github_map_unions_bindings_and_repos(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let (store, integration_id) = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let mut store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            let integration = store
+                .create_integration("github", Some("octocat".to_string()))
+                .await
+                .expect("the integration");
+            let app = store
+                .app_for_integration(integration.id)
+                .await
+                .expect("the integration's app")
+                .expect("an app");
+            let bound = store.create_tag("bound").await.expect("the repo tag");
+            store
+                .bind_repo_tag(bound.id, integration.id, "octocat", "hello-world")
+                .await
+                .expect("the repo binding");
+            let attached = store.create_tag("attached").await.expect("the picker tag");
+            store
+                .attach_app_to_tag(
+                    app.id,
+                    attached.id,
+                    storage::BindingRole::Partial,
+                    false,
+                )
+                .await
+                .expect("the picker attachment");
+            let targeted = store.create_tag("targeted").await.expect("the sync tag");
+            store
+                .set_tag_sync_target(
+                    targeted.id,
+                    Some(storage::SyncTarget {
+                        integration_id: integration.id,
+                        external_id: "octocat/solo".to_string(),
+                    }),
+                )
+                .await
+                .expect("the sync target");
+            store
+                .set_tag_dirs(bound.id, vec!["/repos/hello-world".to_string()])
+                .await
+                .expect("the directories");
+            (Store::new(store), integration.id)
+        });
+
+        cx.executor().allow_parking();
+        let rows = std::rc::Rc::new(std::cell::Cell::new(None));
+        let recorder = rows.clone();
+        let store = store.clone();
+        cx.spawn(move |cx: gpui::AsyncApp| async move {
+            let map = store.github_tag_map(integration_id, &cx).await.ok();
+            recorder.set(map);
+        })
+        .detach();
+        for _ in 0..400 {
+            if let Some(map) = rows.take() {
+                assert_eq!(map.len(), 3);
+                let bound = map.iter().find(|(label, _, _)| label == "bound").expect("bound");
+                assert_eq!(bound.1, vec!["octocat/hello-world".to_string()]);
+                assert_eq!(bound.2, vec!["/repos/hello-world".to_string()]);
+                let attached = map.iter().find(|(label, _, _)| label == "attached").expect("attached");
+                assert!(attached.1.is_empty());
+                let targeted = map.iter().find(|(label, _, _)| label == "targeted").expect("targeted");
+                assert_eq!(targeted.1, vec!["octocat/solo".to_string()]);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+        panic!("the tag map did not finish");
     }
 }

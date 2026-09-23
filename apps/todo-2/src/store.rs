@@ -266,6 +266,10 @@ async fn push_github_patch(
     Ok(())
 }
 
+/// One row of the GitHub settings mapping: `(tag label, remote repo short
+/// urls, local directories)`.
+pub type GithubTagMapRow = (String, Vec<String>, Vec<String>);
+
 impl Store {
     pub fn new(store: TodoStore) -> Self {
         Store(Arc::new(StoreLock::new(store)))
@@ -882,6 +886,86 @@ impl Store {
             }
             pairs.sort_by(|a, b| a.3.cmp(&b.3));
             Ok(pairs)
+        })
+    }
+
+    /// One mapped row for the GitHub settings mapping, grouped by local tag:
+    /// `(tag label, remote repo short urls, local directories)`. Tags union
+    /// both connection shapes: picker attachments (binding rows, which carry
+    /// no repo) and repo bindings (link rows or a bare `sync_target`, via
+    /// `bound_repos`). Either side alone undercounts — the pills read
+    /// bindings only, the links read repos only. A connected tag whose repos
+    /// are still empty falls back to the github.com remote its directories
+    /// resolve to (SSH included, other hosts excluded), so a tag attached
+    /// before its repo was ever bound still maps.
+    pub fn github_tag_map(
+        &self,
+        integration_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<Vec<GithubTagMapRow>>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let rows: Vec<(String, Vec<String>, Vec<String>)> = {
+                let mut s = store.lock().await;
+                let mut repos_by_tag: std::collections::BTreeMap<u64, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for bound in s.bound_repos(integration_id).await? {
+                    let external_id = format!("{}/{}", bound.owner, bound.repo);
+                    let repos = repos_by_tag.entry(bound.tag_id).or_default();
+                    if !repos.contains(&external_id) {
+                        repos.push(external_id);
+                    }
+                }
+                // Picker attachments carry no repo, but they are connected tags
+                // all the same: seed the union so they map instead of vanishing.
+                if let Some(app) = s.app_for_integration(integration_id).await? {
+                    for binding in s.bindings_for_app(app.id).await? {
+                        repos_by_tag.entry(binding.tag_id).or_default();
+                    }
+                }
+                let mut rows = Vec::with_capacity(repos_by_tag.len());
+                for (tag_id, mut repos) in repos_by_tag {
+                    repos.sort();
+                    let label = s
+                        .get_tag(tag_id)
+                        .await
+                        .map(|tag| tag.label())
+                        .unwrap_or_else(|_| "(deleted tag)".to_string());
+                    let dirs = s
+                        .tag_settings(tag_id)
+                        .await
+                        .map(|settings| settings.dirs)
+                        .unwrap_or_default();
+                    rows.push((label, repos, dirs));
+                }
+                rows.sort_by(|a, b| a.0.cmp(&b.0));
+                rows
+            };
+            // Fill repos the database never recorded from the checkouts
+            // themselves, one blocking git call per tag at most. Tags whose
+            // directories point anywhere but github.com keep empty repos.
+            let mut filled = Vec::with_capacity(rows.len());
+            for (label, repos, dirs) in rows {
+                let repos = if repos.is_empty() && !dirs.is_empty() {
+                    let detected = tokio::task::spawn_blocking({
+                        let dirs = dirs.clone();
+                        move || {
+                            dirs.iter()
+                                .map(std::path::PathBuf::from)
+                                .filter(|dir| dir.is_dir())
+                                .find_map(|dir| crate::coding_git::resolve_remote(&dir))
+                                .map(|remote| format!("{}/{}", remote.owner, remote.repo))
+                        }
+                    })
+                    .await
+                    .unwrap_or(None);
+                    detected.map(|repo| vec![repo]).unwrap_or_default()
+                } else {
+                    repos
+                };
+                filled.push((label, repos, dirs));
+            }
+            Ok(filled)
         })
     }
 

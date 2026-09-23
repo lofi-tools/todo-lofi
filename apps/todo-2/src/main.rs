@@ -627,6 +627,9 @@ impl Layout {
             |this, _view, event, window, cx| match event {
                 IntegrationsEvent::Changed => {
                     this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                    // A sync binds repos to their tags, which the settings
+                    // apps tree reads, so reload it while the panel is open.
+                    this.settings.update(cx, |view, cx| view.refresh(cx));
                     // A sync or a merged pull request changes both the task list
                     // and the selected run: a merge completes the run and
                     // removes its worktrees, which moves the agent pane too.
