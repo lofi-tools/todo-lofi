@@ -171,6 +171,15 @@ branch-creation guard refuses a dirty tree; see §6.2).
 - **The token is API-only.** Pushing uses the user's own git credentials
   (decision 30): no token is ever written into `.git/config`, a remote URL, or a
   credential helper.
+- **Alternate credential — personal access token.** The card offers an optional
+  PAT that authenticates every API call instead of the device-flow token, for an
+  org whose owners never approved the OAuth app; it is stored in the same file
+  (`personal_token`) and wins over the OAuth pair. The card says why a token is
+  the easier route (it works on organization repos immediately, and is revocable
+  on GitHub at any time) and lists the steps to create one, each with a button
+  opening the page it is about; the classic-token form is prefilled with the
+  `repo` scope and no expiration, so a saved token does not start failing
+  silently after GitHub's 30-day default.
 - The shipped client id is public by design (device flow takes no secret). The
   app is registered **under the `lofi-tools` org** — the org that already hosts
   this repo — with device flow enabled and the scopes above (decision 34);
@@ -324,7 +333,9 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 
 - `integrations.rs`: replace the GitHub stub with a real card — connect (device
   flow: show `user_code` + `verification_uri`, a copy button, a waiting state,
-  expiry countdown), account label, disconnect, last-sync time, **Sync now**.
+  expiry countdown), account label, disconnect, last-sync time, **Sync now**,
+  and the optional personal-token block with its step-by-step instructions and
+  an open-the-page button per step.
 - Per-project binding lives in the tag settings popover, beside the dirs picker,
   showing the bound `owner/repo` (detected or chosen) with a change affordance.
 - Imported tasks carry a source badge with the issue number; the details panel

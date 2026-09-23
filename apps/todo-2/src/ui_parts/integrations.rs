@@ -5,13 +5,14 @@
 
 use gpui::{
     AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder,
-    px, rgb,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
-use gpui_component::{Sizable, Size, StyledExt};
+use gpui_component::{Disableable, Sizable, Size, StyledExt};
 
 use crate::github_auth;
 use crate::store::Store;
@@ -39,6 +40,13 @@ const GITHUB_POLL_PRESETS: [(u64, &str); 4] = [
     (300, "5 min"),
     (900, "15 min"),
 ];
+
+const GITHUB_NEW_CLASSIC_TOKEN_URL: &str = concat!(
+    "https://github.com/settings/tokens/new",
+    // A non-expiring token keeps background syncing from silently failing
+    // once the default 30 days are up.
+    "?scopes=repo&description=todo-lofi&default_expires_at=none",
+);
 
 pub enum IntegrationsEvent {
     Changed,
@@ -781,21 +789,36 @@ impl IntegrationsView {
             state.set_placeholder("ghp_… or github_pat_…", window, cx);
             state
         });
-        self._github_pat_sub = Some(cx.subscribe(&input, |this, _input, event, cx| match event {
-            InputEvent::PressEnter { .. } => this.store_github_pat(None, cx),
+        self._github_pat_sub = Some(cx.subscribe(&input, |this, input, event, cx| match event {
+            // Enter saves a typed token; with nothing typed there is nothing
+            // to save, matching the Save button's disabled state.
+            InputEvent::PressEnter { .. } => {
+                if token_field_filled(&input.read(cx).text().to_string()) {
+                    this.store_github_pat(None, cx);
+                }
+            }
+            // Every edit re-renders the card, so Save follows the field.
+            InputEvent::Change => cx.notify(),
             _ => {}
         }));
         self.github_pat_input = Some(input.clone());
         input
     }
 
-    /// Persist the token field's contents: a blank field clears the stored
-    /// token. The field is cleared after reading when a window is at hand.
+    /// Persist the token field's contents and clear the field. Only reachable
+    /// with something typed; a blank field means removal, which the dedicated
+    /// Remove button does instead.
     fn save_github_pat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token = self.pat_input(window, cx).read(cx).text().to_string();
         self.pat_input(window, cx)
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.store_github_pat(Some(token), cx);
+    }
+
+    /// Drop the stored personal token, falling back to the device-flow
+    /// credential.
+    fn remove_github_pat(&mut self, cx: &mut Context<Self>) {
+        self.store_github_pat(Some(String::new()), cx);
     }
 
     fn store_github_pat(&mut self, token: Option<String>, cx: &mut Context<Self>) {
@@ -1303,10 +1326,14 @@ impl IntegrationsView {
             Some(format!("{} repos", bound_repos.len()))
         };
         div()
+            .w_full()
+            .min_w_0()
             .v_flex()
             .gap_2()
             .child(
                 integration_card(dimmed)
+                    .w_full()
+                    .flex_shrink_0()
                     .v_flex()
                     .gap_3()
                     .child(
@@ -1591,7 +1618,9 @@ impl IntegrationsView {
 
     /// Optional personal access token: authenticates every request instead
     /// of the device-flow token, for orgs that never approved the OAuth app.
-    /// The token is write-only on screen — the field never echoes it back.
+    /// The token is write-only on screen — the field never echoes it back —
+    /// so the block carries the how-to-make-one steps, each with the button
+    /// that opens the page it is about.
     fn github_pat_block(
         &mut self,
         window: &mut Window,
@@ -1599,7 +1628,65 @@ impl IntegrationsView {
     ) -> gpui::AnyElement {
         let input = self.pat_input(window, cx);
         let using = self.github_pat_saved;
+        let typed = token_field_filled(&input.read(cx).text().to_string());
+        let heading = div()
+            .w_full()
+            .min_w_0()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("Personal access token"),
+            )
+            .child(
+                div().min_w_0().text_xs().text_color(rgb(0x737373)).child(if using {
+                    "Syncing with a personal token. Remove it to fall back to the GitHub sign-in."
+                } else {
+                    "Optional, and the quicker way in when your repos belong to an organization: a token you create works on them immediately, while the GitHub sign-in has to be approved by an org owner first. The token is revocable on GitHub at any time."
+                }),
+            );
+        let steps = div()
+            .w_full()
+            .min_w_0()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x737373))
+                    .child("Create one on GitHub:"),
+            )
+            .child(pat_step(
+                1,
+                "Open your token settings on GitHub.".to_string(),
+                &[],
+            ))
+            .child(pat_step(
+                2,
+                "Click \"Generate new token\" → \"Generate new token (classic)\", give it a name (e.g. \"todo-lofi\"), and tick the repo scope."
+                    .to_string(),
+                &[(
+                    "github-pat-new-classic",
+                    "New classic token",
+                    GITHUB_NEW_CLASSIC_TOKEN_URL,
+                )],
+            ))
+            .child(pat_step(
+                3,
+                "Copy the token GitHub shows you — it is shown only once.".to_string(),
+                &[],
+            ))
+            .child(pat_step(
+                4,
+                "Paste it below. It then authenticates every request instead of the GitHub sign-in."
+                    .to_string(),
+                &[],
+            ));
         div()
+            .w_full()
+            .min_w_0()
             .rounded_md()
             .border_1()
             .border_color(rgb(0x2e2e2e))
@@ -1607,35 +1694,122 @@ impl IntegrationsView {
             .px_3()
             .py_2()
             .v_flex()
-            .gap_1()
-            .child(div().text_xs().text_color(rgb(0x737373)).child(if using {
-                "Syncing with a personal token. Save an empty field to remove it."
-            } else {
-                "Personal access token [optional]: for syncing organization data without approval"
-            }))
+            .gap_2()
+            .child(heading)
+            .when(!using, |this| this.child(steps))
             .child(
                 div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(rgb(0x737373)).child(if using {
+                        "Replace the stored token"
+                    } else {
+                        "Paste your token here"
+                    }))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&input).appearance(false)),
-                    )
-                    .child(
-                        Button::new("github-pat-save")
-                            .ghost()
-                            .compact()
-                            .label("Save")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.save_github_pat(window, cx);
-                            })),
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&input).appearance(false)),
+                            )
+                            .when(using, |this| {
+                                this.child(
+                                    Button::new("github-pat-remove")
+                                        .flex_none()
+                                        .ghost()
+                                        .compact()
+                                        .label("Remove")
+                                        .tooltip("Stop using the personal token")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.remove_github_pat(cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("github-pat-save")
+                                    .flex_none()
+                                    .ghost()
+                                    .compact()
+                                    .label("Save")
+                                    .disabled(!typed)
+                                    .tooltip(if typed {
+                                        "Save this token"
+                                    } else {
+                                        "Paste a token first"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save_github_pat(window, cx);
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
     }
+}
+
+/// Whether the token field holds something worth saving. Whitespace alone is
+/// nothing: the field is trimmed before the token is stored, so a blank field
+/// would be a save of an empty token.
+fn token_field_filled(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
+/// One numbered step in the personal-token instructions. Each action renders
+/// as a button travelling to the page the step is about, so a step that needs
+/// GitHub is one click from the card.
+fn pat_step(
+    index: usize,
+    text: String,
+    actions: &[(&'static str, &'static str, &'static str)],
+) -> gpui::AnyElement {
+    let mut row = div()
+        .id(SharedString::from(format!("pat-step-{index}")))
+        .debug_selector(move || format!("pat-step-{index}"))
+        .w_full()
+        .min_w_0()
+        .h_flex()
+        .items_start()
+        .gap_2()
+        .child(
+            div()
+                .flex_none()
+                .pt_0p5()
+                .text_xs()
+                .text_color(rgb(0x737373))
+                .child(format!("{index}.")),
+        )
+        .child(
+            div()
+                .id(SharedString::from(format!("pat-step-text-{index}")))
+                .debug_selector(move || format!("pat-step-text-{index}"))
+                .flex_1()
+                .min_w_0()
+                .pt_0p5()
+                .text_xs()
+                .text_color(rgb(0x737373))
+                .child(text),
+        );
+    for (id, label, url) in actions {
+        let (id, label, url) = (*id, *label, *url);
+        row = row.child(
+            Button::new(id)
+                .flex_none()
+                .ghost()
+                .compact()
+                .with_size(Size::Small)
+                .label(label)
+                .tooltip(format!("Open {url}"))
+                .on_click(move |_, _, _| todoist_auth::open_browser(url)),
+        );
+    }
+    row.into_any_element()
 }
 
 /// Brand logo for Todoist (vendored SVG): the shared asset bundle only
@@ -1725,12 +1899,21 @@ impl Render for IntegrationsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
+            .min_w_0()
             .h_full()
+            .overflow_y_scrollbar()
             // Same surface as the task list view (APP_BG), not the darker
             // navbar tone.
             .bg(rgb(APP_BG))
             .child(
+                // `min_w_0` is what lets the column shrink to the pane: with
+                // the automatic minimum a flex item refuses to go below its
+                // longest unbroken line, so an instruction line would widen
+                // the card — and every parent — instead of wrapping.
                 div()
+                    .w_full()
+                    .flex_1()
+                    .min_w_0()
                     .p_8()
                     .v_flex()
                     .gap_4()
@@ -1761,6 +1944,76 @@ mod tests {
         assert_eq!(since_label(at(910_000), now), "1 d ago");
         // A clock that moved backwards cannot claim to be in the future.
         assert_eq!(since_label(at(1_000_060), now), "just now");
+    }
+
+    /// A step line wider than the width it is given wraps onto more lines
+    /// rather than widening its row — the row stays exactly as wide as the
+    /// container, which is what keeps the sub-card, and every parent above it,
+    /// inside the pane. The host is a row so the step is a flex item on the
+    /// main axis, where the automatic minimum size is what used to let a long
+    /// line push the layout wider than its pane.
+    #[gpui::test]
+    fn the_token_steps_wrap_within_their_width(cx: &mut gpui::TestAppContext) {
+        const WIDTH: f32 = 400.;
+        const PADDING: f32 = 16.;
+        struct Host;
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // A pane-shaped row holding a stretched column, the way the
+                // step reaches its width under the card.
+                div().w(px(WIDTH)).h_flex().child(
+                    div()
+                        .id("test-column")
+                        .debug_selector(|| "test-column".to_string())
+                        .flex_1()
+                        .min_w_0()
+                        .p(px(PADDING))
+                        .v_flex()
+                        .child(pat_step(
+                            1,
+                            "Click \"Generate new token\" → \"Generate new token (classic)\", give it a name, and tick the repo scope."
+                                .to_string(),
+                            &[(
+                                "test-step-button",
+                                "New classic token",
+                                GITHUB_NEW_CLASSIC_TOKEN_URL,
+                            )],
+                        )),
+                )
+            }
+        }
+        cx.update(gpui_component::init);
+        let (_view, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let row = cx
+            .debug_bounds("pat-step-1")
+            .expect("the step row measured");
+        let line = cx
+            .debug_bounds("pat-step-text-1")
+            .expect("the step text measured");
+        // Without a zero minimum the line takes its whole unwrapped length and
+        // runs past the row (and the card, and the pane) on a narrow window.
+        assert!(
+            line.right() <= row.right(),
+            "the step text ({line:?}) overflows its row ({row:?})"
+        );
+        assert!(
+            line.size.height > px(20.),
+            "a line too long for one row should wrap, height was {}",
+            line.size.height
+        );
+    }
+
+    /// The token field saves only something: an empty — or whitespace-only —
+    /// field leaves the Save button disabled, so pressing it can never store a
+    /// blank token.
+    #[test]
+    fn a_blank_token_field_leaves_nothing_to_save() {
+        assert!(!token_field_filled(""));
+        assert!(!token_field_filled("   "));
+        assert!(!token_field_filled("\n\t "));
+        assert!(token_field_filled("ghp_abc"));
+        assert!(token_field_filled("  github_pat_abc  "));
     }
 
     #[test]
