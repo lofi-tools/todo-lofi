@@ -37,6 +37,28 @@ pub struct ChainNode {
     pub nested: Vec<ChainNode>,
 }
 
+/// Whether two rows' blocking displays are the same tasks in the same shape.
+/// Compared by [`TaskWithMeta::same_list_data`] rather than by identity,
+/// because every reload hands over freshly loaded rows.
+fn same_blocking(left: &RowBlocking, right: &RowBlocking) -> bool {
+    same_chain(&left.blocked, &right.blocked) && same_tasks(&left.blocks, &right.blocks)
+}
+
+fn same_tasks(left: &[TaskWithMeta], right: &[TaskWithMeta]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.same_list_data(right))
+}
+
+fn same_chain(left: &[ChainNode], right: &[ChainNode]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.task.same_list_data(&right.task) && same_chain(&left.nested, &right.nested)
+        })
+}
+
 /// What a task row displays about the tasks its task blocks.
 pub struct RowBlocking {
     /// The tasks rendered inline ("then" + grayed title) after the
@@ -215,8 +237,31 @@ impl TaskRow {
     /// re-derives its rows when a done-toggle changes which tasks are
     /// visible: a dependant that just stood on its own row leaves this
     /// row's chain and "blocks N" chip before the next reload.
+    ///
+    /// A re-derivation that reaches the same conclusion leaves the row (and
+    /// the list's idea of its height) alone: `LayoutChanged` costs a
+    /// re-measure of every row in the range, and a sync tick must not pay it
+    /// to show the same thing again.
     pub fn set_blocking(&mut self, blocking: RowBlocking, cx: &mut Context<Self>) {
+        if same_blocking(&self.blocking, &blocking) {
+            return;
+        }
         self.blocking = blocking;
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
+        cx.notify();
+    }
+
+    /// Replace the row's subtasks (the inline first title and the expandable
+    /// "N/M" list). Guarded like [`Self::set_blocking`]: the same set of
+    /// subtasks leaves the row alone, and any difference re-measures it, since
+    /// a title that grew can wrap the row onto another line.
+    pub fn set_subtasks(&mut self, subtasks: Vec<TaskWithMeta>, cx: &mut Context<Self>) {
+        if same_tasks(&self.subtasks, &subtasks) {
+            return;
+        }
+        self.subtasks = subtasks;
         cx.emit(TaskRowEvent::LayoutChanged {
             task_id: self.task.id,
         });
@@ -243,6 +288,28 @@ impl TaskRow {
             self.project_tags = project_tags;
             cx.notify();
         }
+    }
+
+    /// Re-point the row at the view it belongs to: the tag path whose tasks
+    /// these are and the labels its tag chips resolve against. The list keeps
+    /// its rows across a reload of the same view, so these are pushed rather
+    /// than passed to a constructor. A new label set can bring chips into (or
+    /// drop them out of) the row, which moves its height.
+    pub fn set_view_context(
+        &mut self,
+        selected_path: Vec<String>,
+        selected_labels: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_path == selected_path && self.selected_labels == selected_labels {
+            return;
+        }
+        self.selected_path = selected_path;
+        self.selected_labels = selected_labels;
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
+        cx.notify();
     }
 
     /// The list view owns which row is expanded (only one at a time); this
@@ -328,6 +395,12 @@ impl TaskRow {
     }
 
     pub fn set_task_data(&mut self, task: TaskWithMeta, cx: &mut Context<Self>) {
+        // A reload that found the same task must not re-lay-out the row:
+        // `LayoutChanged` drops the row's cached height, and a sync tick
+        // reaches every row in the list.
+        if self.task.same_list_data(&task) {
+            return;
+        }
         self.task = task;
         // Reloaded data can add or drop the metadata sub-row, so the row's
         // height is no longer known to the list.
@@ -1040,7 +1113,9 @@ const SUBTASK_SVG: &[u8] = include_bytes!("../../assets/icons/subtask.svg");
 
 #[cfg(test)]
 mod tests {
-    use super::start_day_label;
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn now_secs() -> u64 {
         std::time::SystemTime::now()
@@ -1076,5 +1151,268 @@ mod tests {
         let far = start_day_label(now + 10 * 86400, now).unwrap();
         assert!(!far.starts_with("today"), "got {far}");
         assert!(!far.starts_with("tomorrow"), "got {far}");
+    }
+
+    fn task(id: u64, title: &str) -> TaskWithMeta {
+        TaskWithMeta {
+            task: storage::task::Task {
+                id,
+                title: title.to_string(),
+                description: None,
+                branch_name: None,
+                labels: None,
+                deadline: None,
+                blocked_until: None,
+                importance_factor: 1.0,
+                urgency_factor: 1.0,
+                done: false,
+                completed_at: None,
+                // Fixed, so two fixtures for the same task differ only in what
+                // the test means to move.
+                created_at: jiff::Timestamp::from_second(1_700_000_000).expect("a timestamp"),
+                updated_at: jiff::Timestamp::from_second(1_700_000_000).expect("a timestamp"),
+                parent_id: None,
+                source_task_id: None,
+                deleted_at: None,
+                timezone: None,
+                comments: None,
+                workflow_run_id: None,
+                node_id: None,
+                role: None,
+                spec_covered_at: None,
+                subtasks: storage::prelude::Deferred::default(),
+                parent: storage::prelude::Deferred::default(),
+            },
+            spec: None,
+            direct_tags: Vec::new(),
+            inherited_tags: Vec::new(),
+            inferred_tags: Vec::new(),
+            leaf_tags: Vec::new(),
+            blocked: false,
+            managed_by: None,
+            managed_label: None,
+            managed_mode: None,
+            managed_editable: false,
+            user_modified: false,
+        }
+    }
+
+    fn empty_blocking() -> RowBlocking {
+        RowBlocking {
+            blocked: Vec::new(),
+            blocks: Vec::new(),
+        }
+    }
+
+    struct RelayoutLog;
+
+    /// Records every `LayoutChanged` the row reports. The returned entity owns
+    /// the subscription: dropping it stops the recording.
+    fn log_relayouts(
+        cx: &mut gpui::TestAppContext,
+        row: &Entity<TaskRow>,
+    ) -> (Rc<RefCell<Vec<u64>>>, Entity<RelayoutLog>) {
+        let relayouts: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = relayouts.clone();
+        let row = row.clone();
+        let logger = cx.update(|cx| {
+            cx.new(|cx| {
+                cx.subscribe(
+                    &row,
+                    move |_: &mut RelayoutLog, _: Entity<TaskRow>, event, _| {
+                        if let TaskRowEvent::LayoutChanged { task_id } = event {
+                            log.borrow_mut().push(*task_id);
+                        }
+                    },
+                )
+                .detach();
+                RelayoutLog
+            })
+        });
+        (relayouts, logger)
+    }
+
+    /// A row handed the same task again must not ask to be measured: the list
+    /// caches heights per row and `LayoutChanged` drops the row's cached
+    /// height, so a sync tick that reloads every row would re-lay-out the whole
+    /// visible list to show exactly what it already showed.
+    #[gpui::test]
+    fn a_reload_that_changed_nothing_leaves_the_row_alone(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let store = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            Store::new(
+                storage::TodoStore::new(&config)
+                    .await
+                    .expect("the in-memory store"),
+            )
+        });
+        let row = cx.update(|cx| {
+            cx.new(|cx| {
+                TaskRow::new(
+                    task(1, "Ship it"),
+                    empty_blocking(),
+                    Vec::new(),
+                    store,
+                    Vec::new(),
+                    Vec::new(),
+                    std::collections::HashSet::new(),
+                    false,
+                    false,
+                    cx,
+                )
+            })
+        });
+        let (relayouts, _log) = log_relayouts(cx, &row);
+
+        // A re-read: the sync loads the row again and moves `updated_at`.
+        let mut re_read = task(1, "Ship it");
+        re_read.task.updated_at = jiff::Timestamp::now();
+        cx.update(|cx| row.update(cx, |row, cx| row.set_task_data(re_read, cx)));
+        assert!(
+            relayouts.borrow().is_empty(),
+            "a re-read is not a re-layout"
+        );
+
+        // The same blocking, and the same subtasks in the same order.
+        cx.update(|cx| row.update(cx, |row, cx| row.set_blocking(empty_blocking(), cx)));
+        cx.update(|cx| row.update(cx, |row, cx| row.set_subtasks(Vec::new(), cx)));
+        assert!(relayouts.borrow().is_empty(), "nothing moved");
+
+        // A moved field is a re-layout.
+        cx.update(|cx| row.update(cx, |row, cx| row.set_task_data(task(1, "Ship it now"), cx)));
+        assert_eq!(*relayouts.borrow(), vec![1], "a moved field is a change");
+
+        // So is the row's blocking, and the subtask list growing.
+        relayouts.borrow_mut().clear();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_blocking(
+                    RowBlocking {
+                        blocked: Vec::new(),
+                        blocks: vec![task(2, "blocked")],
+                    },
+                    cx,
+                )
+            })
+        });
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_subtasks(vec![task(2, "subtask")], cx)
+            })
+        });
+        assert_eq!(
+            *relayouts.borrow(),
+            vec![1, 1],
+            "the chain and the subtask list both changed shape"
+        );
+    }
+
+    /// The row's other content setters are guarded the same way, and each one
+    /// that does move asks the list to measure the row again: a subtask title
+    /// that grew can wrap onto another line, and a changed label set can bring
+    /// chips into the row.
+    #[gpui::test]
+    fn a_row_that_moved_asks_to_be_measured_again(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let store = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            Store::new(
+                storage::TodoStore::new(&config)
+                    .await
+                    .expect("the in-memory store"),
+            )
+        });
+        let subtask = task(2, "Subtask");
+        let row = cx.update(|cx| {
+            cx.new(|cx| {
+                TaskRow::new(
+                    task(1, "Ship it"),
+                    empty_blocking(),
+                    vec![subtask.clone()],
+                    store,
+                    Vec::new(),
+                    Vec::new(),
+                    std::collections::HashSet::new(),
+                    false,
+                    true,
+                    cx,
+                )
+            })
+        });
+        let (relayouts, _log) = log_relayouts(cx, &row);
+
+        // The same subtask, re-read: no height to re-measure.
+        let mut re_read = subtask.clone();
+        re_read.task.updated_at = jiff::Timestamp::now();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| row.set_subtasks(vec![re_read.clone()], cx))
+        });
+        assert!(
+            relayouts.borrow().is_empty(),
+            "a re-read subtask changes nothing"
+        );
+
+        // A renamed subtask can wrap: the row re-measures.
+        let mut renamed = subtask.clone();
+        renamed.task.title = "Subtask renamed".to_string();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| row.set_subtasks(vec![renamed.clone()], cx))
+        });
+        assert_eq!(*relayouts.borrow(), vec![1]);
+
+        // A second subtask is a taller row: the list has to measure it too.
+        relayouts.borrow_mut().clear();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_subtasks(vec![renamed, task(3, "Another")], cx)
+            })
+        });
+        assert_eq!(*relayouts.borrow(), vec![1]);
+
+        // Pointing the row at the same view again does nothing; a new label set
+        // changes which chips it draws, so that one re-measures.
+        let labels = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        relayouts.borrow_mut().clear();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_view_context(Vec::new(), labels(&["pack"]), cx)
+            })
+        });
+        assert_eq!(*relayouts.borrow(), vec![1], "the row moved to its view");
+        relayouts.borrow_mut().clear();
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_view_context(Vec::new(), labels(&["pack"]), cx)
+            })
+        });
+        assert!(
+            relayouts.borrow().is_empty(),
+            "the row is already pointed there"
+        );
+        cx.update(|cx| {
+            row.update(cx, |row, cx| {
+                row.set_view_context(Vec::new(), labels(&["pack", "travel"]), cx)
+            })
+        });
+        assert_eq!(*relayouts.borrow(), vec![1], "a new label set can add chips");
     }
 }

@@ -312,6 +312,13 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
   validation) block with an inline reason and a fix action (decision 22).
 - First connect: **import everything, quietly** (decision 32) — paged at 100/page
   in the background, rate-limit aware, filling the task list as it goes.
+- A pass that found nothing **reports nothing**. The poller runs every few
+  seconds while a run is pending, and a reported pass reloads everything synced
+  content appears on — the tag tree, the task list, the selected task. Only a
+  pass whose summary is non-empty (an import, an update, a push, a removal, a
+  new sub-issue link) drives that reload; the card's status line and last-sync
+  time update either way. A manual **Sync now** and the fetch an opened project
+  triggers are full passes, which re-read what is there and so always report.
 
 ### 5.8 UI
 

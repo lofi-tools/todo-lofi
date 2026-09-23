@@ -677,11 +677,20 @@ impl IntegrationsView {
         self._github_sync = Some(cx.spawn(async move |this, cx| match sync.await {
             Ok(summary) => {
                 let message = summary.describe();
+                // A pass that found nothing is the common case: the poller runs
+                // every few seconds while a run is pending. Announcing it would
+                // reload every surface synced content appears on — the tag
+                // tree, the task list, the selected task — for no change, and
+                // the reload costs rows their measured heights. The card still
+                // gets its timestamp, which is inside this same update.
+                let changed = !summary.is_empty();
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
                     this.github_last_sync = Some(jiff::Timestamp::now());
                     this.github_status = Some(format!("GitHub synced — {message}"));
-                    cx.emit(IntegrationsEvent::Changed);
+                    if changed {
+                        cx.emit(IntegrationsEvent::Changed);
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -964,6 +973,10 @@ impl IntegrationsView {
                         summary.sections,
                         summary.tasks_tombstoned,
                     ));
+                    // Unlike the GitHub pass above, this one is a user action
+                    // ("Sync now", or the sync that follows pairing a project),
+                    // so it always reports: the refresh it drives is the answer
+                    // the user asked for, whatever the summary says.
                     cx.emit(IntegrationsEvent::Changed);
                     cx.notify();
                 })

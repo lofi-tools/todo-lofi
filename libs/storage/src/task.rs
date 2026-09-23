@@ -70,6 +70,40 @@ pub struct Task {
     pub parent: Deferred<Option<Task>>,
 }
 impl Task {
+    /// Whether this row and `other` are the same task *as any surface shows
+    /// it*.
+    ///
+    /// Not `PartialEq`, deliberately. `updated_at` does not mean "changed": a
+    /// sync can re-write a linked row on a pass that found nothing new, and a
+    /// merge bumps it for every issue it touches, so comparing it would call
+    /// every refresh a change and defeat the point of asking. `subtasks` and
+    /// `parent` are lazy relation loads, not column data, and carry no equality
+    /// at all. Everything else is compared: a field left out here would go
+    /// stale on screen after a refresh that only moved it.
+    pub fn same_data(&self, other: &Task) -> bool {
+        self.id == other.id
+            && self.title == other.title
+            && self.description == other.description
+            && self.branch_name == other.branch_name
+            && self.labels == other.labels
+            && self.deadline == other.deadline
+            && self.blocked_until == other.blocked_until
+            && self.importance_factor == other.importance_factor
+            && self.urgency_factor == other.urgency_factor
+            && self.done == other.done
+            && self.completed_at == other.completed_at
+            && self.created_at == other.created_at
+            && self.parent_id == other.parent_id
+            && self.source_task_id == other.source_task_id
+            && self.deleted_at == other.deleted_at
+            && self.timezone == other.timezone
+            && self.comments == other.comments
+            && self.workflow_run_id == other.workflow_run_id
+            && self.node_id == other.node_id
+            && self.role == other.role
+            && self.spec_covered_at == other.spec_covered_at
+    }
+
     /// Compute priority score matching the SQL formula in `list_tasks_by_priority`.
     pub fn compute_priority_score(&self, now_secs: u64) -> f64 {
         self.importance_factor
@@ -177,6 +211,31 @@ pub struct TaskWithMeta {
 }
 
 impl TaskWithMeta {
+    /// Whether this load and `other` show the same task: [`Task::same_data`]
+    /// plus the metadata a list query computes alongside the row.
+    pub fn same_data(&self, other: &TaskWithMeta) -> bool {
+        self.same_list_data(other) && self.spec == other.spec
+    }
+
+    /// Whether this load and `other` would draw the same list row:
+    /// [`Self::same_data`] without the spec. A list query never loads the spec
+    /// ("spec surfaces all go through `get_task_with_meta`") and a row does not
+    /// show it, so a list row compared against a full load would read as
+    /// changed every single time.
+    pub fn same_list_data(&self, other: &TaskWithMeta) -> bool {
+        self.task.same_data(&other.task)
+            && self.direct_tags == other.direct_tags
+            && self.inherited_tags == other.inherited_tags
+            && self.inferred_tags == other.inferred_tags
+            && self.leaf_tags == other.leaf_tags
+            && self.blocked == other.blocked
+            && self.managed_by == other.managed_by
+            && self.managed_label == other.managed_label
+            && self.managed_mode == other.managed_mode
+            && self.managed_editable == other.managed_editable
+            && self.user_modified == other.user_modified
+    }
+
     /// True when the task's content fields are locked to the user because an
     /// app owns it and has not made it editable.
     pub fn is_managed_read_only(&self) -> bool {
@@ -860,6 +919,39 @@ mod tests {
             .unwrap()
             .as_secs();
         task.compute_priority_score(now_secs)
+    }
+
+    /// Two loads of the same task are the same load. A sync re-reads every
+    /// linked row on every pass, so `updated_at` moves without anything the
+    /// user can see changing; counting that as a change would redraw (and
+    /// re-measure) the list on every sync tick.
+    #[tokio::test]
+    async fn test_same_data_ignores_a_re_read_but_not_a_moved_field() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let task = store
+            .create_task(Task::create().title("t".to_string()))
+            .await?;
+        let loaded = store.get_task_with_meta(task.id).await?;
+
+        let mut re_read = loaded.clone();
+        re_read.task.updated_at = Timestamp::now();
+        assert!(loaded.same_data(&re_read), "a re-read is the same task");
+
+        let mut renamed = loaded.clone();
+        renamed.task.title = "renamed".to_string();
+        assert!(!loaded.same_data(&renamed), "a moved field is a change");
+
+        // The spec belongs to the details pane, not to a list row: a list query
+        // never loads it, so a row compared against a full load would read as
+        // changed every single time.
+        let mut with_spec = loaded.clone();
+        with_spec.spec = Some("the plan".to_string());
+        assert!(
+            loaded.same_list_data(&with_spec),
+            "a list row does not show the spec"
+        );
+        assert!(!loaded.same_data(&with_spec), "the pane does");
+        Ok(())
     }
 
     #[tokio::test]

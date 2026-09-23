@@ -160,6 +160,10 @@ pub struct TaskListView {
     store: Store,
     selected_path: Vec<String>,
     selected_labels: Vec<String>,
+    /// The path whose tasks the rows currently on screen were built for. A
+    /// reload of the same path keeps the rows; a move to another one rebuilds
+    /// them, since every row is scoped to its tag (chips, sections, tags).
+    loaded_path: Vec<String>,
     selected: Option<TaskWithMeta>,
     /// Previously selected tasks, oldest first. The forward stack only ever
     /// grows via `go_back`, so "next" is meaningless until "prev" is used.
@@ -278,6 +282,7 @@ impl TaskListView {
             store,
             selected_path: Vec::new(),
             selected_labels: Vec::new(),
+            loaded_path: Vec::new(),
             project_tags: std::collections::HashSet::new(),
             _project_tags_fetch: None,
             selected: None,
@@ -736,9 +741,13 @@ impl TaskListView {
         let store = self.store.clone();
         let selected_path = self.selected_path.clone();
         let selected_labels = self.selected_labels.clone();
-        // Drop stale section headers while the new list loads.
-        self.section_order.clear();
-        self.task_section.clear();
+        // Drop stale section headers while the new list loads — but only when
+        // the view is actually changing. On a re-load of the same tag they are
+        // still right, and clearing them makes every sync tick blink.
+        if self.selected_path != self.loaded_path {
+            self.section_order.clear();
+            self.task_section.clear();
+        }
         let fetch = if let Some(last) = selected_path.last().cloned() {
             let path = selected_path.clone();
             cx.spawn(async move |this, cx| {
@@ -1043,12 +1052,42 @@ impl TaskListView {
             &self.subtasks_map,
         );
         self.row_specs = row_specs;
-        let views: Vec<Entity<TaskRow>> = self
-            .row_specs
-            .iter()
-            .map(|spec| self.build_row(spec, selected_path, selected_labels, cx))
-            .collect();
+        // Reloading the same view keeps every row that is still in it, and
+        // hands it the new data (all of which the setters skip when nothing
+        // moved). A sync tick reloads the list for one changed task; building
+        // the rest of the rows again would throw away their measured heights,
+        // their hover state and any open editor.
+        let same_view = self.loaded_path.as_slice() == selected_path;
+        let mut views: Vec<Entity<TaskRow>> = Vec::with_capacity(self.row_specs.len());
+        let selected = self.selected.as_ref().map(|task| task.id);
+        for spec in &self.row_specs {
+            let existing = if same_view {
+                self.task_views
+                    .iter()
+                    .find(|row| row.read(cx).task_id() == spec.task.id)
+                    .cloned()
+            } else {
+                None
+            };
+            let Some(row) = existing else {
+                views.push(self.build_row(spec, selected_path, selected_labels, cx));
+                continue;
+            };
+            let project_tags = self.project_tags.clone();
+            let expanded = self.expanded_subtask == Some(spec.task.id);
+            row.update(cx, |row, cx| {
+                row.set_view_context(selected_path.to_vec(), selected_labels.to_vec(), cx);
+                row.set_task_data(spec.task.clone(), cx);
+                row.set_subtasks(spec.subtasks.clone(), cx);
+                row.set_blocking(row_blocking(spec), cx);
+                row.set_project_tags(project_tags, cx);
+                row.set_selected(Some(spec.task.id) == selected, cx);
+                row.set_subtasks_expanded(expanded, cx);
+            });
+            views.push(row);
+        }
         self.task_views = views;
+        self.loaded_path = selected_path.to_vec();
     }
 
     /// Build the row (and subscribe to its events) for one spec. Rows are
@@ -1377,6 +1416,162 @@ mod tests {
             distant: None,
             show_all: false,
         }
+    }
+
+    /// A list view over an in-memory store holding two tags, so a test can
+    /// reload the view it is on and move to the other one.
+    fn test_view<'a>(
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (Entity<TaskListView>, &'a mut gpui::VisualTestContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("the test's Tokio runtime");
+        let handle = runtime.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle.clone()));
+        let store = handle.block_on(async {
+            let config = storage::StorageConfig {
+                db_uri: "turso::memory:".to_string(),
+            };
+            let mut store = storage::TodoStore::new(&config)
+                .await
+                .expect("the in-memory store");
+            store.create_tag("synced").await.expect("the synced tag");
+            store.create_tag("other").await.expect("another tag");
+            Store::new(store)
+        });
+        cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            let nav_bar = cx.new(|cx| NavBar::new(store.clone(), cx));
+            TaskListView::new(input, store.clone(), nav_bar, window, cx)
+        })
+    }
+
+    fn maps() -> (
+        std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+        std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+        std::collections::HashMap<u64, Vec<TaskWithMeta>>,
+    ) {
+        Default::default()
+    }
+
+    fn row_ids(
+        view: &Entity<TaskListView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Vec<gpui::EntityId> {
+        view.read_with(cx, |view, _| {
+            view.task_views
+                .iter()
+                .map(|row| row.entity_id())
+                .collect()
+        })
+    }
+
+    fn sections(view: &Entity<TaskListView>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+        view.read_with(cx, |view, _| view.section_order.clone())
+    }
+
+    /// Load `tasks` as the rows of `path`, the way a fetch landing does.
+    fn load_rows(
+        view: &Entity<TaskListView>,
+        path: &[String],
+        tasks: Vec<TaskWithMeta>,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        view.update(cx, |view, cx| {
+            view.selected_path = path.to_vec();
+            let (blockers, blocking, subtasks) = maps();
+            view.set_tasks_with_path(
+                tasks,
+                path,
+                &[],
+                blockers,
+                blocking,
+                subtasks,
+                cx,
+            );
+        });
+    }
+
+    /// A reload that found what the view already shows leaves every row in
+    /// place. Rebuilding a row throws away its measured height, its hover state
+    /// and any open editor, so a sync tick that reloads the list would re-lay-
+    /// out the whole visible window to show exactly what it already showed.
+    #[gpui::test]
+    fn a_reload_of_the_same_view_keeps_its_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = test_view(cx);
+        let path = vec!["synced".to_string()];
+        let other = vec!["other".to_string()];
+        let tasks = vec![meta(1, "One"), meta(2, "Two")];
+
+        load_rows(&view, &path, tasks.clone(), cx);
+        let first = row_ids(&view, cx);
+        assert_eq!(first.len(), 2, "one row per task");
+
+        // The same view, reloaded with the same tasks.
+        load_rows(&view, &path, tasks.clone(), cx);
+        assert_eq!(
+            row_ids(&view, cx),
+            first,
+            "a same-view reload keeps the rows it already has"
+        );
+
+        // A task that did move is updated in place, not replaced.
+        let mut renamed = tasks.clone();
+        renamed[0].task.title = "One renamed".to_string();
+        load_rows(&view, &path, renamed, cx);
+        assert_eq!(row_ids(&view, cx), first, "a changed row is reused too");
+        assert_eq!(
+            view.read_with(cx, |view, cx| {
+                view.task_views[0].read_with(cx, |row, _| row.task_data().title.clone())
+            }),
+            "One renamed"
+        );
+
+        // Section headers belong to the view on screen: a re-load of the same
+        // tag keeps them up while the new list loads, and a move to another tag
+        // drops them rather than showing the old tag's groups.
+        view.update(cx, |view, cx| {
+            view.section_order = vec!["Today".to_string()];
+            view.refresh(cx);
+        });
+        assert_eq!(
+            sections(&view, cx),
+            vec!["Today".to_string()],
+            "a same-view reload keeps the headers up"
+        );
+        view.update(cx, |view, cx| {
+            view.selected_path = other;
+            view.refresh(cx);
+        });
+        assert!(
+            sections(&view, cx).is_empty(),
+            "another tag does not show the old tag's sections"
+        );
+    }
+
+    /// Rows are scoped to the tag they were built under (their chips resolve
+    /// against its labels), so a move to another tag builds its own.
+    #[gpui::test]
+    fn another_tag_gets_its_own_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = test_view(cx);
+        let path = vec!["synced".to_string()];
+        let other = vec!["other".to_string()];
+        let tasks = vec![meta(1, "One"), meta(2, "Two")];
+
+        load_rows(&view, &path, tasks.clone(), cx);
+        let first = row_ids(&view, cx);
+
+        load_rows(&view, &other, tasks, cx);
+        let moved = row_ids(&view, cx);
+        assert_eq!(moved.len(), first.len());
+        assert!(
+            moved.iter().all(|id| !first.contains(id)),
+            "the other tag's rows are built for it, not inherited"
+        );
     }
 
     fn gap(above: u64, below: u64) -> ListEntry {

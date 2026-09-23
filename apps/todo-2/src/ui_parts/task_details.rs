@@ -1425,6 +1425,8 @@ impl TaskDetails {
     /// pulled a remote description), so the pane shows what GitHub has.
     /// Skipped while a field editor is open, so in-progress edits are never
     /// clobbered; the emitted event keeps the task list's row in sync too.
+    /// Skipped as well when the reload found the same task, which is the usual
+    /// case on a sync tick: re-taking it would redraw the pane for nothing.
     pub fn refresh_selected(&mut self, cx: &mut Context<Self>) {
         let Some(task_id) = self.selected.as_ref().map(|task| task.id) else {
             return;
@@ -1436,7 +1438,15 @@ impl TaskDetails {
         cx.spawn(async move |this, cx| match reload.await {
             Ok(fresh) => {
                 this.update(cx, |this, cx| {
-                    if this.selected.as_ref().map(|task| task.id) != Some(task_id) {
+                    let Some(current) = this.selected.as_ref().filter(|task| task.id == task_id)
+                    else {
+                        return;
+                    };
+                    // Nothing moved. A sync tick reloads the selected task
+                    // whether or not it touched it, and taking the reload
+                    // anyway would re-render the pane and hand the task list a
+                    // change it would re-measure for.
+                    if current.same_data(&fresh) {
                         return;
                     }
                     this.selected = Some(fresh.clone());

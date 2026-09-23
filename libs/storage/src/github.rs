@@ -3926,9 +3926,22 @@ mod tests {
         reviewers_requested: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
         pull_request_counter: std::sync::Mutex<u64>,
         repos: std::sync::Mutex<Vec<RemoteRepo>>,
+        /// Mirrors GitHub's own `since` filter: an incremental page holds only
+        /// the issues that moved since the cursor, so a test that wants a quiet
+        /// pass sets this and gets an empty one. Off by default, because most
+        /// tests want the issue in hand on every pass.
+        empty_incremental_pages: std::sync::atomic::AtomicBool,
     }
 
     impl FakeGithub {
+        /// Answer every `since`-filtered page with nothing, the way GitHub does
+        /// when no issue moved since the last pass.
+        fn with_quiet_incremental_pages(self) -> Self {
+            self.empty_incremental_pages
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self
+        }
+
         fn with_issue(self, repo: &str, issue: RemoteIssue) -> Self {
             self.issues
                 .lock()
@@ -4043,13 +4056,20 @@ mod tests {
             _etag: Option<&'a str>,
         ) -> impl std::future::Future<Output = anyhow::Result<IssuePage>> + Send + 'a {
             async move {
-                let issues = self
-                    .issues
-                    .lock()
-                    .expect("issues lock")
-                    .get(&format!("{owner}/{repo}"))
-                    .cloned()
-                    .unwrap_or_default();
+                let quiet = since.is_some()
+                    && self
+                        .empty_incremental_pages
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                let issues = if quiet {
+                    Vec::new()
+                } else {
+                    self.issues
+                        .lock()
+                        .expect("issues lock")
+                        .get(&format!("{owner}/{repo}"))
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 // Mirrors the real client: a `since`-filtered page is partial.
                 Ok(IssuePage {
                     issues,
@@ -4588,6 +4608,45 @@ mod tests {
             .sync_github_integration(&fake, integration.id, false)
             .await?;
         assert_eq!(summary.imported, 0);
+        Ok(())
+    }
+
+    /// A pass with nothing to do reports nothing. The app's poller runs this
+    /// every few seconds while a run is pending, and what it reports is what
+    /// the window reloads: an empty pass that described itself as a sync would
+    /// re-lay-out every synced view for no change (and leave the periodic
+    /// re-sort of the list to do it again a moment later).
+    #[tokio::test]
+    async fn a_pass_with_nothing_to_do_is_empty() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("lofi-tools", "todo-lofi").await?;
+        let quiet = || {
+            FakeGithub::default()
+                .with_issue("lofi-tools/todo-lofi", remote(7, "Fix login", "open", 100))
+                .with_quiet_incremental_pages()
+        };
+
+        let imported = storage
+            .sync_github_integration(&quiet(), integration.id, false)
+            .await?;
+        assert_eq!(imported.imported, 1);
+        assert!(!imported.is_empty(), "an import is a change");
+
+        // The next pass asks only for what moved since the cursor, and nothing
+        // did: GitHub answers with an empty page.
+        let idle = storage
+            .sync_github_integration(&quiet(), integration.id, false)
+            .await?;
+        assert!(
+            idle.is_empty(),
+            "a quiet pass reads as nothing happened: {idle:?}"
+        );
+
+        // A full pass re-reads every issue, so it never reads as quiet — which
+        // is what a manual sync and opening a project want.
+        let full = storage
+            .sync_github_integration(&quiet(), integration.id, true)
+            .await?;
+        assert!(!full.is_empty(), "a full pass re-reads what is there");
         Ok(())
     }
 
