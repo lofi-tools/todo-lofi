@@ -1,16 +1,31 @@
 //! The agent profiles a coding run launches.
 //!
-//! The interview phase must not be able to change files, so it runs in its own
-//! opencode process with a read-only profile injected through
-//! `OPENCODE_CONFIG_CONTENT` (see
-//! `docs/spec/coding-interview-readonly-session-spec.md` §5). The coding
-//! phases keep the default `opencode acp` launch and its full tool set.
+//! opencode v1 and v2 are separate integrations. v1 accepts an inline config
+//! through `OPENCODE_CONFIG_CONTENT`, so the interview runs as an app-defined
+//! `todo-interview` agent with a read-only permission profile, switched with
+//! `session/set_mode`.
+//!
+//! v2 ignores `OPENCODE_CONFIG_CONTENT` (and `OPENCODE_CONFIG`) on its ACP
+//! path — verified against v2.0.14: the custom agent never appears in the
+//! session's mode list and the switch fails with `Invalid params: mode not
+//! found: todo-interview`. The v2 ACP server is backed by the long-running
+//! background service, so per-launch environment never reaches config
+//! loading. The v2 integration therefore uses only built-in agents: `plan`
+//! (edits denied, switched with `session/set_config_option` on the `mode`
+//! config id) for the interview, `build` for coding.
+//!
+//! Both integrations follow the same tool strategy per step: attach one MCP
+//! server carrying exactly the tools the step may use — the narrow interview
+//! set for the interview step, the wider set for the coding step — and run
+//! one fresh agent session per step; run launches never resume a stored
+//! session (see `start_run_session`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use acp_client::schema::{HttpHeader, McpServer, McpServerHttp};
-use acp_client::{AcpError, AgentServer, SpawnSpec};
+use acp_client::{AcpError, AgentServer, OpencodeVersion, SpawnSpec};
 
 /// Name of the agent the app defines in the injected config.
 pub const INTERVIEW_AGENT_NAME: &str = "todo-interview";
@@ -120,6 +135,36 @@ fn quote(value: &str) -> String {
     serde_json::Value::String(value.to_string()).to_string()
 }
 
+/// The `mode` config id the v2 ACP server expects in
+/// `session/set_config_option` (its `session/set_mode` answers `mode not
+/// found` for anything but the built-ins it serves).
+pub const V2_MODE_CONFIG_ID: &str = "mode";
+/// The built-in v2 agent the interview step runs as: edits denied, so the
+/// model cannot change files. No config injection involved — v2 ignores
+/// `OPENCODE_CONFIG_CONTENT` on its ACP path (verified against v2.0.14),
+/// and only built-in agents appear in the session's mode list.
+pub const V2_INTERVIEW_AGENT_NAME: &str = "plan";
+/// The built-in v2 agent the coding step runs as: the full tool set.
+pub const V2_CODING_AGENT_NAME: &str = "build";
+
+/// Pick the run's agent integrations for the installed opencode generation:
+/// v1 gets the injected `todo-interview` profile (switched with
+/// `session/set_mode`), v2 gets the built-in `plan`/`build` pair (switched
+/// with `session/set_config_option` on the `mode` config id). Unparseable
+/// versions stay v1, preserving the behaviour the app shipped with.
+pub fn select_run_agents() -> (Arc<dyn AgentServer>, Arc<dyn AgentServer>) {
+    match acp_client::detect_opencode_version("opencode") {
+        OpencodeVersion::V2 => (
+            Arc::new(OpenCodeV2InterviewAgent),
+            Arc::new(OpenCodeV2CodingAgent),
+        ),
+        OpencodeVersion::V1 => (
+            Arc::new(OpenCodeInterviewAgent),
+            Arc::new(acp_client::OpenCodeAgent),
+        ),
+    }
+}
+
 /// The read-only interview process: `opencode acp` with the profile injected
 /// through the environment. Its own agent id means its persisted session cannot
 /// be confused with the coding profile's.
@@ -163,6 +208,69 @@ impl AgentServer for OpenCodeInterviewAgent {
     }
 }
 
+/// The v2 interview process: a plain `opencode acp` launch whose session is
+/// switched to the built-in `plan` agent (edits denied) with
+/// `session/set_config_option` (`mode`). No config is injected: v2 ignores
+/// `OPENCODE_CONFIG_CONTENT` on its ACP path, so a custom agent would fail
+/// the switch with `mode not found`. Its own agent id means its persisted
+/// session cannot be confused with the coding profile's.
+pub struct OpenCodeV2InterviewAgent;
+
+/// The v2 coding process: a plain `opencode acp` launch switched to the
+/// built-in `build` agent with the full tool set.
+pub struct OpenCodeV2CodingAgent;
+
+impl AgentServer for OpenCodeV2InterviewAgent {
+    fn id(&self) -> &'static str {
+        "opencode-interview-v2"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "opencode v2 (interview, plan)"
+    }
+
+    fn program(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn args(&self) -> &'static [&'static str] {
+        &["acp"]
+    }
+
+    fn session_mode(&self) -> Option<&'static str> {
+        Some(V2_INTERVIEW_AGENT_NAME)
+    }
+
+    fn opencode_version(&self) -> OpencodeVersion {
+        OpencodeVersion::V2
+    }
+}
+
+impl AgentServer for OpenCodeV2CodingAgent {
+    fn id(&self) -> &'static str {
+        "opencode-coding-v2"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "opencode v2 (coding, build)"
+    }
+
+    fn program(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn args(&self) -> &'static [&'static str] {
+        &["acp"]
+    }
+
+    fn session_mode(&self) -> Option<&'static str> {
+        Some(V2_CODING_AGENT_NAME)
+    }
+
+    fn opencode_version(&self) -> OpencodeVersion {
+        OpencodeVersion::V2
+    }
+}
 /// The app's loopback MCP endpoint plus the bearer token of one session.
 /// A token is minted per launch and bound to the task that launch is for, so a
 /// tool call can be attributed — and resolved — to the session that made it
@@ -245,6 +353,38 @@ mod tests {
         // created without a mode would otherwise run as `build`.
         let config: serde_json::Value = serde_json::from_str(injected).expect("valid JSON");
         assert_eq!(config["default_agent"], INTERVIEW_AGENT_NAME);
+    }
+
+    #[test]
+    fn the_v2_agents_use_only_builtin_modes_and_inject_no_config() {
+        // v2 ignores `OPENCODE_CONFIG_CONTENT` on its ACP path, so the only
+        // switchable agents are the built-ins the session advertises
+        // (`build`, `plan`): anything else fails with `mode not found`.
+        let interview = OpenCodeV2InterviewAgent;
+        assert_eq!(interview.opencode_version(), OpencodeVersion::V2);
+        assert_eq!(interview.session_mode(), Some(V2_INTERVIEW_AGENT_NAME));
+        assert_eq!(V2_INTERVIEW_AGENT_NAME, "plan");
+        assert_eq!(interview.id(), "opencode-interview-v2");
+        assert_eq!(interview.args(), &["acp"]);
+        let spec = interview
+            .spawn_spec(Path::new("/tmp"))
+            .expect("opencode resolves");
+        assert_eq!(spec.args, vec!["acp"]);
+        assert!(
+            !spec.env.contains_key(OPENCODE_CONFIG_CONTENT),
+            "v2 must not inject a config the server ignores"
+        );
+
+        let coding = OpenCodeV2CodingAgent;
+        assert_eq!(coding.opencode_version(), OpencodeVersion::V2);
+        assert_eq!(coding.session_mode(), Some(V2_CODING_AGENT_NAME));
+        assert_eq!(V2_CODING_AGENT_NAME, "build");
+        assert_eq!(coding.id(), "opencode-coding-v2");
+        assert!(!coding
+            .spawn_spec(Path::new("/tmp"))
+            .expect("opencode resolves")
+            .env
+            .contains_key(OPENCODE_CONFIG_CONTENT));
     }
 
     #[test]

@@ -271,6 +271,10 @@ impl AgentServer for EnvAgent {
         self.inner.session_mode()
     }
 
+    fn opencode_version(&self) -> acp_client::OpencodeVersion {
+        self.inner.opencode_version()
+    }
+
     fn spawn_spec(&self, cwd: &std::path::Path) -> Result<SpawnSpec, AcpError> {
         let mut spec = self.inner.spawn_spec(cwd)?;
         spec.env.insert(self.name.to_string(), self.value.clone());
@@ -1013,6 +1017,7 @@ impl AgentPane {
         // The agent this profile must run under, applied to the session below
         // before the launch task hands it over.
         let session_mode = agent.session_mode().map(str::to_string);
+        let session_mode_version = agent.opencode_version();
         let store = self.session_store.clone();
         let endpoint = entry.mcp.clone();
 
@@ -1106,11 +1111,31 @@ impl AgentPane {
             // returns, so the switch cannot be raced, and a refusal fails the
             // launch instead of running the phase under the agent's own
             // default (for the interview: `build`, with write tools).
-            if let Some(mode) = session_mode.as_deref() {
-                connection
-                    .requester
-                    .set_mode(&session_id, SessionModeId::new(mode))
-                    .await?;
+            // opencode v1 switches with `session/set_mode`; v2 removed that
+            // method and selects the agent through the `mode` config option,
+            // so a v1 switch against v2 fails with `mode not found`.
+            // Owned: the switch runs inside a spawned task.
+            if let Some(mode) = session_mode.clone() {
+                match session_mode_version {
+                    acp_client::OpencodeVersion::V2 => {
+                        connection
+                            .requester
+                            .set_config_option(
+                                &session_id,
+                                SessionConfigId::new(
+                                    crate::coding_agent::V2_MODE_CONFIG_ID,
+                                ),
+                                SessionConfigOptionValue::value_id(mode),
+                            )
+                            .await?;
+                    }
+                    acp_client::OpencodeVersion::V1 => {
+                        connection
+                            .requester
+                            .set_mode(&session_id, SessionModeId::new(mode))
+                            .await?;
+                    }
+                }
             }
             let record = StoredSession {
                 project_path: project_path.clone(),
@@ -2134,14 +2159,21 @@ impl AgentPane {
         };
         let request = self.projects.get(&tag_name).and_then(|entry| entry.live()).and_then(
             |live| {
-                live.session_id
-                    .clone()
-                    .map(|session_id| (live.connection.requester.clone(), session_id))
+                live.session_id.clone().map(|session_id| {
+                    (
+                        live.connection.requester.clone(),
+                        session_id,
+                        self.projects
+                            .get(&tag_name)
+                            .map(|entry| entry.agent.opencode_version()),
+                    )
+                })
             },
         );
-        let Some((requester, session_id)) = request else {
+        let Some((requester, session_id, version)) = request else {
             return;
         };
+        let version = version.unwrap_or(acp_client::OpencodeVersion::V1);
         self.overlay = None;
         // `session/set_mode` answers with an empty result and an agent need
         // not announce the change, so the mode is taken here, at the click: a
@@ -2151,9 +2183,23 @@ impl AgentPane {
         let previous = self.show_mode(&tag_name, &mode_id);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = requester
-                .set_mode(&session_id, SessionModeId::new(mode_id.clone()))
-                .await;
+            // v2 removed `session/set_mode`: the agent is selected through
+            // the `mode` config option instead.
+            let result = match version {
+                acp_client::OpencodeVersion::V2 => requester
+                    .set_config_option(
+                        &session_id,
+                        SessionConfigId::new(crate::coding_agent::V2_MODE_CONFIG_ID),
+                        SessionConfigOptionValue::value_id(mode_id.clone()),
+                    )
+                    .await
+                    .map(|_| ()),
+                acp_client::OpencodeVersion::V1 => {
+                    requester
+                        .set_mode(&session_id, SessionModeId::new(mode_id.clone()))
+                        .await
+                }
+            };
             this.update(cx, |pane, cx| {
                 if let Err(error) = result {
                     let message = format!("Could not change the mode: {error}");

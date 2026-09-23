@@ -274,10 +274,16 @@ impl Layout {
             profile,
             task_id,
         };
-        let agent: std::sync::Arc<dyn acp_client::AgentServer> = if interview {
-            std::sync::Arc::new(coding_agent::OpenCodeInterviewAgent)
-        } else {
-            std::sync::Arc::new(acp_client::OpenCodeAgent)
+        let agent: std::sync::Arc<dyn acp_client::AgentServer> = {
+            // v1 and v2 are separate integrations (config shape and mode
+            // switch both changed). One step is one fresh session
+            // (see `start_run_session`).
+            let (interview_agent, coding_agent) = coding_agent::select_run_agents();
+            if interview {
+                interview_agent
+            } else {
+                coding_agent
+            }
         };
         let replaced = self.agent_pane.update(cx, |pane, cx| {
             pane.start_run_session(project, agent, Some(endpoint), cx)

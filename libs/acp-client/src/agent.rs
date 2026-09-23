@@ -47,12 +47,18 @@ pub trait AgentServer: Send + Sync + 'static {
         None
     }
 
+    /// Which opencode generation this integration targets. The pane uses it
+    /// to pick the mode switch: v1 `session/set_mode`, v2
+    /// `session/set_config_option` with the `mode` config id.
+    fn opencode_version(&self) -> OpencodeVersion {
+        OpencodeVersion::V1
+    }
+
     /// Resolve the launch for `cwd`, failing when the executable is missing.
     fn spawn_spec(&self, cwd: &Path) -> Result<SpawnSpec, AcpError> {
-        let program =
-            resolve_program(self.program()).ok_or_else(|| AcpError::AgentNotFound {
-                program: self.program().to_string(),
-            })?;
+        let program = resolve_program(self.program()).ok_or_else(|| AcpError::AgentNotFound {
+            program: self.program().to_string(),
+        })?;
         Ok(SpawnSpec {
             program,
             args: self.args().iter().map(|arg| arg.to_string()).collect(),
@@ -91,6 +97,47 @@ impl AgentServer for OpenCodeAgent {
     }
 }
 
+/// Which opencode generation an [`AgentServer`] targets. v1 and v2 differ in
+/// config shape (`agent`+`permission`+`prompt` vs `agents`+`permissions`+
+/// `system`), in MCP placement (`mcp.<name>` vs `mcp.servers.<name>`), and in
+/// the mode switch (`session/set_mode` vs `session/set_config_option` with
+/// the `mode` config id). Sending a v1 switch to a v2 server fails with
+/// `Invalid params: mode not found: <name>`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpencodeVersion {
+    /// opencode 1.x: `session/set_mode` selects the agent.
+    #[default]
+    V1,
+    /// opencode 2.x: `session/set_config_option` (`mode`) selects the agent.
+    V2,
+}
+
+impl OpencodeVersion {
+    /// Parse the major version out of `opencode --version` output, which
+    /// looks like `opencode v2.0.6` or `2.0.6`. Anything unparseable is v1,
+    /// preserving the behaviour the app shipped with.
+    pub fn parse_version_output(output: &str) -> Self {
+        let digits = output
+            .split(|char: char| !char.is_ascii_digit())
+            .filter(|part| !part.is_empty());
+        match digits.clone().next().map(str::parse::<u64>) {
+            Some(Ok(2..)) => OpencodeVersion::V2,
+            _ => OpencodeVersion::V1,
+        }
+    }
+}
+
+/// Run `<program> --version` and report its generation. Missing binaries and
+/// unreadable output fall back to [`OpencodeVersion::V1`].
+pub fn detect_opencode_version(program: &str) -> OpencodeVersion {
+    let output = std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|result| String::from_utf8(result.stdout).ok())
+        .unwrap_or_default();
+    OpencodeVersion::parse_version_output(&output)
+}
 /// Locate `program` on `PATH`. A path containing a separator is used as given.
 pub fn resolve_program(program: &str) -> Option<PathBuf> {
     if program.contains(std::path::MAIN_SEPARATOR) {
@@ -118,5 +165,35 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_output_selects_the_integration() {
+        assert_eq!(
+            OpencodeVersion::parse_version_output("opencode v2.0.6"),
+            OpencodeVersion::V2
+        );
+        assert_eq!(
+            OpencodeVersion::parse_version_output("2.1.0"),
+            OpencodeVersion::V2
+        );
+        assert_eq!(
+            OpencodeVersion::parse_version_output("opencode v1.9.3"),
+            OpencodeVersion::V1
+        );
+        // Unparseable output keeps the v1 behaviour the app shipped with.
+        assert_eq!(
+            OpencodeVersion::parse_version_output(""),
+            OpencodeVersion::V1
+        );
+        assert_eq!(
+            OpencodeVersion::parse_version_output("not an agent"),
+            OpencodeVersion::V1
+        );
     }
 }
