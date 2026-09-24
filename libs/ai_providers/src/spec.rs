@@ -18,7 +18,11 @@ pub struct ProviderSpec {
 
 impl ProviderSpec {
     /// A provider with no models and no pacing limits.
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             base_url: base_url.into(),

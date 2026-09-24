@@ -11,22 +11,35 @@
 //! the agent (agent-cli backs it with SQLite), and [`NullStore`] /
 //! [`InMemoryStore`] ship here so the crate works with no database at all.
 
+pub mod benchmarks;
 pub mod catalog;
+pub mod catalog_store;
 pub mod discovery;
 pub mod failure;
+pub mod families;
 pub mod key;
 pub mod pacing;
+pub mod providers;
 pub mod quirks;
 pub mod routing;
 pub mod spec;
 pub mod store;
 pub mod transport;
 
+pub use benchmarks::{
+    Benchmark, BenchmarkScore, BenchmarkSource, CodingRank, RankConfig, RankTerm, rank_models,
+};
 pub use catalog::{Catalog, ModelParams};
-pub use discovery::fetch_models;
+pub use catalog_store::{
+    CatalogStoreHandle, InMemoryStore as InMemoryCatalog, ModelCatalogStore, ModelRecord,
+    NullStore as NullCatalog, UpsertSummary, refresh_models,
+};
+pub use discovery::{DiscoveredModel, fetch_discovered, fetch_models};
 pub use failure::{FailureKind, classify, classify_message, classify_status};
+pub use families::{ModelFamily, ModelVersion, family_for_model_id, infer_model_version};
 pub use key::{resolve_api_key, resolve_value_spec};
 pub use pacing::{ProviderLimiter, RateLimitHint};
+pub use providers::{DiscoveryShape, ProviderKind, provider_kind};
 pub use quirks::{
     Family, ResponseFormat, Segment, SegmentKind, classify_delta, family_by_name, family_for_model,
     format_for, parse_sse, reasoning_field_for,

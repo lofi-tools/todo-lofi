@@ -143,7 +143,8 @@ impl PacedProvider {
     /// recomputable spec (`!command` / `env:VAR`): a literal key would resolve
     /// to the same value and the retry would just repeat the failure.
     fn rebuild(&self) -> anyhow::Result<()> {
-        let recomputable = self.api_key_spec.starts_with('!') || self.api_key_spec.starts_with("env:");
+        let recomputable =
+            self.api_key_spec.starts_with('!') || self.api_key_spec.starts_with("env:");
         if !recomputable {
             anyhow::bail!("api key is a literal; nothing to re-resolve");
         }
@@ -206,9 +207,7 @@ impl PacedProvider {
             });
         }
         let until = self.cooldowns.until(&self.key())?;
-        let remaining = until
-            .duration_since(SystemTime::now())
-            .unwrap_or_default();
+        let remaining = until.duration_since(SystemTime::now()).unwrap_or_default();
         Some(CerseiError::RateLimit {
             retry_after: Some(remaining.max(Duration::from_secs(1))),
             message: format!("{} is cooling down", self.key()),

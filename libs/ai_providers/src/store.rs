@@ -8,10 +8,10 @@
 use crate::failure::FailureKind;
 use crate::spec::ModelKey;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use parking_lot::Mutex;
 
 /// How an attempt ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -458,7 +458,10 @@ mod tests {
         assert!(!registry.is_disabled("groq"));
         registry.disable_provider("groq", "no credit");
         assert!(registry.is_disabled("groq"));
-        assert_eq!(registry.disabled_reason("groq").as_deref(), Some("no credit"));
+        assert_eq!(
+            registry.disabled_reason("groq").as_deref(),
+            Some("no credit")
+        );
     }
 
     #[test]

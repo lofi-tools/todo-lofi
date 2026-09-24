@@ -353,7 +353,10 @@ mod tests {
             async move { l.acquire().await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!second.is_finished(), "cap of 1 must block the second request");
+        assert!(
+            !second.is_finished(),
+            "cap of 1 must block the second request"
+        );
         drop(first);
         let _second = second.await.unwrap();
         assert_eq!(l.pressure(), 1.0);
@@ -408,7 +411,10 @@ mod tests {
         // Our own request errors and cancels do not cool anything down.
         assert_eq!(l.cooldown_for(&FailureKind::ContextOverflow), None);
         assert_eq!(l.cooldown_for(&FailureKind::Cancelled), None);
-        assert_eq!(l.cooldown_for(&FailureKind::RequestRejected { status: 400 }), None);
+        assert_eq!(
+            l.cooldown_for(&FailureKind::RequestRejected { status: 400 }),
+            None
+        );
         assert_eq!(l.cooldown_for(&FailureKind::QuotaExhausted), None);
         assert_eq!(l.cooldown_for(&FailureKind::Auth), None);
     }

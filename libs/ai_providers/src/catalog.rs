@@ -100,11 +100,7 @@ impl Catalog {
     pub fn entries(&self) -> Vec<(String, String)> {
         self.providers
             .iter()
-            .flat_map(|p| {
-                p.models
-                    .iter()
-                    .map(move |m| (p.name.clone(), m.id.clone()))
-            })
+            .flat_map(|p| p.models.iter().map(move |m| (p.name.clone(), m.id.clone())))
             .collect()
     }
 
@@ -141,8 +137,9 @@ impl Catalog {
                 .join(", ");
             anyhow::anyhow!("unknown provider '{provider}'; known providers: {known}")
         })?;
-        let api_key = resolve_api_key(&p.api_key)
-            .map_err(|error| error.context(format!("resolving api_key for provider '{provider}'")))?;
+        let api_key = resolve_api_key(&p.api_key).map_err(|error| {
+            error.context(format!("resolving api_key for provider '{provider}'"))
+        })?;
         let found = find_model(p, provider, model);
         Ok(Resolved {
             provider: p.name.clone(),
@@ -168,9 +165,9 @@ impl Catalog {
         reasoning: cersei::provider::ReasoningField,
     ) -> anyhow::Result<Box<dyn cersei::provider::Provider>> {
         let resolved = self.resolve(provider, model)?;
-        let spec = self.provider(provider).ok_or_else(|| {
-            anyhow::anyhow!("unknown provider '{provider}'")
-        })?;
+        let spec = self
+            .provider(provider)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider '{provider}'"))?;
         let inner = ConfiguredProvider::build(&resolved, reasoning)?;
         Ok(Box::new(PacedProvider::new(
             resolved,
@@ -261,8 +258,8 @@ mod tests {
 
     fn catalog() -> Catalog {
         let specs = vec![
-            ProviderSpec::new("groq", "https://api.groq.com/openai/v1", "env:GROQ_KEY").with_models(
-                [
+            ProviderSpec::new("groq", "https://api.groq.com/openai/v1", "env:GROQ_KEY")
+                .with_models([
                     ModelSpec {
                         family: Some("plain".into()),
                         max_tokens: Some(2048),
@@ -270,8 +267,7 @@ mod tests {
                         ..ModelSpec::bare("groq/compound")
                     },
                     ModelSpec::bare("openai/gpt-oss-120b"),
-                ],
-            ),
+                ]),
             ProviderSpec::new("combo-land", "", "")
                 .with_models([ModelSpec::bare("a"), ModelSpec::bare("b")]),
         ];
@@ -282,7 +278,10 @@ mod tests {
     fn lookups_keep_configured_order_and_the_double_prefix_quirk() {
         let catalog = catalog();
         assert_eq!(catalog.providers().len(), 2);
-        assert_eq!(catalog.provider("groq").unwrap().base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(
+            catalog.provider("groq").unwrap().base_url,
+            "https://api.groq.com/openai/v1"
+        );
         assert!(catalog.provider("nope").is_none());
         assert_eq!(
             catalog.model_ids("groq"),
@@ -305,7 +304,10 @@ mod tests {
             Catalog::display_model_id("groq", "groq/compound"),
             "groq/compound"
         );
-        assert_eq!(Catalog::display_model_id("groq", "compound"), "groq/compound");
+        assert_eq!(
+            Catalog::display_model_id("groq", "compound"),
+            "groq/compound"
+        );
     }
 
     #[test]
@@ -334,10 +336,7 @@ mod tests {
         let catalog = catalog();
         let params = catalog.request_params("groq", "compound");
         assert_eq!(params.max_tokens, Some(2048));
-        assert_eq!(
-            catalog.request_params("groq", "unknown").max_tokens,
-            None
-        );
+        assert_eq!(catalog.request_params("groq", "unknown").max_tokens, None);
     }
 
     #[test]
@@ -350,7 +349,10 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &other));
         // An unknown provider gets a default (unlimited) limiter rather than
         // an error: pacing must never be a reason a request cannot be tried.
-        assert_eq!(catalog.limiter("ghost").effective_interval(), std::time::Duration::ZERO);
+        assert_eq!(
+            catalog.limiter("ghost").effective_interval(),
+            std::time::Duration::ZERO
+        );
     }
 
     #[tokio::test]
@@ -358,8 +360,10 @@ mod tests {
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("GROQ_KEY", "sk-test") };
         let catalog = Catalog::new(
-            vec![ProviderSpec::new("groq", "https://example.invalid/v1", "env:GROQ_KEY")
-                .with_models([ModelSpec::bare("m")])],
+            vec![
+                ProviderSpec::new("groq", "https://example.invalid/v1", "env:GROQ_KEY")
+                    .with_models([ModelSpec::bare("m")]),
+            ],
             Arc::new(InMemoryStore::new()),
         );
         let provider = catalog
@@ -371,6 +375,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(provider.name(), "groq");
-        assert!(catalog.provider_impl("nope", "m", Arc::new(crate::store::AttemptScope::anonymous()), cersei::provider::ReasoningField::Auto).is_err());
+        assert!(
+            catalog
+                .provider_impl(
+                    "nope",
+                    "m",
+                    Arc::new(crate::store::AttemptScope::anonymous()),
+                    cersei::provider::ReasoningField::Auto
+                )
+                .is_err()
+        );
     }
 }

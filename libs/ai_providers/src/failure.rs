@@ -120,7 +120,9 @@ impl FailureKind {
 impl std::fmt::Display for FailureKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FailureKind::RateLimited { retry_after: Some(d) } => {
+            FailureKind::RateLimited {
+                retry_after: Some(d),
+            } => {
                 write!(f, "rate limited (retry in {}s)", d.as_secs())
             }
             FailureKind::RateLimited { retry_after: None } => write!(f, "rate limited"),
@@ -141,7 +143,10 @@ impl std::fmt::Display for FailureKind {
 /// Classify a typed provider error.
 pub fn classify(error: &CerseiError) -> FailureKind {
     match error {
-        CerseiError::RateLimit { retry_after, message } => {
+        CerseiError::RateLimit {
+            retry_after,
+            message,
+        } => {
             if looks_like_quota(message) {
                 FailureKind::QuotaExhausted
             } else {
@@ -150,9 +155,7 @@ pub fn classify(error: &CerseiError) -> FailureKind {
                 }
             }
         }
-        CerseiError::ProviderStatus { status, message } => {
-            classify_status(*status, message)
-        }
+        CerseiError::ProviderStatus { status, message } => classify_status(*status, message),
         CerseiError::Auth(message) => {
             if looks_like_quota(message) {
                 FailureKind::QuotaExhausted
@@ -214,18 +217,35 @@ pub fn classify_message(message: &str) -> FailureKind {
     if has(&["rate limit", "ratelimit", "429", "too many requests"]) {
         return FailureKind::RateLimited { retry_after: None };
     }
-    if has(&["context length", "context_length", "maximum context", "too many tokens", "token limit"]) {
+    if has(&[
+        "context length",
+        "context_length",
+        "maximum context",
+        "too many tokens",
+        "token limit",
+    ]) {
         return FailureKind::ContextOverflow;
     }
-    if has(&["model not found", "unknown model", "no such model", "does not exist", "model_not_found"])
-        && has(&["model"])
+    if has(&[
+        "model not found",
+        "unknown model",
+        "no such model",
+        "does not exist",
+        "model_not_found",
+    ]) && has(&["model"])
     {
         return FailureKind::ModelNotFound;
     }
     if has(&["timeout", "timed out", "deadline"]) {
         return FailureKind::Timeout;
     }
-    if has(&["network", "connection", "dns", "reset by peer", "broken pipe"]) {
+    if has(&[
+        "network",
+        "connection",
+        "dns",
+        "reset by peer",
+        "broken pipe",
+    ]) {
         return FailureKind::Network;
     }
     if has(&["overloaded", "unavailable", "capacity", "503", "529"]) {
@@ -306,11 +326,19 @@ mod tests {
             FailureKind::ContextOverflow
         );
         assert_eq!(
-            classify(&CerseiError::from_http_status(400, None, "unknown model: x")),
+            classify(&CerseiError::from_http_status(
+                400,
+                None,
+                "unknown model: x"
+            )),
             FailureKind::ModelNotFound
         );
         assert_eq!(
-            classify(&CerseiError::from_http_status(400, None, "content policy violation")),
+            classify(&CerseiError::from_http_status(
+                400,
+                None,
+                "content policy violation"
+            )),
             FailureKind::RequestRejected { status: 400 }
         );
 
@@ -337,7 +365,10 @@ mod tests {
             classify_message("HTTP 429: too many requests"),
             FailureKind::RateLimited { retry_after: None }
         );
-        assert_eq!(classify_message("the request timed out"), FailureKind::Timeout);
+        assert_eq!(
+            classify_message("the request timed out"),
+            FailureKind::Timeout
+        );
         assert_eq!(
             classify_message("connection reset by peer"),
             FailureKind::Network
@@ -350,7 +381,10 @@ mod tests {
             classify_message("model not found: stealth/nope"),
             FailureKind::ModelNotFound
         );
-        assert_eq!(classify_message("operation cancelled"), FailureKind::Cancelled);
+        assert_eq!(
+            classify_message("operation cancelled"),
+            FailureKind::Cancelled
+        );
         assert!(matches!(
             classify_message("something odd happened"),
             FailureKind::Unknown { .. }
@@ -374,7 +408,11 @@ mod tests {
                 message: String::new(),
             },
         ] {
-            assert_eq!(FailureKind::from_tag(kind.tag()).as_ref(), Some(&kind), "{kind:?}");
+            assert_eq!(
+                FailureKind::from_tag(kind.tag()).as_ref(),
+                Some(&kind),
+                "{kind:?}"
+            );
         }
         assert!(FailureKind::from_tag("nope").is_none());
     }

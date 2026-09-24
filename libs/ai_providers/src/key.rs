@@ -49,11 +49,17 @@ mod tests {
 
     #[test]
     fn resolves_literals_and_commands_and_env() {
-        assert_eq!(resolve_value_spec("literal-key", "api_key").unwrap(), "literal-key");
+        assert_eq!(
+            resolve_value_spec("literal-key", "api_key").unwrap(),
+            "literal-key"
+        );
         assert_eq!(resolve_api_key("!echo test-key").unwrap(), "test-key");
         // SAFETY: test-only mutation of a dedicated env var.
         unsafe { std::env::set_var("AI_PROVIDERS_KEY_TEST", "env-key") };
-        assert_eq!(resolve_api_key("env:AI_PROVIDERS_KEY_TEST").unwrap(), "env-key");
+        assert_eq!(
+            resolve_api_key("env:AI_PROVIDERS_KEY_TEST").unwrap(),
+            "env-key"
+        );
     }
 
     #[test]

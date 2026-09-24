@@ -417,7 +417,10 @@ mod tests {
         let ours_rate = router.score_attempts(&many_ours, now).0;
         let theirs_rate = router.score_attempts(&many_theirs, now).0;
         assert!(ours_rate <= PRIOR_FAILURE_RATE, "{ours_rate}");
-        assert!(theirs_rate > ours_rate + 0.5, "{theirs_rate} vs {ours_rate}");
+        assert!(
+            theirs_rate > ours_rate + 0.5,
+            "{theirs_rate} vs {ours_rate}"
+        );
     }
 
     #[test]
@@ -584,10 +587,7 @@ mod tests {
         struct FailingStore;
         #[async_trait::async_trait]
         impl crate::store::TelemetryStore for FailingStore {
-            async fn record_attempt(
-                &self,
-                _attempt: &AttemptRecord,
-            ) -> anyhow::Result<()> {
+            async fn record_attempt(&self, _attempt: &AttemptRecord) -> anyhow::Result<()> {
                 anyhow::bail!("database is on fire")
             }
             async fn set_cooldown(
@@ -598,10 +598,7 @@ mod tests {
             ) -> anyhow::Result<()> {
                 anyhow::bail!("database is on fire")
             }
-            async fn cooldown_until(
-                &self,
-                _key: &ModelKey,
-            ) -> anyhow::Result<Option<SystemTime>> {
+            async fn cooldown_until(&self, _key: &ModelKey) -> anyhow::Result<Option<SystemTime>> {
                 anyhow::bail!("database is on fire")
             }
             async fn attempts_since(
@@ -628,7 +625,10 @@ mod tests {
         let decision = router
             .choose(
                 None,
-                &[Candidate::new(first.clone(), 0.0), Candidate::new(second, 0.0)],
+                &[
+                    Candidate::new(first.clone(), 0.0),
+                    Candidate::new(second, 0.0),
+                ],
             )
             .await
             .unwrap();
