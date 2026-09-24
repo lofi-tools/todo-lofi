@@ -59,6 +59,7 @@ describe, so building it first would mean building it against a stub.
 | 35 | 9 | **No local-merge escape hatch** once a remote resolves to github.com — the PR step is absolute there. Local merge survives only where no such remote exists (decision 17) |
 | 36 | 9 | Generated PRs follow the **`AGENTS.md` PR-hygiene convention**: imperative title, no conventional-commit prefix, no trailing punctuation, and a final `Release Notes:` section |
 | 37 | 10 | Sub-issues ↔ subtasks are **synced both ways**: a local subtask in a repo-bound tree opens its own issue and is attached under its parent's issue (the parent's chain is opened first when none of it is on GitHub yet), and a **pulled sub-issue becomes a local subtask**, un-nested when the relationship is removed on GitHub. The relationship is tracked in the child's link, one repo's issues only |
+| 38 | 10 | Labels are **mirrored (add *and* remove), not additive**: adding a local tag creates the missing label and puts it on the issue; removing the tag takes that label off again, but only for labels the app **paired** with a local tag (`external_tag_links`, `source_kind = 'label'`, `external_id = <owner>/<repo>#label:<label>`) — a label somebody else added is never taken off. The push runs **in the background at the tag edit**, and every push that cannot be delivered is **stored in `pending_sync_ops` with the labels it wanted** (error + attempt count) so a later pass can replay it; the replay pass itself is out of scope here |
 
 ## 3. Current state (verified in this repo)
 
@@ -194,7 +195,7 @@ branch-creation guard refuses a dirty tree; see §6.2).
 | Repository (`owner/repo`) | Project tag, namespaced `github/<owner>/<repo>`, with `tag_settings.sync_target` set | binding |
 | Issue | Task (title, body → `description`) | two-way |
 | Issue state (`open`/`closed`) | `done` / `completed_at` | two-way |
-| Labels | Tags, nested under the issue's project tag | two-way, additive (decision 27) |
+| Labels | Tags, nested under the issue's project tag | two-way, mirrored (decisions 27, 38) |
 | Comments | `tasks.comments` (one-way import) | GitHub → local |
 | Assignees, milestone, author, `html_url` | Metadata chips (stored in the link's `field_state`, rendered read-only) | GitHub → local |
 | Sub-issue relationship | `tasks.parent_id` (the child's link also records the parent issue) | two-way, GitHub owns the relationship (§5.9) |
@@ -277,12 +278,27 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
   local; no GitHub connection means no work at all.
 - Pushed: `title`, `body`, `state` (open/closed), labels.
 - Not pushed: assignees, milestone, comment threads.
-- **Additive labels** (decision 27): adding a local tag creates the label if
-  missing (`POST /repos/{owner}/{repo}/labels`) and adds it to the issue —
-  including when the issue is opened, so a task captured with a project subtag
-  shows its label at once; the app never deletes or renames label objects, and
-  never removes a label it did not add. (Whether the app may *remove* a label it
-  previously added when the tag is removed locally is an open item — §10.)
+- **Labels are mirrored** (decisions 27, 38): adding a local tag creates the
+  label if missing (`POST /repos/{owner}/{repo}/labels`) and puts it on the
+  issue — including when the issue is opened, so a task captured with a project
+  subtag shows its label at once — and removing the tag takes that label off
+  again. The app never deletes or renames label *objects* (decision 27), and it
+  only removes a label it paired with a local tag, so a label somebody else
+  added is never taken off by a push racing the pull that would have imported
+  it.
+- **A tag edit pushes at once, in the background.** Saving tags starts the
+  mirror without holding up the editor; a purely local task, or one in a tag
+  that binds no repo, costs no API call. A push that cannot be delivered — no
+  credentials, permission refused, offline — records the labels it wanted in
+  `pending_sync_ops` (one row per issue, with error and attempt count, a repeat
+  failure updating the row rather than queueing a second copy) so a later pass
+  can replay it once the reason is gone. **Nothing replays them yet**: the retry
+  pass is a follow-up task.
+- **The label ↔ tag pairing is stored** whenever a label is imported *or*
+  written by the app: `external_tag_links` with `source_kind = 'label'` and
+  `external_id = <owner>/<repo>#label:<label>`. The pairing is what lets a later
+  pull find the tag again — including after the tag is renamed or when a tag of
+  the same name exists — and what marks a label as the app's to remove.
 - **Labels are the project's subtags** (both directions). A remote label is
   imported as a tag under the issue's project tag (the user's own tag is reused
   when one is named after the label, otherwise it is created as the per-repo
@@ -294,8 +310,8 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
   under its parent's issue, opening the parent's chain first (§5.9).
 - Workflow-step tasks (`workflow_run_id` set) never sync, matching today's rule
   — and neither does anything under one, since run content is the app's.
-- All calls are `PATCH`/`POST` on the specific fields only — no full-object
-  round trips that could clobber fields we do not model.
+- All calls are `PATCH`/`POST`/`DELETE` on the specific fields only — no
+  full-object round trips that could clobber fields we do not model.
 
 ### 5.6 Close, delete, reopen
 
@@ -592,7 +608,29 @@ CREATE TABLE IF NOT EXISTS run_pull_requests (
     UNIQUE (integration_id, owner, repo, number)
 );
 CREATE INDEX IF NOT EXISTS idx_run_pull_requests_state ON run_pull_requests(state);
+
+-- one row per undelivered push (§5.5), keyed by target so a repeat failure
+-- updates the row rather than queueing a second copy of the same intent
+CREATE TABLE IF NOT EXISTS pending_sync_ops (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider       TEXT NOT NULL,
+    integration_id INTEGER NOT NULL,
+    external_id    TEXT NOT NULL,
+    task_id        INTEGER,
+    kind           TEXT NOT NULL,          -- 'labels' today
+    payload        TEXT NOT NULL,          -- JSON: { "labels": ["bug"] }
+    error          TEXT NOT NULL,
+    attempts       INTEGER NOT NULL DEFAULT 1,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE (provider, integration_id, external_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_sync_ops_integration
+    ON pending_sync_ops(integration_id);
 ```
+
+The deferred-push table is not part of `0023_*`: the numbering moved on while
+this half was being built, so it lands as `0027_pending_sync_ops.sql`.
 
 `base_branch` on `workflow_runs` becomes the primary repo's base for backwards
 compatibility; the per-repo truth lives in `run_worktrees`.
@@ -613,6 +651,7 @@ compatibility; the per-repo truth lives in `run_worktrees`.
 | Sub-issue relationship removed on GitHub | The local task is un-nested (kept, never deleted or tombstoned) |
 | No remote resolves to github.com (none, or other hosts only) | Merge step keeps today's local merge (decision 17) |
 | Push rejected (non-fast-forward, no credentials) | Block with git's stderr; no retry loop |
+| Label push refused, offline, or no credentials | The tag edit stands; the wanted labels are recorded in `pending_sync_ops` for a later replay (no executor yet, §5.5) |
 | Several remotes, only one of them GitHub (this repo: `github` + `gitlab`) | The GitHub remote is the only one used for push/PR; other hosts are never pushed to or mirrored |
 | Reviewer request rejected (not a collaborator, no access) | PR creation still succeeds; the failure is recorded as a note on the step, never a blocked step |
 | PR already exists for the branch | Adopt it: store the number/URL and continue instead of erroring |
@@ -661,8 +700,9 @@ corrected in §5.3 and §6.5.
 
 **Product**
 
-1. **Label removal nuance:** may the app remove a label it previously added when
-   the tag is removed locally (§5.5), or is the label purely additive?
+1. ~~**Label removal nuance:** may the app remove a label it previously added
+   when the tag is removed locally (§5.5), or is the label purely additive?~~
+   **Resolved — decision 38:** removal mirrors, for labels the app paired.
 2. **Comments import window:** all comments, last N, or excluding bots? And
    should the PR link be posted as an issue comment when the PR opens?
 3. **Do local edits push while the issue is closed?**
@@ -697,6 +737,12 @@ Everything runs against fakes; **no live network in CI** (decision 29).
   resurrected.
 - Binding: explicit sync target, auto-detected remote persisted, undetectable
   remote left alone, repo-invisible (404) reason.
+- Labels (§5.5): a tag added locally creating its label remotely, the removal
+  taking it off again (and leaving a label somebody else added alone), the label
+  ↔ tag pairing outranking a name match, a refused push leaving a
+  `pending_sync_ops` row with the labels it wanted (attempts counted, cleared by
+  the push that goes through), and the no-credentials path recording the intent
+  rather than dropping it.
 - `integration_sync_state` cursor behaviour and idempotent re-sync.
 - Sub-issues (§5.9): a subtask opening its parent's chain and attaching once, a
   repeat push making no call, a pulled sub-issue nesting locally, an un-parented
@@ -738,6 +784,7 @@ Everything runs against fakes; **no live network in CI** (decision 29).
 1. **Auth**: `github_auth.rs` (device flow) + `github.json` storage + the
    integration card (connect/disconnect/account), tests with a fake HTTP layer.
 2. **Storage**: migration `0023`, `field_state`, `integration_sync_state`,
+   `pending_sync_ops` (`0027`),
    link/identity helpers, and the sync engine (pull → resolve → push →
    watermark) with the full test table from §11.
 3. **Task-side mapping**: repo → namespaced project tag, binding via tag

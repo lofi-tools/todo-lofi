@@ -167,6 +167,65 @@ fn push_github_capture_in_background(store: &Arc<StoreLock>, task_id: u64) {
     });
 }
 
+/// Mirror a task's tags onto the labels of every issue it is linked to
+/// (§5.5), now rather than at the next pass: adding a tag puts its label on
+/// the issue (opening the repo's label object if it has none of that name),
+/// and removing a tag takes the label off again. Without GitHub credentials
+/// the wanted labels are stored as a pending sync op instead, so the edit is
+/// delivered once the user connects — or adds a personal token — and no
+/// failure is lost. Per-link failures are recorded by the storage layer, so
+/// this only logs.
+async fn push_github_labels(store: &mut TodoStore, task_id: u64) {
+    if !crate::github_auth::has_usable_credentials() {
+        match store
+            .record_pending_task_labels(task_id, "no GitHub credentials")
+            .await
+        {
+            Ok(0) => {}
+            Ok(recorded) => tracing::info!(
+                task_id,
+                recorded,
+                "label sync deferred until GitHub is connected"
+            ),
+            Err(error) => tracing::error!(task_id, %error, "could not record pending label sync"),
+        }
+        return;
+    }
+    let token = match crate::github_auth::access_token().await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::error!(task_id, %error, "GitHub label push skipped: no usable token");
+            return;
+        }
+    };
+    let client = storage::GithubHttpClient::new(token);
+    match store.push_task_labels(&client, task_id).await {
+        Ok(mirror) if mirror.added > 0 || mirror.removed > 0 => tracing::info!(
+            task_id,
+            added = mirror.added,
+            removed = mirror.removed,
+            "labels mirrored to GitHub"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            task_id,
+            %error,
+            "GitHub label push failed; the wanted labels are stored for retry"
+        ),
+    }
+}
+
+/// Run the label mirror for `task_id` on the shared runtime, detached from the
+/// caller's task: the local tag edit is already saved, so the tag editor never
+/// waits on the GitHub round trip it may need (including a token refresh).
+fn push_github_labels_in_background(store: &Arc<StoreLock>, task_id: u64) {
+    let store = store.clone();
+    tokio::spawn(async move {
+        let mut s = store.lock().await;
+        push_github_labels(&mut s, task_id).await;
+    });
+}
+
 /// Push a field delta to every Todoist task linked to `task_id`. No links
 /// (or no token) → no-op, so purely local tasks never touch the network.
 /// Must run on the Tokio runtime. A push failure fails the whole edit so
@@ -1280,6 +1339,11 @@ impl Store {
             if !captured.is_empty() {
                 push_captured_task_in_background(&store, task_id);
             }
+            drop(s);
+            // A tag edit is a label edit on every issue the task is linked to;
+            // the push is detached so the editor returns as soon as the local
+            // write lands.
+            push_github_labels_in_background(&store, task_id);
             Ok(())
         })
     }

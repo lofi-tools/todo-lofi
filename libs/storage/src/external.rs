@@ -36,6 +36,22 @@ pub struct TaskLink {
     pub external_updated_at: Option<jiff::Timestamp>,
 }
 
+/// A push the app could not deliver, kept so it can be replayed once the
+/// reason it failed is gone — a missing permission, say, fixed by a personal
+/// token. `payload` is JSON shaped by `kind`, and `external_id` names the
+/// remote object the push targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSyncOp {
+    pub provider: String,
+    pub integration_id: u64,
+    pub external_id: String,
+    pub task_id: Option<u64>,
+    pub kind: String,
+    pub payload: String,
+    pub error: String,
+    pub attempts: u32,
+}
+
 /// Remote tag link.
 #[derive(Debug, Clone)]
 pub struct TagLink {
@@ -392,6 +408,40 @@ impl TodoStore {
         Ok(())
     }
 
+    /// Record that a local tag stands in for a remote *label*. Same table as
+    /// `link_tag`, but without its capture side effect: a remote project or
+    /// section is a place tasks are typed into, while a label is a property a
+    /// task carries, so binding an imported label must not make every task
+    /// that happens to wear it a new remote item (§5.5).
+    pub async fn link_label_tag(
+        &mut self,
+        integration_id: u64,
+        external_id: &str,
+        tag_id: u64,
+        namespaced: bool,
+    ) -> QueryResult<()> {
+        toasty::sql::statement(
+            r#"INSERT INTO external_tag_links
+               (integration_id, external_id, tag_id, source_kind, namespaced)
+               VALUES (?1, ?2, ?3, 'label', ?4)
+               ON CONFLICT (integration_id, external_id)
+               DO UPDATE SET tag_id = excluded.tag_id,
+                             source_kind = excluded.source_kind,
+                             namespaced = excluded.namespaced"#,
+        )
+        .bind(integration_id as i64)
+        .bind(external_id)
+        .bind(tag_id as i64)
+        .bind(i64::from(namespaced))
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "link external label",
+        })?;
+        Ok(())
+    }
+
+    /// The local tag standing in for a remote project, section or label.
     pub async fn tag_link(
         &mut self,
         integration_id: u64,
@@ -604,6 +654,123 @@ impl TodoStore {
             .exec(&mut self.db)
             .await
             .context(crate::error::UpdateTaskSnafu { id })?;
+        Ok(())
+    }
+
+    // -- pending pushes ---------------------------------------------------
+
+    /// Remember a push that could not be delivered, so a later pass (or a
+    /// later credential) can replay it. One row per target: a repeat failure
+    /// replaces the payload and counts the attempt rather than queueing a
+    /// second copy of the same intent.
+    pub async fn record_pending_sync_op(&mut self, op: &PendingSyncOp) -> QueryResult<()> {
+        let now = jiff::Timestamp::now().to_string();
+        toasty::sql::statement(
+            r#"INSERT INTO pending_sync_ops
+               (provider, integration_id, external_id, task_id, kind, payload, error,
+                attempts, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)
+               ON CONFLICT (provider, integration_id, external_id, kind)
+               DO UPDATE SET payload = excluded.payload,
+                             error = excluded.error,
+                             task_id = excluded.task_id,
+                             attempts = pending_sync_ops.attempts + 1,
+                             updated_at = excluded.updated_at"#,
+        )
+        .bind(&op.provider)
+        .bind(op.integration_id as i64)
+        .bind(&op.external_id)
+        .bind(op.task_id.map(|id| id as i64))
+        .bind(&op.kind)
+        .bind(&op.payload)
+        .bind(&op.error)
+        .bind(now)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "record pending sync op",
+        })?;
+        Ok(())
+    }
+
+    /// Every undelivered push of one provider, oldest first, so a retry pass
+    /// replays them in the order they were wanted.
+    pub async fn pending_sync_ops(&mut self, provider: &str) -> QueryResult<Vec<PendingSyncOp>> {
+        let rows = toasty::sql::query(
+            r#"SELECT integration_id, external_id, task_id, kind, payload, error, attempts
+               FROM pending_sync_ops WHERE provider = ?1 ORDER BY id"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::I64,
+        ])
+        .bind(provider)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "list pending sync ops",
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| match row {
+                toasty::stmt::Value::Record(record) => Some(PendingSyncOp {
+                    provider: provider.to_string(),
+                    integration_id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
+                    external_id: record
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    task_id: record.get(2).and_then(|v| v.to_i64()).map(|id| id as u64),
+                    kind: record
+                        .get(3)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    payload: record
+                        .get(4)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    error: record
+                        .get(5)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    attempts: record.get(6).and_then(|v| v.to_i64()).unwrap_or(0) as u32,
+                }),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Drop a pending push once it has gone through, so a later retry pass
+    /// does not repeat it.
+    pub async fn clear_pending_sync_op(
+        &mut self,
+        provider: &str,
+        integration_id: u64,
+        external_id: &str,
+        kind: &str,
+    ) -> QueryResult<()> {
+        toasty::sql::statement(
+            r#"DELETE FROM pending_sync_ops
+               WHERE provider = ?1 AND integration_id = ?2 AND external_id = ?3 AND kind = ?4"#,
+        )
+        .bind(provider)
+        .bind(integration_id as i64)
+        .bind(external_id)
+        .bind(kind)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::QueryTagsSnafu {
+            context: "clear pending sync op",
+        })?;
         Ok(())
     }
 }

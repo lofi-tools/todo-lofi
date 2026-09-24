@@ -60,6 +60,54 @@ pub fn parse_issue_external_id(external_id: &str) -> Option<IssueRef> {
     })
 }
 
+/// The external id of a *label* mapping (`external_tag_links`): a label's
+/// name is only unique within one repo, so the repo qualifies it the way an
+/// issue id does. The `label:` prefix keeps the two apart in one table, since
+/// `owner/repo#12` is an issue and `owner/repo#label:12` a label.
+pub fn label_external_id(owner: &str, repo: &str, label: &str) -> String {
+    format!("{owner}/{repo}#label:{label}")
+}
+
+/// The `pending_sync_ops.kind` of a label push.
+pub const LABEL_PUSH_KIND: &str = "labels";
+
+/// What one label push did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LabelMirror {
+    /// Labels added to the issue, creating the label object when the repo had
+    /// none of that name.
+    pub added: usize,
+    /// Labels taken off the issue because the task no longer carries the tag.
+    pub removed: usize,
+    /// The labels the issue holds afterwards, as far as this push knows: the
+    /// link's new snapshot, so the next pull does not read the app's own write
+    /// as a remote edit (§5.4).
+    pub labels: Vec<String>,
+}
+
+/// The pending-sync record for a label push that failed, so a later pass can
+/// replay it — for instance once a personal token grants the permission the
+/// first attempt lacked.
+pub fn pending_label_push(
+    provider: &str,
+    integration_id: u64,
+    external_id: &str,
+    task_id: u64,
+    labels: &[String],
+    error: &str,
+) -> crate::PendingSyncOp {
+    crate::PendingSyncOp {
+        provider: provider.to_string(),
+        integration_id,
+        external_id: external_id.to_string(),
+        task_id: Some(task_id),
+        kind: LABEL_PUSH_KIND.to_string(),
+        payload: serde_json::json!({ "labels": labels }).to_string(),
+        error: error.to_string(),
+        attempts: 0,
+    }
+}
+
 /// The remote values last written to a local task, used to tell a remote edit
 /// apart from a value the app itself pushed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1525,6 +1573,16 @@ pub trait GithubClient {
         labels: &'a [String],
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
 
+    /// Take one label off an issue. The label object itself stays on the repo
+    /// (decision 27): only the issue stops carrying it.
+    fn remove_issue_label<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        label: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a;
+
     fn add_issue_assignees<'a>(
         &'a self,
         owner: &'a str,
@@ -1651,6 +1709,21 @@ fn truncate(text: &str, limit: usize) -> String {
     }
     let mut out: String = text.chars().take(limit).collect();
     out.push('…');
+    out
+}
+
+/// Percent-encode one path segment. Label names are user data and may hold
+/// spaces, `#`, or `/`, none of which may reach the URL unencoded.
+fn encode_path_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if unreserved {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
     out
 }
 
@@ -2014,6 +2087,48 @@ impl GithubClient for GithubHttpClient {
         }
     }
 
+    fn remove_issue_label<'a>(
+        &'a self,
+        owner: &'a str,
+        repo: &'a str,
+        number: u64,
+        label: &'a str,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            // A label name is a path segment here, so spaces and slashes are
+            // encoded rather than allowed to reshape the URL.
+            let path = format!(
+                "/repos/{owner}/{repo}/issues/{number}/labels/{}",
+                encode_path_segment(label)
+            );
+            let response = self
+                .request(reqwest::Method::DELETE, &path)
+                .send()
+                .await
+                .map_err(|e| {
+                    anyhow::Error::new(SyncFailure::Transient {
+                        message: format!("Could not reach GitHub: {e}"),
+                        retry_after: None,
+                    })
+                })?;
+            if response.status().is_success() {
+                return Ok(());
+            }
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            // The label is already off the issue: that is the state we wanted,
+            // and GitHub reports it as a missing sub-resource.
+            if status == 404 {
+                return Ok(());
+            }
+            Err(anyhow::Error::new(classify_status(
+                status,
+                &truncate(&body, 300),
+                None,
+            )))
+        }
+    }
+
     fn add_issue_assignees<'a>(
         &'a self,
         owner: &'a str,
@@ -2199,7 +2314,11 @@ pub struct GithubSyncSummary {
     pub imported: usize,
     pub updated: usize,
     pub pushed: usize,
+    /// Labels created on the repo, because the task carried a tag the issue
+    /// did not have a label for.
     pub labels: usize,
+    /// Labels taken off an issue because the task no longer carries the tag.
+    pub labels_removed: usize,
     pub comments: usize,
     pub tombstoned: usize,
     /// Sub-issue relationships newly mirrored onto the local tree.
@@ -2213,6 +2332,7 @@ impl GithubSyncSummary {
         self.updated += other.updated;
         self.pushed += other.pushed;
         self.labels += other.labels;
+        self.labels_removed += other.labels_removed;
         self.comments += other.comments;
         self.tombstoned += other.tombstoned;
         self.nested += other.nested;
@@ -2229,11 +2349,12 @@ impl GithubSyncSummary {
     /// One line for the card's status row.
     pub fn describe(&self) -> String {
         format!(
-            "{} repo(s): {} imported, {} updated, {} pushed, {} comments, {} sub-issues, {} removed.",
+            "{} repo(s): {} imported, {} updated, {} pushed, {} labels off, {} comments, {} sub-issues, {} removed.",
             self.repos,
             self.imported,
             self.updated,
             self.pushed,
+            self.labels_removed,
             self.comments,
             self.nested,
             self.tombstoned
@@ -2688,11 +2809,86 @@ impl TodoStore {
         )))
     }
 
-    /// Add the task's local tags to an issue it is linked to, and fold them
-    /// into the link's snapshot so the next pull does not read the app's own
-    /// push as a remote edit. Best-effort by design: a failure is logged by
-    /// the caller and retried by the next merge, because the issue already
-    /// exists by the time this runs.
+    /// Make one issue's labels say exactly what the task's tags say (§5.5):
+    /// add what the task carries and the issue does not — creating the label
+    /// object on the repo when it is missing — and take off what the user has
+    /// untagged locally since the last push.
+    ///
+    /// Removal is deliberately narrow. Only labels in `synced_labels` (the
+    /// set this app last left on the issue) are candidates, and only when a
+    /// mapping says the app is the one that put the pair there, so a label
+    /// somebody else added is never removed by a push racing the pull that
+    /// would have imported it. Every label this writes is mapped to the tag
+    /// that wanted it, which is what makes it a candidate later and what lets
+    /// the next pull find the tag by the pairing rather than by name. The
+    /// label *objects* are never deleted or renamed (decision 27); only the
+    /// issue stops carrying them.
+    async fn mirror_issue_labels<C: GithubClient>(
+        &mut self,
+        client: &C,
+        integration_id: u64,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        desired: &[(String, u64)],
+        synced_labels: &[String],
+    ) -> anyhow::Result<LabelMirror> {
+        let to_add: Vec<(String, u64)> = desired
+            .iter()
+            .filter(|(label, _)| !synced_labels.iter().any(|known| known == label))
+            .cloned()
+            .collect();
+        let added = to_add.len();
+        let mut to_remove: Vec<String> = Vec::new();
+        for label in synced_labels {
+            if desired.iter().any(|(wanted, _)| wanted == label) {
+                continue;
+            }
+            let external_id = label_external_id(owner, repo, label);
+            if self.tag_link(integration_id, &external_id).await?.is_some() {
+                to_remove.push(label.clone());
+            }
+        }
+        for (label, _) in &to_add {
+            client.ensure_label(owner, repo, label).await?;
+        }
+        if !to_add.is_empty() {
+            let names: Vec<String> = to_add.iter().map(|(label, _)| label.clone()).collect();
+            client.add_issue_labels(owner, repo, number, &names).await?;
+            for (label, tag_id) in &to_add {
+                let external_id = label_external_id(owner, repo, label);
+                self.link_label_tag(integration_id, &external_id, *tag_id, false)
+                    .await?;
+            }
+        }
+        for label in &to_remove {
+            client
+                .remove_issue_label(owner, repo, number, label)
+                .await?;
+        }
+        let mut labels: Vec<String> = synced_labels
+            .iter()
+            .filter(|label| !to_remove.iter().any(|removed| removed == *label))
+            .cloned()
+            .collect();
+        for (label, _) in &to_add {
+            if !labels.contains(label) {
+                labels.push(label.clone());
+            }
+        }
+        Ok(LabelMirror {
+            added,
+            removed: to_remove.len(),
+            labels,
+        })
+    }
+
+    /// Copy a freshly opened issue's labels from the task that captured it,
+    /// and fold them into the link's snapshot so the next pull does not read
+    /// the app's own push as a remote edit. There is nothing to remove on an
+    /// issue the app has just created. Best-effort by design: a failure is
+    /// logged by the caller and retried by the next merge, because the issue
+    /// already exists by the time this runs.
     async fn push_local_issue_labels<C: GithubClient>(
         &mut self,
         client: &C,
@@ -2703,24 +2899,156 @@ impl TodoStore {
         repo: &str,
         number: u64,
     ) -> anyhow::Result<()> {
-        let labels = self.local_issue_labels(task_id, None).await?;
+        let labels = self.local_label_tags(task_id, None).await?;
         if labels.is_empty() {
             return Ok(());
         }
-        for label in &labels {
-            client.ensure_label(owner, repo, label).await?;
-        }
-        client
-            .add_issue_labels(owner, repo, number, &labels)
+        let mirror = self
+            .mirror_issue_labels(client, integration_id, owner, repo, number, &labels, &[])
             .await?;
         let Some(link) = self.issue_link(integration_id, external_id).await? else {
             return Ok(());
         };
         let mut state = link.state;
-        state.remote.labels = labels;
+        state.remote.labels = mirror.labels;
         self.save_issue_field_state(integration_id, external_id, &state)
             .await?;
         Ok(())
+    }
+
+    /// The label push a task's tags add up to, once per issue the task is
+    /// linked to, each label with the tag that carries it. Empty for a task
+    /// with no issue link, no repo-bound project above it, or a tombstoned
+    /// link — none of which may be pushed to.
+    pub async fn label_push_targets(
+        &mut self,
+        task_id: u64,
+    ) -> QueryResult<Vec<(u64, String, Vec<(String, u64)>)>> {
+        let Some(bound) = self.bound_repo_for_task(task_id).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for link in self.task_links_for_task(task_id).await? {
+            if link.integration_id != bound.integration_id
+                || parse_issue_external_id(&link.external_id).is_none()
+            {
+                continue;
+            }
+            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+                continue;
+            };
+            if stored.state.tombstoned {
+                continue;
+            }
+            let labels = self.local_label_tags(task_id, Some(bound.tag_id)).await?;
+            out.push((link.integration_id, link.external_id, labels));
+        }
+        Ok(out)
+    }
+
+    /// Record the label pushes a tag edit wanted but could not even attempt,
+    /// because there is no usable GitHub credential: the intent survives the
+    /// moment, so a later pass — after the user connects again, or adds a
+    /// personal token — can deliver it. Returns how many links were recorded.
+    pub async fn record_pending_task_labels(
+        &mut self,
+        task_id: u64,
+        reason: &str,
+    ) -> QueryResult<usize> {
+        let mut recorded = 0;
+        for (integration_id, external_id, labels) in self.label_push_targets(task_id).await? {
+            let provider = self
+                .integration_provider(integration_id)
+                .await?
+                .unwrap_or_else(|| "github".to_string());
+            let names: Vec<String> = labels.into_iter().map(|(label, _)| label).collect();
+            self.record_pending_sync_op(&pending_label_push(
+                &provider,
+                integration_id,
+                &external_id,
+                task_id,
+                &names,
+                reason,
+            ))
+            .await?;
+            recorded += 1;
+        }
+        Ok(recorded)
+    }
+
+    /// Mirror a task's tags onto the issue it is linked to, now rather than at
+    /// the next pass: what a tag edit in the details pane wants (§5.5).
+    ///
+    /// A link whose push fails is recorded as a pending sync op — with the
+    /// labels it wanted — so it can be replayed once the reason is gone (a
+    /// personal token granting the missing permission, say), and the other
+    /// links are still tried: one repo's refusal must not hold up another's.
+    pub async fn push_task_labels<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<LabelMirror> {
+        let mut out = LabelMirror::default();
+        let mut failure: Option<anyhow::Error> = None;
+        for (integration_id, external_id, desired) in self.label_push_targets(task_id).await? {
+            let provider = self
+                .integration_provider(integration_id)
+                .await?
+                .unwrap_or_else(|| "github".to_string());
+            let Some(issue) = parse_issue_external_id(&external_id) else {
+                continue;
+            };
+            let Some(stored) = self.issue_link(integration_id, &external_id).await? else {
+                continue;
+            };
+            let mirrored = self
+                .mirror_issue_labels(
+                    client,
+                    integration_id,
+                    &issue.owner,
+                    &issue.repo,
+                    issue.number,
+                    &desired,
+                    &stored.state.remote.labels,
+                )
+                .await;
+            match mirrored {
+                Ok(mirror) => {
+                    let mut state = stored.state.clone();
+                    state.remote.labels = mirror.labels.clone();
+                    self.save_issue_field_state(integration_id, &external_id, &state)
+                        .await?;
+                    self.clear_pending_sync_op(
+                        &provider,
+                        integration_id,
+                        &external_id,
+                        LABEL_PUSH_KIND,
+                    )
+                    .await?;
+                    out.added += mirror.added;
+                    out.removed += mirror.removed;
+                    out.labels = mirror.labels;
+                }
+                Err(error) => {
+                    let names: Vec<String> =
+                        desired.iter().map(|(label, _)| label.clone()).collect();
+                    self.record_pending_sync_op(&pending_label_push(
+                        &provider,
+                        integration_id,
+                        &external_id,
+                        task_id,
+                        &names,
+                        &error.to_string(),
+                    ))
+                    .await?;
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(out),
+        }
     }
 
     /// Open the issue for a task captured by a repo-bound project tag, so a
@@ -3373,9 +3701,13 @@ impl TodoStore {
     ) -> anyhow::Result<()> {
         let task = self.get_task(link.task_id).await?;
         let snapshot = link.state.remote.clone();
-        let local_labels = self
-            .local_issue_labels(link.task_id, Some(bound.tag_id))
+        let local_label_tags = self
+            .local_label_tags(link.task_id, Some(bound.tag_id))
             .await?;
+        let local_labels: Vec<String> = local_label_tags
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect();
 
         let title_changed = task.title != snapshot.title;
         let body_changed = task.description.clone().unwrap_or_default() != snapshot.body;
@@ -3427,12 +3759,34 @@ impl TodoStore {
                 .context(crate::error::UpdateTaskSnafu { id: link.task_id })?;
         }
 
-        // Labels are additive on both sides (decision 27): a remote label
-        // becomes a local tag, and never disappears from either side.
+        // Importing is additive (decision 27): a remote label becomes a local
+        // tag, and a tag the user made with that name is reused. What the
+        // labels *are* on the issue is the mirror of the task's tags, though,
+        // so the push below can take a label off as well as put one on (§5.5).
         self.assign_issue_labels(link.task_id, bound, &issue.labels)
             .await?;
 
         let mut snapshot_after = remote.clone();
+        if keep_local.contains(&"labels") {
+            // The removal candidates are the labels the last push left, not
+            // the issue's current set: a label added on GitHub since then has
+            // just been imported as a tag, and taking it off again would be
+            // the app fighting a change it has not shown the user yet.
+            let mirror = self
+                .mirror_issue_labels(
+                    client,
+                    bound.integration_id,
+                    &bound.owner,
+                    &bound.repo,
+                    issue.number,
+                    &local_label_tags,
+                    &snapshot.labels,
+                )
+                .await?;
+            summary.labels += mirror.added;
+            summary.labels_removed += mirror.removed;
+            snapshot_after.labels = mirror.labels;
+        }
         if !keep_local.is_empty() {
             let mut patch = IssuePatch::default();
             if keep_local.contains(&"title") {
@@ -3444,40 +3798,27 @@ impl TodoStore {
             if keep_local.contains(&"state") {
                 patch.state = Some(if task.done { "closed" } else { "open" }.to_string());
             }
-            if keep_local.contains(&"labels") {
-                let mut union = issue.labels.clone();
-                for label in &local_labels {
-                    if !union.iter().any(|existing| existing == label) {
-                        union.push(label.clone());
-                    }
+            // Labels never ride in the patch: setting the whole list would
+            // clobber a label somebody else added, while the mirror above
+            // changes exactly what it means to.
+            if !patch.is_empty() {
+                client
+                    .update_issue(&bound.owner, &bound.repo, issue.number, &patch)
+                    .await?;
+                // The pushed values are now the remote's, so the snapshot takes
+                // them and the local stamps are spent: the app's own write must
+                // not come back as a remote edit (§5.4).
+                if let Some(title) = patch.title {
+                    snapshot_after.title = title;
                 }
-                for label in &local_labels {
-                    if !issue.labels.iter().any(|existing| existing == label) {
-                        client
-                            .ensure_label(&bound.owner, &bound.repo, label)
-                            .await?;
-                        summary.labels += 1;
-                    }
+                if let Some(body) = patch.body {
+                    snapshot_after.body = body;
                 }
-                patch.labels = Some(union.clone());
-                snapshot_after.labels = union;
+                if let Some(state) = patch.state {
+                    snapshot_after.state = state;
+                }
+                summary.pushed += 1;
             }
-            client
-                .update_issue(&bound.owner, &bound.repo, issue.number, &patch)
-                .await?;
-            // The pushed values are now the remote's, so the snapshot takes
-            // them and the local stamps are spent: the app's own write must
-            // not come back as a remote edit (§5.4).
-            if let Some(title) = patch.title {
-                snapshot_after.title = title;
-            }
-            if let Some(body) = patch.body {
-                snapshot_after.body = body;
-            }
-            if let Some(state) = patch.state {
-                snapshot_after.state = state;
-            }
-            summary.pushed += 1;
         }
 
         let mut state = link.state.clone();
@@ -3533,16 +3874,17 @@ impl TodoStore {
         Ok(())
     }
 
-    /// Tags on the task that stand in for issue labels: everything except the
-    /// repo binding itself and other project tags. `exclude_tag_id` is the
-    /// bound repo tag when the caller has it; tags with a sync target are left
-    /// out either way.
-    async fn local_issue_labels(
+    /// Tags on the task that stand in for issue labels, each with the tag that
+    /// carries it: everything except the repo binding itself and other project
+    /// tags. `exclude_tag_id` is the bound repo tag when the caller has it;
+    /// tags with a sync target are left out either way. The pairing is what
+    /// lets a push record which tag a label it writes belongs to.
+    async fn local_label_tags(
         &mut self,
         task_id: u64,
         exclude_tag_id: Option<u64>,
-    ) -> QueryResult<Vec<String>> {
-        let mut out = Vec::new();
+    ) -> QueryResult<Vec<(String, u64)>> {
+        let mut out: Vec<(String, u64)> = Vec::new();
         for tag in self.get_direct_task_tags(task_id).await? {
             if Some(tag.id) == exclude_tag_id {
                 continue;
@@ -3551,8 +3893,8 @@ impl TodoStore {
                 continue;
             }
             let label = tag.label();
-            if !out.contains(&label) {
-                out.push(label);
+            if !out.iter().any(|(existing, _)| *existing == label) {
+                out.push((label, tag.id));
             }
         }
         Ok(out)
@@ -3578,26 +3920,39 @@ impl TodoStore {
         Ok(())
     }
 
-    /// The local tag standing in for one remote label: the user's own tag when
-    /// one is named after the label, otherwise a per-repo
-    /// `github/<owner>/<repo>/<label>` tag. Scoping the name to the
-    /// repo keeps two projects from sharing one label tag — which, now that
-    /// labels hang under their project, would also leak each project's tasks
-    /// into the other's aggregated view.
+    /// The local tag standing in for one remote label. The recorded mapping
+    /// wins, so a tag renamed locally keeps its label; then the user's own tag
+    /// when one is named after the label; otherwise a per-repo
+    /// `github/<owner>/<repo>/<label>` tag. Scoping the name to the repo keeps
+    /// two projects from sharing one label tag — which, now that labels hang
+    /// under their project, would also leak each project's tasks into the
+    /// other's aggregated view.
     async fn github_label_tag(&mut self, bound: &BoundRepo, label: &str) -> QueryResult<Tag> {
-        let tag = match self.get_tag_by_name(label).await? {
-            Some(tag) => tag,
+        let external_id = label_external_id(&bound.owner, &bound.repo, label);
+        if let Some(link) = self.tag_link(bound.integration_id, &external_id).await?
+            && let Ok(tag) = self.get_tag(link.tag_id).await
+        {
+            self.place_label_tag(tag.id, bound.tag_id).await?;
+            return Ok(tag);
+        }
+        let (tag, namespaced) = match self.get_tag_by_name(label).await? {
+            Some(tag) => (tag, false),
             None => {
                 let scoped = format!("github/{}/{}/{}", bound.owner, bound.repo, label);
                 match self.get_tag_by_name(&scoped).await? {
-                    Some(tag) => tag,
-                    None => {
+                    Some(tag) => (tag, true),
+                    None => (
                         self.create_tag_with_display_name(scoped, Some(label.to_string()))
-                            .await?
-                    }
+                            .await?,
+                        true,
+                    ),
                 }
             }
         };
+        // Recording the pair is what lets a later pull find the tag again
+        // after a rename, and what tells a push which labels it owns.
+        self.link_label_tag(bound.integration_id, &external_id, tag.id, namespaced)
+            .await?;
         self.place_label_tag(tag.id, bound.tag_id).await?;
         Ok(tag)
     }
@@ -4005,6 +4360,11 @@ mod tests {
         /// sub-issue call.
         sub_issues: std::sync::Mutex<Vec<(String, u64, String, u64)>>,
         labels: std::sync::Mutex<Vec<String>>,
+        /// `(issue number, label)` per accepted label removal.
+        removed_labels: std::sync::Mutex<Vec<(u64, String)>>,
+        /// Refuse to create a label, the way a token without the label
+        /// permission does, so the retry path can be exercised.
+        fail_labels: std::sync::atomic::AtomicBool,
         /// `(repo, head_branch, pull request)`, so `find_pull_request` works
         /// the way GitHub's `head=` filter does.
         pull_requests:
@@ -4028,6 +4388,14 @@ mod tests {
         /// when no issue moved since the last pass.
         fn with_quiet_incremental_pages(self) -> Self {
             self.empty_incremental_pages
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self
+        }
+
+        /// Refuse every label write to the repo, the way a credential that
+        /// may not write labels does.
+        fn with_refused_labels(self) -> Self {
+            self.fail_labels
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self
         }
@@ -4109,6 +4477,35 @@ mod tests {
 
         fn push_count(&self) -> usize {
             self.updates.lock().expect("updates lock").len()
+        }
+
+        fn removed_labels(&self) -> Vec<(u64, String)> {
+            self.removed_labels
+                .lock()
+                .expect("removed labels")
+                .clone()
+        }
+
+        /// The labels the issue carries right now, as the fake's own state.
+        fn issue_labels(&self, repo: &str, number: u64) -> Vec<String> {
+            self.issues
+                .lock()
+                .expect("issues lock")
+                .get(repo)
+                .and_then(|issues| issues.iter().find(|issue| issue.number == number))
+                .map(|issue| issue.labels.clone())
+                .unwrap_or_default()
+        }
+
+        /// Add a label to an issue the way somebody else's GitHub session
+        /// does, without going through the API the app uses.
+        fn label_issue(&self, repo: &str, number: u64, label: &str) {
+            if let Some(issues) = self.issues.lock().expect("issues lock").get_mut(repo)
+                && let Some(issue) = issues.iter_mut().find(|issue| issue.number == number)
+                && !issue.labels.iter().any(|existing| existing == label)
+            {
+                issue.labels.push(label.to_string());
+            }
         }
 
         fn created_issues(&self) -> Vec<(String, String, String)> {
@@ -4379,6 +4776,12 @@ mod tests {
             name: &'a str,
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
             async move {
+                if self
+                    .fail_labels
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    anyhow::bail!("label write refused");
+                }
                 self.labels.lock().expect("labels lock").push(name.to_string());
                 Ok(())
             }
@@ -4503,6 +4906,33 @@ mod tests {
                             issue.labels.push(label.clone());
                         }
                     }
+                }
+                Ok(())
+            }
+        }
+
+        fn remove_issue_label<'a>(
+            &'a self,
+            owner: &'a str,
+            repo: &'a str,
+            number: u64,
+            label: &'a str,
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
+            async move {
+                self.removed_labels
+                    .lock()
+                    .expect("removed labels")
+                    .push((number, label.to_string()));
+                // Mirror GitHub: the label comes off the issue itself, so a
+                // pull that follows does not still see it.
+                if let Some(issues) = self
+                    .issues
+                    .lock()
+                    .expect("issues lock")
+                    .get_mut(&format!("{owner}/{repo}"))
+                    && let Some(issue) = issues.iter_mut().find(|issue| issue.number == number)
+                {
+                    issue.labels.retain(|existing| existing != label);
                 }
                 Ok(())
             }
@@ -5361,37 +5791,207 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn labels_are_additive_and_created_remotely_when_new() -> anyhow::Result<()> {
+    async fn a_tag_added_locally_becomes_a_label_and_its_removal_takes_it_off() -> anyhow::Result<()>
+    {
         let (mut storage, integration, _) = bound_store("o", "r").await?;
-        let mut issue = remote(1, "Buggy", "open", 100);
-        issue.labels = vec!["bug".to_string()];
-        let fake = FakeGithub::default().with_issue("o/r", issue.clone());
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
         storage
             .sync_github_integration(&fake, integration.id, false)
             .await?;
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
         let imported = storage.get_direct_task_tags(task_id).await?;
-        assert!(imported.iter().any(|tag| tag.label() == "bug"));
+        let bug = imported
+            .iter()
+            .find(|tag| tag.label() == "bug")
+            .expect("the remote label is a tag")
+            .clone();
 
-        // A new local tag becomes a label, while the remote's label stays.
+        // A tag added locally becomes a label on the issue, created on the
+        // repo because the repo had none of that name.
         let local = storage.create_tag("needs-review").await?;
         storage.assign_tag_to_task(task_id, &local.name).await?;
-        let summary = storage
-            .sync_github_integration(&fake, integration.id, false)
-            .await?;
-        assert_eq!(summary.pushed, 1);
-        assert_eq!(summary.labels, 1);
+        let mirror = storage.push_task_labels(&fake, task_id).await?;
+        assert_eq!(mirror.added, 1);
+        assert_eq!(mirror.removed, 0);
         assert_eq!(
             *fake.labels.lock().expect("labels lock"),
             vec!["needs-review".to_string()]
         );
-        let mut pushed = fake.last_patch().labels.unwrap_or_default();
-        pushed.sort();
-        assert_eq!(pushed, vec!["bug".to_string(), "needs-review".to_string()]);
+        assert_eq!(
+            fake.issue_labels("o/r", 1),
+            vec!["bug".to_string(), "needs-review".to_string()]
+        );
 
-        // A label removed locally is still never removed remotely.
-        let fake_before = fake.last_patch().labels.unwrap_or_default();
-        assert!(fake_before.contains(&"bug".to_string()));
+        // The snapshot took the push, so the pull that follows is quiet rather
+        // than reading the app's own write as a remote edit.
+        let summary = storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        assert_eq!(summary.pushed, 0);
+        assert_eq!(summary.labels, 0);
+        assert_eq!(summary.labels_removed, 0);
+
+        // The label the app wrote is paired with the tag that wanted it, so
+        // the app is the one that may take it off again.
+        let written = storage
+            .tag_link(integration.id, "o/r#label:needs-review")
+            .await?
+            .expect("the written label is mapped to its tag");
+        assert_eq!(written.tag_id, local.id);
+
+        // A label somebody else added is not the app's to take off, but the
+        // tags the user drops are: each label comes off the issue with its tag.
+        fake.label_issue("o/r", 1, "help wanted");
+        storage.remove_tag_from_task(task_id, bug.id).await?;
+        storage.remove_tag_from_task(task_id, local.id).await?;
+        let mirror = storage.push_task_labels(&fake, task_id).await?;
+        assert_eq!(mirror.added, 0);
+        assert_eq!(mirror.removed, 2);
+        assert_eq!(
+            fake.removed_labels(),
+            vec![(1, "bug".to_string()), (1, "needs-review".to_string())]
+        );
+        assert!(mirror.labels.is_empty());
+        assert_eq!(fake.issue_labels("o/r", 1), vec!["help wanted".to_string()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_label_mapping_outranks_a_name_match() -> anyhow::Result<()> {
+        let (mut storage, integration, project) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+
+        // The import pairs the label with the tag it made, so a later pull
+        // finds that tag rather than resolving the label again.
+        let scoped = storage
+            .get_children(project.id)
+            .await?
+            .into_iter()
+            .find(|tag| tag.label() == "bug")
+            .expect("the label is a subtag of the project");
+        let link = storage
+            .tag_link(integration.id, "o/r#label:bug")
+            .await?
+            .expect("the label is mapped to its tag");
+        assert_eq!(link.tag_id, scoped.id);
+        assert_eq!(link.source_kind, "label");
+
+        // A tag of the user's own with the label's name appears afterwards:
+        // the pairing still wins, so the label keeps the tag it was imported
+        // as and no second tag is made for it.
+        let mine = storage.create_tag("bug").await?;
+        assert_ne!(mine.id, scoped.id);
+        let fake = FakeGithub::default().with_issue("o/r", remote(2, "Also buggy", "open", 110));
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#2")
+            .await?
+            .unwrap()
+            .task_id;
+        let tags = storage.get_direct_task_tags(task_id).await?;
+        assert!(tags.iter().any(|tag| tag.id == scoped.id));
+        assert!(!tags.iter().any(|tag| tag.id == mine.id));
+        let bugs = storage
+            .get_children(project.id)
+            .await?
+            .into_iter()
+            .filter(|tag| tag.label() == "bug")
+            .count();
+        assert_eq!(bugs, 1, "one label stays one tag");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refused_label_push_is_stored_for_a_later_retry() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default()
+            .with_issue("o/r", remote(1, "Buggy", "open", 100))
+            .with_refused_labels();
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+        let local = storage.create_tag("needs-review").await?;
+        storage.assign_tag_to_task(task_id, &local.name).await?;
+
+        // The repo refuses the label, so the wanted labels are kept for a
+        // token that may write them rather than being lost with the attempt.
+        assert!(storage.push_task_labels(&fake, task_id).await.is_err());
+        let pending = storage.pending_sync_ops("github").await?;
+        assert_eq!(pending.len(), 1);
+        let op = &pending[0];
+        assert_eq!(op.provider, "github");
+        assert_eq!(op.kind, "labels");
+        assert_eq!(op.integration_id, integration.id);
+        assert_eq!(op.external_id, "o/r#1");
+        assert_eq!(op.task_id, Some(task_id));
+        assert_eq!(op.attempts, 1);
+        assert!(op.error.contains("label write refused"));
+        assert!(op.payload.contains("needs-review"));
+
+        // A second failure replaces the payload and counts the attempt instead
+        // of queueing the same intent twice.
+        assert!(storage.push_task_labels(&fake, task_id).await.is_err());
+        let pending = storage.pending_sync_ops("github").await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].attempts, 2);
+
+        // A retry that goes through drops the record.
+        let healthy = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
+        storage.push_task_labels(&healthy, task_id).await?;
+        assert!(storage.pending_sync_ops("github").await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_label_push_without_credentials_is_recorded_for_later() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
+        storage
+            .sync_github_integration(&fake, integration.id, false)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+
+        assert_eq!(
+            storage
+                .record_pending_task_labels(task_id, "no GitHub credentials")
+                .await?,
+            1
+        );
+        let pending = storage.pending_sync_ops("github").await?;
+        assert_eq!(pending[0].error, "no GitHub credentials");
+        assert_eq!(pending[0].task_id, Some(task_id));
+        assert!(pending[0].payload.contains("bug"));
+
+        // A task with no issue has nothing to defer, so a purely local tag
+        // costs neither an API call nor a pending record.
+        let local = storage
+            .create_task(Task::create().title("Just local".to_string()))
+            .await?;
+        assert_eq!(
+            storage
+                .record_pending_task_labels(local.id, "no GitHub credentials")
+                .await?,
+            0
+        );
+        assert_eq!(storage.pending_sync_ops("github").await?.len(), 1);
         Ok(())
     }
 
