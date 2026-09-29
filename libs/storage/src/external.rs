@@ -44,6 +44,13 @@ pub const SYNC_OP_OK: &str = "ok";
 /// how a replay picks its backlog.
 pub const SYNC_OP_FAILED: &str = "failed";
 
+/// A pass that brought something back, rather than a push the app made: the
+/// incoming half of the sync history. Such a row belongs to no task
+/// ([`SyncOpLogEntry::task_id`] is `None`), so it never enters a replay
+/// backlog, and it is always a success — a pass that found nothing is not
+/// logged at all.
+pub const SYNC_OP_INCOMING: &str = "incoming";
+
 /// How many of the most recent rows a backlog is worked out from. The log
 /// itself is append-only and unbounded; this bounds what a replay reads, and a
 /// task whose last push is older than this many rows is long since settled.
@@ -62,7 +69,8 @@ pub struct SyncOpLogEntry {
     /// The local task the push was about. `None` for a push that belongs to no
     /// task.
     pub task_id: Option<u64>,
-    /// What was pushed: `capture`, `labels`, `task_done`, `task_open`.
+    /// What was pushed: `capture`, `labels`, `task_done`, `task_open` — or,
+    /// for a row the app did not push, [`SYNC_OP_INCOMING`].
     pub kind: String,
     /// JSON describing the push, so a failure can be read without guessing.
     pub payload: String,
@@ -140,9 +148,36 @@ impl SyncOpLogEntry {
         )
     }
 
+    /// A pass that brought something back, described the way the pass itself
+    /// described it. It belongs to no single task, and it is not a push, so a
+    /// replay has nothing to do with it.
+    pub fn incoming(provider: &str, summary: &str) -> Self {
+        Self::new(
+            provider,
+            None,
+            SYNC_OP_INCOMING,
+            serde_json::json!({ "summary": summary }),
+            SYNC_OP_OK,
+            None,
+        )
+    }
+
     /// Whether this is a push that did not land.
     pub fn is_failed(&self) -> bool {
         self.status == SYNC_OP_FAILED
+    }
+
+    /// Whether this row records what a pass brought back rather than a push
+    /// the app made.
+    pub fn is_incoming(&self) -> bool {
+        self.kind == SYNC_OP_INCOMING
+    }
+
+    /// What a pass brought back, for a row built by [`Self::incoming`]. `None`
+    /// for any other row, and for a payload that cannot be read back.
+    pub fn incoming_summary(&self) -> Option<String> {
+        let payload: serde_json::Value = serde_json::from_str(&self.payload).ok()?;
+        payload.get("summary")?.as_str().map(str::to_owned)
     }
 }
 
@@ -1028,6 +1063,28 @@ mod tests {
                 .expect("the app row stays")
                 .enabled
         );
+        Ok(())
+    }
+
+    /// An incoming change is readable back from the log, and being a pass
+    /// rather than a push it is never something a replay is owed.
+    #[tokio::test]
+    async fn test_incoming_changes_are_logged_but_not_replayed() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
+        storage
+            .record_sync_op(&SyncOpLogEntry::incoming("github", "2 repo(s): 3 imported"))
+            .await?;
+
+        let log = storage.sync_op_log("github", 10).await?;
+        assert_eq!(log.len(), 1);
+        assert!(log[0].is_incoming());
+        assert!(!log[0].is_failed());
+        assert_eq!(log[0].task_id, None);
+        assert_eq!(
+            log[0].incoming_summary().as_deref(),
+            Some("2 repo(s): 3 imported")
+        );
+        assert!(storage.sync_op_log_backlog("github").await?.is_empty());
         Ok(())
     }
 }

@@ -34,6 +34,7 @@ use ui_parts::notifications::{
     Notice, NoticeFeed, NoticeFilter, NoticeLayer, NoticeLevel, NoticeLog, NoticeSink, error_toast,
 };
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
+use ui_parts::sync_history::{SyncHistoryPanel, failed_badge, history_icon, history_tooltip};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
 use ui_parts::tag_settings::{TagSettingsEvent, TagSettingsPanel};
@@ -56,6 +57,7 @@ mod ui_parts {
     pub mod navbar;
     pub mod notifications;
     pub mod settings;
+    pub mod sync_history;
     pub mod project_picker;
     pub mod repeat_picker;
     pub mod task_details;
@@ -117,6 +119,12 @@ const FOOTER_HEIGHT: f32 = 28.;
 /// so opening it shows a tall, scrollable history without moving the layout.
 const NOTIFICATION_PANE_HEIGHT_FRACTION: f32 = 0.80;
 
+/// Width of the history pane, which overlays the content column from the
+/// right: wide enough for a provider, an operation and its reason on one row.
+const SYNC_HISTORY_PANE_WIDTH: f32 = 400.;
+/// Floor for the history pane, so a narrow window still shows the log.
+const SYNC_HISTORY_PANE_MIN_WIDTH: f32 = 280.;
+
 /// Width cap for a notification card. Narrow enough that a card reads as a
 /// floating note rather than a band across the window.
 const NOTIFICATION_WIDTH: f32 = 360.;
@@ -169,6 +177,9 @@ struct Layout {
     /// Integrations panels. Held so the panels share one instance.
     _apps: Entity<AppSettings>,
     settings: Entity<SettingsView>,
+    /// The history pane: what the app pushed to its providers and what sync
+    /// brought back, shown as a right-anchored overlay from the header.
+    sync_history: Entity<SyncHistoryPanel>,
     /// Everything the app reported: the footer's indicator and the pane.
     notices: NoticeLog,
     /// Whether the notifications pane is expanded above the footer.
@@ -613,6 +624,12 @@ impl Layout {
         })
         .detach();
         let settings = cx.new(|cx| SettingsView::new(store.clone(), apps.clone(), cx));
+        // The history pane reads the persistent sync log and writes the
+        // incoming events the integrations view reports into it.
+        let sync_history = cx.new(|cx| SyncHistoryPanel::new(store.clone(), cx));
+        // The title bar's badge reads the pane's outstanding-failure count, so
+        // the layout repaints when the pane reloads its log.
+        cx.observe(&sync_history, |_, _, cx| cx.notify()).detach();
         let settings_for_apps = settings.clone();
         cx.subscribe(&apps, move |_this, _settings, event, cx| match event {
             AppSettingsEvent::Changed => {
@@ -626,6 +643,10 @@ impl Layout {
             window,
             |this, _view, event, window, cx| match event {
                 IntegrationsEvent::Changed => {
+                    // A pass may have logged new pushes, and a replay inside it
+                    // may have retired failures: re-read the log so the pane
+                    // and the badge beside the history glyph are current.
+                    this.sync_history.update(cx, |panel, cx| panel.reload(cx));
                     this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
                     // A sync binds repos to their tags, which the settings
                     // apps tree reads, so reload it while the panel is open.
@@ -640,6 +661,13 @@ impl Layout {
                     // so it shows what GitHub has.
                     this.details.update(cx, |details, cx| details.refresh_selected(cx));
                     this.sync_agent_checkout_for_selection(cx);
+                }
+                // A pass that brought something back is logged as an incoming
+                // event in the history pane.
+                IntegrationsEvent::Synced(change) => {
+                    let change = change.clone();
+                    this.sync_history
+                        .update(cx, |panel, cx| panel.note_incoming(change, cx));
                 }
                 IntegrationsEvent::Notice(message) => {
                     // The integrations view has already logged this and set its
@@ -818,6 +846,14 @@ impl Layout {
                     if layout._picker_subscription.is_some() {
                         return;
                     }
+                    // The history pane is a full-height overlay: Escape takes
+                    // it back down before anything underneath reacts.
+                    if layout.sync_history.read(cx).is_open() {
+                        layout
+                            .sync_history
+                            .update(cx, |panel, cx| panel.close(cx));
+                        return;
+                    }
                     // The agent pane takes Escape while it holds the focus: an
                     // open dropdown closes, and a running turn is cancelled on
                     // a second press (the first puts the hint up). Anything
@@ -946,6 +982,7 @@ impl Layout {
             automations,
             _apps: apps,
             settings,
+            sync_history,
             notices: NoticeLog::default(),
             notices_open: false,
             notice_filter: NoticeFilter::default(),
@@ -2228,6 +2265,9 @@ impl Render for Layout {
             self.right_pane == RightPane::DetailsAndAgent && self.details.read(cx).has_selection();
         let can_go_back = self.task_list.read(cx).can_go_back();
         let can_go_forward = self.task_list.read(cx).can_go_forward();
+        let sync_history_open = self.sync_history.read(cx).is_open();
+        let sync_history_failed = self.sync_history.read(cx).failed_count();
+        let sync_history_pane = self.sync_history.clone();
 
         // The app's own column: title bar, content, footer. It is the only
         // in-flow child of the frame below, so the overlaid layers cannot move
@@ -2268,6 +2308,32 @@ impl Render for Layout {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.task_list.update(cx, |list, cx| list.go_forward(cx));
                                 })),
+                        )
+                        .child(
+                            Button::new("sync-history-toggle")
+                                .ghost()
+                                .compact()
+                                .child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(history_icon(
+                                            px(14.),
+                                            cx.theme().secondary_foreground,
+                                        ))
+                                        // Pushes a replay still owes, so the
+                                        // count lands where the history is.
+                                        .when(sync_history_failed > 0, |this| {
+                                            this.child(failed_badge(sync_history_failed))
+                                        }),
+                                )
+                                .toggled(sync_history_open)
+                                .tooltip(history_tooltip(sync_history_failed))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.sync_history
+                                        .update(cx, |panel, cx| panel.toggle(cx));
+                                })),
                         ),
                 ),
             )
@@ -2281,6 +2347,7 @@ impl Render for Layout {
                     // push the navbar footer out of view; min_h_0 lets it
                     // clamp to the remaining window height instead.
                     .min_h_0()
+                    .relative()
                     .child(div().w_auto().max_w(px(256.)).flex_none().child(self.nav_bar.clone()))
                     .child(match self.nav_bar.read(cx).destination().clone() {
                         // Only a tag can be automation-managed, so the special
@@ -2442,6 +2509,23 @@ impl Render for Layout {
                             .min_h_0()
                             .child(div().flex_1().child(self.settings.clone()))
                             .into_any_element(),
+                    })
+                    // The history pane overlays the whole content column from
+                    // the right, above whichever panel is showing, so a click
+                    // lands on it rather than on the rows it covers.
+                    .when(sync_history_open, |this| {
+                        this.child(
+                            div()
+                                .id("sync-history-overlay")
+                                .occlude()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(SYNC_HISTORY_PANE_WIDTH))
+                                .min_w(px(SYNC_HISTORY_PANE_MIN_WIDTH))
+                                .child(sync_history_pane.clone()),
+                        )
                     }),
             )
             // The footer is window-wide chrome: it stays pinned to the

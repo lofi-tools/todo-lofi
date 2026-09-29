@@ -21,7 +21,8 @@ pub mod workflow;
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
     pub use crate::external::{
-        ExternalComment, Integration, SYNC_OP_FAILED, SYNC_OP_OK, SyncOpLogEntry, TagLink, TaskLink,
+        ExternalComment, Integration, SYNC_OP_FAILED, SYNC_OP_INCOMING, SYNC_OP_OK, SyncOpLogEntry,
+        TagLink, TaskLink,
     };
     pub use crate::github::{
         BoundRepo, DirtyWorktrees, FieldDecision, FieldMerge, GithubClient, GithubHttpClient,

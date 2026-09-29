@@ -20,6 +20,7 @@ use crate::theme::{APP_BG, DANGER, HAIRLINE};
 use crate::todoist_auth;
 use crate::ui_parts::apps::AppSettings;
 use crate::ui_parts::notifications::{self, NoticeLevel};
+use crate::ui_parts::sync_history::IncomingChange;
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 /// Demand-driven polling (decision 23): short while a PR or a run is live,
@@ -50,6 +51,10 @@ const GITHUB_NEW_CLASSIC_TOKEN_URL: &str = concat!(
 
 pub enum IntegrationsEvent {
     Changed,
+    /// A pass that brought something back: the history pane logs it as an
+    /// incoming change, so it outlives the session. A pass that found nothing
+    /// is not an event.
+    Synced(IncomingChange),
     /// A failure the user should see wherever they are: the layout shows it
     /// as a persistent notice until dismissed.
     Notice(String),
@@ -694,12 +699,16 @@ impl IntegrationsView {
                 let changed = !summary.is_empty();
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
-                    this.github_last_sync = Some(jiff::Timestamp::now());
-                    this.github_status = Some(format!("GitHub synced — {message}"));
-                    if changed {
-                        cx.emit(IntegrationsEvent::Changed);
-                    }
-                    cx.notify();
+                        this.github_last_sync = Some(jiff::Timestamp::now());
+                        this.github_status = Some(format!("GitHub synced — {message}"));
+                        if changed {
+                            cx.emit(IntegrationsEvent::Synced(IncomingChange::new(
+                                "github",
+                                message.clone(),
+                            )));
+                            cx.emit(IntegrationsEvent::Changed);
+                        }
+                        cx.notify();
                 })
                 .ok();
             }
@@ -989,17 +998,22 @@ impl IntegrationsView {
             Ok(summary) => {
                 this.update(cx, |this, cx| {
                     this.syncing = false;
+                    let description = format!(
+                        "{} task(s), {} section(s), {} removed.",
+                        summary.tasks_upserted, summary.sections, summary.tasks_tombstoned,
+                    );
                     this.status = Some(format!(
-                        "Synced {} project: {} task(s), {} section(s), {} removed.",
+                        "Synced {} project: {description}",
                         summary.projects,
-                        summary.tasks_upserted,
-                        summary.sections,
-                        summary.tasks_tombstoned,
                     ));
                     // Unlike the GitHub pass above, this one is a user action
                     // ("Sync now", or the sync that follows pairing a project),
                     // so it always reports: the refresh it drives is the answer
                     // the user asked for, whatever the summary says.
+                    cx.emit(IntegrationsEvent::Synced(IncomingChange::new(
+                        "todoist",
+                        description,
+                    )));
                     cx.emit(IntegrationsEvent::Changed);
                     cx.notify();
                 })

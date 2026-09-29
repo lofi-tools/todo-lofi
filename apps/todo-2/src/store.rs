@@ -2595,6 +2595,44 @@ impl Store {
         })
     }
 
+    /// One provider's history for the history pane: the most recent log rows,
+    /// newest first, and how many pushes are still owed — the tasks whose
+    /// newest entry is a failure. Both come from one lock, so the pane's feed
+    /// and its badge cannot disagree (§5.10).
+    pub fn sync_op_history(
+        &self,
+        provider: String,
+        limit: u32,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<(Vec<SyncOpLogEntry>, usize)>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let entries = s.sync_op_log(&provider, limit).await?;
+            let owed = s.sync_op_log_backlog(&provider).await?.len();
+            Ok((entries, owed))
+        })
+    }
+
+    /// Append an incoming change — what one sync pass brought back — to the
+    /// same log the app's own pushes go to, so the pane's incoming feed
+    /// outlives the session. The stored row is returned so the pane shows the
+    /// copy that was written rather than rebuilding one.
+    pub fn record_incoming_change(
+        &self,
+        provider: String,
+        summary: String,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<SyncOpLogEntry>> {
+        let store = self.0.clone();
+        gpui_tokio::Tokio::spawn_result(cx, async move {
+            let mut s = store.lock().await;
+            let entry = SyncOpLogEntry::incoming(&provider, &summary);
+            s.record_sync_op(&entry).await?;
+            Ok(entry)
+        })
+    }
+
     /// When the integration last synced successfully, for the card (§5.8).
     pub fn github_last_synced(
         &self,
