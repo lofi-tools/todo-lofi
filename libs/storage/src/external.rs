@@ -36,20 +36,114 @@ pub struct TaskLink {
     pub external_updated_at: Option<jiff::Timestamp>,
 }
 
-/// A push the app could not deliver, kept so it can be replayed once the
-/// reason it failed is gone — a missing permission, say, fixed by a personal
-/// token. `payload` is JSON shaped by `kind`, and `external_id` names the
-/// remote object the push targets.
+/// A push that went through.
+pub const SYNC_OP_OK: &str = "ok";
+/// A push that did not, with its reason in [`SyncOpLogEntry::error`].
+///
+/// A task is *behind* while its most recent log row is one of these, which is
+/// how a replay picks its backlog.
+pub const SYNC_OP_FAILED: &str = "failed";
+
+/// How many of the most recent rows a backlog is worked out from. The log
+/// itself is append-only and unbounded; this bounds what a replay reads, and a
+/// task whose last push is older than this many rows is long since settled.
+const SYNC_OP_LOG_WINDOW: u32 = 1000;
+
+/// One provider push in the sync operation log: a record of what the app tried
+/// to sync, whether it landed, and — when it did not — why not.
+///
+/// The log is append-only, so a retry is a new row rather than an edit of the
+/// old one: a failure stays readable after it has been worked around. It is the
+/// app's error log for sync, and its failed rows are what a replay pass retries
+/// once the cause is gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingSyncOp {
+pub struct SyncOpLogEntry {
     pub provider: String,
-    pub integration_id: u64,
-    pub external_id: String,
+    /// The local task the push was about. `None` for a push that belongs to no
+    /// task.
     pub task_id: Option<u64>,
+    /// What was pushed: `capture`, `labels`, `task_done`, `task_open`.
     pub kind: String,
+    /// JSON describing the push, so a failure can be read without guessing.
     pub payload: String,
-    pub error: String,
-    pub attempts: u32,
+    /// [`SYNC_OP_OK`] or [`SYNC_OP_FAILED`].
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: jiff::Timestamp,
+}
+
+impl SyncOpLogEntry {
+    fn new(
+        provider: &str,
+        task_id: Option<u64>,
+        kind: &str,
+        payload: serde_json::Value,
+        status: &str,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            provider: provider.to_string(),
+            task_id,
+            kind: kind.to_string(),
+            payload: payload.to_string(),
+            status: status.to_string(),
+            error,
+            created_at: jiff::Timestamp::now(),
+        }
+    }
+
+    /// A push that landed.
+    pub fn delivered(
+        provider: &str,
+        task_id: u64,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self::new(provider, Some(task_id), kind, payload, SYNC_OP_OK, None)
+    }
+
+    /// A push that did not land, with the reason it did not.
+    pub fn failed(
+        provider: &str,
+        task_id: Option<u64>,
+        kind: &str,
+        payload: serde_json::Value,
+        error: &str,
+    ) -> Self {
+        Self::new(
+            provider,
+            task_id,
+            kind,
+            payload,
+            SYNC_OP_FAILED,
+            Some(error.to_string()),
+        )
+    }
+
+    /// An operation that turned out to owe nothing — a deleted task, a project
+    /// that no longer binds a repo — recorded so it stops being retried. The
+    /// reason lands in the payload, because the push did not fail: it was not
+    /// needed.
+    pub fn settled(
+        provider: &str,
+        task_id: u64,
+        kind: &str,
+        reason: &str,
+    ) -> Self {
+        Self::new(
+            provider,
+            Some(task_id),
+            kind,
+            serde_json::json!({ "skipped": reason }),
+            SYNC_OP_OK,
+            None,
+        )
+    }
+
+    /// Whether this is a push that did not land.
+    pub fn is_failed(&self) -> bool {
+        self.status == SYNC_OP_FAILED
+    }
 }
 
 /// Remote tag link.
@@ -657,121 +751,150 @@ impl TodoStore {
         Ok(())
     }
 
-    // -- pending pushes ---------------------------------------------------
+    // -- sync operation log ------------------------------------------------
 
-    /// Remember a push that could not be delivered, so a later pass (or a
-    /// later credential) can replay it. One row per target: a repeat failure
-    /// replaces the payload and counts the attempt rather than queueing a
-    /// second copy of the same intent.
-    pub async fn record_pending_sync_op(&mut self, op: &PendingSyncOp) -> QueryResult<()> {
-        let now = jiff::Timestamp::now().to_string();
+    /// Append one attempt to the sync operation log. Nothing is ever rewritten:
+    /// a retry of the same operation is the next row.
+    ///
+    /// A missing task or error is written as `0` / `""` rather than as SQL
+    /// `NULL`: the raw-statement API cannot type a null bind, and both are
+    /// values a column of this log never otherwise holds.
+    pub async fn record_sync_op(&mut self, entry: &SyncOpLogEntry) -> QueryResult<()> {
         toasty::sql::statement(
-            r#"INSERT INTO pending_sync_ops
-               (provider, integration_id, external_id, task_id, kind, payload, error,
-                attempts, created_at, updated_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)
-               ON CONFLICT (provider, integration_id, external_id, kind)
-               DO UPDATE SET payload = excluded.payload,
-                             error = excluded.error,
-                             task_id = excluded.task_id,
-                             attempts = pending_sync_ops.attempts + 1,
-                             updated_at = excluded.updated_at"#,
+            r#"INSERT INTO sync_op_log
+               (provider, task_id, kind, payload, status, error, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
         )
-        .bind(&op.provider)
-        .bind(op.integration_id as i64)
-        .bind(&op.external_id)
-        .bind(op.task_id.map(|id| id as i64))
-        .bind(&op.kind)
-        .bind(&op.payload)
-        .bind(&op.error)
-        .bind(now)
+        .bind(&entry.provider)
+        .bind(entry.task_id.unwrap_or(0) as i64)
+        .bind(&entry.kind)
+        .bind(&entry.payload)
+        .bind(&entry.status)
+        .bind(entry.error.clone().unwrap_or_default())
+        .bind(entry.created_at.to_string())
         .exec(&mut self.db)
         .await
         .context(crate::error::QueryTagsSnafu {
-            context: "record pending sync op",
+            context: "record sync op",
         })?;
         Ok(())
     }
 
-    /// Every undelivered push of one provider, oldest first, so a retry pass
-    /// replays them in the order they were wanted.
-    pub async fn pending_sync_ops(&mut self, provider: &str) -> QueryResult<Vec<PendingSyncOp>> {
+    /// The most recent entries of one provider, newest first: the log as the
+    /// app would show it.
+    pub async fn sync_op_log(
+        &mut self,
+        provider: &str,
+        limit: u32,
+    ) -> QueryResult<Vec<SyncOpLogEntry>> {
+        let mut entries = self.sync_op_log_rows(provider).await?;
+        entries.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+        Ok(entries
+            .into_iter()
+            .take(limit as usize)
+            .map(|(_, entry)| entry)
+            .collect())
+    }
+
+    /// The pushes a replay pass still owes, oldest first: for every task whose
+    /// most recent entry is a failure, that failure.
+    ///
+    /// A task that failed and then succeeded is not behind — the later row is
+    /// what its state is — while a task whose last push failed is, whichever
+    /// operation that was.
+    pub async fn sync_op_log_backlog(&mut self, provider: &str) -> QueryResult<Vec<SyncOpLogEntry>> {
+        let mut entries = self.sync_op_log_rows(provider).await?;
+        entries.sort_by_key(|(id, _)| *id);
+        let mut backlog: std::collections::HashMap<u64, SyncOpLogEntry> =
+            std::collections::HashMap::new();
+        for (_, entry) in entries {
+            let Some(task_id) = entry.task_id else {
+                continue;
+            };
+            if entry.is_failed() {
+                backlog.insert(task_id, entry);
+            } else {
+                backlog.remove(&task_id);
+            }
+        }
+        let mut backlog: Vec<SyncOpLogEntry> = backlog.into_values().collect();
+        backlog.sort_by_key(|entry| entry.created_at);
+        Ok(backlog)
+    }
+
+    /// Every logged entry of one provider with its row id, so a caller can
+    /// order them the way it needs.
+    async fn sync_op_log_rows(
+        &mut self,
+        provider: &str,
+    ) -> QueryResult<Vec<(u64, SyncOpLogEntry)>> {
         let rows = toasty::sql::query(
-            r#"SELECT integration_id, external_id, task_id, kind, payload, error, attempts
-               FROM pending_sync_ops WHERE provider = ?1 ORDER BY id"#,
+            r#"SELECT id, task_id, kind, payload, status, error, created_at
+               FROM sync_op_log WHERE provider = ?1 ORDER BY id DESC LIMIT ?2"#,
         )
         .column_types([
             toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
             toasty::stmt::Type::I64,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
             toasty::stmt::Type::String,
-            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
         ])
         .bind(provider)
+        .bind(SYNC_OP_LOG_WINDOW as i64)
         .exec(&mut self.db)
         .await
         .context(crate::error::QueryTagsSnafu {
-            context: "list pending sync ops",
+            context: "list sync op log",
         })?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match row {
-                toasty::stmt::Value::Record(record) => Some(PendingSyncOp {
+        let mut entries = Vec::new();
+        for row in rows {
+            let toasty::stmt::Value::Record(record) = row else {
+                continue;
+            };
+            let Some(id) = record.first().and_then(|value| value.to_i64()) else {
+                continue;
+            };
+            let created_at = record
+                .get(6)
+                .and_then(|value| value.as_str())
+                .and_then(|raw| raw.parse::<jiff::Timestamp>().ok())
+                .unwrap_or_default();
+            entries.push((
+                id as u64,
+                SyncOpLogEntry {
                     provider: provider.to_string(),
-                    integration_id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
-                    external_id: record
+                    task_id: record
                         .get(1)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    task_id: record.get(2).and_then(|v| v.to_i64()).map(|id| id as u64),
+                        .and_then(|value| value.to_i64())
+                        .filter(|id| *id > 0)
+                        .map(|id| id as u64),
                     kind: record
-                        .get(3)
-                        .and_then(|v| v.as_str())
+                        .get(2)
+                        .and_then(|value| value.as_str())
                         .unwrap_or("")
                         .to_string(),
                     payload: record
+                        .get(3)
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    status: record
                         .get(4)
-                        .and_then(|v| v.as_str())
+                        .and_then(|value| value.as_str())
                         .unwrap_or("")
                         .to_string(),
                     error: record
                         .get(5)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    attempts: record.get(6).and_then(|v| v.to_i64()).unwrap_or(0) as u32,
-                }),
-                _ => None,
-            })
-            .collect())
-    }
-
-    /// Drop a pending push once it has gone through, so a later retry pass
-    /// does not repeat it.
-    pub async fn clear_pending_sync_op(
-        &mut self,
-        provider: &str,
-        integration_id: u64,
-        external_id: &str,
-        kind: &str,
-    ) -> QueryResult<()> {
-        toasty::sql::statement(
-            r#"DELETE FROM pending_sync_ops
-               WHERE provider = ?1 AND integration_id = ?2 AND external_id = ?3 AND kind = ?4"#,
-        )
-        .bind(provider)
-        .bind(integration_id as i64)
-        .bind(external_id)
-        .bind(kind)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "clear pending sync op",
-        })?;
-        Ok(())
+                        .and_then(|value| value.as_str())
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned),
+                    created_at,
+                },
+            ));
+        }
+        Ok(entries)
     }
 }
 

@@ -68,8 +68,33 @@ pub fn label_external_id(owner: &str, repo: &str, label: &str) -> String {
     format!("{owner}/{repo}#label:{label}")
 }
 
-/// The `pending_sync_ops.kind` of a label push.
-pub const LABEL_PUSH_KIND: &str = "labels";
+/// The `sync_op_log.kind` of each push the app makes on its own behalf (§5.10):
+/// what an entry of the log was about.
+pub const SYNC_OP_CAPTURE: &str = "capture";
+pub const SYNC_OP_LABELS: &str = "labels";
+pub const SYNC_OP_TASK_DONE: &str = "task_done";
+pub const SYNC_OP_TASK_OPEN: &str = "task_open";
+
+/// What replaying one task's failed push did.
+enum Replayed {
+    /// The push was made again.
+    Pushed,
+    /// The task owes nothing, for this reason.
+    Skipped(&'static str),
+}
+
+/// What one replay pass did, for the caller's log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SyncReplaySummary {
+    /// Tasks re-pushed because their last logged push had failed.
+    pub replayed: usize,
+    /// Tasks whose replay failed again; their new reason is in the log.
+    pub failed: usize,
+    /// Tasks that turned out to owe nothing (deleted, or out of a repo-bound
+    /// project): recorded as settled so they stop being retried.
+    pub settled: usize,
+}
+
 
 /// What one label push did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -85,26 +110,23 @@ pub struct LabelMirror {
     pub labels: Vec<String>,
 }
 
-/// The pending-sync record for a label push that failed, so a later pass can
-/// replay it — for instance once a personal token grants the permission the
-/// first attempt lacked.
-pub fn pending_label_push(
-    provider: &str,
-    integration_id: u64,
-    external_id: &str,
+/// The log entry for a label push, delivered or not, so the record names the
+/// labels it wanted rather than only the task it was about.
+fn label_push_log_entry(
     task_id: u64,
     labels: &[String],
-    error: &str,
-) -> crate::PendingSyncOp {
-    crate::PendingSyncOp {
-        provider: provider.to_string(),
-        integration_id,
-        external_id: external_id.to_string(),
-        task_id: Some(task_id),
-        kind: LABEL_PUSH_KIND.to_string(),
-        payload: serde_json::json!({ "labels": labels }).to_string(),
-        error: error.to_string(),
-        attempts: 0,
+    error: Option<&str>,
+) -> crate::SyncOpLogEntry {
+    let payload = serde_json::json!({ "labels": labels });
+    match error {
+        None => crate::SyncOpLogEntry::delivered("github", task_id, SYNC_OP_LABELS, payload),
+        Some(error) => crate::SyncOpLogEntry::failed(
+            "github",
+            Some(task_id),
+            SYNC_OP_LABELS,
+            payload,
+            error,
+        ),
     }
 }
 
@@ -2541,8 +2563,10 @@ impl TodoStore {
     /// be opened as an issue there. Resolves through a section's parent the
     /// way the Todoist destination lookup does (a task in a section of a
     /// bound project still belongs to that project). `None` leaves the task
-    /// purely local.
-    async fn bound_repo_for_task(&mut self, task_id: u64) -> QueryResult<Option<BoundRepo>> {
+    /// purely local — which is the question "would this task touch GitHub at
+    /// all?", asked by the sync paths and the capture push before either
+    /// spends an API call.
+    pub async fn bound_repo_for_task(&mut self, task_id: u64) -> QueryResult<Option<BoundRepo>> {
         let integration_ids: Vec<u64> = self
             .list_integrations()
             .await?
@@ -2956,21 +2980,10 @@ impl TodoStore {
         reason: &str,
     ) -> QueryResult<usize> {
         let mut recorded = 0;
-        for (integration_id, external_id, labels) in self.label_push_targets(task_id).await? {
-            let provider = self
-                .integration_provider(integration_id)
-                .await?
-                .unwrap_or_else(|| "github".to_string());
+        for (_, _, labels) in self.label_push_targets(task_id).await? {
             let names: Vec<String> = labels.into_iter().map(|(label, _)| label).collect();
-            self.record_pending_sync_op(&pending_label_push(
-                &provider,
-                integration_id,
-                &external_id,
-                task_id,
-                &names,
-                reason,
-            ))
-            .await?;
+            self.record_sync_op(&label_push_log_entry(task_id, &names, Some(reason)))
+                .await?;
             recorded += 1;
         }
         Ok(recorded)
@@ -2979,10 +2992,11 @@ impl TodoStore {
     /// Mirror a task's tags onto the issue it is linked to, now rather than at
     /// the next pass: what a tag edit in the details pane wants (§5.5).
     ///
-    /// A link whose push fails is recorded as a pending sync op — with the
-    /// labels it wanted — so it can be replayed once the reason is gone (a
-    /// personal token granting the missing permission, say), and the other
-    /// links are still tried: one repo's refusal must not hold up another's.
+    /// A link whose push fails is recorded in the sync log — with the labels it
+    /// wanted and the reason it failed — so it can be replayed once that reason
+    /// is gone (a personal token granting the missing permission, say), and the
+    /// other links are still tried: one repo's refusal must not hold up
+    /// another's.
     pub async fn push_task_labels<C: GithubClient>(
         &mut self,
         client: &C,
@@ -2991,10 +3005,6 @@ impl TodoStore {
         let mut out = LabelMirror::default();
         let mut failure: Option<anyhow::Error> = None;
         for (integration_id, external_id, desired) in self.label_push_targets(task_id).await? {
-            let provider = self
-                .integration_provider(integration_id)
-                .await?
-                .unwrap_or_else(|| "github".to_string());
             let Some(issue) = parse_issue_external_id(&external_id) else {
                 continue;
             };
@@ -3012,33 +3022,24 @@ impl TodoStore {
                     &stored.state.remote.labels,
                 )
                 .await;
+            let names: Vec<String> = desired.iter().map(|(label, _)| label.clone()).collect();
             match mirrored {
                 Ok(mirror) => {
                     let mut state = stored.state.clone();
                     state.remote.labels = mirror.labels.clone();
                     self.save_issue_field_state(integration_id, &external_id, &state)
                         .await?;
-                    self.clear_pending_sync_op(
-                        &provider,
-                        integration_id,
-                        &external_id,
-                        LABEL_PUSH_KIND,
-                    )
-                    .await?;
+                    self.record_sync_op(&label_push_log_entry(task_id, &names, None))
+                        .await?;
                     out.added += mirror.added;
                     out.removed += mirror.removed;
                     out.labels = mirror.labels;
                 }
                 Err(error) => {
-                    let names: Vec<String> =
-                        desired.iter().map(|(label, _)| label.clone()).collect();
-                    self.record_pending_sync_op(&pending_label_push(
-                        &provider,
-                        integration_id,
-                        &external_id,
+                    self.record_sync_op(&label_push_log_entry(
                         task_id,
                         &names,
-                        &error.to_string(),
+                        Some(&error.to_string()),
                     ))
                     .await?;
                     failure.get_or_insert(error);
@@ -3272,6 +3273,121 @@ impl TodoStore {
             link.external_updated_at,
         )
         .await
+    }
+
+    /// Retry the pushes the sync log still owes (§5.10): a task whose most
+    /// recent logged push failed is re-synced from its current local state,
+    /// which is what makes a resolved cause — a personal token carrying the
+    /// permission the first attempt lacked, a repo that was briefly
+    /// unreachable — enough to catch up.
+    ///
+    /// Each task goes through the ordinary merge, not a blind re-push: local
+    /// edits win only where their stamp is newer, so a replay can never clobber
+    /// a remote edit the app has not shown the user (§5.4). A task that never
+    /// got an issue is captured instead, since there is nothing to merge with.
+    /// Every outcome is appended to the log, so a replay that fails again keeps
+    /// its new reason for the next pass.
+    pub async fn replay_failed_syncs<C: GithubClient>(
+        &mut self,
+        client: &C,
+        provider: &str,
+    ) -> anyhow::Result<SyncReplaySummary> {
+        let mut summary = SyncReplaySummary::default();
+        for entry in self.sync_op_log_backlog(provider).await? {
+            let Some(task_id) = entry.task_id else {
+                continue;
+            };
+            match self.replay_task_sync(client, task_id).await {
+                Ok(Replayed::Skipped(reason)) => {
+                    self.record_sync_op(&crate::SyncOpLogEntry::settled(
+                        provider,
+                        task_id,
+                        &entry.kind,
+                        reason,
+                    ))
+                    .await?;
+                    summary.settled += 1;
+                }
+                Ok(Replayed::Pushed) => {
+                    self.record_sync_op(&crate::SyncOpLogEntry::delivered(
+                        provider,
+                        task_id,
+                        &entry.kind,
+                        serde_json::json!({ "replayed": true }),
+                    ))
+                    .await?;
+                    summary.replayed += 1;
+                }
+                Err(error) => {
+                    self.record_sync_op(&crate::SyncOpLogEntry::failed(
+                        provider,
+                        Some(task_id),
+                        &entry.kind,
+                        serde_json::json!({ "replayed": true }),
+                        &error.to_string(),
+                    ))
+                    .await?;
+                    summary.failed += 1;
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Push one task's current state, or report that it owes nothing.
+    async fn replay_task_sync<C: GithubClient>(
+        &mut self,
+        client: &C,
+        task_id: u64,
+    ) -> anyhow::Result<Replayed> {
+        if self.get_task(task_id).await?.deleted_at.is_some() {
+            return Ok(Replayed::Skipped("the task was deleted"));
+        }
+        let Some(bound) = self.bound_repo_for_task(task_id).await? else {
+            return Ok(Replayed::Skipped("the task is in no repo-bound project"));
+        };
+        let links: Vec<crate::TaskLink> = self
+            .task_links_for_task(task_id)
+            .await?
+            .into_iter()
+            .filter(|link| {
+                link.integration_id == bound.integration_id
+                    && parse_issue_external_id(&link.external_id).is_some()
+            })
+            .collect();
+        if links.is_empty() {
+            // Nothing to merge with: the capture this task owes is its issue.
+            self.push_github_new_task(client, task_id).await?;
+            return Ok(Replayed::Pushed);
+        }
+        let mut summary = GithubSyncSummary::default();
+        for link in links {
+            let Some(issue_ref) = parse_issue_external_id(&link.external_id) else {
+                continue;
+            };
+            if issue_ref.owner != bound.owner || issue_ref.repo != bound.repo {
+                continue;
+            }
+            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+                continue;
+            };
+            if stored.state.tombstoned {
+                continue;
+            }
+            let issue = client
+                .get_issue(&bound.owner, &bound.repo, issue_ref.number)
+                .await?;
+            self.merge_github_issue(
+                client,
+                &bound,
+                &link.external_id,
+                &stored,
+                &issue,
+                &mut summary,
+            )
+            .await?;
+        }
+        Ok(Replayed::Pushed)
     }
 
     /// Sync every repo bound to a GitHub integration (§5.4–5.7): pull, merge
@@ -5927,32 +6043,117 @@ mod tests {
         let local = storage.create_tag("needs-review").await?;
         storage.assign_tag_to_task(task_id, &local.name).await?;
 
-        // The repo refuses the label, so the wanted labels are kept for a
-        // token that may write them rather than being lost with the attempt.
+        // The repo refuses the label, so the wanted labels are kept in the sync
+        // log for a token that may write them rather than being lost with the
+        // attempt.
         assert!(storage.push_task_labels(&fake, task_id).await.is_err());
-        let pending = storage.pending_sync_ops("github").await?;
-        assert_eq!(pending.len(), 1);
-        let op = &pending[0];
+        let log = storage.sync_op_log("github", 10).await?;
+        assert_eq!(log.len(), 1);
+        let op = &log[0];
         assert_eq!(op.provider, "github");
-        assert_eq!(op.kind, "labels");
-        assert_eq!(op.integration_id, integration.id);
-        assert_eq!(op.external_id, "o/r#1");
+        assert_eq!(op.kind, SYNC_OP_LABELS);
         assert_eq!(op.task_id, Some(task_id));
-        assert_eq!(op.attempts, 1);
-        assert!(op.error.contains("label write refused"));
+        assert!(op.is_failed());
+        assert!(op.error.as_deref().is_some_and(|e| e.contains("label write refused")));
         assert!(op.payload.contains("needs-review"));
 
-        // A second failure replaces the payload and counts the attempt instead
-        // of queueing the same intent twice.
+        // The log is append-only, so a second failure is a second entry rather
+        // than a rewrite of the first: the task's history stays readable.
         assert!(storage.push_task_labels(&fake, task_id).await.is_err());
-        let pending = storage.pending_sync_ops("github").await?;
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].attempts, 2);
+        assert_eq!(storage.sync_op_log("github", 10).await?.len(), 2);
+        assert_eq!(storage.sync_op_log_backlog("github").await?.len(), 1);
 
-        // A retry that goes through drops the record.
+        // A retry that goes through settles the task: its newest entry is not a
+        // failure, so a replay has nothing left to do for it.
         let healthy = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
         storage.push_task_labels(&healthy, task_id).await?;
-        assert!(storage.pending_sync_ops("github").await?.is_empty());
+        assert_eq!(storage.sync_op_log("github", 10).await?.len(), 3);
+        assert!(storage.sync_op_log_backlog("github").await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_replay_re_pushes_a_task_whose_last_push_failed() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let refusing = FakeGithub::default()
+            .with_issue("o/r", remote(1, "Buggy", "open", 100))
+            .with_refused_labels();
+        storage
+            .sync_github_integration(&refusing, integration.id, false)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+        let local = storage.create_tag("needs-review").await?;
+        storage.assign_tag_to_task(task_id, &local.name).await?;
+        assert!(storage.push_task_labels(&refusing, task_id).await.is_err());
+        let backlog = storage.sync_op_log_backlog("github").await?;
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog[0].task_id, Some(task_id));
+        assert_eq!(backlog[0].kind, SYNC_OP_LABELS);
+
+        // The permission the first attempt lacked is there now: the replay
+        // catches the task up and its newest entry stops being a failure.
+        let healthy = FakeGithub::default().with_issue("o/r", remote(1, "Buggy", "open", 100));
+        let replay = storage.replay_failed_syncs(&healthy, "github").await?;
+        assert_eq!(replay.replayed, 1);
+        assert_eq!(replay.failed, 0);
+        assert_eq!(replay.settled, 0);
+        assert!(storage.sync_op_log_backlog("github").await?.is_empty());
+        assert!(
+            healthy
+                .issue_labels("o/r", 1)
+                .contains(&"needs-review".to_string())
+        );
+
+        // A task that owes GitHub nothing — it left the repo-bound project —
+        // is settled rather than retried on every later pass.
+        let elsewhere = storage
+            .create_task(Task::create().title("Elsewhere".to_string()))
+            .await?;
+        storage
+            .record_sync_op(&SyncOpLogEntry::failed(
+                "github",
+                Some(elsewhere.id),
+                SYNC_OP_LABELS,
+                serde_json::json!({ "labels": ["needs-review"] }),
+                "no issue to mirror onto",
+            ))
+            .await?;
+        let replay = storage.replay_failed_syncs(&healthy, "github").await?;
+        assert_eq!(replay.settled, 1);
+        assert_eq!(replay.replayed, 0);
+        assert!(storage.sync_op_log_backlog("github").await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_replay_whose_cause_is_not_gone_keeps_the_new_reason() -> anyhow::Result<()> {
+        let (mut storage, integration, _) = bound_store("o", "r").await?;
+        let refusing = FakeGithub::default()
+            .with_issue("o/r", remote(1, "Buggy", "open", 100))
+            .with_refused_labels();
+        storage
+            .sync_github_integration(&refusing, integration.id, false)
+            .await?;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
+        let local = storage.create_tag("needs-review").await?;
+        storage.assign_tag_to_task(task_id, &local.name).await?;
+        assert!(storage.push_task_labels(&refusing, task_id).await.is_err());
+
+        // Still refused: the replay records the fresh failure — the log is the
+        // error log — and the task stays in the backlog for the next attempt.
+        let replay = storage.replay_failed_syncs(&refusing, "github").await?;
+        assert_eq!(replay.failed, 1);
+        let backlog = storage.sync_op_log_backlog("github").await?;
+        assert_eq!(backlog.len(), 1);
+        assert!(backlog[0].payload.contains("replayed"));
         Ok(())
     }
 
@@ -5975,13 +6176,14 @@ mod tests {
                 .await?,
             1
         );
-        let pending = storage.pending_sync_ops("github").await?;
-        assert_eq!(pending[0].error, "no GitHub credentials");
-        assert_eq!(pending[0].task_id, Some(task_id));
-        assert!(pending[0].payload.contains("bug"));
+        let log = storage.sync_op_log_backlog("github").await?;
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].error.as_deref(), Some("no GitHub credentials"));
+        assert_eq!(log[0].task_id, Some(task_id));
+        assert!(log[0].payload.contains("bug"));
 
         // A task with no issue has nothing to defer, so a purely local tag
-        // costs neither an API call nor a pending record.
+        // costs neither an API call nor a log entry.
         let local = storage
             .create_task(Task::create().title("Just local".to_string()))
             .await?;
@@ -5991,7 +6193,7 @@ mod tests {
                 .await?,
             0
         );
-        assert_eq!(storage.pending_sync_ops("github").await?.len(), 1);
+        assert_eq!(storage.sync_op_log("github", 10).await?.len(), 1);
         Ok(())
     }
 

@@ -59,7 +59,9 @@ describe, so building it first would mean building it against a stub.
 | 35 | 9 | **No local-merge escape hatch** once a remote resolves to github.com — the PR step is absolute there. Local merge survives only where no such remote exists (decision 17) |
 | 36 | 9 | Generated PRs follow the **`AGENTS.md` PR-hygiene convention**: imperative title, no conventional-commit prefix, no trailing punctuation, and a final `Release Notes:` section |
 | 37 | 10 | Sub-issues ↔ subtasks are **synced both ways**: a local subtask in a repo-bound tree opens its own issue and is attached under its parent's issue (the parent's chain is opened first when none of it is on GitHub yet), and a **pulled sub-issue becomes a local subtask**, un-nested when the relationship is removed on GitHub. The relationship is tracked in the child's link, one repo's issues only |
-| 38 | 10 | Labels are **mirrored (add *and* remove), not additive**: adding a local tag creates the missing label and puts it on the issue; removing the tag takes that label off again, but only for labels the app **paired** with a local tag (`external_tag_links`, `source_kind = 'label'`, `external_id = <owner>/<repo>#label:<label>`) — a label somebody else added is never taken off. The push runs **in the background at the tag edit**, and every push that cannot be delivered is **stored in `pending_sync_ops` with the labels it wanted** (error + attempt count) so a later pass can replay it; the replay pass itself is out of scope here |
+| 38 | 10 | Labels are **mirrored (add *and* remove), not additive**: adding a local tag creates the missing label and puts it on the issue; removing the tag takes that label off again, but only for labels the app **paired** with a local tag (`external_tag_links`, `source_kind = 'label'`, `external_id = <owner>/<repo>#label:<label>`) — a label somebody else added is never taken off. The push runs **in the background at the tag edit**, and every push that cannot be delivered is **stored with the labels it wanted** (error + attempt count) so a later pass can replay it |
+| 39 | 11 | Ticking a task's checkbox **records the completion locally and returns**; the provider pushes run detached, so the row grays out at the speed of a local write rather than of an API call (§5.11) |
+| 40 | 11 | Every push the app makes **on its own behalf in the background** is appended to a **sync operation log** with its outcome — delivered, or the reason it failed — and each sync pass **replays** the tasks whose most recent entry failed (§5.10) |
 
 ## 3. Current state (verified in this repo)
 
@@ -289,11 +291,9 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 - **A tag edit pushes at once, in the background.** Saving tags starts the
   mirror without holding up the editor; a purely local task, or one in a tag
   that binds no repo, costs no API call. A push that cannot be delivered — no
-  credentials, permission refused, offline — records the labels it wanted in
-  `pending_sync_ops` (one row per issue, with error and attempt count, a repeat
-  failure updating the row rather than queueing a second copy) so a later pass
-  can replay it once the reason is gone. **Nothing replays them yet**: the retry
-  pass is a follow-up task.
+  credentials, permission refused, offline — records the labels it wanted, with
+  the reason, in the sync operation log (§5.10), so a later pass replays it once
+  the reason is gone.
 - **The label ↔ tag pairing is stored** whenever a label is imported *or*
   written by the app: `external_tag_links` with `source_kind = 'label'` and
   `external_id = <owner>/<repo>#label:<label>`. The pairing is what lets a later
@@ -317,7 +317,7 @@ tie-breaker" (decision 7) is implemented against a stored snapshot:
 
 | Event | Effect |
 | --- | --- |
-| Local task completed | `PATCH state=closed` and a comment saying the linked task was marked as completed — GitHub gives a plain close no reason of its own, so the thread is what distinguishes "done" from "abandoned" |
+| Local task completed | The completion is recorded locally first and the row returns; `PATCH state=closed` and a comment saying the linked task was marked as completed follow in the background (§5.11) — GitHub gives a plain close no reason of its own, so the thread is what distinguishes "done" from "abandoned" |
 | Issue closed on GitHub | Local task completed (never tombstoned) |
 | Issued reopened | Local task reopened (unless tombstoned) |
 | Local task deleted | Tombstone locally **and** close the issue (GitHub has no delete); the link is marked tombstoned so later pulls cannot resurrect it |
@@ -414,6 +414,58 @@ nesting limits surface as a failed attach, which is logged and retried by the
 next push of that tree; and a relationship created on GitHub for an issue that
 has not moved since the cursor is picked up when that issue next appears in a
 listing (a full **Sync now** always sees it).
+
+### 5.10 The sync operation log
+
+Everything the app pushes on its own behalf — a capture, a label mirror, a
+completion or reopen — is appended to `sync_op_log`: one row per attempt, with
+the task it was about, what it tried to do, its payload, and, when it did not
+land, the reason. Nothing is ever rewritten, so a failure stays readable after
+it has been worked around, and "this kept failing" is a query rather than a
+counter.
+
+What it is for:
+
+- **A record of what was synced.** Which pushes went out, for which task, when,
+  and what changed — the trail a sync problem is diagnosed from.
+- **An error log.** A push with no caller left to report to (the tag editor and
+  the checkbox have already returned) still explains itself, with the
+  provider's own message, instead of becoming a `tracing` line nobody keeps.
+- **A backlog to replay.** A task is *behind* while its most recent entry is a
+  failure. Every sync pass, after pulling and merging, replays those tasks: the
+  issue is fetched and merged like any other (§5.4), so local edits win only
+  where their stamp is newer and a replay can never clobber a remote edit the
+  app has not shown the user; a task that never got an issue is captured
+  instead, since there is nothing to merge with. Every outcome is appended, so a
+  replay that fails again keeps its new reason for the next pass, and a task
+  that turns out to owe nothing — deleted, or no longer in a repo-bound project
+  — is recorded as settled rather than retried forever.
+
+The log covers the pushes made **in the background**, where no caller is left to
+report to: captures, label mirrors, completions (§5.11). A push from a
+foreground edit (a rename, a description) still fails that edit and is reported
+to the user directly, so it is not duplicated here. A backlog is derived from
+the most recent 1000 rows, which keeps reading it bounded while the log itself
+stays complete.
+
+Every provider is logged — the `provider` column is what makes the backlog
+questions askable one provider at a time — while the replay pass runs for
+GitHub, the provider whose sync engine can re-derive a task's state. Todoist's
+rows are the error log half of the feature until it has a replay of its own.
+
+### 5.11 Completing a task never waits for the network
+
+Ticking a task's checkbox writes the completion locally and returns; the pushes
+that follow — Todoist's `done`, GitHub's close and its comment, or the reopen —
+run detached behind it. The row grays out at the speed of a local write rather
+than of an API call, or of a token refresh, which is the latency a synced
+project used to show at every tick.
+
+The trade, stated: a push that fails in the background no longer raises an error
+at the click. What replaces that report is the log entry (§5.10) plus the replay
+that follows every sync pass. The detached push holds the store lock while it
+runs, like the other background pushes, so a click landing inside that window
+queues behind it — the sync lock budget (§5.7) is what keeps that window short.
 
 ## 6. Part B — the coding workflow becomes git/PR-backed
 
@@ -564,6 +616,21 @@ New:
 -- per-field sync snapshot + local field-change stamps for GitHub links
 ALTER TABLE external_task_links ADD COLUMN field_state TEXT;
 
+-- one row per push the app attempted in the background (§5.10): delivered or
+-- not, with the reason a push failed. Append-only, so a retry is a new row.
+CREATE TABLE IF NOT EXISTS sync_op_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider   TEXT NOT NULL,
+    task_id    INTEGER,
+    kind       TEXT NOT NULL,          -- capture | labels | task_done | task_open
+    payload    TEXT NOT NULL,          -- JSON: { "labels": ["bug"] }
+    status     TEXT NOT NULL,          -- ok | failed
+    error      TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_op_log_provider ON sync_op_log(provider, id);
+CREATE INDEX IF NOT EXISTS idx_sync_op_log_task ON sync_op_log(task_id);
+
 -- one row per (integration, repo): ETag / since cursor for incremental pulls
 CREATE TABLE IF NOT EXISTS integration_sync_state (
     integration_id INTEGER NOT NULL,
@@ -608,29 +675,12 @@ CREATE TABLE IF NOT EXISTS run_pull_requests (
     UNIQUE (integration_id, owner, repo, number)
 );
 CREATE INDEX IF NOT EXISTS idx_run_pull_requests_state ON run_pull_requests(state);
-
--- one row per undelivered push (§5.5), keyed by target so a repeat failure
--- updates the row rather than queueing a second copy of the same intent
-CREATE TABLE IF NOT EXISTS pending_sync_ops (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider       TEXT NOT NULL,
-    integration_id INTEGER NOT NULL,
-    external_id    TEXT NOT NULL,
-    task_id        INTEGER,
-    kind           TEXT NOT NULL,          -- 'labels' today
-    payload        TEXT NOT NULL,          -- JSON: { "labels": ["bug"] }
-    error          TEXT NOT NULL,
-    attempts       INTEGER NOT NULL DEFAULT 1,
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL,
-    UNIQUE (provider, integration_id, external_id, kind)
-);
-CREATE INDEX IF NOT EXISTS idx_pending_sync_ops_integration
-    ON pending_sync_ops(integration_id);
 ```
 
-The deferred-push table is not part of `0023_*`: the numbering moved on while
-this half was being built, so it lands as `0027_pending_sync_ops.sql`.
+The sync operation log is not part of `0023_*`: the numbering moved on while
+this half was being built, so it lands as `0028_sync_op_log.sql`, replacing the
+label-only `0027_pending_sync_ops.sql` (whose undelivered rows become the first
+rows of the log, with `pending_sync_ops` itself dropped).
 
 `base_branch` on `workflow_runs` becomes the primary repo's base for backwards
 compatibility; the per-repo truth lives in `run_worktrees`.
@@ -651,7 +701,9 @@ compatibility; the per-repo truth lives in `run_worktrees`.
 | Sub-issue relationship removed on GitHub | The local task is un-nested (kept, never deleted or tombstoned) |
 | No remote resolves to github.com (none, or other hosts only) | Merge step keeps today's local merge (decision 17) |
 | Push rejected (non-fast-forward, no credentials) | Block with git's stderr; no retry loop |
-| Label push refused, offline, or no credentials | The tag edit stands; the wanted labels are recorded in `pending_sync_ops` for a later replay (no executor yet, §5.5) |
+| Label push refused, offline, or no credentials | The tag edit stands; the wanted labels are recorded in the sync log for a later replay (§5.5, §5.10) |
+| Local completion, reopen, or capture cannot be delivered | The local change stands (the checkbox never fails, §5.11) and the push is logged with its reason; the next sync pass replays it (§5.10) |
+| A replay fails again | The new reason is appended; the task stays in the backlog and the next pass tries again (§5.10) |
 | Several remotes, only one of them GitHub (this repo: `github` + `gitlab`) | The GitHub remote is the only one used for push/PR; other hosts are never pushed to or mirrored |
 | Reviewer request rejected (not a collaborator, no access) | PR creation still succeeds; the failure is recorded as a note on the step, never a blocked step |
 | PR already exists for the branch | Adopt it: store the number/URL and continue instead of erroring |
@@ -739,10 +791,17 @@ Everything runs against fakes; **no live network in CI** (decision 29).
   remote left alone, repo-invisible (404) reason.
 - Labels (§5.5): a tag added locally creating its label remotely, the removal
   taking it off again (and leaving a label somebody else added alone), the label
-  ↔ tag pairing outranking a name match, a refused push leaving a
-  `pending_sync_ops` row with the labels it wanted (attempts counted, cleared by
-  the push that goes through), and the no-credentials path recording the intent
-  rather than dropping it.
+  ↔ tag pairing outranking a name match, a refused push leaving a log entry
+  with the labels it wanted and the reason (append-only, so a second failure is
+  a second row), and the no-credentials path recording the intent rather than
+  dropping it.
+- The sync operation log (§5.10): a delivered push leaving an `ok` row, a
+  failed one leaving its reason, and a backlog that holds a task while its most
+  recent row is a failure and drops it once a later row is not.
+- Replay (§5.10): a task whose last push failed being re-merged from its current
+  state (including a capture for a task with no issue yet), a replay that fails
+  again keeping its new reason and staying in the backlog, and a task that owes
+  nothing being settled rather than retried forever.
 - `integration_sync_state` cursor behaviour and idempotent re-sync.
 - Sub-issues (§5.9): a subtask opening its parent's chain and attaching once, a
   repeat push making no call, a pulled sub-issue nesting locally, an un-parented
@@ -784,9 +843,8 @@ Everything runs against fakes; **no live network in CI** (decision 29).
 1. **Auth**: `github_auth.rs` (device flow) + `github.json` storage + the
    integration card (connect/disconnect/account), tests with a fake HTTP layer.
 2. **Storage**: migration `0023`, `field_state`, `integration_sync_state`,
-   `pending_sync_ops` (`0027`),
-   link/identity helpers, and the sync engine (pull → resolve → push →
-   watermark) with the full test table from §11.
+   `sync_op_log` (`0028`), link/identity helpers, and the sync engine (pull →
+   resolve → push → watermark → replay) with the full test table from §11.
 3. **Task-side mapping**: repo → namespaced project tag, binding via tag
    settings + remote auto-detection, source badge, `Open on GitHub`, comment and
    metadata rendering.

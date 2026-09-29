@@ -20,19 +20,21 @@ pub mod workflow;
 
 pub mod prelude {
     pub use crate::error::{self, QueryErr, QueryResult, StorageSetupErr};
-    pub use crate::external::{ExternalComment, Integration, PendingSyncOp, TagLink, TaskLink};
+    pub use crate::external::{
+        ExternalComment, Integration, SYNC_OP_FAILED, SYNC_OP_OK, SyncOpLogEntry, TagLink, TaskLink,
+    };
     pub use crate::github::{
         BoundRepo, DirtyWorktrees, FieldDecision, FieldMerge, GithubClient, GithubHttpClient,
         GithubSyncOutcome, GithubSyncSummary, ISSUE_FIELDS, IssueFieldState, IssueLink, IssuePage,
-        IssuePatch, IssueRef, LABEL_PUSH_KIND, LabelMirror, NewPullRequest, NewRunPullRequest,
-        NewRunWorktree,
+        IssuePatch, IssueRef, LabelMirror, NewPullRequest, NewRunPullRequest, NewRunWorktree,
         PULL_REQUEST_CLOSED, PULL_REQUEST_MERGED, PULL_REQUEST_OPEN, PULL_REQUEST_WAIVED,
         RemoteIssue, RemoteIssueFields, RemotePullRequest, RemoteRepo, RunPullRequest, RunWorktree,
-        SyncCursor, SyncFailure, SyncYield, TaskIssue, classify_status, comment_from_json,
-        format_pull_request_body, format_pull_request_title, issue_external_id, label_external_id,
-        parse_issue_external_id, pending_label_push, plan_issue_merge, release_note_for,
-        remote_issue_from_json, remote_pull_request_from_json, repos_from_json, resolve_field,
-        summary_from_notes,
+        SYNC_OP_CAPTURE, SYNC_OP_LABELS, SYNC_OP_TASK_DONE, SYNC_OP_TASK_OPEN, SyncCursor,
+        SyncFailure, SyncReplaySummary, SyncYield, TaskIssue, classify_status, comment_from_json,
+        format_pull_request_body,
+        format_pull_request_title, issue_external_id, label_external_id, parse_issue_external_id,
+        plan_issue_merge, release_note_for, remote_issue_from_json, remote_pull_request_from_json,
+        repos_from_json, resolve_field, summary_from_notes,
     };
     pub use crate::link::LinkKind;
     pub use crate::managed::{

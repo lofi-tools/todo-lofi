@@ -130,15 +130,32 @@ async fn push_todoist_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Re
 }
 
 /// Open the issue for a captured task in a repo-bound project tag (§5.2).
-/// Skipped without GitHub credentials and for tags that bind no repo, so a
-/// purely local tag costs no API call.
+/// Skipped for tags that bind no repo — a purely local task costs no API call
+/// and no log entry — and without GitHub credentials the capture is *recorded
+/// as failed* rather than dropped, so a replay opens the issue once the account
+/// is connected instead of leaving the task without one for good.
 async fn push_github_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Result<()> {
-    if !crate::github_auth::has_usable_credentials() {
+    if store.bound_repo_for_task(task_id).await?.is_none() {
         return Ok(());
     }
-    let token = crate::github_auth::access_token().await?;
-    let client = storage::GithubHttpClient::new(token);
-    store.push_github_new_task(&client, task_id).await?;
+    let outcome = async {
+        if !crate::github_auth::has_usable_credentials() {
+            return Err(anyhow::anyhow!("no GitHub credentials"));
+        }
+        let token = crate::github_auth::access_token().await?;
+        let client = storage::GithubHttpClient::new(token);
+        store.push_github_new_task(&client, task_id).await.map(|_| ())
+    }
+    .await;
+    log_sync_op(
+        store,
+        "github",
+        storage::SYNC_OP_CAPTURE,
+        task_id,
+        serde_json::json!({ "capture": true }),
+        &outcome,
+    )
+    .await;
     Ok(())
 }
 
@@ -226,15 +243,16 @@ fn push_github_labels_in_background(store: &Arc<StoreLock>, task_id: u64) {
     });
 }
 
-/// Push a field delta to every Todoist task linked to `task_id`. No links
-/// (or no token) → no-op, so purely local tasks never touch the network.
-/// Must run on the Tokio runtime. A push failure fails the whole edit so
-/// the UI reports it; the local edit itself is already saved.
+/// Push a field delta to every Todoist task linked to `task_id`, reporting
+/// whether there was one to tell: a task the provider does not mirror costs no
+/// API call and deserves no sync-log entry. Must run on the Tokio runtime. A
+/// push failure fails the whole edit so the UI reports it; the local edit
+/// itself is already saved.
 async fn push_patch(
     store: &mut TodoStore,
     task_id: u64,
     patch: storage::todoist::TaskPatch,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let todoist_ids: std::collections::HashSet<u64> = store
         .list_integrations()
         .await?
@@ -249,7 +267,7 @@ async fn push_patch(
         .filter(|link| todoist_ids.contains(&link.integration_id))
         .collect();
     if links.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let token = crate::todoist_auth::access_token().await?;
     for link in links {
@@ -257,7 +275,7 @@ async fn push_patch(
             .push_todoist_patch(&token, link.integration_id, &link.external_id, task_id, &patch)
             .await?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Every GitHub issue link of a task. Empty for a task no GitHub issue backs,
@@ -297,6 +315,109 @@ async fn push_github_completion(store: &mut TodoStore, task_id: u64) -> anyhow::
     let client = storage::GithubHttpClient::new(token);
     store.close_issue_for_completed_task(&client, task_id).await?;
     Ok(())
+}
+
+/// Record one provider push in the sync log (§5.10): every attempt, delivered
+/// or not, with the reason a push failed. The log is the app's record of what
+/// it synced and its error log for what it could not, and it is what a replay
+/// pass reads to catch up once the cause is gone.
+///
+/// It covers the pushes the app makes *on its own behalf*, in the background,
+/// where no caller is left to report to; a push from a foreground edit still
+/// fails that edit, and is reported to the user instead of only logged.
+/// Nothing is returned: the entry is the report, and a caller that cannot write
+/// it has nothing better to do than log that too.
+async fn log_sync_op(
+    store: &mut TodoStore,
+    provider: &str,
+    kind: &str,
+    task_id: u64,
+    payload: serde_json::Value,
+    outcome: &anyhow::Result<()>,
+) {
+    let entry = match outcome {
+        Ok(()) => SyncOpLogEntry::delivered(provider, task_id, kind, payload),
+        Err(error) => {
+            tracing::error!(task_id, provider, kind, %error, "sync push failed; recorded for replay");
+            SyncOpLogEntry::failed(provider, Some(task_id), kind, payload, &error.to_string())
+        }
+    };
+    if let Err(error) = store.record_sync_op(&entry).await {
+        tracing::error!(task_id, provider, kind, %error, "could not write the sync log entry");
+    }
+}
+
+/// Tell every provider that a task was completed or reopened, detached from the
+/// click that did it. The local write has already landed, so the row updates at
+/// once and the pushes catch up behind it (§5.6). A push that fails is recorded
+/// in the sync log with its reason, which is what makes it replayable.
+fn push_task_done_in_background(store: &Arc<StoreLock>, task_id: u64, done: bool) {
+    let store = store.clone();
+    tokio::spawn(async move {
+        let mut s = store.lock().await;
+        push_task_done(&mut s, task_id, done).await;
+    });
+}
+
+/// The completion/reopen push itself. Todoist is told unconditionally (its
+/// failure is recorded rather than returned), and GitHub only when the task
+/// really has an issue: a purely local tick costs no API call.
+async fn push_task_done(store: &mut TodoStore, task_id: u64, done: bool) {
+    let kind = if done {
+        storage::SYNC_OP_TASK_DONE
+    } else {
+        storage::SYNC_OP_TASK_OPEN
+    };
+    let payload = serde_json::json!({ "done": done });
+    match push_patch(
+        store,
+        task_id,
+        storage::todoist::TaskPatch {
+            done: Some(done),
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        // No Todoist task to tell: there is no operation to record either.
+        Ok(false) => {}
+        Ok(true) => {
+            log_sync_op(store, "todoist", kind, task_id, payload.clone(), &Ok(())).await
+        }
+        Err(error) => {
+            log_sync_op(store, "todoist", kind, task_id, payload.clone(), &Err(error)).await
+        }
+    }
+
+    let links = match github_links_for_task(store, task_id).await {
+        Ok(links) => links,
+        Err(error) => {
+            tracing::error!(task_id, %error, "could not read the task's GitHub links");
+            return;
+        }
+    };
+    if links.is_empty() {
+        return;
+    }
+    let github = if !crate::github_auth::has_usable_credentials() {
+        Err(anyhow::anyhow!("no GitHub credentials"))
+    } else if done {
+        // Completing closes the issue, and the close carries a comment saying
+        // why (§5.6).
+        push_github_completion(store, task_id).await
+    } else {
+        push_github_patch(
+            store,
+            task_id,
+            storage::IssuePatch {
+                state: Some("open".to_string()),
+                ..Default::default()
+            },
+            &["state"],
+        )
+        .await
+    };
+    log_sync_op(store, "github", kind, task_id, payload, &github).await;
 }
 
 /// Push a title/description delta to every GitHub issue linked to `task_id`.
@@ -426,6 +547,11 @@ impl Store {
         })
     }
 
+    /// Tick (or untick) a task, returning as soon as the change is recorded
+    /// locally: the providers are told afterwards, detached (§5.11). A checkbox
+    /// must not wait on a network round trip — or on the token refresh one may
+    /// need — for the row to gray out, and a push that fails is kept in the sync
+    /// log with its reason rather than being shown as a failed click.
     pub fn toggle_task_done(
         &self,
         task_id: u64,
@@ -434,29 +560,16 @@ impl Store {
     ) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
-            tracing::info!(task_id, done, "toggle_task_done: before update");
-            let mut s = store.lock().await;
-            s.update_task_done(task_id, done).await?;
-            tracing::info!(task_id, done, "toggle_task_done: after update, ok");
-            // A synced task keeps its local completion on the next pull and
-            // pushes it as `state` (spec §5.5).
-            s.stamp_local_issue_field(task_id, "state").await?;
-            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
-                done: Some(done),
-                ..Default::default()
-            })
-            .await?;
-            if done {
-                // Completing closes the issue, and the close carries a comment
-                // saying why (§5.6).
-                push_github_completion(&mut s, task_id).await?;
-            } else {
-                push_github_patch(&mut s, task_id, storage::IssuePatch {
-                    state: Some("open".to_string()),
-                    ..Default::default()
-                }, &["state"])
-                .await?;
+            {
+                let mut s = store.lock().await;
+                tracing::info!(task_id, done, "toggle_task_done: before update");
+                s.update_task_done(task_id, done).await?;
+                tracing::info!(task_id, done, "toggle_task_done: after update, ok");
+                // A synced task keeps its local completion on the next pull and
+                // pushes it as `state` (spec §5.5).
+                s.stamp_local_issue_field(task_id, "state").await?;
             }
+            push_task_done_in_background(&store, task_id, done);
             Ok(())
         })
     }
@@ -2361,6 +2474,29 @@ impl Store {
             total.absorb(&outcome.summary);
             if outcome.aborted {
                 break;
+            }
+            // Retry what the sync log still owes in the same pass: a cause that
+            // has since been resolved — a personal token that now carries the
+            // permission, a repo that was briefly unreachable — catches up
+            // without the user having to do anything (§5.10).
+            let replay = {
+                let mut s = store.lock().await;
+                s.replay_failed_syncs(client, "github").await
+            };
+            match replay {
+                Ok(replay) if replay.replayed + replay.failed + replay.settled > 0 => {
+                    tracing::info!(
+                        integration_id = id,
+                        replayed = replay.replayed,
+                        failed = replay.failed,
+                        settled = replay.settled,
+                        "replayed the sync operations the log still owed"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(integration_id = id, %error, "could not replay failed sync operations")
+                }
             }
         }
         Ok(total)
