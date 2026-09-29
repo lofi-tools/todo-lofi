@@ -222,8 +222,10 @@ The built-ins are `poolside`, `openrouter`, `groq`, `nvidia`, `tokenrouter`
 (the tokenrouter.com unified gateway), `kiosapi` (kiosapi.com), `google`
 (Google AI Studio's OpenAI-compatible endpoint, `gemini-3.8-flash` at low
 thinking), `ollama` (ollama.com's hosted cloud API), `opencode-zen`
-(opencode.ai's Zen gateway) and `orcarouter` (orcarouter.ai's zero-markup
-meta-router). A `providers.NAME` entry either
+(opencode.ai's Zen gateway), `orcarouter` (orcarouter.ai's zero-markup
+meta-router) and `openllm` (openllm.sh's one-key gateway over your Claude,
+ChatGPT, Grok, Kimi and Cursor accounts plus bring-your-own API keys).
+A `providers.NAME` entry either
 overrides a built-in (by name) or defines a brand-new provider. All fields are optional; only set what you want to
 override. The default config (`/default-config`) includes every built-in
 provider with its `base_url`, `api_key` spec, and one model, so you can see
@@ -272,7 +274,8 @@ The `!command` form is resolved each time a provider is used (opencode/pi
 convention). Default built-ins use `env:POOLSIDE_API_KEY`,
 `env:OPENROUTER_API_KEY`, `env:GROQ_API_KEY`, `env:NVIDIA_API_KEY`,
 `env:TOKENROUTER_API_KEY`, `env:KIOSAPI_API_KEY`, `env:GEMINI_API_KEY`,
-`env:OLLAMA_CLOUD_API_KEY`, `env:OPENCODE_API_KEY`.
+`env:OLLAMA_CLOUD_API_KEY`, `env:OPENCODE_API_KEY`,
+`env:ORCAROUTER_API_KEY`, `env:OPENLLM_API_KEY`.
 
 #### Environment variables for tools
 

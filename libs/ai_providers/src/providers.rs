@@ -22,6 +22,7 @@ pub mod kiosapi;
 pub mod nvidia;
 pub mod ollama;
 pub mod opencode_zen;
+pub mod openllm;
 pub mod openrouter;
 pub mod orcarouter;
 pub mod poolside;
@@ -72,6 +73,7 @@ pub fn provider_kinds() -> &'static [&'static dyn ProviderKind] {
         &poolside::Poolside,
         &ollama::Ollama,
         &opencode_zen::OpenCodeZen,
+        &openllm::OpenLlm,
         &google::Google,
     ]
 }

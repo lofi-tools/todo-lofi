@@ -4,7 +4,8 @@
 //! Built-in providers (all OpenAI-compatible): poolside, openrouter, groq,
 //! nvidia nim, the tokenrouter gateway, kiosapi, google (AI Studio), ollama
 //! (ollama.com's hosted cloud API), opencode-zen (opencode.ai's Zen gateway),
-//! and orcarouter (orcarouter.ai's meta-router). Their base URL / api key /
+//! orcarouter (orcarouter.ai's meta-router), and openllm (openllm.sh's gateway
+//! over subscription and byo-key accounts). Their base URL / api key /
 //! models can be overridden — or new providers added — via the config file's
 //! `[providers.NAME]` section.
 //!
@@ -469,6 +470,19 @@ fn builtin_providers() -> Vec<Provider> {
                 "z-ai/glm-5.3-flash-free".into(),
                 "tencent/hy3-free".into(),
             ],
+        },
+        Provider {
+            name: "openllm".into(),
+            base_url: "https://www.openllm.sh/v1".into(),
+            api_key: "env:OPENLLM_API_KEY".into(),
+            // OpenLLM fronts the Claude/ChatGPT/Grok/Kimi/Cursor accounts you
+            // already pay for (plus bring-your-own API keys) behind one
+            // OpenAI-compatible endpoint. `lite`, `plus` and `ultra` are tier
+            // aliases backed by your fallback chains — `plus` is the default.
+            // The alias is the wire id, so it stays bare here (the UI shows
+            // it as `openllm/plus`); concrete `provider/model` ids from
+            // `/v1/models` can be added alongside them.
+            models: vec!["plus".into(), "lite".into(), "ultra".into()],
         },
     ]
 }
@@ -1971,6 +1985,15 @@ mod tests {
             resolve_selection(&config, "", "laguna-xs-2.1").unwrap(),
             ("poolside".to_string(), "poolside/laguna-xs-2.1".to_string())
         );
+        // A bare wire id stays bare when selected through its display id.
+        assert_eq!(
+            resolve_selection(&config, "", "openllm/plus").unwrap(),
+            ("openllm".to_string(), "plus".to_string())
+        );
+        assert_eq!(
+            resolve_selection(&config, "", "plus").unwrap(),
+            ("openllm".to_string(), "plus".to_string())
+        );
         assert!(resolve_selection(&config, "", "unknown-provider/model").is_err());
     }
 
@@ -2153,6 +2176,23 @@ mod tests {
         assert_eq!(resolved.base_url, "https://opencode.ai/zen/v1");
         assert_eq!(resolved.model, "opencode-zen/gemini-3.8-flash");
         assert_eq!(resolved.api_key, "opencode-test-key");
+    }
+
+    #[test]
+    fn openllm_builtin_provider() {
+        let config = AppConfig::default();
+        let ol = provider(&config, "openllm").unwrap();
+        assert_eq!(ol.base_url, "https://www.openllm.sh/v1");
+        assert_eq!(ol.api_key, "env:OPENLLM_API_KEY");
+        // The tier aliases are the wire ids, so the roster stores them bare.
+        assert_eq!(model_ids(&ol), vec!["plus", "lite", "ultra"]);
+        // Resolution wires up the hosted gateway base URL and key.
+        // SAFETY: test-only mutation of a dedicated env var.
+        unsafe { std::env::set_var("OPENLLM_API_KEY", "openllm-test-key") };
+        let resolved = resolve(&config, "openllm", "plus").unwrap();
+        assert_eq!(resolved.base_url, "https://www.openllm.sh/v1");
+        assert_eq!(resolved.model, "plus");
+        assert_eq!(resolved.api_key, "openllm-test-key");
     }
 
     /// A config with telemetry off and routing off, so a test exercises the

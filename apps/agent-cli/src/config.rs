@@ -43,7 +43,8 @@ pub struct AppConfig {
     pub fallback: FallbackConfig,
     /// Per-provider overrides (base_url, api_key, models). Keys extend or
     /// override the built-in providers (poolside, openrouter, groq, nvidia,
-    /// tokenrouter, kiosapi, google, ollama, opencode-zen, orcarouter).
+    /// tokenrouter, kiosapi, google, ollama, opencode-zen, orcarouter,
+    /// openllm).
     #[serde(default)]
     pub providers: std::collections::HashMap<String, ProviderConfigEntry>,
     /// Named fallback "combos": exposed as the virtual provider `combos` with
@@ -145,7 +146,7 @@ pub fn default_config_jsonc() -> String {
         ),
         (
             "provider",
-            "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"ollama\", \"opencode-zen\", \"orcarouter\", \"combos\", or a name from `providers`)",
+            "Provider (\"auto\", \"poolside\", \"openrouter\", \"groq\", \"nvidia\", \"tokenrouter\", \"kiosapi\", \"google\", \"ollama\", \"opencode-zen\", \"orcarouter\", \"openllm\", \"combos\", or a name from `providers`)",
         ),
         ("max_turns", "Maximum agent turns per run (u32)"),
         ("max_tokens", "Maximum output tokens per response (u32)"),
@@ -355,6 +356,7 @@ fn append_env_jsonc(out: &mut String) {
     out.push_str("    \"OLLAMA_CLOUD_API_KEY\": \"!echo OLLAMA_CLOUD_API_KEY\",\n");
     out.push_str("    \"OPENCODE_API_KEY\": \"!echo OPENCODE_API_KEY\",\n");
     out.push_str("    \"ORCAROUTER_API_KEY\": \"!echo ORCAROUTER_API_KEY\",\n");
+    out.push_str("    \"OPENLLM_API_KEY\": \"!echo OPENLLM_API_KEY\",\n");
     out.push_str("    // WebSearch keys (Exa and the keyed providers; Parallel Search via MCP needs no key).\n");
     out.push_str("    \"EXA_API_KEY\": \"!echo EXA_API_KEY\",\n");
     out.push_str("    \"TINYFISH_API_KEY\": \"!echo TINYFISH_API_KEY\",\n");
@@ -1098,9 +1100,9 @@ mod tests {
         );
         // The providers/env sections are template content (the runtime
         // defaults keep empty maps), so assert the rendered entries parse
-        // back: the ten default providers and thirteen necessary env vars.
-        assert_eq!(parsed.providers.len(), 10);
-        assert_eq!(parsed.env.len(), 13);
+        // back: the eleven default providers and fourteen necessary env vars.
+        assert_eq!(parsed.providers.len(), 11);
+        assert_eq!(parsed.env.len(), 14);
         assert!(serde_json::from_str::<AppConfig>(&jsonc).is_err());
     }
 
@@ -1120,6 +1122,7 @@ mod tests {
             ("ollama", "OLLAMA_CLOUD_API_KEY"),
             ("opencode-zen", "OPENCODE_API_KEY"),
             ("orcarouter", "ORCAROUTER_API_KEY"),
+            ("openllm", "OPENLLM_API_KEY"),
         ] {
             assert!(
                 jsonc.contains(&format!("    \"{name}\": {{")),
@@ -1143,6 +1146,7 @@ mod tests {
             "OLLAMA_CLOUD_API_KEY",
             "OPENCODE_API_KEY",
             "ORCAROUTER_API_KEY",
+            "OPENLLM_API_KEY",
             "EXA_API_KEY",
             "TINYFISH_API_KEY",
             "LANGSEARCH_API_KEY",
