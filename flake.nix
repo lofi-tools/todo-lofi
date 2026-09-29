@@ -22,8 +22,25 @@
       perSystem = { pkgs, lib, ... }:
         let
           # bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
+          # crane's `buildDepsOnly` builds the dependencies of every workspace
+          # member, not just the one being packaged, so `nix build .#todo-2`
+          # also has to satisfy demos/desktop-tauri's tauri stack on Linux:
+          # gtk-sys, atk-sys, cairo-sys-rs, pango-sys, gdk-pixbuf-sys,
+          # soup3-sys, webkit2gtk-sys and libdbus-sys each ask pkg-config for
+          # their library at build time. macOS needs none of them: tauri and
+          # tao use the system frameworks there.
           buildDeps = [
             pkgs.pkg-config
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.glib
+            pkgs.gtk3
+            pkgs.gdk-pixbuf
+            pkgs.pango
+            pkgs.cairo
+            pkgs.atk
+            pkgs.libsoup_3
+            pkgs.webkitgtk_4_1
+            pkgs.dbus
           ];
 
           # Node + pnpm supply the web design system under libs/ and its Astro
