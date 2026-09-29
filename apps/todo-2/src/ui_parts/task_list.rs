@@ -1423,6 +1423,12 @@ mod tests {
     fn test_view<'a>(
         cx: &'a mut gpui::TestAppContext,
     ) -> (Entity<TaskListView>, &'a mut gpui::VisualTestContext) {
+        // The view's tag loads run on this runtime's worker threads, so they
+        // can wake their GPUI task from off the test thread. That is real
+        // Tokio work, not a scheduling bug in the view, so the scheduler's
+        // single-thread check is off for these tests (as it is in the other
+        // tests that drive a runtime of their own).
+        cx.executor().allow_parking();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
