@@ -28,8 +28,14 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # TEMPORARY: the `profiler` feature exposes gpui's foreground hang detector,
 # used by `watch_for_foreground_hangs` while diagnosing UI stalls.
 gpui = { package = "gpui-pre", version = "0.3.4", features = ["profiler"] }
+# `runtime_shaders` makes the Apple backend (gpui_platform → gpui_pre_macos →
+# gpui_pre_apple) stitch its Metal source with the generated header and compile
+# it at run time instead of invoking `xcrun metal` from a build script. The Nix
+# build runs that script inside a sandbox with no Xcode toolchain, so
+# `nix build .#todo-2` fails on macOS without this feature.
 gpui_platform = { package = "gpui-pre-platform", version = "0.3.4", features = [
   "font-kit",
+  "runtime_shaders",
 ] }
 gpui_tokio = { path = "../../libs/gpui-tokio" }
 gpui-component = "0.6.1"
