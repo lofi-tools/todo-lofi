@@ -63,5 +63,14 @@ for dll in "$(dirname "$binary")"/*.dll; do
 done
 
 mkdir -p "$out"
-(cd "$work" && zip -qr "$out/todo-lofi-$version-windows-x86_64.zip" todo-lofi)
+# Git Bash on the Windows runner image has no `zip`; 7-Zip is on PATH there
+# instead. Either makes the same .zip container.
+if command -v zip >/dev/null 2>&1; then
+	(cd "$work" && zip -qr "$out/todo-lofi-$version-windows-x86_64.zip" todo-lofi)
+elif command -v 7z >/dev/null 2>&1; then
+	(cd "$work" && 7z a -tzip "$out/todo-lofi-$version-windows-x86_64.zip" todo-lofi >/dev/null)
+else
+	echo "package-windows.sh: need zip or 7z to make the archive" >&2
+	exit 1
+fi
 echo "package-windows.sh: $out/todo-lofi-$version-windows-x86_64.zip"

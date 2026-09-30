@@ -117,8 +117,9 @@ jobs:
       # Git Bash ships on the runner image; the default PowerShell would not
       # execute the packaging script.
       - name: Package
+        shell: bash
         run: |
-          bash ./scripts/package-windows.sh \
+          ./scripts/package-windows.sh \
             --binary target/release/todo-2.exe \
             --out dist
 
