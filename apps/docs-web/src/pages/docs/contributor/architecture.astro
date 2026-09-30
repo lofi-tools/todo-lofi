@@ -11,6 +11,7 @@ const toc = [
   { label: 'The agent side', href: '#agent-side' },
   { label: 'Persistence', href: '#persistence' },
   { label: 'Web surfaces', href: '#web-surfaces' },
+  { label: 'Tech stack', href: '#tech-stack' },
   { label: 'Specs', href: '#specs' },
 ]
 
@@ -81,6 +82,39 @@ const desktopModules = [
   { name: 'components/', detail: 'Reusable widgets: calendar, checkbox, date/time picker, mini task list, tag chip.' },
 ]
 
+const stack = [
+  {
+    piece: 'GPUI',
+    what: 'The GPU-accelerated UI framework, from the ecosystem around the Zed editor.',
+    why: 'One native window, drawn on the GPU, with no web runtime inside the app.',
+  },
+  {
+    piece: 'Rust',
+    what: 'The language every crate in the workspace is written in.',
+    why: 'A single binary per platform, and nothing to install first.',
+  },
+  {
+    piece: 'SQLite',
+    what: 'The local database, reached through the toasty ORM in libs/storage.',
+    why: 'The task list is a file on disk the app can read with no network.',
+  },
+  {
+    piece: 'MCP and ACP',
+    what: 'Model Context Protocol for tools, Agent Client Protocol for the agent session.',
+    why: 'The agent is a separate process the app talks to over a protocol, rather than a model client embedded in the UI.',
+  },
+  {
+    piece: 'Astro',
+    what: 'The static-site framework behind this documentation site and the design-system showcase.',
+    why: 'The docs are static HTML built from the same components the marketing pages use.',
+  },
+  {
+    piece: 'Panda CSS and Ark UI',
+    what: 'The styling engine and the headless primitives behind the web design system.',
+    why: 'One token set and one preset, shared by the docs site and the showcase.',
+  },
+]
+
 const specs = [
   { file: 'workflow-engine-spec.md', status: 'Draft v1', topic: 'Workflow engine data model in libs/storage, minimal UI contract.' },
   { file: 'workflow-simplification-spec.md', status: 'Draft v1', topic: 'The v2 workflow model; supersedes the v1 data model.' },
@@ -95,6 +129,7 @@ const specs = [
   { file: 'todo2-nested-projects-spec.md', status: 'Draft v1', topic: 'Nesting project directories under tags.' },
   { file: 'symphony.md', status: 'Draft v1', topic: 'A language-agnostic service specification.' },
   { file: 'web-design-system-spec.md', status: 'Implemented v1', topic: 'The web design system and its showcase.' },
+  { file: 'homepage-refresh-spec.md', status: 'Draft v1', topic: 'The landing-page rewrite, the /roadmap page, and the terminology pass.' },
 ]
 ---
 
@@ -216,6 +251,34 @@ const specs = [
     See the design system's <code>DESIGN.md</code> for the token and layering rules, and
     <a href="/docs/contributor/contributing">Contributing</a> for the checks that keep them honest.
   </p>
+
+  <h2 id="tech-stack">Tech stack</h2>
+  <p>
+    What the app and this site are built with, and what each piece is there for. The landing page
+    deliberately says none of this: it is here for the people who are going to work on the code.
+  </p>
+  <TableScroll label="Tech stack">
+    <table>
+      <thead>
+        <tr>
+          <th>Piece</th>
+          <th>What it is</th>
+          <th>Why it is here</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          stack.map((entry) => (
+            <tr>
+              <td>{entry.piece}</td>
+              <td>{entry.what}</td>
+              <td>{entry.why}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
 
   <h2 id="specs">Specs</h2>
   <p>

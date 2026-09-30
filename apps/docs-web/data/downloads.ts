@@ -1,6 +1,6 @@
 /**
- * Resolves the download links on the landing page and the install page to the
- * bundles of the current release.
+ * Resolves the download links on the downloads page and the install page to
+ * the bundles of the current release.
  *
  * The bundles carry their version in the file name (`todo-lofi-<version>-…`),
  * so there is no fixed `releases/latest/download/<name>` URL to hard-code — the
@@ -189,14 +189,12 @@ async function loadReleases(): Promise<Release[]> {
  *
  * Markup contract:
  * - `[data-download]` — an `<a>` to fill. `data-platform` is a platform id or
- *   `auto` (the currently selected platform); `data-format` is a format id and
+ *   `auto` (the platform the visitor is on); `data-format` is a format id and
  *   defaults to the platform's first format.
- * - `[data-download-option]` — a `<button>` that selects a platform.
- * - `[data-download-formats]` — a group shown only for its selected platform.
  * - `[data-download-detected]` — an element revealed only for the platform the
  *   visitor is actually on.
  * - `[data-download-primary]` / `[data-download-primary-label]` — the main
- *   button and the label that names the selected platform.
+ *   button and the label that names its platform.
  * - `[data-download-name]` — an element inside a link, replaced with the
  *   resolved asset's file name.
  * - `[data-download-version]` — text replaced with the resolved version.
@@ -205,37 +203,41 @@ export async function initDownloads(): Promise<void> {
   const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('[data-download]'))
   if (links.length === 0) return
 
-  const detected = detectPlatform()
-  let selected: PlatformId = detected
-  let arch = detected === 'macos' ? 'aarch64' : 'x86_64'
+  // Nothing on the page switches the platform: a build for another machine is
+  // reached from the file list, not from a picker.
+  const platform = detectPlatform()
+  let arch = platform === 'macos' ? 'aarch64' : 'x86_64'
   let releases: Release[] | undefined
+  let primaryResolved = false
 
-  const applySelection = () => {
-    for (const option of document.querySelectorAll<HTMLElement>('[data-download-option]')) {
-      const active = option.dataset.downloadOption === selected
-      option.setAttribute('aria-pressed', String(active))
-      // Present-or-absent, not "true"/"false": the selected style keys off
-      // `&[data-selected]`, which an attribute set to "false" would still match.
-      if (active) option.dataset.selected = 'true'
-      else delete option.dataset.selected
-    }
-    for (const group of document.querySelectorAll<HTMLElement>('[data-download-formats]')) {
-      group.hidden = group.dataset.downloadFormats !== selected
-    }
+  const applyDetected = () => {
     for (const mark of document.querySelectorAll<HTMLElement>('[data-download-detected]')) {
-      mark.hidden = mark.dataset.downloadDetected !== detected
+      mark.hidden = mark.dataset.downloadDetected !== platform
     }
+  }
+
+  // Name the visitor's platform as soon as it is known. `releases` is the
+  // readiness flag: until the request comes back the primary button already
+  // points at the releases page, so naming the platform is honest; once it
+  // comes back with no matching asset, the label says what the link does.
+  const applyPrimaryLabel = () => {
+    const label = document.querySelector<HTMLElement>('[data-download-primary-label]')
+    if (!label) return
+    label.textContent =
+      !releases || primaryResolved
+        ? `Download for ${PLATFORM_LABELS[platform]}`
+        : 'Browse all downloads'
   }
 
   const applyLinks = () => {
     let version: string | undefined
-    let primaryResolved = false
+    primaryResolved = false
     for (const link of links) {
       const raw = link.dataset.platform
-      const platform: PlatformId = !raw || raw === 'auto' ? selected : (raw as PlatformId)
-      if (!FORMATS[platform]) continue
-      const format = (link.dataset.format as FormatId | undefined) ?? FORMATS[platform][0].id
-      const found = releases ? findAsset(releases, platform, format, arch) : undefined
+      const target: PlatformId = !raw || raw === 'auto' ? platform : (raw as PlatformId)
+      if (!FORMATS[target]) continue
+      const format = (link.dataset.format as FormatId | undefined) ?? FORMATS[target][0].id
+      const found = releases ? findAsset(releases, target, format, arch) : undefined
       if (!found) continue
       link.href = found.asset.browser_download_url
       if (!version) version = versionOf(found.asset.name)
@@ -250,28 +252,13 @@ export async function initDownloads(): Promise<void> {
         node.textContent = `v${version}`
       }
     }
-    const label = document.querySelector<HTMLElement>('[data-download-primary-label]')
-    if (label) {
-      label.textContent = primaryResolved
-        ? `Download for ${PLATFORM_LABELS[selected]}`
-        : 'Browse all downloads'
-    }
+    applyPrimaryLabel()
   }
 
-  for (const option of document.querySelectorAll<HTMLElement>('[data-download-option]')) {
-    option.addEventListener('click', () => {
-      const next = option.dataset.downloadOption
-      if (next === 'macos' || next === 'linux' || next === 'windows') {
-        selected = next
-        applySelection()
-        applyLinks()
-      }
-    })
-  }
-
-  applySelection()
+  applyDetected()
+  applyPrimaryLabel()
   try {
-    arch = await detectArch(detected)
+    arch = await detectArch(platform)
   } catch {
     // Keep the per-platform default.
   }

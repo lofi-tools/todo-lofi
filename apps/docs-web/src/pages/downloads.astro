@@ -1,0 +1,263 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../layouts/Base.astro'
+import SiteHeader from '../components/SiteHeader.astro'
+import DocsFooter from '../components/DocsFooter.astro'
+import { FORMATS, PLATFORMS, RELEASES_URL } from '../../data/downloads'
+
+const eyebrow = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'accent.text',
+})
+
+const primary = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  h: '12',
+  px: '8',
+  borderRadius: 'sm',
+  bg: 'accent',
+  color: 'fg.onAccent',
+  fontSize: 'lg',
+  fontWeight: 'medium',
+  _hover: { bg: 'accent.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const inlineLink = css({
+  color: 'fg.muted',
+  textDecoration: 'underline',
+  textUnderlineOffset: '2px',
+  _hover: { color: 'fg.default' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const ctaPanel = css({
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: '4',
+  mt: { base: '8', md: '10' },
+  p: { base: '6', md: '8' },
+  borderRadius: 'xl',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const card = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '3',
+  p: { base: '5', md: '6' },
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const cardHead = css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })
+
+const detectedBadge = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  textTransform: 'uppercase',
+  letterSpacing: 'wider',
+  color: 'accent.text',
+})
+
+const formatList = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2',
+  listStyle: 'none',
+  m: '0',
+  p: '0',
+})
+
+const formatRow = css({
+  display: 'flex',
+  alignItems: 'baseline',
+  gap: '3',
+  flexWrap: 'wrap',
+})
+
+const formatLink = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  h: '8',
+  px: '3',
+  borderRadius: 'sm',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'canvas',
+  fontFamily: 'mono',
+  fontSize: 'xs',
+  color: 'fg.default',
+  _hover: { borderColor: 'border.strong', bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const formatHint = css({ fontSize: 'xs', color: 'fg.subtle' })
+
+const notes = [
+  {
+    platform: 'macOS',
+    detail:
+      'The bundle is unsigned, so the first launch needs System Settings → Privacy & Security → Open Anyway. Dragging the app into Applications is the usual move.',
+  },
+  {
+    platform: 'Linux',
+    detail:
+      'The AppImage needs no install step — make it executable and run it. The .deb installs under /usr, and the tarball unpacks anywhere.',
+  },
+  {
+    platform: 'Windows',
+    detail:
+      'Unzip the archive and run todo-lofi.exe. SmartScreen may warn about the unsigned build the first time: More info, then Run anyway.',
+  },
+]
+---
+
+<Base
+  title="Download"
+  suffix="todo-lofi"
+  description="Download todo-lofi for macOS, Linux, or Windows. Prebuilt bundles are named after their version; this page points each link at the newest matching file for the machine you are on."
+>
+  <SiteHeader />
+
+  <main id="content">
+    <section id="download" class={css({ py: { base: '12', md: '20' } })}>
+      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <div class={css({ display: 'flex', flexDirection: 'column', gap: '3', alignItems: 'flex-start' })}>
+          <span class={eyebrow}>Download</span>
+          <h1 class={css({ textStyle: 'h1', color: 'fg.default', textWrap: 'balance' })}>
+            Download todo-lofi
+          </h1>
+          <p
+            class={css({
+              textStyle: 'body.lg',
+              color: 'fg.muted',
+              maxW: '640px',
+              textWrap: 'pretty',
+            })}
+          >
+            Prebuilt bundles for macOS, Linux, and Windows. The button below starts on the platform
+            you are reading this from; every other file is listed underneath it.
+          </p>
+        </div>
+
+        <div class={ctaPanel}>
+          <a
+            data-download
+            data-platform="auto"
+            data-download-primary
+            href={RELEASES_URL}
+            class={primary}
+          >
+            <span data-download-primary-label>Download for your platform</span>
+          </a>
+          <p class={css({ m: '0', fontSize: 'sm', color: 'fg.muted' })}>
+            <span data-download-version>the latest release</span>
+            {' · '}
+            <a href={RELEASES_URL} class={inlineLink}>all versions</a>
+            {' · '}
+            unsigned development builds
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section id="all-downloads" class={css({ pb: { base: '12', md: '20' } })}>
+      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <h2 class={css({ textStyle: 'h2', color: 'fg.default' })}>All downloads</h2>
+        <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: { base: '6', md: '8' } })}>
+          Every bundle in the newest release, grouped by platform. Each link points at the file for
+          the architecture it was built for, and the platform you are on is marked.
+        </p>
+
+        <div
+          class={css({
+            display: 'grid',
+            gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(3, minmax(0, 1fr))' },
+            gap: '4',
+            alignItems: 'start',
+          })}
+        >
+          {
+            PLATFORMS.map((platform) => (
+              <div class={card}>
+                <div class={cardHead}>
+                  <h3 class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
+                    {platform.label}
+                  </h3>
+                  <span data-download-detected={platform.id} hidden class={detectedBadge}>
+                    this machine
+                  </span>
+                </div>
+                <p class={css({ m: '0', fontSize: 'xs', color: 'fg.subtle' })}>
+                  {platform.requirement}
+                </p>
+                <ul class={formatList}>
+                  {FORMATS[platform.id].map((format) => (
+                    <li class={formatRow}>
+                      <a
+                        data-download
+                        data-platform={platform.id}
+                        data-format={format.id}
+                        href={RELEASES_URL}
+                        title={format.hint}
+                        class={formatLink}
+                      >
+                        {format.label}
+                      </a>
+                      <span class={formatHint}>{format.hint}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          }
+        </div>
+      </div>
+    </section>
+
+    <section class={css({ pb: { base: '12', md: '20' } })}>
+      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <div class={css({ p: { base: '5', md: '6' }, borderRadius: 'lg', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', bg: 'surface.subtle' })}>
+          <h2 class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default', m: '0', mb: '3' })}>
+            Before you run it
+          </h2>
+          <ul class={css({ m: '0', pl: '5', display: 'flex', flexDirection: 'column', gap: '2' })}>
+            {
+              notes.map((note) => (
+                <li class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+                  <span class={css({ fontWeight: 'medium', color: 'fg.default' })}>{note.platform}</span>
+                  {' — '}
+                  {note.detail}
+                </li>
+              ))
+            }
+          </ul>
+          <p class={css({ m: '0', mt: '4', fontSize: 'sm', color: 'fg.muted' })}>
+            <a href="/docs/install" class={inlineLink}>Full install instructions →</a>
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <DocsFooter />
+</Base>
+
+<script>
+  import { initDownloads } from '../../data/downloads'
+  void initDownloads()
+</script>

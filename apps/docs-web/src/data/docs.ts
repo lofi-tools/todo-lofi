@@ -5,8 +5,8 @@
  * the previous/next links, so a new page is one entry here and one file under
  * `src/pages/docs`.
  *
- * Every docs route lives under `/docs`; `/` is the landing page and belongs to
- * no guide.
+ * Every docs route lives under `/docs`. The three pages outside the tree — `/`,
+ * `/downloads`, and `/roadmap` — belong to no guide.
  */
 
 export interface DocLink {

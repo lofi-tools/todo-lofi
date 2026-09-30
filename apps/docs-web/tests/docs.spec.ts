@@ -75,8 +75,16 @@ const guides: Guide[] = [
 
 const pagesOf = (guide: Guide) => guide.sections.flatMap((section) => section.pages)
 const docsRoutes = guides.flatMap(pagesOf)
-/** The landing page is not part of either guide, but is still a page we ship. */
-const routes: [label: string, path: string][] = [['Home', '/'], ...docsRoutes]
+/**
+ * The landing page and the downloads page belong to no guide, but are still
+ * pages we ship; the layout and accessibility checks run over every page.
+ */
+const routes: [label: string, path: string][] = [
+  ['Home', '/'],
+  ['Downloads', '/downloads'],
+  ['Roadmap', '/roadmap'],
+  ...docsRoutes,
+]
 
 test.describe('docs routes', () => {
   // Both guides have a page called Overview, so the guide is part of the title.
@@ -124,6 +132,8 @@ test.describe('landing page', () => {
     await page.goto('/')
 
     await expect(main.getByRole('link', { name: /read the docs/i }).first()).toBeVisible()
+    await expect(main.locator('a[href="/downloads"]').first()).toBeVisible()
+    await expect(main.locator('a[href="/roadmap"]').first()).toBeVisible()
     for (const [, path] of docsRoutes) {
       await expect(
         page.locator(`a[href="${path}"]`).first(),
@@ -155,6 +165,49 @@ test.describe('landing page', () => {
       expect(background).not.toBe('rgba(0, 0, 0, 0)')
     })
   }
+})
+
+// `/downloads` and `/roadmap` share the landing page's header, which marks the
+// current route rather than always marking the brand link.
+test.describe('top-level pages', () => {
+  for (const [label, path, navLabel] of [
+    ['downloads page', '/downloads', 'Download'],
+    ['roadmap page', '/roadmap', 'Roadmap'],
+  ] as const) {
+    test(`the ${label} renders and marks its own nav entry current`, async ({ page }) => {
+      const errors: string[] = []
+      page.on('console', (message) => {
+        if (message.type() === 'error') errors.push(message.text())
+      })
+      page.on('pageerror', (error) => errors.push(error.message))
+
+      const response = await page.goto(path)
+      expect(response?.ok()).toBeTruthy()
+      await expect(page.locator('h1').first()).toBeVisible()
+
+      const nav = page.locator('header nav[aria-label="Main"]')
+      // The brand link is only current on `/`.
+      await expect(nav.locator('a[href="/"]')).not.toHaveAttribute('aria-current', 'page')
+      await expect(nav.locator('a[aria-current="page"]')).toHaveText(navLabel)
+      await expect(nav.locator(`a[href="${path}"]`)).toBeVisible()
+
+      expect(errors).toEqual([])
+    })
+  }
+})
+
+test('the downloads page marks the detected platform on the main button', async ({ page }) => {
+  await page.goto('/downloads')
+
+  // Detection is client-side and needs no network: exactly one platform is
+  // revealed as the visitor's own.
+  await expect(page.locator('[data-download-detected]:visible')).toHaveCount(1)
+
+  // The label is rewritten from the placeholder to the platform's name; when
+  // the releases API cannot be reached it falls back to the releases list.
+  await expect(page.locator('[data-download-primary-label]')).toHaveText(
+    /^(Download for |Browse all downloads)/,
+  )
 })
 
 test('the design system stylesheet is applied', async ({ page }) => {

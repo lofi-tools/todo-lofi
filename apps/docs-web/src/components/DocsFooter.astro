@@ -72,9 +72,17 @@ const linkStyle = css({
         <span>todo-lofi</span>
       </div>
       <p class={css({ fontSize: 'sm', color: 'fg.subtle', maxW: '280px', lineHeight: 'relaxed' })}>
-        A local-first task manager for macOS and Linux, built on GPUI. Runs offline; syncs when you
-        want it to.
+        A local-first task manager for macOS, Linux, and Windows. Runs offline; syncs when you want
+        it to.
       </p>
+      <!--
+        The header carries these on the pages that use it; the footer is the
+        only place they are reachable from inside the docs.
+      -->
+      <div class={css({ display: 'flex', gap: '4', mt: '2' })}>
+        <a class={linkStyle} href="/downloads">Download</a>
+        <a class={linkStyle} href="/roadmap">Roadmap</a>
+      </div>
     </div>
 
     {

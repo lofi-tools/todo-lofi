@@ -1,0 +1,128 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../layouts/Base.astro'
+import SiteHeader from '../components/SiteHeader.astro'
+import DocsFooter from '../components/DocsFooter.astro'
+import { Badge } from 'web-design-system/components'
+import { notPlanned, roadmapBuckets } from '../../data/roadmap'
+
+const eyebrow = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'accent.text',
+})
+
+const row = css({
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: '3',
+  p: '4',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const itemName = css({
+  display: 'block',
+  fontSize: 'sm',
+  fontWeight: 'medium',
+  color: 'fg.default',
+  textDecoration: 'underline',
+  textUnderlineOffset: '2px',
+  _hover: { color: 'accent.text' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const itemNamePlain = css({ display: 'block', fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })
+
+const itemNote = css({ display: 'block', fontSize: 'sm', color: 'fg.muted', mt: '0.5' })
+---
+
+<Base
+  title="Roadmap"
+  suffix="todo-lofi"
+  description="Where todo-lofi stands: what is available now, what is in preview, what is only specified, and what has no promise behind it."
+>
+  <SiteHeader />
+
+  <main id="content">
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+        <div class={css({ display: 'flex', flexDirection: 'column', gap: '3', alignItems: 'flex-start' })}>
+          <span class={eyebrow}>Roadmap</span>
+          <h1 class={css({ textStyle: 'h1', color: 'fg.default', textWrap: 'balance' })}>
+            Where the app is, and where it is going
+          </h1>
+          <p class={css({ textStyle: 'body.lg', color: 'fg.muted', maxW: '640px', textWrap: 'pretty' })}>
+            Labels age badly, so they are kept blunt: <strong>Now</strong> is built and used,{' '}
+            <strong>Next</strong> is usable but still changing shape, <strong>Later</strong> is
+            specified or sketched, and <strong>Exploring</strong> is an idea with nothing committed
+            behind it. When a label and the code disagree, believe the code.
+          </p>
+        </div>
+
+        {
+          roadmapBuckets.map((bucket) => (
+            <section class={css({ mt: { base: '10', md: '14' } })}>
+              <div class={css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })}>
+                <h2 id={bucket.id} class={css({ textStyle: 'h2', color: 'fg.default' })}>
+                  {bucket.heading}
+                </h2>
+                <Badge tone={bucket.tone} variant="subtle">{bucket.badge}</Badge>
+              </div>
+              <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: '5' })}>
+                {bucket.summary}
+              </p>
+              <ul class={css({ display: 'flex', flexDirection: 'column', gap: '3', listStyle: 'none', p: '0', m: '0' })}>
+                {bucket.items.map((item) => (
+                  <li class={row}>
+                    <span class={css({ minW: '0' })}>
+                      {item.href ? (
+                        <a href={item.href} class={itemName}>{item.name}</a>
+                      ) : (
+                        <span class={itemNamePlain}>{item.name}</span>
+                      )}
+                      <span class={itemNote}>{item.note}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ))
+        }
+
+        <section class={css({ mt: { base: '10', md: '14' } })}>
+          <h2 id="not-planned" class={css({ textStyle: 'h2', color: 'fg.default' })}>Not planned</h2>
+          <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: '5' })}>
+            The short list of things this project has decided against.
+          </p>
+          <ul class={css({ display: 'flex', flexDirection: 'column', gap: '3', listStyle: 'none', p: '0', m: '0' })}>
+            {notPlanned.map((entry) => <li class={row}>{entry}</li>)}
+          </ul>
+        </section>
+
+        <p class={css({ mt: '10', fontSize: 'sm', color: 'fg.muted' })}>
+          Want to know how something works rather than whether it exists? The{' '}
+          <a
+            href="/docs"
+            class={css({
+              color: 'fg.default',
+              textDecoration: 'underline',
+              textUnderlineOffset: '2px',
+              _hover: { color: 'accent.text' },
+            })}
+          >
+            user guide
+          </a>{' '}
+          has a page for every feature here.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <DocsFooter />
+</Base>

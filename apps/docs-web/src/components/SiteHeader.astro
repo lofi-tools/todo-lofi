@@ -4,21 +4,33 @@ import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
 import { LogoMark } from 'web-design-system/icons'
 import { REPO_URL } from '../data/docs'
 
-const links = [{ label: 'Docs', href: '/docs' }]
+const links = [
+  { label: 'Docs', href: '/docs' },
+  { label: 'Download', href: '/downloads' },
+  { label: 'Roadmap', href: '/roadmap' },
+]
 
-const linkStyle = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  h: '8',
-  px: '3',
-  borderRadius: 'sm',
-  fontSize: 'sm',
-  color: 'fg.muted',
-  transitionProperty: 'color, background-color',
-  transitionDuration: 'fast',
-  _hover: { color: 'fg.default', bg: 'surface.hover' },
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
+// This header serves the landing page, the downloads page, and the roadmap, so
+// each link marks itself current and the brand link is only current on `/`.
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/'
+const isHome = path === '/'
+
+const linkStyle = (active: boolean) =>
+  css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    h: '8',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    transitionProperty: 'color, background-color',
+    transitionDuration: 'fast',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
 ---
 
 <header
@@ -50,7 +62,7 @@ const linkStyle = css({
   >
     <a
       href="/"
-      aria-current="page"
+      aria-current={isHome ? 'page' : undefined}
       class={css({
         display: 'inline-flex',
         alignItems: 'center',
@@ -76,12 +88,24 @@ const linkStyle = css({
         p: '0',
       })}
     >
-      {links.map((link) => <li><a class={linkStyle} href={link.href}>{link.label}</a></li>)}
+      {
+        links.map((link) => (
+          <li>
+            <a
+              class={linkStyle(path === link.href)}
+              href={link.href}
+              aria-current={path === link.href ? 'page' : undefined}
+            >
+              {link.label}
+            </a>
+          </li>
+        ))
+      }
     </ul>
 
     <div class={css({ flex: '1' })} />
 
-    <a class={linkStyle} href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
+    <a class={linkStyle(false)} href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
     <ThemeToggle />
   </nav>
 </header>

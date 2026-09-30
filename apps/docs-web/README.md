@@ -11,7 +11,17 @@ components (`DocSidebar`, `DocTOC`, `Prose`, `Callout`), and `CodeBlock` that
 ## Structure
 
 `/` is the landing page: a marketing-shaped introduction built from the design
-system's marketing and product components, with links into the docs.
+system's marketing and product components, with links into the docs. Three
+pages sit outside the docs tree, all built on the landing page's `SiteHeader`
+and the shared `DocsFooter`:
+
+- `/downloads` — the per-platform bundle downloads, moved off the landing page
+  so its buttons can point at it from anywhere.
+- `/roadmap` — Now / Next / Later / Exploring, which absorbed the feature
+  inventory that used to live on `/docs/status`.
+
+The landing page deliberately says nothing about the tech stack; that now lives
+in the architecture page's Tech stack section.
 
 **Every documentation page lives under `/docs`.** The docs navigation has two
 levels: the header's tab bar splits the docs into two guides, one per audience,
@@ -23,7 +33,9 @@ extension surface rather than part of the everyday tasklist.
 
 | Guide / section | Route | Content |
 | --- | --- | --- |
-| Landing | `/` | What the app is, what it does, the download section, and the way into both guides |
+| Landing | `/` | One list for personal and work tasks, the agent, extensions, integrations, and the way into the docs |
+| Downloads | `/downloads` | Prebuilt bundles for macOS, Linux, and Windows, resolved to the newest release |
+| Roadmap | `/roadmap` | Now / Next / Later / Exploring, plus what is deliberately not planned |
 | User guide | `/docs` | Overview: what the app is, highlights, and where to start |
 | User guide | `/docs/install` | Per-platform bundle downloads, first launch, and building from source |
 | User guide | `/docs/tasks` | The task list, task details, tags, projects and areas, filtering |
@@ -32,11 +44,11 @@ extension surface rather than part of the everyday tasklist.
 | User guide | `/docs/agent` | The agent pane: what it does, what it inherits, how to configure it |
 | User guide | `/docs/sync` | Offline first, Todoist, GitHub, and what syncs |
 | User guide | `/docs/mini-apps` | Travel checklists today, the planned ones, and the model behind them |
-| User guide | `/docs/status` | Available / preview / planned, per feature |
+| User guide | `/docs/status` | A stub: the feature inventory lives on `/roadmap` now |
 | User guide | `/docs/configuration` | In-app settings, providers and keys, Todoist, GitHub |
 | Contributor guide | `/docs/contributor` | Landing: what the guide covers and the reading order |
 | Contributor guide | `/docs/contributor/development` | Nix + direnv setup, the dev shell commands, web packages |
-| Contributor guide | `/docs/contributor/architecture` | Workspace layout, the desktop app, persistence, specs |
+| Contributor guide | `/docs/contributor/architecture` | Workspace layout, the desktop app, persistence, the tech stack, specs |
 | Contributor guide | `/docs/contributor/data-model` | Storage internals: the task, priority scoring, tags, links, ownership, repeats |
 | Contributor guide | `/docs/contributor/workflow-engine` | Recipes, runs, the coding pipeline, git worktrees, the loopback tool server |
 | Contributor guide | `/docs/contributor/agent-runtime` | ACP surface, the connection, tools, sub-agents, vendored patches |
@@ -71,13 +83,17 @@ server on port 4322 (the showcase suite uses 4321, so both can run at once).
 
 ## Downloads
 
-The landing page's download section and the install page resolve their links at
-runtime from the GitHub releases API (`data/downloads.ts`), because each bundle
+The downloads page and the install page resolve their links at runtime from the
+GitHub releases API (`data/downloads.ts`), because each bundle
 carries its version in its file name and there is no fixed `latest/download`
 URL. The module detects the visitor's platform — and, where the browser reports
-it, the architecture — and points the primary button at the matching asset;
-every link keeps the releases page as its `href`, so a failed or rate-limited
-request degrades to a working fallback. `data/downloads.ts` lives outside `src/`
+it, the architecture — and points the primary button at the matching asset. That
+button names the platform it detected (`Download for macOS`), and every other
+bundle is listed underneath it in the *All downloads* grid; the visitor's own
+platform is the one marked *this machine*. Every link keeps the releases page as
+its `href`, so a failed or rate-limited request degrades to a working fallback —
+the button then says *Browse all downloads* rather than naming a file it cannot
+deliver. `data/downloads.ts` lives outside `src/`
 for the same reason `data/landing.ts` does: Panda scans `src/` for style-shaped
 objects.
 

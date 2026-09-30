@@ -4,90 +4,126 @@ import Base from '../layouts/Base.astro'
 import SiteHeader from '../components/SiteHeader.astro'
 import DocsFooter from '../components/DocsFooter.astro'
 import { Badge } from 'web-design-system/components'
-import AnnouncementPill from 'web-design-system/astro/marketing/AnnouncementPill.astro'
 import Hero from 'web-design-system/astro/marketing/Hero.astro'
-import LogoCloud from 'web-design-system/astro/marketing/LogoCloud.astro'
 import StatsBand from 'web-design-system/astro/marketing/StatsBand.astro'
 import SectionHeading from 'web-design-system/astro/marketing/SectionHeading.astro'
 import FeatureSection from 'web-design-system/astro/marketing/FeatureSection.astro'
 import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
 import IssueRow from 'web-design-system/astro/product/IssueRow.astro'
-import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
 import Timeline from 'web-design-system/astro/product/Timeline.astro'
 import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
 import AutomationsPanel from '../components/AutomationsPanel.astro'
-import DownloadSection from '../components/DownloadSection.astro'
 import screenshot from '../assets/app.png'
 
-import { agentThread, codingColumns, repeatRows, taskRows } from '../../data/landing'
+import { agentThread, extensionCards, integrationCards, repeatRows, taskRows } from '../../data/landing'
 
-const guides = [
-  {
-    heading: 'User guide',
-    tone: 'accent' as const,
-    badge: 'Using the app',
-    body: 'Install it, get your tasks in, and set up the parts that need credentials.',
-    href: '/docs',
-    cta: 'Open the user guide',
-    links: [
-      { label: 'Install and run', href: '/docs/install' },
-      { label: 'Tasks, tags, and projects', href: '/docs/tasks' },
-      { label: 'Repeat and scheduling', href: '/docs/repeats' },
-      { label: 'Configuration', href: '/docs/configuration' },
-    ],
-  },
-  {
-    heading: 'Contributor guide',
-    tone: 'success' as const,
-    badge: 'Working on it',
-    body: 'How the workspace is put together, how to run it, and what a change has to pass.',
-    href: '/docs/contributor',
-    cta: 'Open the contributor guide',
-    links: [
-      { label: 'Development setup', href: '/docs/contributor/development' },
-      { label: 'Architecture', href: '/docs/contributor/architecture' },
-      { label: 'Integrations', href: '/docs/contributor/integrations' },
-      { label: 'Contributing', href: '/docs/contributor/contributing' },
-    ],
-  },
-]
+const container = css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })
 
-const linkStyle = css({
+const grid = css({
+  display: 'grid',
+  gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+  gap: '4',
+})
+
+const card = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '3',
+  p: { base: '5', md: '6' },
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const cardTitle = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '3',
+  flexWrap: 'wrap',
+})
+
+const cardHeading = css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })
+
+const cardBody = css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })
+
+const cardLink = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  mt: 'auto',
+  pt: '1',
+  fontSize: 'sm',
+  fontWeight: 'medium',
+  color: 'accent.text',
+  _hover: { color: 'accent.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const panel = css({
+  p: '4',
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const band = css({
+  display: 'flex',
+  flexDirection: { base: 'column', md: 'row' },
+  alignItems: { base: 'flex-start', md: 'center' },
+  justifyContent: 'space-between',
+  gap: '5',
+  p: { base: '6', md: '8' },
+  borderRadius: 'xl',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const bandText = css({ display: 'flex', flexDirection: 'column', gap: '1' })
+
+const bandLink = css({
   display: 'inline-flex',
   alignItems: 'center',
   h: '10',
   px: '5',
   borderRadius: 'sm',
-  fontSize: 'md',
-  fontWeight: 'medium',
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
-
-const ctaSecondary = css({
   borderWidth: 'hairline',
   borderStyle: 'solid',
   borderColor: 'border',
+  fontSize: 'md',
   color: 'fg.default',
+  whiteSpace: 'nowrap',
   _hover: { bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+const inlineLink = css({
+  color: 'fg.default',
+  textDecoration: 'underline',
+  textUnderlineOffset: '2px',
+  _hover: { color: 'accent.text' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
 })
 ---
 
 <Base
   title="todo-lofi"
   suffix="a local-first task manager"
-  description="todo-lofi is a local-first task manager for macOS and Linux, built on GPUI. Nested tags and projects, repeating tasks, an embedded AI agent, and Todoist sync when you want it."
+  description="todo-lofi is a local-first task manager for macOS, Linux, and Windows: your personal and work tasks in one list, an agent that can work them, repeats and priorities that keep the list honest, and two-way sync when you want it."
 >
   <SiteHeader />
 
   <main id="content">
     <Hero
-      title="Your tasks, on your machine"
-      subtitle="todo-lofi keeps a local database, renders it with the same GPU-accelerated framework as Zed, and stays useful with no network at all. The agent pane, the workflows, and the sync are all opt-in."
-      primaryCta={{ label: 'Install and run', href: '/docs/install' }}
+      title="An agent that does the work"
+      subtitle="todo-lofi keeps your tasks in a list you own and puts an agent beside them. It can add and reshape tasks, set up repeats, and take a task through a whole staged workflow — while you watch the tools it calls and decide when the work is done."
+      primaryCta={{ label: 'Download', href: '/downloads' }}
       secondaryCta={{ label: 'Read the docs', href: '/docs' }}
     >
-      <AnnouncementPill slot="pill" label="Documentation for users and contributors" href="/docs" />
-
       <div class={css({ maxW: '980px', mx: 'auto', px: { base: '5', md: '8' } })}>
         <img
           src={screenshot.src}
@@ -107,30 +143,10 @@ const ctaSecondary = css({
       </div>
     </Hero>
 
-    <LogoCloud title="Built with" logos={['GPUI', 'Rust', 'SQLite', 'MCP', 'Astro', 'Panda CSS']} />
-
-    <StatsBand
-      value="Local first"
-      label="Tasks, repeats, and workflows live in a SQLite file you own. Network features — Todoist, GitHub, model providers — each bring their own credentials and never gate the core loop."
-      linkLabel="How the storage layer works"
-      linkHref="/docs/contributor/architecture"
-    />
-
-    <DownloadSection />
-
-    <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
-      <SectionHeading
-        eyebrow="What it does"
-        title="Work that has a shape, kept in one place"
-        description="Four things the app does beyond a list of checkboxes. Each one has a page in the user guide."
-        align="left"
-      />
-    </div>
-
     <FeatureSection
-      eyebrow="Tasklist"
-      title="Nested tags, projects, and areas"
-      description="Tasks, tags, and projects are ordinary rows you can move, nest, and filter. A task carries a deadline, importance and urgency, subtasks, and blocking links that the list resolves into what you can actually do next."
+      eyebrow="One list"
+      title="Your whole life, not just your job"
+      description="Feed the dog and review the release pull request from the same list. Most task apps are built for a team and expect your personal errands to live somewhere else; todo-lofi is centred on you, so the work that syncs in from Todoist or GitHub sits next to the tasks nobody else needs to see — and neither half is the guest."
       href="/docs/tasks"
       linkLabel="Read about the task list"
     >
@@ -139,152 +155,166 @@ const ctaSecondary = css({
       </div>
     </FeatureSection>
 
-    <FeatureSection
-      eyebrow="Repeat and scheduling"
-      title="Repeats you configure, not syntax you memorise"
-      description="Recurring tasks are set up in a picker — how often, which weekdays or month day, and what time the occurrence becomes doable. That last part matters, because a task that is not due yet stays out of the way until it is."
-      href="/docs/repeats"
-      linkLabel="Read about repeats"
-      reverse
-    >
-      <Timeline months={['Mon', 'Tue', 'Wed', 'Thu', 'Fri']} rows={repeatRows} />
-    </FeatureSection>
+    <StatsBand
+      value="Offline"
+      label="Your tasks live in a database file on your machine rather than on somebody's server. There is no account to create and no telemetry, and the list works with the network unplugged — sync and the agent are things you switch on when you want them."
+      linkLabel="How sync stays optional"
+      linkHref="/docs/sync#offline"
+    />
 
     <FeatureSection
-      eyebrow="AI agent"
-      title="An agent that works in your lists"
-      description="The agent pane is docked next to the tasks, not in a separate window. It can set up repeats, add and reshape tasks, and drive a workflow — and you can watch the tools it calls and the files it touches."
+      eyebrow="The agent"
+      title="A pane beside your list, not another chat window"
+      description="The agent works in the lists you already have: it adds and edits tasks, sets up a repeat, and drives a task through its workflow stages. Every tool it calls and every file it touches is visible while it works, and nothing runs until you point it at a provider and give it a key."
       href="/docs/agent"
       linkLabel="Read about the agent"
+      reverse
     >
       <ChatThread messages={agentThread} />
     </FeatureSection>
 
-    <FeatureSection
-      eyebrow="Coding workflow"
-      title="Coding work moves through real stages"
-      description="A task can carry a workflow whose stages have their own state — interview, spec, implement, review, merge. The agent does the work inside a stage; you decide when the stage is finished."
-      href="/docs/workflows"
-      linkLabel="Read about workflows"
-      reverse
-    >
-      <KanbanBoard columns={codingColumns} />
-    </FeatureSection>
-
-    <FeatureSection
-      eyebrow="Automations"
-      title="The panel that drives a run"
-      description="An automation is a recipe with runs under it. The pane lists the recipes, groups each one's active runs, shows the phase a run has reached, and hands you the decision — approve, reject, or complete — along with the branch housekeeping a coding run leaves behind."
-      href="/docs/workflows"
-      linkLabel="Read about workflows"
-    >
-      <AutomationsPanel />
-    </FeatureSection>
-
-    <div
-      class={css({
-        mt: { base: '12', md: '20' },
-        pt: { base: '12', md: '16' },
-        borderTopWidth: 'hairline',
-        borderStyle: 'solid',
-        borderColor: 'border.subtle',
-      })}
-    >
-      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={container}>
         <SectionHeading
-          eyebrow="Documentation"
-          title="Two guides, one for each job"
-          description="Everything under /docs. Start with the one that matches what you are here to do."
+          eyebrow="Extensions"
+          title="Apps that fit your workflows"
+          description="Beyond the list itself, todo-lofi ships apps that own a slice of your work. They are ordinary tasks underneath — the value is the vocabulary and the defaults they bring, not a private store that holds your data hostage."
           align="left"
         />
-      </div>
 
-      <div
-        class={css({
-          display: 'grid',
-          gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
-          gap: '4',
-          mt: { base: '12', md: '20' },
-          w: '100%',
-          maxW: '1200px',
-          mx: 'auto',
-          px: { base: '5', md: '8' },
-        })}
-      >
+        <div
+          class={css({
+            mt: { base: '8', md: '12' },
+            display: 'grid',
+            gridTemplateColumns: { base: '1fr', lg: 'minmax(0, 1fr) minmax(0, 1.15fr)' },
+            gap: '4',
+            alignItems: 'start',
+          })}
+        >
+          <div class={css({ display: 'flex', flexDirection: 'column', gap: '4' })}>
+            {
+              extensionCards.map((entry) => (
+                <div class={card}>
+                  <div class={cardTitle}>
+                    <h3 class={cardHeading}>{entry.name}</h3>
+                    <Badge tone={entry.tone} variant="subtle">{entry.badge}</Badge>
+                  </div>
+                  <p class={cardBody}>{entry.body}</p>
+                  <a href={entry.href} class={cardLink}>{entry.linkLabel} →</a>
+                </div>
+              ))
+            }
+          </div>
+
+          <div class={css({ display: 'flex', flexDirection: 'column', gap: '3' })}>
+            <div class={panel}>
+              <AutomationsPanel />
+            </div>
+            <p class={css({ m: '0', fontSize: 'xs', color: 'fg.subtle' })}>
+              The automations pane: a recipe, the runs under it with the phase each one has reached,
+              and the branch cleanup a coding run leaves behind.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={container}>
+        <SectionHeading
+          eyebrow="Everyday"
+          title="What to do next, decided for you"
+          description="A long list is only useful if it orders itself honestly. todo-lofi does that quietly in the background, so you can stop re-reading everything just to find the one thing that matters now."
+          align="left"
+        />
+
+        <div class={`${grid} ${css({ mt: { base: '8', md: '12' } })}`}>
+          <div class={card}>
+            <h3 class={css({ fontSize: 'lg', fontWeight: 'semibold', color: 'fg.default' })}>
+              Priority that sorts itself
+            </h3>
+            <p class={cardBody}>
+              Each task carries the importance and urgency you gave it, and the list folds in deadline
+              pressure: a task with no deadline keeps the score you set, one whose deadline is close
+              climbs steeply, and an overdue task keeps rising until it is handled. Subtasks,
+              blocked-by chains, and softer ordering hints are resolved into what you can actually
+              start on.
+            </p>
+            <a href="/docs/tasks#priority" class={cardLink}>Read about priority and ordering →</a>
+          </div>
+
+          <div class={card}>
+            <h3 class={css({ fontSize: 'lg', fontWeight: 'semibold', color: 'fg.default' })}>
+              Repeats you configure, not syntax you memorise
+            </h3>
+            <p class={cardBody}>
+              Recurring tasks are set up in a picker — how often, which weekdays or month day, and what
+              time the occurrence becomes doable. That last part matters: a task that is not due yet
+              stays out of the way until it is, instead of sitting at the top of the list for days.
+            </p>
+            <a href="/docs/repeats" class={cardLink}>Read about repeats →</a>
+          </div>
+        </div>
+
+        <div class={`${panel} ${css({ mt: '4' })}`}>
+          <Timeline months={['Mon', 'Tue', 'Wed', 'Thu', 'Fri']} rows={repeatRows} />
+        </div>
+      </div>
+    </section>
+
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={container}>
+        <SectionHeading
+          eyebrow="Integrations"
+          title="Keep the tool you already use"
+          description="Sync is bolt-on and opt-in. Your local database is the copy the app trusts, so a sync that fails never breaks the list — you keep working offline and the mapping catches up when it can."
+          align="left"
+        />
+
+        <div class={`${grid} ${css({ mt: { base: '8', md: '12' } })}`}>
           {
-            guides.map((guide) => (
-              <div
-                class={css({
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '4',
-                  p: '6',
-                  borderRadius: 'lg',
-                  borderWidth: 'hairline',
-                  borderStyle: 'solid',
-                  borderColor: 'border',
-                  bg: 'surface.subtle',
-                })}
-              >
-                <div class={css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })}>
-                  <span class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
-                    {guide.heading}
-                  </span>
-                  <Badge tone={guide.tone} variant="subtle">{guide.badge}</Badge>
+            integrationCards.map((entry) => (
+              <div class={card}>
+                <div class={cardTitle}>
+                  <h3 class={cardHeading}>{entry.name}</h3>
+                  <Badge tone={entry.tone} variant="subtle">{entry.badge}</Badge>
                 </div>
-                <p class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed', m: '0' })}>
-                  {guide.body}
-                </p>
-                <ul
-                  class={css({
-                    listStyle: 'none',
-                    m: '0',
-                    p: '0',
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '2',
-                  })}
-                >
-                  {
-                    guide.links.map((link) => (
-                      <li>
-                        <a
-                          href={link.href}
-                          class={css({
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            h: '8',
-                            px: '3',
-                            borderRadius: 'full',
-                            borderWidth: 'hairline',
-                            borderStyle: 'solid',
-                            borderColor: 'border',
-                            bg: 'canvas',
-                            fontSize: 'sm',
-                            color: 'fg.muted',
-                            _hover: { color: 'fg.default', borderColor: 'border.strong' },
-                            _focusVisible: { outline: 'none', boxShadow: 'focus' },
-                          })}
-                        >
-                          {link.label}
-                        </a>
-                      </li>
-                    ))
-                  }
-                </ul>
-                <div class={css({ mt: 'auto' })}>
-                  <a href={guide.href} class={`${linkStyle} ${ctaSecondary}`}>{guide.cta}</a>
-                </div>
+                <p class={cardBody}>{entry.body}</p>
+                <a href={entry.href} class={cardLink}>{entry.linkLabel} →</a>
               </div>
             ))
           }
+        </div>
       </div>
-    </div>
+    </section>
+
+    <section class={css({ py: { base: '12', md: '20' } })}>
+      <div class={container}>
+        <div class={band}>
+          <div class={bandText}>
+            <span class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
+              What is coming next
+            </span>
+            <p class={css({ m: '0', fontSize: 'sm', color: 'fg.muted', maxW: '640px' })}>
+              GitHub sync and the coding workflow are in preview, and a few mini-apps — message
+              follow-ups, birthdays, job applications — are still only specified. The roadmap says
+              where each one stands, including the ideas that have no promise behind them.
+            </p>
+          </div>
+          <a href="/roadmap" class={bandLink}>See the roadmap</a>
+        </div>
+
+        <p class={css({ m: '0', mt: '8', fontSize: 'sm', color: 'fg.muted' })}>
+          Every feature here has a page: installation, the task list, repeats, the agent, workflows,
+          sync, and configuration all live in <a href="/docs" class={inlineLink}>the user guide</a>.
+        </p>
+      </div>
+    </section>
 
     <CTASection
-      title="Start with the guide that fits"
-      primaryCta={{ label: 'Install and run', href: '/docs/install' }}
-      secondaryCta={{ label: 'Read the user guide', href: '/docs' }}
+      title="Get it on your machine"
+      primaryCta={{ label: 'Download', href: '/downloads' }}
+      secondaryCta={{ label: 'Read the docs', href: '/docs' }}
     />
   </main>
 
