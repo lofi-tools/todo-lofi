@@ -69,6 +69,11 @@ mod ui_parts {
     pub mod travel;
 }
 
+/// The version Cargo.toml gave this crate: what `--version` prints and what
+/// the About pane shows. The packaging scripts read the same field to name the
+/// bundles, so the binary, the app bundle and the archives agree.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Which pane fills the right-hand column of the Tasks panel.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum RightPane {
@@ -2599,6 +2604,13 @@ fn history_arrow(enabled: bool, cx: &App) -> Svg {
 }
 
 fn main() {
+    // `--version`/`-V` reports the build and exits before a window or a store
+    // is set up, so it works in a terminal and inside a packaging script.
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("todo-lofi {VERSION}");
+        return;
+    }
+
     // The feed exists before logging so the tracing layer can publish into it.
     let notices = NoticeFeed::new();
     init_logging(notices.sink());

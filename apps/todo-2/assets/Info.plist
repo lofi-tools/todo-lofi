@@ -10,6 +10,8 @@
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>todo-lofi</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <!-- Overwritten at package time by scripts/package-macos.sh with the version
+       from Cargo.toml, which is the single source of truth. -->
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CSResourcesFileMapped</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>

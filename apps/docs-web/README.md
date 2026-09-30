@@ -23,9 +23,9 @@ extension surface rather than part of the everyday tasklist.
 
 | Guide / section | Route | Content |
 | --- | --- | --- |
-| Landing | `/` | What the app is, what it does, and the way into both guides |
+| Landing | `/` | What the app is, what it does, the download section, and the way into both guides |
 | User guide | `/docs` | Overview: what the app is, highlights, and where to start |
-| User guide | `/docs/install` | Requirements, running from a checkout, the macOS app bundle |
+| User guide | `/docs/install` | Per-platform bundle downloads, first launch, and building from source |
 | User guide | `/docs/tasks` | The task list, task details, tags, projects and areas, filtering |
 | User guide | `/docs/repeats` | Repeat rules, dates and times, why a picker |
 | User guide | `/docs/workflows` | Workflows as staged state, and the coding workflow |
@@ -68,6 +68,18 @@ pnpm test:e2e   # Playwright smoke, theming, layout, and axe AA checks
 
 The e2e suite expects the locally installed Chrome and starts its own preview
 server on port 4322 (the showcase suite uses 4321, so both can run at once).
+
+## Downloads
+
+The landing page's download section and the install page resolve their links at
+runtime from the GitHub releases API (`data/downloads.ts`), because each bundle
+carries its version in its file name and there is no fixed `latest/download`
+URL. The module detects the visitor's platform — and, where the browser reports
+it, the architecture — and points the primary button at the matching asset;
+every link keeps the releases page as its `href`, so a failed or rate-limited
+request degrades to a working fallback. `data/downloads.ts` lives outside `src/`
+for the same reason `data/landing.ts` does: Panda scans `src/` for style-shaped
+objects.
 
 ## Adding a page
 

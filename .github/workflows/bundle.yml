@@ -4,6 +4,11 @@ name: Bundle
 # compiles todo-2 through nix, which the nix store cache makes free on a repeat
 # run but expensive the first time a lockfile changes — which is why a pull
 # request gets the test workflow alone.
+#
+# The bundles are both uploaded as workflow artifacts and published as a GitHub
+# release (see the `release` job): a `v*` tag publishes that tag's release, and
+# while the project has no version tags at all a push to main keeps a rolling
+# pre-release up to date so the website has something to download.
 on:
   push:
     branches: [main]
@@ -128,3 +133,66 @@ jobs:
           name: todo-lofi-windows
           path: dist/*
           if-no-files-found: error
+
+  # Publishes the bundles the packaging jobs uploaded. Two shapes, one job:
+  # a `v*` tag push publishes a release for that tag, and — only while the
+  # repository has no `v*` tags yet — a push to main keeps one rolling
+  # pre-release (`latest`) current, so the download link on the website works
+  # from the first push. Once a version tag exists, main stops publishing and
+  # releases come from tags alone.
+  release:
+    name: Publish
+    needs: [package-macos, package-linux, package-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # All three jobs' artifacts, flattened into one directory.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Bash rather than the executable bit: the flag file bit is not
+          # reliable across the runners the job could move to.
+          version=$(bash ./scripts/version.sh)
+          notes="Unsigned development builds of todo-lofi $version.
+
+          macOS: todo-lofi-$version-macos-<arch>.zip or .dmg
+          Linux: todo-lofi-$version-linux-<arch>.tar.gz, .deb or .AppImage
+          Windows: todo-lofi-$version-windows-x86_64.zip"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            gh release create "${GITHUB_REF#refs/tags/}" dist/* \
+              --title "todo-lofi ${GITHUB_REF#refs/tags/}" \
+              --notes "$notes"
+            exit 0
+          fi
+
+          # A main push only publishes while no version tag exists. `latest`
+          # itself is not a `v*` tag, so the rolling release never switches
+          # this off on its own.
+          if git ls-remote --tags origin 'refs/tags/v*' | grep -q .; then
+            echo "version tags exist; main no longer publishes a rolling release"
+            exit 0
+          fi
+
+          # Replace rather than edit: the rolling tag has to move to this
+          # commit, and editing an existing release cannot move the tag it
+          # already points at. The window where no `latest` release exists is
+          # one API round trip; the website falls back to the releases page in
+          # it. Concurrency serializes the runs, so two pushes cannot race here.
+          gh release delete latest --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create latest dist/* \
+            --target "$GITHUB_SHA" \
+            --title "todo-lofi $version (latest main)" \
+            --notes "$notes" \
+            --prerelease

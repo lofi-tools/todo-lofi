@@ -13,7 +13,6 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-plist=$repo/apps/todo-2/assets/Info.plist
 
 binary=
 out=dist/windows
@@ -48,7 +47,9 @@ done
 	echo "package-windows.sh: --binary must name a built todo-2.exe" >&2
 	exit 2
 }
-version=${version:-$(sed -n 's/.*CFBundleShortVersionString<\/key><string>\([^<]*\)<\/string>.*/\1/p' "$plist")}
+# Version comes from Cargo.toml, so the archive is named after the build. Run
+# the resolver through bash: a Windows checkout does not keep its exec bit.
+version=${version:-$(bash "$repo/scripts/version.sh")}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

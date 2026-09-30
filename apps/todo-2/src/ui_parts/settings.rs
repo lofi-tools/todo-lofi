@@ -1050,15 +1050,26 @@ impl SettingsView {
             .child(div().text_xl().font_semibold().child("About"))
             .child(Self::section(
                 "App",
-                vec![Self::row(
-                    "Config location",
-                    Some("General, sync, and per-app flags live here."),
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0xa3a3a3))
-                        .child("~/.config/my-todo/settings.json")
-                        .into_any_element(),
-                )],
+                vec![
+                    Self::row(
+                        "Version",
+                        Some("The build's version, from Cargo.toml."),
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .child(crate::VERSION.to_string())
+                            .into_any_element(),
+                    ),
+                    Self::row(
+                        "Config location",
+                        Some("General, sync, and per-app flags live here."),
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xa3a3a3))
+                            .child("~/.config/my-todo/settings.json")
+                            .into_any_element(),
+                    ),
+                ],
             ))
             .into_any_element()
     }

@@ -207,6 +207,10 @@
           # from the full workspace source instead.
           crane = config.extraLib.craneLib;
           relPath = p: (/. + builtins.unsafeDiscardStringContext "${self.outPath + "${p}"}");
+          # The version the binary is built with and the bundles are named
+          # after: read from Cargo.toml, the single source of truth (see
+          # scripts/version.sh for the non-nix readers of the same field).
+          version = (builtins.fromTOML (builtins.readFile (relPath "/Cargo.toml"))).workspace.package.version;
           # `commonCargoSources` drops non-Rust files, but todo-2 embeds its
           # icons via `include_bytes!` and storage embeds its migrations via
           # `include_dir!`, so keep those trees in the build source.
@@ -281,7 +285,7 @@
             ];
             buildInputs = config.rust.buildInputs;
             pname = "todo-2-tests";
-            version = "0.1.0";
+            inherit version;
             cargoTestExtraArgs = "-p todo-2 -p storage -p acp-client -p gpui_tokio";
             env = config.rust.buildEnv // {
               GIT_AUTHOR_NAME = "CI";
@@ -354,7 +358,7 @@
               inherit (config.rust) nativeBuildInputs;
               buildInputs = config.rust.buildInputs;
               pname = "todo-2-linux";
-              version = "0.1.0";
+              inherit version;
               cargoExtraArgs = "-p todo-2";
               doCheck = false;
               # `zig cc` resolves its cache dir via HOME, which the build env
@@ -370,7 +374,7 @@
               inherit (config.rust) nativeBuildInputs;
               buildInputs = config.rust.buildInputs;
               pname = "todo-2";
-              version = "0.1.0";
+              inherit version;
               cargoExtraArgs = "-p todo-2";
               doCheck = false;
               env = config.rust.buildEnv;
@@ -401,7 +405,7 @@
               in
               pkgs.stdenv.mkDerivation {
                 pname = "todo-lofi-linux-dist";
-                version = "0.1.0";
+                inherit version;
                 src = packagingSrc;
                 # Everything package-linux.sh shells out to: ldd (glibc),
                 # objdump (binutils), dpkg-deb, rsvg-convert; plus the tools
@@ -425,7 +429,7 @@
                   chmod +x "$appimage"
                   PACKAGE_LINUX_SKIP_STORE_CHECK=1 bash scripts/package-linux.sh \
                     --binary ${config.packages.todo-2}/bin/todo-2 \
-                    --version 0.1.0 \
+                    --version ${version} \
                     --out dist \
                     --appimagetool "$appimage"
                 '';

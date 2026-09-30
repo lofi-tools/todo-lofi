@@ -13,8 +13,8 @@
 # grain is baked into that raster (scripts/icon-grain.py) so the SVG stays clean
 # for its web consumers.
 #
-# Usage: package-macos.sh --binary <path> [--out DIR] [--link] [--register]
-#                         [--no-archives]
+# Usage: package-macos.sh --binary <path> [--out DIR] [--version X] [--link]
+#                         [--register] [--no-archives]
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -24,6 +24,7 @@ lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 binary=
 out=dist/macos
+version=
 link=0
 register=0
 archives=1
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
   case $1 in
     --binary) binary=${2:?--binary needs a path}; shift 2 ;;
     --out) out=${2:?--out needs a path}; shift 2 ;;
+    --version) version=${2:?--version needs a value}; shift 2 ;;
     --link) link=1; shift ;;
     --register) register=1; shift ;;
     --no-archives) archives=0; shift ;;
@@ -47,8 +49,9 @@ done
   exit 2
 }
 
-version=$(sed -n 's/.*CFBundleShortVersionString<\/key><string>\([^<]*\)<\/string>.*/\1/p' "$plist")
-[ -n "$version" ] || { echo "package-macos.sh: no CFBundleShortVersionString in $plist" >&2; exit 1; }
+# Version comes from Cargo.toml rather than the checked-in plist, so the
+# binary, the app bundle and the archive names all agree on one number.
+version=${version:-$("$repo/scripts/version.sh")}
 arch=$(uname -m)
 
 app=$out/todo-lofi.app
@@ -56,7 +59,12 @@ exe=$app/Contents/MacOS/todo-2
 icns=$app/Contents/Resources/todo-lofi.icns
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp -f "$plist" "$app/Contents/Info.plist"
+# The bundle reports the version the binary was built with: write it over the
+# plist's own CFBundleShortVersionString instead of shipping the checked-in one.
+sed "s|\\(<key>CFBundleShortVersionString</key><string>\\)[^<]*\\(</string>\\)|\\1$version\\2|" \
+  "$plist" > "$app/Contents/Info.plist"
+grep -q "<key>CFBundleShortVersionString</key><string>$version</string>" "$app/Contents/Info.plist" \
+  || { echo "package-macos.sh: could not write version $version into the bundle's Info.plist" >&2; exit 1; }
 
 # Regenerate whenever the artwork or this recipe changed, so an icon baked
 # earlier (qlmanage composites the SVG on a white matte) can't stick.

@@ -16,6 +16,7 @@ import KanbanBoard from 'web-design-system/astro/product/KanbanBoard.astro'
 import Timeline from 'web-design-system/astro/product/Timeline.astro'
 import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
 import AutomationsPanel from '../components/AutomationsPanel.astro'
+import DownloadSection from '../components/DownloadSection.astro'
 import screenshot from '../assets/app.png'
 
 import { agentThread, codingColumns, repeatRows, taskRows } from '../../data/landing'
@@ -114,6 +115,8 @@ const ctaSecondary = css({
       linkLabel="How the storage layer works"
       linkHref="/docs/contributor/architecture"
     />
+
+    <DownloadSection />
 
     <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
       <SectionHeading

@@ -33,7 +33,11 @@ export interface DocGuide {
   sections: DocSection[]
 }
 
-export const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
+// The repository URL has one definition, in the download helper the client
+// scripts share; this module re-exports it for the pages that link to the repo.
+import { REPO_URL } from '../../data/downloads'
+
+export { REPO_URL }
 
 /** Where the docs start. The landing page and the header's brand link use it. */
 export const DOCS_ROOT = '/docs'

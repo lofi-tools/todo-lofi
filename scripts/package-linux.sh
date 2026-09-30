@@ -22,7 +22,6 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-plist=$repo/apps/todo-2/assets/Info.plist
 icon_svg=$repo/apps/todo-2/assets/icons/do-list-app.svg
 
 binary=
@@ -62,7 +61,9 @@ done
 	echo "package-linux.sh: --binary must name a built todo-2 binary" >&2
 	exit 2
 }
-version=${version:-$(sed -n 's/.*CFBundleShortVersionString<\/key><string>\([^<]*\)<\/string>.*/\1/p' "$plist")}
+# Version comes from Cargo.toml; flake.nix passes it explicitly because the
+# sandbox has no checkout of the workspace root to read it from.
+version=${version:-$("$repo/scripts/version.sh")}
 arch=$(uname -m)
 case $arch in
 x86_64) deb_arch=amd64 ;;
