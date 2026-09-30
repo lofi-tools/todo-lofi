@@ -197,6 +197,34 @@
           # };
 
         in
+        let
+          # Shared crane setup for the outputs below. my-nix's rust module
+          # builds each crate from a fileset of just the crate's own
+          # directory plus the workspace root manifests. That omits workspace
+          # path dependencies (`todo-2 -> ../../libs/*`), so `cargo build -p
+          # todo-2` fails in the sandbox with "failed to read
+          # .../source/libs/acp-client/Cargo.toml". All outputs below build
+          # from the full workspace source instead.
+          crane = config.extraLib.craneLib;
+          relPath = p: (/. + builtins.unsafeDiscardStringContext "${self.outPath + "${p}"}");
+          # `commonCargoSources` drops non-Rust files, but todo-2 embeds its
+          # icons via `include_bytes!` and storage embeds its migrations via
+          # `include_dir!`, so keep those trees in the build source.
+          fullSrc = lib.fileset.toSource {
+            root = (/. + builtins.unsafeDiscardStringContext self.outPath);
+            fileset = lib.fileset.unions [
+              (crane.fileset.commonCargoSources (relPath "/"))
+              (relPath "/apps/todo-2/assets")
+              (relPath "/libs/storage/toasty")
+            ];
+          };
+          fullDeps = crane.buildDepsOnly {
+            src = fullSrc;
+            buildInputs = config.rust.buildInputs;
+            inherit (config.rust) nativeBuildInputs extraDummyScript;
+            env = config.rust.buildEnv;
+          };
+        in
         {
           # packages = scripts;
           rust.buildInputs = buildDeps;
@@ -223,35 +251,98 @@
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
 
-          # my-nix's rust module builds each crate from a fileset of just the
-          # crate's own directory plus the workspace root manifests. That omits
-          # workspace path dependencies (`todo-2 -> ../../libs/*`), so `cargo
-          # build -p todo-2` fails in the sandbox with "failed to read
-          # .../source/libs/acp-client/Cargo.toml". Rebuild todo-2 from the
-          # full workspace source instead; every other crate keeps the
-          # module's package.
-          packages.todo-2 =
+          # my-nix's `configure-editors` hook shells out to `code` unguarded,
+          # so entering the devshell where VSCode is not installed prints
+          # `code: command not found`. Only run it when `code` exists.
+          myDevShell.shellHooks.configure-editors = lib.mkForce ''
+            if command -v code >/dev/null 2>&1; then
+              ${config.expose.packages.configure-editors}/bin/configure-editors
+            fi
+          '';
+
+          # Hermetic test suites, run by CI via `nix build` instead of `nix
+          # develop` + `cargo test`: the devshell is for local tools only, and
+          # its incremental `target/` dir (restored from cache) is what
+          # produced unreproducible sandbox failures like the missing rustls
+          # build-script binary. Same crate set the `t2` watch loop covers.
+          # Test binaries that commit to throwaway repos need a git identity,
+          # hence GIT_* below (mirrors .github/workflows/test.yml).
+          checks.todo-2-tests = crane.cargoTest {
+            src = fullSrc;
+            cargoArtifacts = fullDeps;
+            nativeBuildInputs = config.rust.nativeBuildInputs ++ [ pkgs.git ];
+            buildInputs = config.rust.buildInputs;
+            pname = "todo-2-tests";
+            version = "0.1.0";
+            cargoTestExtraArgs = "-p todo-2 -p storage -p acp-client -p gpui_tokio";
+            env = config.rust.buildEnv // {
+              GIT_AUTHOR_NAME = "CI";
+              GIT_AUTHOR_EMAIL = "ci@todo-lofi.invalid";
+              GIT_COMMITTER_NAME = "CI";
+              GIT_COMMITTER_EMAIL = "ci@todo-lofi.invalid";
+            };
+          };
+
+          # Linux binary of todo-2 built with one expression on any host:
+          # native on a Linux host, cross-compiled on macOS. Rust cross needs
+          # the target std plus a linker/C toolchain for the target; `zig cc`
+          # provides both C/C++/ar behind wrapper scripts, so no per-host
+          # pkgsCross stdenv is required. `doCheck` stays off: cross-built
+          # test binaries cannot run on the build host; `checks.todo-2-tests`
+          # runs the suites natively per runner instead.
+          packages.todo-2-linux =
             let
-              crane = config.extraLib.craneLib;
-              relPath = p: (/. + builtins.unsafeDiscardStringContext "${self.outPath + "${p}"}");
-              # `cleanCargoSource` drops non-Rust files, but todo-2 embeds its
-              # icons via `include_bytes!` and storage embeds its migrations
-              # via `include_dir!`, so keep those trees in the build source.
-              fullSrc = lib.fileset.toSource {
-                root = (/. + builtins.unsafeDiscardStringContext self.outPath);
-                fileset = lib.fileset.unions [
-                  (crane.fileset.commonCargoSources (relPath "/"))
-                  (relPath "/apps/todo-2/assets")
-                  (relPath "/libs/storage/toasty")
-                ];
+              linuxTarget = "x86_64-unknown-linux-gnu";
+              linuxTargetEnv = "x86_64_unknown_linux_gnu";
+              linuxToolchain = config.expose.packages.customRust.override {
+                targets = [ linuxTarget ];
               };
-              fullDeps = crane.buildDepsOnly {
-                src = fullSrc;
-                buildInputs = config.rust.buildInputs;
-                inherit (config.rust) nativeBuildInputs extraDummyScript;
-                env = config.rust.buildEnv;
+              linuxCrane = crane.overrideToolchain (_: linuxToolchain);
+              # `zig cc` takes the target via `-target x86_64-linux-gnu`,
+              # but cc-rs appends cargo's `--target=x86_64-unknown-linux-gnu`
+              # (with the `unknown` vendor), which zig cannot parse, so filter
+              # that flag out here.
+              zigCc = pkgs.writeShellScriptBin "zig-cc-x86_64-linux" ''
+                args=()
+                for a in "$@"; do
+                  case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
+                done
+                exec ${pkgs.zig}/bin/zig cc -target x86_64-linux-gnu "''${args[@]}"
+              '';
+              zigCxx = pkgs.writeShellScriptBin "zig-cxx-x86_64-linux" ''
+                args=()
+                for a in "$@"; do
+                  case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
+                done
+                exec ${pkgs.zig}/bin/zig c++ -target x86_64-linux-gnu "''${args[@]}"
+              '';
+              crossEnv = {
+                CARGO_BUILD_TARGET = linuxTarget;
+                CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${zigCc}/bin/zig-cc-x86_64-linux";
+                "CC_${linuxTargetEnv}" = "${zigCc}/bin/zig-cc-x86_64-linux";
+                "CXX_${linuxTargetEnv}" = "${zigCxx}/bin/zig-cxx-x86_64-linux";
+                "AR_${linuxTargetEnv}" = "${pkgs.llvmPackages.bintools}/bin/llvm-ar";
               };
             in
+            # No `buildDepsOnly` layer here: it builds the dependencies of
+            # every workspace member, including demos/desktop-tauri's Linux
+            # gtk stack, which cannot resolve when cross-compiling from macOS.
+            # Building `-p todo-2` directly only needs its own closure.
+            linuxCrane.buildPackage {
+              src = fullSrc;
+              inherit (config.rust) nativeBuildInputs;
+              buildInputs = config.rust.buildInputs;
+              pname = "todo-2-linux";
+              version = "0.1.0";
+              cargoExtraArgs = "-p todo-2";
+              doCheck = false;
+              # `zig cc` resolves its cache dir via HOME, which the build env
+              # leaves unset/unwritable; point it at the per-build temp dir.
+              preBuild = ''export HOME="$TMPDIR"'';
+              env = config.rust.buildEnv // crossEnv;
+            };
+
+          packages.todo-2 =
             lib.mkForce (crane.buildPackage {
               src = fullSrc;
               cargoArtifacts = fullDeps;
