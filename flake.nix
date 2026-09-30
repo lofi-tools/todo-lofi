@@ -19,7 +19,7 @@
         inputs.my-nix.flakeModules.rust
         (inputs.my-nix.lib.findFlakePartFilesRec ./.)
       ];
-      perSystem = { pkgs, lib, ... }:
+      perSystem = { pkgs, config, lib, ... }:
         let
           # bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
           # crane's `buildDepsOnly` builds the dependencies of every workspace
@@ -222,6 +222,47 @@
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
+
+          # my-nix's rust module builds each crate from a fileset of just the
+          # crate's own directory plus the workspace root manifests. That omits
+          # workspace path dependencies (`todo-2 -> ../../libs/*`), so `cargo
+          # build -p todo-2` fails in the sandbox with "failed to read
+          # .../source/libs/acp-client/Cargo.toml". Rebuild todo-2 from the
+          # full workspace source instead; every other crate keeps the
+          # module's package.
+          packages.todo-2 =
+            let
+              crane = config.extraLib.craneLib;
+              relPath = p: (/. + builtins.unsafeDiscardStringContext "${self.outPath + "${p}"}");
+              # `cleanCargoSource` drops non-Rust files, but todo-2 embeds its
+              # icons via `include_bytes!` and storage embeds its migrations
+              # via `include_dir!`, so keep those trees in the build source.
+              fullSrc = lib.fileset.toSource {
+                root = (/. + builtins.unsafeDiscardStringContext self.outPath);
+                fileset = lib.fileset.unions [
+                  (crane.fileset.commonCargoSources (relPath "/"))
+                  (relPath "/apps/todo-2/assets")
+                  (relPath "/libs/storage/toasty")
+                ];
+              };
+              fullDeps = crane.buildDepsOnly {
+                src = fullSrc;
+                buildInputs = config.rust.buildInputs;
+                inherit (config.rust) nativeBuildInputs extraDummyScript;
+                env = config.rust.buildEnv;
+              };
+            in
+            lib.mkForce (crane.buildPackage {
+              src = fullSrc;
+              cargoArtifacts = fullDeps;
+              inherit (config.rust) nativeBuildInputs;
+              buildInputs = config.rust.buildInputs;
+              pname = "todo-2";
+              version = "0.1.0";
+              cargoExtraArgs = "-p todo-2";
+              doCheck = false;
+              env = config.rust.buildEnv;
+            });
         };
     });
 
