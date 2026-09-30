@@ -63,6 +63,10 @@ for dll in "$(dirname "$binary")"/*.dll; do
 done
 
 mkdir -p "$out"
+# Resolve to an absolute path now: the archive commands below run after
+# `cd "$work"`, where a relative $out would land inside the temp dir and the
+# caller's dist/ would stay empty.
+out=$(cd "$out" && pwd)
 # Git Bash on the Windows runner image has no `zip`; 7-Zip is on PATH there
 # instead. Either makes the same .zip container.
 if command -v zip >/dev/null 2>&1; then

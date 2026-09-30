@@ -109,7 +109,11 @@ done
 # The loader resolves a versioned library by its SONAME, which is not the file
 # name it happens to be stored under (libfoo.so.1 vs libfoo.so.1.2.3).
 for lib in "$appdir"/usr/lib/todo-lofi/*; do
-	soname=$(objdump -p "$lib" 2>/dev/null | awk '/SONAME/{print $2; exit}')
+	# No `exit` in the awk: quitting early closes the pipe while objdump is
+	# still writing, killing it with SIGPIPE (exit 141 under pipefail). Read
+	# it all and keep the first SONAME line instead.
+	soname=$(objdump -p "$lib" 2>/dev/null | awk '/SONAME/{print $2}')
+	soname=${soname%%$'\n'*}
 	[ -n "$soname" ] || continue
 	[ -e "$appdir/usr/lib/todo-lofi/$soname" ] && continue
 	ln -s "$(basename "$lib")" "$appdir/usr/lib/todo-lofi/$soname"
