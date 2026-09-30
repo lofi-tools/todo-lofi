@@ -201,6 +201,19 @@
           # packages = scripts;
           rust.buildInputs = buildDeps;
           rust.buildEnv = env;
+          # crane's `buildDepsOnly` replaces every crate it finds with a dummy
+          # stub. That includes the `patched/` cersei forks, but the git `cersei`
+          # umbrella is a real dependency that links against the patched
+          # `cersei-provider`, so the stub leaves `cersei_provider::{gemini,
+          # openai, Auth, ...}` undefined and the deps build fails. Restore the
+          # real patch sources once the dummy tree has been assembled.
+          #
+          # Needs my-nix to expose the crane `buildDepsOnly` escape hatches
+          # (`rust.extraDummyScript`); run `nix flake update my-nix` for it.
+          rust.extraDummyScript = ''
+            rm -rf $out/patched
+            cp -r --no-preserve=ownership ${self.outPath}/patched $out/patched
+          '';
           # rust.toolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
           #   extensions = [ "rust-src" "rust-analyzer" ];
           #   targets = [ ];
