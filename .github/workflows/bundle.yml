@@ -72,26 +72,15 @@ jobs:
           restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
           purge-primary-key: never
 
+      # Fully hermetic, no `--impure`: the tarball, .deb and AppImage are all
+      # assembled by `packages.todo-lofi-linux-dist`, which runs
+      # scripts/package-linux.sh inside the sandbox with every tool (down to
+      # appimagetool, fetched by content hash) from nixpkgs.
       - name: Build
-        run: nix build .#todo-2 --no-link --print-out-paths > /tmp/todo-2-path
+        run: nix build .#todo-lofi-linux-dist --print-out-paths > /tmp/todo-2-dist
 
-      # appimagetool is not in nixpkgs and is not part of the reproducibility
-      # guarantee either: it only wraps the tree the script already assembled.
-      # Pinned and verified so the artifact cannot change under us.
-      - name: Fetch appimagetool
-        run: |
-          curl -fsSL -o appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c -
-          chmod +x appimagetool
-
-      # In the devshell: it is where rsvg-convert and dpkg-deb come from.
-      - name: Package
-        run: |
-          nix develop --impure --command ./scripts/package-linux.sh \
-            --binary "$(cat /tmp/todo-2-path)/bin/todo-2" \
-            --out dist \
-            --appimagetool "$PWD/appimagetool"
+      - name: Collect
+        run: mkdir -p dist && cp "$(cat /tmp/todo-2-dist)"/* dist/
 
       - uses: actions/upload-artifact@v4
         with:

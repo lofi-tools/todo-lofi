@@ -72,7 +72,10 @@ esac
 
 # The closure is what makes the bundle possible, so refuse a binary built
 # outside the store rather than shipping something that cannot run.
-if ! nix-store -qR "$binary" >/dev/null 2>&1; then
+# Skipped when PACKAGE_LINUX_SKIP_STORE_CHECK is set: the nix derivation
+# (flake.nix `packages.todo-lofi-linux-dist`) only ever passes store paths,
+# and `nix-store` cannot reach a daemon inside the sandbox anyway.
+if [ -z "${PACKAGE_LINUX_SKIP_STORE_CHECK:-}" ] && ! nix-store -qR "$binary" >/dev/null 2>&1; then
 	echo "package-linux.sh: $binary is not a nix store path; build it with 'nix build .#todo-2'" >&2
 	exit 2
 fi

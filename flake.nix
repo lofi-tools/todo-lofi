@@ -307,8 +307,12 @@
           # pkgsCross stdenv is required. `doCheck` stays off: cross-built
           # test binaries cannot run on the build host; `checks.todo-2-tests`
           # runs the suites natively per runner instead.
-          packages.todo-2-linux =
-            let
+          # A single `packages` set: Nix forbids mixing `packages.x` entries
+          # with a wholesale `packages` assignment in one attrset.
+          packages =
+            {
+              todo-2-linux =
+                let
               linuxTarget = "x86_64-unknown-linux-gnu";
               linuxTargetEnv = "x86_64_unknown_linux_gnu";
               linuxToolchain = config.expose.packages.customRust.override {
@@ -357,10 +361,10 @@
               # leaves unset/unwritable; point it at the per-build temp dir.
               preBuild = ''export HOME="$TMPDIR"'';
               env = config.rust.buildEnv // crossEnv;
-            };
+                };
 
-          packages.todo-2 =
-            lib.mkForce (crane.buildPackage {
+              todo-2 =
+                lib.mkForce (crane.buildPackage {
               src = fullSrc;
               cargoArtifacts = fullDeps;
               inherit (config.rust) nativeBuildInputs;
@@ -370,7 +374,67 @@
               cargoExtraArgs = "-p todo-2";
               doCheck = false;
               env = config.rust.buildEnv;
-            });
+                });
+            }
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+              # Linux release artifacts (tarball, .deb, AppImage) as a `nix build`
+              # output: runs scripts/package-linux.sh inside the sandbox with every
+              # tool from nixpkgs, so CI needs no devshell, no `--impure`, and no
+              # curl'd appimagetool (it arrives via `fetchurl`, pinned by hash).
+              # Linux-only: appimagetool is an x86_64 executable and ldd/dpkg-deb
+              # only make sense there.
+              todo-lofi-linux-dist =
+              let
+                # Pinned out-of-store tool, fetched purely by content hash
+                # (same revision the workflow used to curl: 1.9.1).
+                appimagetool = pkgs.fetchurl {
+                  url = "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage";
+                  sha256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0";
+                };
+                packagingSrc = lib.fileset.toSource {
+                  root = (/. + builtins.unsafeDiscardStringContext self.outPath);
+                  fileset = lib.fileset.unions [
+                    (relPath "/scripts/package-linux.sh")
+                    (relPath "/apps/todo-2/assets")
+                  ];
+                };
+              in
+              pkgs.stdenv.mkDerivation {
+                pname = "todo-lofi-linux-dist";
+                version = "0.1.0";
+                src = packagingSrc;
+                # Everything package-linux.sh shells out to: ldd (glibc),
+                # objdump (binutils), dpkg-deb, rsvg-convert; plus the tools
+                # appimagetool prefers to have around (desktop-file-validate,
+                # file for arch sniffing).
+                nativeBuildInputs = [
+                  pkgs.glibc
+                  pkgs.binutils
+                  pkgs.dpkg
+                  pkgs.librsvg
+                  pkgs.desktop-file-utils
+                  pkgs.file
+                ];
+                # $out holds archives and an AppImage (whose leading bytes are
+                # the runtime ELF): stripping would corrupt the AppImage, and
+                # there is nothing in there with symbols worth stripping.
+                dontStrip = true;
+                buildPhase = ''
+                  appimage=$PWD/appimagetool
+                  cp -f ${appimagetool} "$appimage"
+                  chmod +x "$appimage"
+                  PACKAGE_LINUX_SKIP_STORE_CHECK=1 bash scripts/package-linux.sh \
+                    --binary ${config.packages.todo-2}/bin/todo-2 \
+                    --version 0.1.0 \
+                    --out dist \
+                    --appimagetool "$appimage"
+                '';
+                installPhase = ''
+                  mkdir -p $out
+                  cp -f dist/* $out/
+                '';
+              };
+          };
         };
     });
 
