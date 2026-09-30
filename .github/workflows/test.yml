@@ -15,9 +15,10 @@ permissions:
 
 concurrency:
   # A distinct group from the bundle workflow, which calls this one: sharing a
-  # group would make each cancel the other.
+  # group would make each cancel the other. Nothing cancels: a new push leaves
+  # in-flight runs alone.
   group: test-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   test:

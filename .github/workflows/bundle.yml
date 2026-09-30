@@ -20,14 +20,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The same definition the pull-request workflow runs, so a release cannot be
-  # built from a commit that never passed the tests.
+  # The same definition the pull-request workflow runs. It no longer gates the
+  # packaging jobs below: tests and builds start at the same time.
   test:
     uses: ./.github/workflows/test.yml
 
   package-macos:
     name: Package (macOS)
-    needs: test
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +60,6 @@ jobs:
 
   package-linux:
     name: Package (Linux)
-    needs: test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -106,7 +104,6 @@ jobs:
 
   package-windows:
     name: Package (Windows)
-    needs: test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
