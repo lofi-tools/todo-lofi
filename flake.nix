@@ -275,6 +275,9 @@
               # The coding-agent tests resolve the `opencode` binary from PATH
               # (the devshell carries it for the same reason).
               pkgs.opencode
+              # Sandbox fixtures below: zoneinfo database and CA bundle.
+              pkgs.tzdata
+              pkgs.cacert
             ];
             buildInputs = config.rust.buildInputs;
             pname = "todo-2-tests";
@@ -288,6 +291,12 @@
               # Debug info for build scripts (e.g. rustls), so a failing
               # `cargoTest` phase reports usable backtraces.
               CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG = "true";
+              # The sandbox has no /usr/share/zoneinfo or /etc/ssl/certs:
+              # without these, jiff falls back to UTC (breaking the
+              # America/New_York repeat test) and reqwest refuses to build a
+              # client ("No CA certificates were loaded from the system").
+              TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             };
           };
 
