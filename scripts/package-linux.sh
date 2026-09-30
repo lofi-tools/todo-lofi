@@ -30,35 +30,51 @@ out=dist/linux
 appimagetool=
 
 while [ $# -gt 0 ]; do
-  case $1 in
-    --binary) binary=${2:?--binary needs a path}; shift 2 ;;
-    --out) out=${2:?--out needs a path}; shift 2 ;;
-    --appimagetool) appimagetool=${2:?--appimagetool needs a path}; shift 2 ;;
-    --version) version=${2:?--version needs a value}; shift 2 ;;
-    -h|--help)
-      sed -n '/^# Usage:/,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' | sed '$d'
-      exit 0 ;;
-    *) echo "package-linux.sh: unknown argument $1" >&2; exit 2 ;;
-  esac
+	case $1 in
+	--binary)
+		binary=${2:?--binary needs a path}
+		shift 2
+		;;
+	--out)
+		out=${2:?--out needs a path}
+		shift 2
+		;;
+	--appimagetool)
+		appimagetool=${2:?--appimagetool needs a path}
+		shift 2
+		;;
+	--version)
+		version=${2:?--version needs a value}
+		shift 2
+		;;
+	-h | --help)
+		sed -n '/^# Usage:/,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' | sed '$d'
+		exit 0
+		;;
+	*)
+		echo "package-linux.sh: unknown argument $1" >&2
+		exit 2
+		;;
+	esac
 done
 
 [ -n "$binary" ] && [ -f "$binary" ] || {
-  echo "package-linux.sh: --binary must name a built todo-2 binary" >&2
-  exit 2
+	echo "package-linux.sh: --binary must name a built todo-2 binary" >&2
+	exit 2
 }
 version=${version:-$(sed -n 's/.*CFBundleShortVersionString<\/key><string>\([^<]*\)<\/string>.*/\1/p' "$plist")}
 arch=$(uname -m)
 case $arch in
-  x86_64) deb_arch=amd64 ;;
-  aarch64) deb_arch=arm64 ;;
-  *) deb_arch=$arch ;;
+x86_64) deb_arch=amd64 ;;
+aarch64) deb_arch=arm64 ;;
+*) deb_arch=$arch ;;
 esac
 
 # The closure is what makes the bundle possible, so refuse a binary built
 # outside the store rather than shipping something that cannot run.
 if ! nix-store -qR "$binary" >/dev/null 2>&1; then
-  echo "package-linux.sh: $binary is not a nix store path; build it with 'nix build .#todo-2'" >&2
-  exit 2
+	echo "package-linux.sh: $binary is not a nix store path; build it with 'nix build .#todo-2'" >&2
+	exit 2
 fi
 
 work=$(mktemp -d)
@@ -72,31 +88,31 @@ chmod +x "$appdir/usr/bin/todo-lofi.bin"
 # Every shared library the loader will reach, following each one's own deps.
 declare -A seen=()
 collect() {
-  local dep
-  while read -r dep; do
-    [ -n "$dep" ] || continue
-    [ -f "$dep" ] || continue
-    [ -n "${seen[$dep]:-}" ] && continue
-    seen[$dep]=1
-    collect "$dep"
-  done < <(ldd "$1" 2>/dev/null | awk '/=> \//{print $3} /^[[:space:]]*\//{print $1}')
+	local dep
+	while read -r dep; do
+		[ -n "$dep" ] || continue
+		[ -f "$dep" ] || continue
+		[ -n "${seen[$dep]:-}" ] && continue
+		seen[$dep]=1
+		collect "$dep"
+	done < <(ldd "$1" 2>/dev/null | awk '/=> \//{print $3} /^[[:space:]]*\//{print $1}')
 }
 collect "$appdir/usr/bin/todo-lofi.bin"
 
 for lib in "${!seen[@]}"; do
-  cp -Lf "$lib" "$appdir/usr/lib/todo-lofi/$(basename "$lib")"
+	cp -Lf "$lib" "$appdir/usr/lib/todo-lofi/$(basename "$lib")"
 done
 
 # The loader resolves a versioned library by its SONAME, which is not the file
 # name it happens to be stored under (libfoo.so.1 vs libfoo.so.1.2.3).
 for lib in "$appdir"/usr/lib/todo-lofi/*; do
-  soname=$(objdump -p "$lib" 2>/dev/null | awk '/SONAME/{print $2; exit}')
-  [ -n "$soname" ] || continue
-  [ -e "$appdir/usr/lib/todo-lofi/$soname" ] && continue
-  ln -s "$(basename "$lib")" "$appdir/usr/lib/todo-lofi/$soname"
+	soname=$(objdump -p "$lib" 2>/dev/null | awk '/SONAME/{print $2; exit}')
+	[ -n "$soname" ] || continue
+	[ -e "$appdir/usr/lib/todo-lofi/$soname" ] && continue
+	ln -s "$(basename "$lib")" "$appdir/usr/lib/todo-lofi/$soname"
 done
 
-cat > "$appdir/usr/bin/todo-lofi" <<'WRAPPER'
+cat >"$appdir/usr/bin/todo-lofi" <<'WRAPPER'
 #!/bin/sh
 # Run todo-lofi against the libraries bundled beside it.
 here=$(dirname "$(readlink -f "$0")")
@@ -106,26 +122,29 @@ exec "$here/todo-lofi.bin" "$@"
 WRAPPER
 chmod +x "$appdir/usr/bin/todo-lofi"
 
-cat > "$appdir/usr/share/applications/todo-lofi.desktop" <<'DESKTOP'
+cat >"$appdir/usr/share/applications/todo-lofi.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
 Name=todo-lofi
 Comment=A lofi, local-first task manager
 Exec=todo-lofi
+Icon=todo-lofi
 Terminal=false
 Categories=Office;Utility;
 DESKTOP
 
 # The AppImage and the icon theme both want a plain PNG, which is the one thing
-# the repo does not carry: the artwork is an SVG.
+# the repo does not carry: the artwork is an SVG. The output directory must
+# exist before rsvg-convert runs; without it the conversion fails and the
+# `|| true` below would silently ship no icon.
+mkdir -p "$appdir/usr/share/icons/hicolor/512x512/apps"
 if command -v rsvg-convert >/dev/null 2>&1; then
-  rsvg-convert -w 512 -h 512 "$icon_svg" -o "$appdir/usr/share/icons/hicolor/512x512/apps/todo-lofi.png" 2>/dev/null || true
+	rsvg-convert -w 512 -h 512 "$icon_svg" -o "$appdir/usr/share/icons/hicolor/512x512/apps/todo-lofi.png" 2>/dev/null || true
 fi
 if [ -f "$appdir/usr/share/icons/hicolor/512x512/apps/todo-lofi.png" ]; then
-  mkdir -p "$appdir/usr/share/icons/hicolor/512x512/apps"
-  cp -f "$appdir/usr/share/icons/hicolor/512x512/apps/todo-lofi.png" "$appdir/todo-lofi.png"
+	cp -f "$appdir/usr/share/icons/hicolor/512x512/apps/todo-lofi.png" "$appdir/todo-lofi.png"
 else
-  echo "package-linux.sh: rsvg-convert missing, shipping without an icon" >&2
+	echo "package-linux.sh: no icon generated (rsvg-convert missing or failed), shipping without one" >&2
 fi
 
 mkdir -p "$out"
@@ -140,7 +159,7 @@ echo "package-linux.sh: $out/todo-lofi-$version-linux-$arch.tar.gz"
 deb=$work/deb
 mkdir -p "$deb/DEBIAN"
 cp -a "$appdir/usr" "$deb/usr"
-cat > "$deb/DEBIAN/control" <<CONTROL
+cat >"$deb/DEBIAN/control" <<CONTROL
 Package: todo-lofi
 Version: $version
 Section: utils
@@ -155,19 +174,22 @@ dpkg-deb --build --root-owner-group "$deb" "$out/todo-lofi-$version-linux-$arch.
 echo "package-linux.sh: $out/todo-lofi-$version-linux-$arch.deb"
 
 if [ -n "$appimagetool" ] && [ -x "$appimagetool" ]; then
-  # AppRun is what the AppImage runtime executes; the AppDir's own copy of the
-  # wrapper already sets LD_LIBRARY_PATH against its siblings.
-  ln -sf usr/bin/todo-lofi "$appdir/AppRun"
-  [ -f "$appdir/todo-lofi.png" ] || { : > "$appdir/todo-lofi.png"; }
-  arch_env=$arch
-  case $arch in
-    x86_64) arch_env=x86_64 ;;
-    aarch64) arch_env=aarch64 ;;
-  esac
-  ARCH=$arch_env "$appimagetool" --appimage-extract-and-run "$appdir" \
-    "$out/todo-lofi-$version-linux-$arch.AppImage" >/dev/null
-  echo "package-linux.sh: $out/todo-lofi-$version-linux-$arch.AppImage"
+	# AppRun is what the AppImage runtime executes; the AppDir's own copy of the
+	# wrapper already sets LD_LIBRARY_PATH against its siblings.
+	ln -sf usr/bin/todo-lofi "$appdir/AppRun"
+	# appimagetool only looks for the .desktop file at the AppDir top level
+	# (the copy under usr/share/applications is for the .deb).
+	cp -f "$appdir/usr/share/applications/todo-lofi.desktop" "$appdir/todo-lofi.desktop"
+	[ -f "$appdir/todo-lofi.png" ] || { : >"$appdir/todo-lofi.png"; }
+	arch_env=$arch
+	case $arch in
+	x86_64) arch_env=x86_64 ;;
+	aarch64) arch_env=aarch64 ;;
+	esac
+	ARCH=$arch_env "$appimagetool" --appimage-extract-and-run "$appdir" \
+		"$out/todo-lofi-$version-linux-$arch.AppImage" >/dev/null
+	echo "package-linux.sh: $out/todo-lofi-$version-linux-$arch.AppImage"
 elif [ -n "$appimagetool" ]; then
-  echo "package-linux.sh: --appimagetool $appimagetool is not executable" >&2
-  exit 1
+	echo "package-linux.sh: --appimagetool $appimagetool is not executable" >&2
+	exit 1
 fi
