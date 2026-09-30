@@ -395,6 +395,16 @@
                   url = "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage";
                   sha256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0";
                 };
+                # The runtime ELF appimagetool prepends to the AppImage, passed
+                # on as --runtime-file. Left to itself appimagetool downloads it
+                # from type2-runtime's releases, which a sandbox forbids; it is
+                # a tagged release rather than the moving `continuous` tag so
+                # the hash keeps meaning what it says. x86_64 matches the
+                # architecture this derivation packs today.
+                appimageRuntime = pkgs.fetchurl {
+                  url = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64";
+                  sha256 = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d";
+                };
                 packagingSrc = lib.fileset.toSource {
                   root = (/. + builtins.unsafeDiscardStringContext self.outPath);
                   fileset = lib.fileset.unions [
@@ -431,7 +441,8 @@
                     --binary ${config.packages.todo-2}/bin/todo-2 \
                     --version ${version} \
                     --out dist \
-                    --appimagetool "$appimage"
+                    --appimagetool "$appimage" \
+                    --appimage-runtime ${appimageRuntime}
                 '';
                 installPhase = ''
                   mkdir -p $out

@@ -18,7 +18,7 @@
 # system, as it does for any packaged GPU application.
 #
 # Usage: package-linux.sh --binary <path> [--out DIR] [--appimagetool PATH]
-#                         [--version X]
+#                         [--appimage-runtime FILE] [--version X]
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,6 +27,7 @@ icon_svg=$repo/apps/todo-2/assets/icons/do-list-app.svg
 binary=
 out=dist/linux
 appimagetool=
+appimage_runtime=
 
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -40,6 +41,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--appimagetool)
 		appimagetool=${2:?--appimagetool needs a path}
+		shift 2
+		;;
+	--appimage-runtime)
+		appimage_runtime=${2:?--appimage-runtime needs a path}
 		shift 2
 		;;
 	--version)
@@ -194,7 +199,19 @@ if [ -n "$appimagetool" ] && [ -x "$appimagetool" ]; then
 	x86_64) arch_env=x86_64 ;;
 	aarch64) arch_env=aarch64 ;;
 	esac
-	ARCH=$arch_env "$appimagetool" --appimage-extract-and-run "$appdir" \
+	# appimagetool downloads the runtime it prepends to the AppImage from
+	# type2-runtime's GitHub releases unless it is handed one. That download is
+	# the only network access in this script, and it is fatal in a sandbox, so
+	# callers with no network pass a pinned runtime and it is used instead.
+	runtime_args=()
+	if [ -n "$appimage_runtime" ]; then
+		[ -f "$appimage_runtime" ] || {
+			echo "package-linux.sh: --appimage-runtime $appimage_runtime does not exist" >&2
+			exit 2
+		}
+		runtime_args=(--runtime-file "$appimage_runtime")
+	fi
+	ARCH=$arch_env "$appimagetool" --appimage-extract-and-run "${runtime_args[@]}" "$appdir" \
 		"$out/todo-lofi-$version-linux-$arch.AppImage" >/dev/null
 	echo "package-linux.sh: $out/todo-lofi-$version-linux-$arch.AppImage"
 elif [ -n "$appimagetool" ]; then

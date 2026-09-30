@@ -80,7 +80,10 @@ jobs:
       # Fully hermetic, no `--impure`: the tarball, .deb and AppImage are all
       # assembled by `packages.todo-lofi-linux-dist`, which runs
       # scripts/package-linux.sh inside the sandbox with every tool (down to
-      # appimagetool, fetched by content hash) from nixpkgs.
+      # appimagetool, fetched by content hash) from nixpkgs. The AppImage's
+      # runtime is pinned the same way and handed to appimagetool with
+      # `--runtime-file`: left to itself appimagetool downloads it, and a
+      # sandbox has no network to do that with.
       - name: Build
         run: nix build .#todo-lofi-linux-dist --print-out-paths > /tmp/todo-2-dist
 
