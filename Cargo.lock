@@ -1474,7 +1474,8 @@ dependencies = [
 [[package]]
 name = "cersei-compression"
 version = "0.2.6"
-source = "git+https://github.com/pacifio/cersei?rev=708c5055845ba6c682d92960cec99e3adbcca3e1#708c5055845ba6c682d92960cec99e3adbcca3e1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c3a8f5ee544c61112ef4408c5f2dcbaa8d4fa509a59deec525948c8b8830e1e"
 dependencies = [
  "anyhow",
  "once_cell",

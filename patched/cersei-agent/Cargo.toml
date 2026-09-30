@@ -28,7 +28,16 @@ cersei-tools = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba
 cersei-hooks = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
 cersei-memory = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
 cersei-mcp = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
-cersei-compression = { git = "https://github.com/pacifio/cersei", rev = "708c5055845ba6c682d92960cec99e3adbcca3e1" }
+# From crates.io, not the pinned git rev: cersei-compression is a leaf (it
+# depends on none of the other cersei crates), and the published 0.2.6 source is
+# byte-identical to the git rev. Going through the registry matters on macOS,
+# where crane's git vendoring runs `cargo package -l` over a checkout with no
+# `.git`: `src/rules/cargo.toml` then collides with `Cargo.toml` on the
+# case-insensitive build filesystem, cargo drops the whole `src/rules/`
+# directory, and every `include_str!("rules/...")` fails. Registry crates are
+# vendored from the published tarball, which was packaged from git and keeps the
+# rule files.
+cersei-compression = "0.2.6"
 async-trait = "0.1"
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = "0.1"
