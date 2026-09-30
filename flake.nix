@@ -270,7 +270,12 @@
           checks.todo-2-tests = crane.cargoTest {
             src = fullSrc;
             cargoArtifacts = fullDeps;
-            nativeBuildInputs = config.rust.nativeBuildInputs ++ [ pkgs.git ];
+            nativeBuildInputs = config.rust.nativeBuildInputs ++ [
+              pkgs.git
+              # The coding-agent tests resolve the `opencode` binary from PATH
+              # (the devshell carries it for the same reason).
+              pkgs.opencode
+            ];
             buildInputs = config.rust.buildInputs;
             pname = "todo-2-tests";
             version = "0.1.0";

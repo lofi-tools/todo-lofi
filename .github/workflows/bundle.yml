@@ -104,30 +104,33 @@ jobs:
 
   package-windows:
     name: Package (Windows)
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
-      - uses: DeterminateSystems/determinate-nix-action@v3
 
-      - name: Restore the nix store
-        uses: nix-community/cache-nix-action@v7
+      # Built natively instead of cross-compiled with mingw: gpui-pre-windows'
+      # build script compiles its HLSL shaders only when the *host* is Windows
+      # (`#[cfg(target_os = "windows")]` in build.rs), so a Linux-host cross
+      # build never emits the `shaders_bytes.rs` the crate then `include!`s.
+      # The Windows SDK's fxc.exe that the build script needs ships on the
+      # runner image and is found via the registry lookup.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo caches
+        uses: Swatinem/rust-cache@v2
         with:
-          primary-key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-${{ runner.arch }}-
-          purge-primary-key: never
+          key: windows-todo-2-${{ hashFiles('Cargo.lock') }}
 
-      # Cross-compiled with mingw: the `todo-2-windows` shell (apps/todo-2/
-      # part.p.nix) carries the toolchain, so cargo writes the .exe under the
-      # target triple the shell also sets.
       - name: Build
-        run: |
-          nix develop .#devShells.x86_64-linux.todo-2-windows --impure --command \
-            cargo build --release --locked -p todo-2
+        run: cargo build --release --locked -p todo-2
 
+      # Git Bash ships on the runner image; the default PowerShell would not
+      # execute the packaging script.
       - name: Package
         run: |
-          ./scripts/package-windows.sh \
-            --binary target/x86_64-pc-windows-gnu/release/todo-2.exe \
+          bash ./scripts/package-windows.sh \
+            --binary target/release/todo-2.exe \
             --out dist
 
       - uses: actions/upload-artifact@v4
