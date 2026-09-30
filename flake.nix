@@ -280,6 +280,9 @@
               GIT_AUTHOR_EMAIL = "ci@todo-lofi.invalid";
               GIT_COMMITTER_NAME = "CI";
               GIT_COMMITTER_EMAIL = "ci@todo-lofi.invalid";
+              # Debug info for build scripts (e.g. rustls), so a failing
+              # `cargoTest` phase reports usable backtraces.
+              CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG = "true";
             };
           };
 
