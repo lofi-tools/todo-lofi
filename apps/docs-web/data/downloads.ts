@@ -221,12 +221,13 @@ export async function initDownloads(): Promise<void> {
   // points at the releases page, so naming the platform is honest; once it
   // comes back with no matching asset, the label says what the link does.
   const applyPrimaryLabel = () => {
-    const label = document.querySelector<HTMLElement>('[data-download-primary-label]')
-    if (!label) return
-    label.textContent =
+    const text =
       !releases || primaryResolved
         ? `Download for ${PLATFORM_LABELS[platform]}`
         : 'Browse all downloads'
+    for (const label of document.querySelectorAll<HTMLElement>('[data-download-primary-label]')) {
+      label.textContent = text
+    }
   }
 
   const applyLinks = () => {

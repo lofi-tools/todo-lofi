@@ -53,20 +53,6 @@ function message(
 }
 
 /**
- * The task list as the app renders it: priority, id, title, labels, meta. The
- * personal rows are there on purpose — the landing page's opening section is
- * about work and personal tasks sharing one list.
- */
-export const taskRows: Issue[] = [
-  issue('T-1284', 'Draft the travel checklist templates', ['mini-apps'], 'high', 'Today'),
-  issue('T-1310', 'Feed the dog', ['home'], 'high', 'Today'),
-  issue('T-1291', 'Sync the Helsinki trip project', ['sync', 'travel'], 'medium', 'Tomorrow'),
-  issue('T-1317', 'Book the vet appointment', ['home', 'family'], 'medium', 'Thursday'),
-  issue('T-1296', 'Normalise deadline pressure in the score', ['storage'], 'urgent', 'Overdue'),
-  issue('T-1303', 'Review the managed ownership spec', ['spec'], 'low', 'Friday'),
-]
-
-/**
  * The landing page's "apps and workflows" cards and the integrations pair.
  *
  * These live here, not in the page, for the reason at the top of this file:
@@ -87,7 +73,7 @@ export const extensionCards: LandingCard[] = [
     name: 'Mini-apps',
     badge: 'available',
     tone: 'success',
-    body: 'Travel is the one that ships today. Give it a trip and it fills in the packing list and the pre-departure chores as ordinary tasks. Message follow-ups, birthday wishes, and job-application tracking are on the roadmap.',
+    body: 'Travel ships today: give it a trip and it fills in the packing list and pre-departure chores as ordinary tasks. Message follow-ups, birthday wishes, and job-application tracking are on the roadmap.',
     href: '/docs/mini-apps',
     linkLabel: 'Read about mini-apps',
   },
@@ -95,7 +81,7 @@ export const extensionCards: LandingCard[] = [
     name: 'Workflow recipes',
     badge: 'available',
     tone: 'success',
-    body: 'A task can carry a process whose stages hold their own state. Recipes mix actions that become tasks, waits that hold a step until its moment, and events that wait for you. The automations pane starts a run and hands you the decision.',
+    body: 'A task can carry a process whose stages hold their own state: actions that become tasks, waits that hold a step until its moment, and events that wait for you. The automations pane starts a run and hands you the decision.',
     href: '/docs/workflows',
     linkLabel: 'Read about workflows',
   },
@@ -103,7 +89,7 @@ export const extensionCards: LandingCard[] = [
     name: 'The coding workflow',
     badge: 'preview',
     tone: 'accent',
-    body: 'Interview, spec, implement, review, merge — on a real checkout, so the diffs a run produces are real diffs. The agent does the work inside a stage; you decide when the stage is finished.',
+    body: 'Interview, spec, implement, review, merge — on a real checkout, so the diffs are real. The agent works inside a stage; you decide when it is finished.',
     href: '/docs/workflows#coding',
     linkLabel: 'Read about the coding workflow',
   },
@@ -114,7 +100,7 @@ export const integrationCards: LandingCard[] = [
     name: 'Todoist',
     badge: 'available',
     tone: 'success',
-    body: 'Projects map onto projects and sections onto child tags, and edits travel both ways. This is the one to reach for if you want two-way sync today.',
+    body: 'Projects map to projects and sections to child tags, and edits travel both ways. The one to reach for if you want two-way sync today.',
     href: '/docs/sync#todoist',
     linkLabel: 'Read about Todoist sync',
   },
@@ -122,7 +108,7 @@ export const integrationCards: LandingCard[] = [
     name: 'GitHub',
     badge: 'preview',
     tone: 'accent',
-    body: 'Issues and projects map onto your lists through the same sync surface. Expect the shape of that mapping to change while it settles.',
+    body: 'Issues and projects map onto your lists through the same sync surface. Expect the mapping to shift while it settles.',
     href: '/docs/sync#github',
     linkLabel: 'Read about GitHub sync',
   },

@@ -92,7 +92,125 @@ export const inlineLink = css({
   _focusVisible: { outline: "none", boxShadow: "focus" },
 });
 
-export const tileHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default", m: "0" });
+/**
+ * Feature items laid out as a grid whose 1px gaps read as hairlines between
+ * the items; the items carry the page background so only the gaps show.
+ */
+const itemGrid = {
+  display: "grid",
+  gap: "1px",
+  bg: "border.subtle",
+};
+
+export const reasonsGrid = css({
+  ...itemGrid,
+  gridTemplateColumns: { base: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+});
+
+/** Vertical auto-advancing tabs: a tab column beside the active panel. */
+export const tabsLayout = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", lg: "minmax(0, 300px) minmax(0, 1fr)" },
+  gap: { base: "5", lg: "10" },
+  alignItems: "start",
+});
+
+export const tabsColumn = css({ display: "flex", flexDirection: "column", gap: "4" });
+
+export const tabList = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1px",
+  bg: "border.subtle",
+});
+
+export const tab = css({
+  display: "grid",
+  gridTemplateColumns: "auto 1fr",
+  alignItems: "baseline",
+  columnGap: "3",
+  rowGap: "1",
+  w: "100%",
+  px: "4",
+  py: "3",
+  textAlign: "left",
+  bg: "canvas",
+  cursor: "pointer",
+  borderLeftWidth: "2px",
+  borderLeftStyle: "solid",
+  borderLeftColor: "transparent",
+  _hover: { bg: "surface.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+  "&[data-active]": { bg: "surface.subtle", borderLeftColor: "accent" },
+  "&[data-active] [data-tab-title]": { color: "fg.default" },
+});
+
+export const tabIndex = css({
+  gridRow: "span 2",
+  fontFamily: "mono",
+  fontSize: "xs",
+  color: "fg.subtle",
+});
+
+export const tabTitle = css({ fontSize: "md", fontWeight: "medium", color: "fg.muted" });
+
+export const tabSubtitle = css({ fontSize: "xs", color: "fg.subtle" });
+
+export const tabProgressTrack = css({
+  w: "100%",
+  h: "2px",
+  bg: "border.subtle",
+  overflow: "hidden",
+});
+
+export const tabProgressBar = css({
+  display: "block",
+  w: "100%",
+  h: "2px",
+  bg: "accent",
+  transformOrigin: "left",
+  transform: "scaleX(0)",
+});
+
+export const tabPanel = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "4",
+  p: { base: "5", md: "6" },
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "surface.subtle",
+  "&[hidden]": { display: "none" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+export const item = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  p: { base: "5", md: "6" },
+  bg: "canvas",
+});
+
+export const itemHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default", m: "0" });
+
+export const itemSubtitle = css({ fontSize: "sm", fontWeight: "medium", color: "accent.text", m: "0" });
+
+export const glyph = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  w: "10",
+  h: "10",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+  color: "accent.text",
+});
 
 /** Width of the centered content column every homepage row aligns to. */
 export const CONTENT_WIDTH = "1104px";

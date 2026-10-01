@@ -52,24 +52,30 @@ const {
         mt: '8',
       })}
     >
-      <a
-        href={primaryCta.href}
-        class={css({
-          display: 'inline-flex',
-          alignItems: 'center',
-          h: '10',
-          px: '5',
-          borderRadius: 'sm',
-          bg: 'accent',
-          color: 'fg.onAccent',
-          fontSize: 'md',
-          fontWeight: 'medium',
-          _hover: { bg: 'accent.hover' },
-          _focusVisible: { outline: 'none', boxShadow: 'focus' },
-        })}
-      >
-        {primaryCta.label}
-      </a>
+      {
+        Astro.slots.has('primary') ? (
+          <slot name="primary" />
+        ) : (
+          <a
+            href={primaryCta.href}
+            class={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              h: '10',
+              px: '5',
+              borderRadius: 'sm',
+              bg: 'accent',
+              color: 'fg.onAccent',
+              fontSize: 'md',
+              fontWeight: 'medium',
+              _hover: { bg: 'accent.hover' },
+              _focusVisible: { outline: 'none', boxShadow: 'focus' },
+            })}
+          >
+            {primaryCta.label}
+          </a>
+        )
+      }
       <a
         href={secondaryCta.href}
         class={css({

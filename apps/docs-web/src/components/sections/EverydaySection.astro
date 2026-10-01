@@ -11,7 +11,7 @@ import { grid, card, cardBody, cardLink, panel } from "./homeStyles";
       <SectionHeading
         eyebrow="Everyday"
         title="What to do next, decided for you"
-        description="A long list is only useful if it orders itself. todo-lofi does that quietly in the background, so you can stop re-reading everything just to find the one thing that matters now."
+        description="A long list only helps if it orders itself. todo-lofi does that quietly, so you stop re-reading everything to find what matters now."
         align="left"
       />
 
@@ -19,9 +19,8 @@ import { grid, card, cardBody, cardLink, panel } from "./homeStyles";
         <div class={card}>
           <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Priority that sorts itself</h3>
           <p class={cardBody}>
-            Each task carries the importance and urgency you gave it, and the list folds in deadline pressure: a task with no deadline keeps the score you set, one whose deadline
-            is close climbs steeply, and an overdue task keeps rising until it is handled. Subtasks, blocked-by chains, and softer ordering hints are resolved into what you can
-            actually start on.
+            Each task carries the importance and urgency you set, and the list folds in deadline pressure: near deadlines climb, overdue tasks keep rising. Subtasks,
+            blocked-by chains, and ordering hints resolve into what you can actually start.
           </p>
           <a href="/docs/tasks#priority" class={cardLink}>
             Read about priority and ordering →
@@ -31,8 +30,7 @@ import { grid, card, cardBody, cardLink, panel } from "./homeStyles";
         <div class={card}>
           <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Repeats you configure, not syntax you memorise</h3>
           <p class={cardBody}>
-            Recurring tasks are set up in a picker — how often, which weekdays or month day, and what time the occurrence becomes doable. That last part matters: a task that is
-            not due yet stays out of the way until it is, instead of sitting at the top of the list for days.
+            Set repeats in a picker — how often, which days, and when the occurrence becomes doable. A task that isn't due yet stays out of the way until it is.
           </p>
           <a href="/docs/repeats" class={cardLink}>
             Read about repeats →

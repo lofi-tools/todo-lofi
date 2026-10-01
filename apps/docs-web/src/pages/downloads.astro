@@ -193,7 +193,7 @@ const notes = [
         >
           {
             PLATFORMS.map((platform) => (
-              <div class={card}>
+              <div class={card} id={platform.id}>
                 <div class={cardHead}>
                   <h3 class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
                     {platform.label}

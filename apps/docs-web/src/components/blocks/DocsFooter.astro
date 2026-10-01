@@ -85,7 +85,9 @@ const subFooterInner = css({
     borderBottomWidth: '0',
     borderStyle: 'solid',
     borderColor: 'border.subtle',
-    mt: '20',
+    // The homepage blueprint ends on the last section's edge, so the footer's
+    // own top margin would leave a bare band that breaks the CTA gradient.
+    mt: blueprint ? '0' : '20',
   })}
 >
   <div

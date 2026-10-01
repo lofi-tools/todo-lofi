@@ -1,13 +1,18 @@
 ---
+import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import StatsBand from "web-design-system/astro/marketing/StatsBand.astro";
 ---
 
 <HomepageSection bare index={3} label="offline">
-  <StatsBand
-    value="Offline"
-    label="Your tasks live in a database file on your machine rather than on somebody's server. There is no account to create and no telemetry, and the list works with the network unplugged — sync and the agent are things you switch on when you want them."
-    linkLabel="How sync stays optional"
-    linkHref="/docs/sync#offline"
-  />
+  <!-- StatsBand's card is full-bleed within its column; inset it by the same
+       horizontal padding the other sections use so the card lines up. -->
+  <div class={css({ px: { base: "5", md: "8" } })}>
+    <StatsBand
+      value="Offline"
+      label="Your tasks live in a file on your machine, not someone's server. No account, no telemetry, and it works offline — sync and the agent are opt-in."
+      linkLabel="How sync stays optional"
+      linkHref="/docs/sync#offline"
+    />
+  </div>
 </HomepageSection>

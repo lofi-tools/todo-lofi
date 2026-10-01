@@ -1,0 +1,132 @@
+---
+import { css } from "styled-system/css";
+import { ChevronDown } from "web-design-system/icons";
+import { PLATFORMS, RELEASES_URL } from "../../../data/downloads";
+
+const group = css({ position: "relative", display: "inline-flex", alignItems: "stretch" });
+
+const primary = css({
+  display: "inline-flex",
+  alignItems: "center",
+  h: "10",
+  px: "5",
+  borderTopLeftRadius: "sm",
+  borderBottomLeftRadius: "sm",
+  bg: "accent",
+  color: "fg.onAccent",
+  fontSize: "md",
+  fontWeight: "medium",
+  whiteSpace: "nowrap",
+  _hover: { bg: "accent.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+const divider = css({ w: "1px", alignSelf: "stretch", bg: "rgba(255,255,255,0.25)" });
+
+const toggle = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  w: "9",
+  h: "10",
+  borderTopRightRadius: "sm",
+  borderBottomRightRadius: "sm",
+  bg: "accent",
+  color: "fg.onAccent",
+  cursor: "pointer",
+  _hover: { bg: "accent.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+const menu = css({
+  position: "absolute",
+  top: "100%",
+  right: "0",
+  mt: "1",
+  minW: "48",
+  p: "1",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.elevated",
+  boxShadow: "md",
+  zIndex: "popover",
+  "&[hidden]": { display: "none" },
+});
+
+const menuItem = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "6",
+  px: "3",
+  h: "8",
+  borderRadius: "sm",
+  fontSize: "sm",
+  color: "fg.default",
+  whiteSpace: "nowrap",
+  _hover: { bg: "surface.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+const menuHint = css({ color: "fg.subtle", fontSize: "xs" });
+---
+
+<div class={group} data-download-button>
+  <a data-download data-platform="auto" data-download-primary href={RELEASES_URL} class={primary}>
+    <span data-download-primary-label>Download for your platform</span>
+  </a>
+  <span class={divider} aria-hidden="true"></span>
+  <button
+    type="button"
+    class={toggle}
+    data-download-menu-toggle
+    aria-haspopup="menu"
+    aria-expanded="false"
+    aria-label="Other downloads"
+  >
+    <ChevronDown size={16} />
+  </button>
+  <div class={menu} data-download-menu role="menu" hidden>
+    {
+      PLATFORMS.map((platform) => (
+        <a class={menuItem} role="menuitem" href={`/downloads#${platform.id}`}>
+          {platform.label}
+          <span class={menuHint}>download</span>
+        </a>
+      ))
+    }
+    <a class={menuItem} role="menuitem" href="/downloads#all-downloads">
+      All downloads
+      <span class={menuHint}>every file</span>
+    </a>
+  </div>
+</div>
+
+<script>
+  import { initDownloads } from "../../../data/downloads";
+
+  void initDownloads();
+
+  for (const button of document.querySelectorAll<HTMLElement>("[data-download-button]")) {
+    const toggle = button.querySelector<HTMLElement>("[data-download-menu-toggle]");
+    const menu = button.querySelector<HTMLElement>("[data-download-menu]");
+    if (!toggle || !menu) continue;
+
+    const setOpen = (open: boolean) => {
+      menu.hidden = !open;
+      toggle.setAttribute("aria-expanded", String(open));
+    };
+
+    toggle.addEventListener("click", () => setOpen(menu.hidden));
+    document.addEventListener("click", (event) => {
+      if (event.target instanceof Node && !button.contains(event.target)) setOpen(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") setOpen(false);
+    });
+  }
+</script>

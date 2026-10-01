@@ -1,23 +1,43 @@
 ---
-import { css } from "styled-system/css";
-import { tileGrid, tile } from "styled-system/recipes";
+import { Inbox, Sparkles, TrendingUp } from "web-design-system/icons";
 import HomepageSection from "./HomepageSection.astro";
-import { cardBody, tileHeading } from "./homeStyles";
+import { cardBody, glyph, item, itemHeading, itemSubtitle, reasonsGrid } from "./homeStyles";
+
+const reasons = [
+  {
+    Icon: Inbox,
+    title: "Work & personal",
+    subtitle: "One list",
+    body: "Your release review sits beside feeding the dog — one list you own, not a team tool.",
+  },
+  {
+    Icon: TrendingUp,
+    title: "Your next task, on top",
+    subtitle: "Sorted for you",
+    body: "Importance, urgency, and deadlines order the list, so the next thing to do is already at the top.",
+  },
+  {
+    Icon: Sparkles,
+    title: "An agent in your lists",
+    subtitle: "Works in place",
+    body: "It explores a task, breaks it into sub-tasks, and drives it through its workflow — you decide when it's done.",
+  },
+];
 ---
 
 <HomepageSection index={1} label="reasons">
-    <div class={tileGrid()}>
-      <div class={tile()}>
-        <h2 class={tileHeading}>Work and personal in the same list</h2>
-        <p class={cardBody}>The release review sits next to feeding the dog. One list you own, not a team tool with your errands as guests.</p>
-      </div>
-      <div class={tile()}>
-        <h2 class={tileHeading}>Priorities surfaced for you</h2>
-        <p class={cardBody}>Importance, urgency, and deadline pressure sort the list, so the next thing to do is already at the top.</p>
-      </div>
-      <div class={tile()}>
-        <h2 class={tileHeading}>An agent to manage your lists</h2>
-        <p class={cardBody}>Explore a task, chunk it into actionable sub-tasks, and drive it through its workflow — with you deciding when it is done.</p>
-      </div>
-    </div>
-  </HomepageSection>
+  <div class={reasonsGrid}>
+    {
+      reasons.map(({ Icon, title, subtitle, body }) => (
+        <div class={item}>
+          <span class={glyph}>
+            <Icon size={22} />
+          </span>
+          <h3 class={itemHeading}>{title}</h3>
+          <p class={itemSubtitle}>{subtitle}</p>
+          <p class={cardBody}>{body}</p>
+        </div>
+      ))
+    }
+  </div>
+</HomepageSection>

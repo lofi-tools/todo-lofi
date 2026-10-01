@@ -14,6 +14,7 @@ import ExtensionsSection from "../components/sections/ExtensionsSection.astro";
 import EverydaySection from "../components/sections/EverydaySection.astro";
 import IntegrationsSection from "../components/sections/IntegrationsSection.astro";
 import RoadmapSection from "../components/sections/RoadmapSection.astro";
+import DownloadButton from "../components/blocks/DownloadButton.astro";
 import { blueprintContent, blueprintGrid, blueprintRules } from "../components/sections/homeStyles";
 import screenshot from "../assets/app.png";
 ---
@@ -22,7 +23,7 @@ import screenshot from "../assets/app.png";
 <Base
   title="todo-lofi"
   suffix="a local-first task manager"
-  description="todo-lofi is a local-first task manager for macOS, Linux, and Windows: your personal and work tasks in one list, an agent that can work them, repeats and priorities that keep the list honest, and two-way sync when you want it."
+  description="todo-lofi is a local-first task manager for macOS, Linux, and Windows: personal and work tasks in one list, an agent that can work them, repeats and priorities, and two-way sync when you want it."
 >
   <SiteHeader blueprint />
 
@@ -30,26 +31,34 @@ import screenshot from "../assets/app.png";
     <div class={blueprintContent}>
       <Hero
         title="An assistant for all your tasks"
-        subtitle="Work and personal tasks live in one list you own, with an assistant beside them. It helps you explore a task and chunk it into actionable sub-tasks, set up repeats, and take a task through a whole staged workflow — while you watch the tools it calls and decide when the work is done."
-        primaryCta={{ label: "Download", href: "/downloads" }}
+        subtitle="Work and personal tasks in one list you own, with an assistant beside them. It breaks tasks into sub-tasks, sets up repeats, and runs a staged workflow — you watch every step and decide when work is done."
         secondaryCta={{ label: "Read the docs", href: "/docs" }}
       >
-        <div class={css({ maxW: "980px", mx: "auto", px: { base: "5", md: "8" } })}>
-          <img
-            src={screenshot.src}
-            width={screenshot.width}
-            height={screenshot.height}
-            alt="The todo-lofi desktop app: a task list on the left, task details in the middle, and the agent pane on the right."
-            class={css({
-              w: "full",
-              h: "auto",
-              borderRadius: "lg",
-              borderWidth: "hairline",
-              borderStyle: "solid",
-              borderColor: "border",
-              bg: "surface.subtle",
-            })}
-          />
+        <DownloadButton slot="primary" />
+        <div class={css({ w: "full", px: { base: "5", md: "8" } })}>
+          <div class={css({ position: "relative" })}>
+            <img
+              src={screenshot.src}
+              width={screenshot.width}
+              height={screenshot.height}
+              alt="The todo-lofi desktop app: a task list on the left, task details in the middle, and the agent pane on the right."
+              class={css({ w: "full", h: "auto" })}
+            />
+            <!-- Fade the screenshot into the page at its bottom edge. -->
+            <div
+              aria-hidden="true"
+              class={css({
+                position: "absolute",
+                left: "0",
+                right: "0",
+                bottom: "0",
+                h: "40%",
+                backgroundImage:
+                  "linear-gradient(to bottom, transparent, var(--colors-canvas))",
+                pointerEvents: "none",
+              })}
+            />
+          </div>
         </div>
       </Hero>
     </div>
@@ -63,8 +72,10 @@ import screenshot from "../assets/app.png";
     <IntegrationsSection />
     <RoadmapSection />
 
-    <HomepageSection bare index={9} label="get started">
-      <CTASection title="Get it on your machine" primaryCta={{ label: "Download", href: "/downloads" }} secondaryCta={{ label: "Read the docs", href: "/docs" }} />
+    <HomepageSection bare index={9} label="get it now">
+      <CTASection title="Get it now" secondaryCta={{ label: "All downloads", href: "/downloads" }}>
+        <DownloadButton slot="primary" />
+      </CTASection>
     </HomepageSection>
   </main>
 
