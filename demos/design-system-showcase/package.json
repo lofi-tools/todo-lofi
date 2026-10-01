@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "codegen": "panda codegen && panda cssgen --outfile styled-system/styles.css",
+    "codegen": "pnpm --filter web-design-system run codegen && panda codegen && panda cssgen --outfile styled-system/styles.css",
     "predev": "pnpm run codegen",
     "dev": "astro dev",
     "prebuild": "pnpm run codegen",
