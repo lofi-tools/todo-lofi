@@ -1,6 +1,6 @@
 //! The coding-workflow MCP server.
 //!
-//! todo-2 hosts a loopback Model Context Protocol endpoint so the agent can
+//! taskstream-desktop hosts a loopback Model Context Protocol endpoint so the agent can
 //! attach the spec it interviewed out, create and interview sub-tasks, log
 //! annotations, propose the feature branch, and report phase completion. The
 //! transport is a minimal HTTP/1.1 listener bound to `127.0.0.1:0` with a
@@ -227,7 +227,7 @@ fn serve(
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "todo-2-coding", "version": "0.1.0" },
+                "serverInfo": { "name": "taskstream-desktop-coding", "version": "0.1.0" },
             }),
         ),
         "ping" => success_response(id, json!({})),

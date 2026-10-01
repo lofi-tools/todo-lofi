@@ -1753,7 +1753,7 @@ mod tests {
     async fn test_task_created_in_subtag_view_inherits_parent_tags() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
 
-        let parent = storage.create_tag("todo-lofi").await?;
+        let parent = storage.create_tag("taskstream").await?;
         let child = storage.create_tag("bugs").await?;
         storage.add_tag_implication(child.id, parent.id).await?;
 

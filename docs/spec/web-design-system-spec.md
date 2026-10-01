@@ -26,7 +26,7 @@ Two deliverables, specified together because the second consumes the first:
   page families.
 
 Why now: the repo has a marketing-grade visual language nowhere in code (the
-desktop app's palette lives in `apps/todo-2/src/theme.rs` and is deliberately
+desktop app's palette lives in `apps/taskstream-desktop/src/theme.rs` and is deliberately
 **not** coupled to this — §2 round 5), and the Linear clone is a useful,
 self-contained exercise in a modern Astro/Panda/Solid stack.
 
@@ -83,7 +83,7 @@ wordmark, logo, screenshots, or copy. All content is placeholder (§4.5).
 | 19 | Extraction delivery | **One-off, documented.** Extract once during implementation; record the method, URL list, and date; commit only the resulting token files. |
 | 20 | Fonts | **Self-host Inter Variable** (open source) via local files/Fontsource. No CDN font requests. |
 | 21 | Docs | **`DESIGN.md` in the package** — tokens, layers, and component conventions (design-system-baton convention). |
-| 22 | GPUI interop | **None. Keep separate.** `apps/todo-2/src/theme.rs` is untouched; no Rust token generation. |
+| 22 | GPUI interop | **None. Keep separate.** `apps/taskstream-desktop/src/theme.rs` is untouched; no Rust token generation. |
 
 ### 2.6 Round 6 — wiring, motion, a11y
 
@@ -549,7 +549,7 @@ wordmark, screenshot, quote, or product name ships.
 
 ## 12. Non-goals
 
-- No changes to the Rust workspace, the GPUI app, or `apps/todo-2/src/theme.rs`.
+- No changes to the Rust workspace, the GPUI app, or `apps/taskstream-desktop/src/theme.rs`.
 - No coupling between web tokens and the desktop theme (decision #22).
 - No publishing of `web-design-system` to a registry.
 - No real Linear content: no wordmark, logos, screenshots, customer names,

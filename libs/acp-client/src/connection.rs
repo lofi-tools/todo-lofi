@@ -335,7 +335,7 @@ where
 
     let connection = Client
         .builder()
-        .name("todo-2")
+        .name("taskstream-desktop")
         // Notifications: hand session updates straight to the UI, which reduces
         // them through the transcript model.
         .on_receive_notification(

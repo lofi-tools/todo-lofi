@@ -39,11 +39,11 @@ const rules = [
 
 <Docs
   title="Contributor guide"
-  description="How todo-lofi is put together and how to work on it — for anyone building, extending, or reviewing the code."
+  description="How taskstream is put together and how to work on it — for anyone building, extending, or reviewing the code."
   toc={toc}
 >
   <Callout tone="note" title="Here to use the app?">
-    This guide is about the code. Installing, using, and configuring todo-lofi is the
+    This guide is about the code. Installing, using, and configuring taskstream is the
     <a href="/docs">User guide</a>.
   </Callout>
 
@@ -122,7 +122,7 @@ const rules = [
   </p>
   <ul>
     <li>
-      <strong>The Cargo workspace</strong> — <code>apps/todo-2</code>, <code>apps/agent-cli</code>, and the
+      <strong>The Cargo workspace</strong> — <code>apps/taskstream-desktop</code>, <code>apps/agent-cli</code>, and the
       crates under <code>libs/</code>. Everything the desktop app and the agent do lives here.
     </li>
     <li>
@@ -133,7 +133,7 @@ const rules = [
   </ul>
   <p>
     The two are deliberately decoupled: the desktop palette lives in{' '}
-    <code>apps/todo-2/src/theme.rs</code> and is not generated from the web tokens. What the web packages
+    <code>apps/taskstream-desktop/src/theme.rs</code> and is not generated from the web tokens. What the web packages
     do share is class-generation settings — if they drift, the design system's components render unstyled
     with no error. <a href="/docs/contributor/development#web-surfaces">Development setup</a> has the detail.
   </p>

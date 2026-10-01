@@ -46,7 +46,7 @@ So there are two problems, and they are separable:
    recipe-node `subtask` lazy spawn intact for other workflows.
 2. **Coverage.** The interview's input today is `build_task_context(task)`:
    title, description, tags — **never the subtasks**
-   (`apps/todo-2/src/ui_parts/agent_pane.rs:197`). So a feature's subtasks are
+   (`apps/taskstream-desktop/src/ui_parts/agent_pane.rs:197`). So a feature's subtasks are
    invisible to the interview that is supposed to spec the feature, and a
    subtask added afterwards is silently uncovered. The fix is an explicit,
    visible coverage model: an umbrella spec on the feature task, a spec per real
@@ -116,9 +116,9 @@ so the transcript is not misleading:
   all five nodes (`coding_recipes()`, `libs/storage/src/workflow.rs:241`).
 - The details pane therefore filters steps out of its own list by hand:
   `plain_subtasks` keeps `subtask.node_id.is_none()`
-  (`apps/todo-2/src/ui_parts/task_details.rs`, in `relationships_section`).
+  (`apps/taskstream-desktop/src/ui_parts/task_details.rs`, in `relationships_section`).
 - The task list does **not** filter them: `compute_row_specs` +
-  `subtasks_map` (`apps/todo-2/src/ui_parts/task_list.rs:489`, `:901`) nest
+  `subtasks_map` (`apps/taskstream-desktop/src/ui_parts/task_list.rs:489`, `:901`) nest
   every task whose `parent_id` is visible, so phase steps render as collapsed
   subtask rows under the feature task today.
 - The MCP context filters the same way (`coding_mcp.rs:434`,
@@ -601,7 +601,7 @@ No mechanical checking in this spec (no diff parsing).
    on the task or an ancestor) in the sub-issue push/pull paths, so a promoted
    subtask keeps syncing.
 
-**`apps/todo-2/`**
+**`apps/taskstream-desktop/`**
 
 5. `coding_mcp.rs`: `get_coding_context.sub_tasks[]` gains `spec` (+
    `description`); `save_spec` gains `subtasks` / `covered` with the guard;
@@ -647,7 +647,7 @@ No mechanical checking in this spec (no diff parsing).
   round; `retry_task` leaves pending children in place instead of tombstoning.
 - `stop_coding_phase` leaves the step open with `done = false`.
 
-**todo-2 (`cargo test -p todo-2`)**
+**taskstream-desktop (`cargo test -p taskstream-desktop`)**
 
 - `coding_mcp`: `get_coding_context` reports per-subtask state;
   `save_spec` with `subtasks`/`covered` writes and advances; a bad id errors

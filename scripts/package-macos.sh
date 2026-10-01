@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Assemble todo-lofi.app and, unless told otherwise, the archives that ship.
+# Assemble taskstream.app and, unless told otherwise, the archives that ship.
 #
 # Two callers share this. `t2-bundle` (flake.nix) runs it over the debug binary
 # it just built, with --link --no-archives --register, so the local bundle
 # tracks rebuilds and the Dock picks up a new icon. The packaging job in
-# .github/workflows/bundle.yml runs it over the release binary `nix build .#todo-2`
+# .github/workflows/bundle.yml runs it over the release binary `nix build .#taskstream-desktop`
 # produced, copying that binary in and writing the .zip and .dmg.
 #
 # The icon is generated rather than committed: sips rasterizes an SVG at its
@@ -18,8 +18,8 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-icon_svg=$repo/apps/todo-2/assets/icons/do-list-app.svg
-plist=$repo/apps/todo-2/assets/Info.plist
+icon_svg=$repo/apps/taskstream-desktop/assets/icons/do-list-app.svg
+plist=$repo/apps/taskstream-desktop/assets/Info.plist
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 binary=
@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$binary" ] && [ -f "$binary" ] || {
-  echo "package-macos.sh: --binary must name a built todo-2 binary" >&2
+  echo "package-macos.sh: --binary must name a built taskstream-desktop binary" >&2
   exit 2
 }
 
@@ -54,9 +54,9 @@ done
 version=${version:-$("$repo/scripts/version.sh")}
 arch=$(uname -m)
 
-app=$out/todo-lofi.app
-exe=$app/Contents/MacOS/todo-2
-icns=$app/Contents/Resources/todo-lofi.icns
+app=$out/taskstream.app
+exe=$app/Contents/MacOS/taskstream-desktop
+icns=$app/Contents/Resources/taskstream.icns
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # The bundle reports the version the binary was built with: write it over the
@@ -111,12 +111,12 @@ else
   install -m 755 "$binary" "$exe"
 fi
 
-# Sign with the self-signed todo-lofi-dev identity when the machine has one so
+# Sign with the self-signed taskstream-dev identity when the machine has one so
 # Gatekeeper doesn't throttle every launch; the ad-hoc identity otherwise, which
 # is what a release artifact gets (nothing here is notarized).
 identity=-
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "todo-lofi-dev"; then
-  identity=todo-lofi-dev
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "taskstream-dev"; then
+  identity=taskstream-dev
 fi
 codesign --force --sign "$identity" "$exe" >/dev/null 2>&1 || true
 codesign --force --deep --sign "$identity" "$app" >/dev/null 2>&1 || true
@@ -127,13 +127,13 @@ echo "package-macos.sh: $app ($arch, $version, signed $identity)"
 if [ "$archives" = 1 ]; then
   # ditto rather than zip: it keeps the bundle's symlinks and extended
   # attributes, which is what keeps the signature valid after extraction.
-  ditto -c -k --sequesterRsrc --keepParent "$app" "$out/todo-lofi-$version-macos-$arch.zip"
-  rm -f "$out/todo-lofi-$version-macos-$arch.dmg"
+  ditto -c -k --sequesterRsrc --keepParent "$app" "$out/taskstream-$version-macos-$arch.zip"
+  rm -f "$out/taskstream-$version-macos-$arch.dmg"
   hdiutil create \
-    -volname "todo-lofi $version" \
+    -volname "taskstream $version" \
     -srcfolder "$app" \
     -ov -format UDZO \
-    "$out/todo-lofi-$version-macos-$arch.dmg" >/dev/null
-  echo "package-macos.sh: $out/todo-lofi-$version-macos-$arch.zip"
-  echo "package-macos.sh: $out/todo-lofi-$version-macos-$arch.dmg"
+    "$out/taskstream-$version-macos-$arch.dmg" >/dev/null
+  echo "package-macos.sh: $out/taskstream-$version-macos-$arch.zip"
+  echo "package-macos.sh: $out/taskstream-$version-macos-$arch.dmg"
 fi

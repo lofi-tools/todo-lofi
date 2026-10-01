@@ -122,7 +122,7 @@ test.describe('landing page', () => {
     expect(response?.ok()).toBeTruthy()
     await expect(page.locator('h1').first()).toBeVisible()
     await expect(page.locator('header nav[aria-label="Main"] a[aria-current="page"]')).toHaveText(
-      /todo-lofi/,
+      /taskstream/,
     )
     expect(errors).toEqual([])
   })

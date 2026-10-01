@@ -400,21 +400,21 @@ mod tests {
     #[test]
     fn parses_the_github_remote_forms_and_rejects_other_hosts() {
         for url in [
-            "git@github.com:lofi-tools/todo-lofi.git",
-            "https://github.com/lofi-tools/todo-lofi.git",
-            "https://github.com/lofi-tools/todo-lofi",
-            "ssh://git@github.com/lofi-tools/todo-lofi.git",
-            "git://github.com/lofi-tools/todo-lofi.git",
-            "github.com/lofi-tools/todo-lofi",
+            "git@github.com:lofi-tools/taskstream.git",
+            "https://github.com/lofi-tools/taskstream.git",
+            "https://github.com/lofi-tools/taskstream",
+            "ssh://git@github.com/lofi-tools/taskstream.git",
+            "git://github.com/lofi-tools/taskstream.git",
+            "github.com/lofi-tools/taskstream",
         ] {
             assert_eq!(
                 parse_github_remote(url),
-                Some(("lofi-tools".to_string(), "todo-lofi".to_string())),
+                Some(("lofi-tools".to_string(), "taskstream".to_string())),
                 "{url}"
             );
         }
         // Other hosts, lookalike hosts and shapeless paths resolve to nothing.
-        assert!(parse_github_remote("git@gitlab.com:lofi-tools/todo-lofi.git").is_none());
+        assert!(parse_github_remote("git@gitlab.com:lofi-tools/taskstream.git").is_none());
         assert!(parse_github_remote("https://notgithub.com/o/r").is_none());
         assert!(parse_github_remote("https://github.company.com/o/r").is_none());
         assert!(parse_github_remote("git@github.com:only-owner.git").is_none());
@@ -427,14 +427,14 @@ mod tests {
     #[test]
     fn resolves_the_github_remote_even_without_an_origin() {
         let repo = TempRepo::new("remote-pushdefault");
-        repo.git(&["remote", "add", "github", "git@github.com:lofi-tools/todo-lofi.git"]);
-        repo.git(&["remote", "add", "gitlab", "git@gitlab.com:lofi-tools/todo-lofi.git"]);
+        repo.git(&["remote", "add", "github", "git@github.com:lofi-tools/taskstream.git"]);
+        repo.git(&["remote", "add", "gitlab", "git@gitlab.com:lofi-tools/taskstream.git"]);
         repo.git(&["config", "remote.pushDefault", "github"]);
 
         let resolved = resolve_remote(&repo.dir).expect("github remote");
         assert_eq!(resolved.name, "github");
         assert_eq!(resolved.owner, "lofi-tools");
-        assert_eq!(resolved.repo, "todo-lofi");
+        assert_eq!(resolved.repo, "taskstream");
         // A GitLab remote alone never resolves to a GitHub remote.
         let gitlab_only = TempRepo::new("remote-gitlab");
         gitlab_only.git(&["remote", "add", "gitlab", "git@gitlab.com:o/r.git"]);

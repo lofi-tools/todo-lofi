@@ -591,7 +591,7 @@ Residual items that are mechanical rather than product decisions:
 ## 10. Implementation status
 
 Implemented and covered by tests (`cargo test -p storage`: 109 passed;
-`cargo test -p todo-2`: 44 passed; `cargo check --workspace` clean):
+`cargo test -p taskstream-desktop`: 44 passed; `cargo check --workspace` clean):
 
 - Schema: `libs/storage/toasty/migrations/0018_apps.sql` (apps table,
   `recipes.app_id`, `integrations.app_id`) and `0019_managed_scope.sql`

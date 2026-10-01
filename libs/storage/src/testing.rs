@@ -505,8 +505,8 @@ impl TodoStore {
                 "about-me",
             ),
             (
-                std::path::Path::new("/Users/me/src/me/todo-lofi"),
-                "todo-lofi",
+                std::path::Path::new("/Users/me/src/me/taskstream"),
+                "taskstream",
             ),
         ] {
             self.create_seed_project_tag(path, label).await?;
@@ -937,8 +937,8 @@ mod tests {
                 "/Users/me/src/me/about-me",
             ),
             (
-                "project:/Users/me/src/me/todo-lofi",
-                "/Users/me/src/me/todo-lofi",
+                "project:/Users/me/src/me/taskstream",
+                "/Users/me/src/me/taskstream",
             ),
         ] {
             let tag = store

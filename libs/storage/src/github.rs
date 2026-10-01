@@ -1671,7 +1671,7 @@ impl GithubHttpClient {
         self.agent
             .request(method, format!("{}{path}", self.base))
             .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .header(reqwest::header::USER_AGENT, "todo-lofi")
+            .header(reqwest::header::USER_AGENT, "taskstream")
             .bearer_auth(&self.token)
     }
 
@@ -4167,20 +4167,20 @@ mod tests {
 
     #[test]
     fn issue_ids_round_trip_and_reject_malformed_ones() {
-        let id = issue_external_id("lofi-tools", "todo-lofi", 42);
-        assert_eq!(id, "lofi-tools/todo-lofi#42");
+        let id = issue_external_id("lofi-tools", "taskstream", 42);
+        assert_eq!(id, "lofi-tools/taskstream#42");
         assert_eq!(
             parse_issue_external_id(&id),
             Some(IssueRef {
                 owner: "lofi-tools".to_string(),
-                repo: "todo-lofi".to_string(),
+                repo: "taskstream".to_string(),
                 number: 42,
             })
         );
         // A bare number is not repo-qualified, so it can never collide across
         // repos of the same account.
         assert!(parse_issue_external_id("42").is_none());
-        assert!(parse_issue_external_id("todo-lofi#42").is_none());
+        assert!(parse_issue_external_id("taskstream#42").is_none());
         assert!(parse_issue_external_id("/repo#42").is_none());
         assert!(parse_issue_external_id("owner/repo#not-a-number").is_none());
     }
@@ -4299,7 +4299,7 @@ mod tests {
         let mut storage = TodoStore::for_test().await?;
         let integration = storage.create_integration("github", Some("me".to_string())).await?;
         let task = storage.create_task(Task::create().title("Issue")).await?;
-        let external_id = issue_external_id("lofi-tools", "todo-lofi", 7);
+        let external_id = issue_external_id("lofi-tools", "taskstream", 7);
 
         let mut state = IssueFieldState::default();
         state.adopt_remote(&remote(7, "Fix login", "open", 100).field_values());
@@ -4343,7 +4343,7 @@ mod tests {
         let integration = storage.create_integration("github", None).await?;
         assert!(
             storage
-                .sync_cursor(integration.id, "lofi-tools/todo-lofi")
+                .sync_cursor(integration.id, "lofi-tools/taskstream")
                 .await?
                 .is_none()
         );
@@ -4351,7 +4351,7 @@ mod tests {
         storage
             .record_sync_cursor(
                 integration.id,
-                "lofi-tools/todo-lofi",
+                "lofi-tools/taskstream",
                 &SyncCursor {
                     etag: Some("W/\"abc\"".to_string()),
                     since: Some("2026-09-14T00:00:00Z".to_string()),
@@ -4360,7 +4360,7 @@ mod tests {
             )
             .await?;
         let cursor = storage
-            .sync_cursor(integration.id, "lofi-tools/todo-lofi")
+            .sync_cursor(integration.id, "lofi-tools/taskstream")
             .await?
             .unwrap();
         assert_eq!(cursor.etag.as_deref(), Some("W/\"abc\""));
@@ -4425,9 +4425,9 @@ mod tests {
             repo_dir: "/repos/api".to_string(),
             integration_id: integration.id,
             owner: "lofi-tools".to_string(),
-            repo: "todo-lofi".to_string(),
+            repo: "taskstream".to_string(),
             number: 12,
-            url: "https://github.com/lofi-tools/todo-lofi/pull/12".to_string(),
+            url: "https://github.com/lofi-tools/taskstream/pull/12".to_string(),
             head_branch: "feature/123-add-login".to_string(),
             base_branch: "main".to_string(),
             draft: true,
@@ -4439,7 +4439,7 @@ mod tests {
         // Re-opening the PR step adopts the existing PR instead of failing.
         let mut opened = pr.clone();
         opened.draft = false;
-        opened.url = "https://github.com/lofi-tools/todo-lofi/pull/12".to_string();
+        opened.url = "https://github.com/lofi-tools/taskstream/pull/12".to_string();
         let again = storage.upsert_run_pull_request(&opened).await?;
         assert_eq!(again, id);
         let all = storage.run_pull_requests(9).await?;
@@ -5104,14 +5104,14 @@ mod tests {
 
     #[tokio::test]
     async fn imports_issues_into_the_bound_repo_tag() -> anyhow::Result<()> {
-        let (mut storage, integration, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, integration, tag) = bound_store("lofi-tools", "taskstream").await?;
         let mut issue = remote(7, "Fix login", "open", 100);
         issue.body = "Steps to reproduce".to_string();
-        issue.url = Some("https://github.com/lofi-tools/todo-lofi/issues/7".to_string());
+        issue.url = Some("https://github.com/lofi-tools/taskstream/issues/7".to_string());
         issue.assignees = vec!["me".to_string()];
         issue.milestone = Some("v1".to_string());
-        let fake = FakeGithub::default().with_issue("lofi-tools/todo-lofi", issue).with_comment(
-            "lofi-tools/todo-lofi",
+        let fake = FakeGithub::default().with_issue("lofi-tools/taskstream", issue).with_comment(
+            "lofi-tools/taskstream",
             7,
             ExternalComment {
                 external_id: "1".to_string(),
@@ -5129,7 +5129,7 @@ mod tests {
         assert_eq!(summary.comments, 1);
 
         let link = storage
-            .issue_link(integration.id, "lofi-tools/todo-lofi#7")
+            .issue_link(integration.id, "lofi-tools/taskstream#7")
             .await?
             .expect("the issue was linked");
         let task = storage.get_task(link.task_id).await?;
@@ -5154,7 +5154,7 @@ mod tests {
         assert_eq!(link.external_updated_at.map(|at| at.as_second()), Some(100));
         // The cursor only moves after a successful pass.
         let cursor = storage
-            .sync_cursor(integration.id, "lofi-tools/todo-lofi")
+            .sync_cursor(integration.id, "lofi-tools/taskstream")
             .await?
             .expect("cursor recorded");
         assert!(cursor.since.is_some());
@@ -5165,15 +5165,15 @@ mod tests {
         let mut closed = remote(8, "Already done", "closed", 110);
         closed.body = String::new();
         let fake = FakeGithub::default()
-            .with_issue("lofi-tools/todo-lofi", closed)
-            .with_issue("lofi-tools/todo-lofi", remote(7, "Fix login", "open", 100));
+            .with_issue("lofi-tools/taskstream", closed)
+            .with_issue("lofi-tools/taskstream", remote(7, "Fix login", "open", 100));
         let summary = storage
             .sync_github_integration(&fake, integration.id, true)
             .await?;
         assert_eq!(summary.imported, 0);
         assert!(
             storage
-                .issue_link(integration.id, "lofi-tools/todo-lofi#8")
+                .issue_link(integration.id, "lofi-tools/taskstream#8")
                 .await?
                 .is_none(),
             "an unlinked closed issue is not imported"
@@ -5181,7 +5181,7 @@ mod tests {
 
         // A linked issue that closes on GitHub completes its task instead.
         let closed_later = remote(7, "Fix login", "closed", 120);
-        let fake = FakeGithub::default().with_issue("lofi-tools/todo-lofi", closed_later);
+        let fake = FakeGithub::default().with_issue("lofi-tools/taskstream", closed_later);
         storage
             .sync_github_integration(&fake, integration.id, true)
             .await?;
@@ -5329,10 +5329,10 @@ mod tests {
     /// re-sort of the list to do it again a moment later).
     #[tokio::test]
     async fn a_pass_with_nothing_to_do_is_empty() -> anyhow::Result<()> {
-        let (mut storage, integration, _) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, integration, _) = bound_store("lofi-tools", "taskstream").await?;
         let quiet = || {
             FakeGithub::default()
-                .with_issue("lofi-tools/todo-lofi", remote(7, "Fix login", "open", 100))
+                .with_issue("lofi-tools/taskstream", remote(7, "Fix login", "open", 100))
                 .with_quiet_incremental_pages()
         };
 
@@ -5391,7 +5391,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_new_task_in_a_bound_project_opens_an_issue() -> anyhow::Result<()> {
-        let (mut storage, integration, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, integration, tag) = bound_store("lofi-tools", "taskstream").await?;
         let task = storage
             .create_task(
                 Task::create()
@@ -5407,7 +5407,7 @@ mod tests {
         assert_eq!(
             fake.created_issues(),
             vec![(
-                "lofi-tools/todo-lofi".to_string(),
+                "lofi-tools/taskstream".to_string(),
                 "Add login".to_string(),
                 "With OAuth".to_string()
             )]
@@ -5416,7 +5416,7 @@ mod tests {
         // The link carries the fresh issue as its snapshot, so the pass that
         // follows merges instead of importing a second task for it.
         let link = storage
-            .issue_link(integration.id, "lofi-tools/todo-lofi#1")
+            .issue_link(integration.id, "lofi-tools/taskstream#1")
             .await?
             .expect("the issue was linked");
         assert_eq!(link.task_id, task.id);
@@ -5442,7 +5442,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_section_task_resolves_its_projects_repo() -> anyhow::Result<()> {
-        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, _, tag) = bound_store("lofi-tools", "taskstream").await?;
         let section = storage.create_tag("In progress").await?;
         storage.add_tag_implication(section.id, tag.id).await?;
         let task = storage.create_task(Task::create().title("Add login".to_string())).await?;
@@ -5469,7 +5469,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_step_never_opens_an_issue() -> anyhow::Result<()> {
-        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, _, tag) = bound_store("lofi-tools", "taskstream").await?;
         let step = storage
             .create_task(
                 Task::create()
@@ -5488,7 +5488,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_subtask_opens_an_issue_under_its_parents_issue() -> anyhow::Result<()> {
-        let (mut storage, integration, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, integration, tag) = bound_store("lofi-tools", "taskstream").await?;
         let parent = storage
             .create_task(Task::create().title("Add login".to_string()))
             .await?;
@@ -5509,17 +5509,17 @@ mod tests {
         assert_eq!(fake.created_issues().len(), 2);
         assert_eq!(
             fake.sub_issue_calls(),
-            vec![("lofi-tools/todo-lofi".to_string(), 1, 2)]
+            vec![("lofi-tools/taskstream".to_string(), 1, 2)]
         );
         let child = storage
-            .issue_link(integration.id, "lofi-tools/todo-lofi#2")
+            .issue_link(integration.id, "lofi-tools/taskstream#2")
             .await?
             .expect("the child issue was linked");
         assert_eq!(child.task_id, subtask.id);
         assert_eq!(child.state.issue_id, Some(2));
         assert_eq!(
             child.state.parent_issue.as_deref(),
-            Some("lofi-tools/todo-lofi#1")
+            Some("lofi-tools/taskstream#1")
         );
 
         // A second push is quiet: both links exist and the relationship is
@@ -5640,7 +5640,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_under_a_workflow_step_is_pushed() -> anyhow::Result<()> {
-        let (mut storage, _, tag) = bound_store("lofi-tools", "todo-lofi").await?;
+        let (mut storage, _, tag) = bound_store("lofi-tools", "taskstream").await?;
         let run = storage
             .create_task(Task::create().title("Add login".to_string()))
             .await?;
@@ -6369,7 +6369,7 @@ mod tests {
         let other = storage.create_integration("github", None).await?;
         let detected = storage.create_tag("project").await?;
         storage
-            .bind_repo_tag(detected.id, integration.id, "lofi-tools", "todo-lofi")
+            .bind_repo_tag(detected.id, integration.id, "lofi-tools", "taskstream")
             .await?;
         // A tag bound only through its sync target (the settings popover).
         let explicit = storage.create_tag("api").await?;
@@ -6396,13 +6396,13 @@ mod tests {
         // Binding the same repo twice does not double-sync it.
         let duplicate = storage.create_tag("duplicate").await?;
         storage
-            .bind_repo_tag(duplicate.id, integration.id, "lofi-tools", "todo-lofi")
+            .bind_repo_tag(duplicate.id, integration.id, "lofi-tools", "taskstream")
             .await?;
 
         let bound = storage.bound_repos(integration.id).await?;
         let mut ids: Vec<String> = bound.iter().map(BoundRepo::external_id).collect();
         ids.sort();
-        assert_eq!(ids, vec!["lofi-tools/api", "lofi-tools/todo-lofi"]);
+        assert_eq!(ids, vec!["lofi-tools/api", "lofi-tools/taskstream"]);
         Ok(())
     }
 
@@ -6412,7 +6412,7 @@ mod tests {
         let integration = storage.create_integration("github", None).await?;
         let tag = storage.create_tag("project").await?;
         storage
-            .bind_repo_tag(tag.id, integration.id, "lofi-tools", "todo-lofi")
+            .bind_repo_tag(tag.id, integration.id, "lofi-tools", "taskstream")
             .await?;
         storage
             .bind_repo_tag(tag.id, integration.id, "lofi-tools", "api")
@@ -6438,7 +6438,7 @@ mod tests {
             .filter(|bound| bound.tag_id == tag.id)
             .map(|bound| bound.external_id())
             .collect();
-        assert_eq!(bound, vec!["lofi-tools/todo-lofi"]);
+        assert_eq!(bound, vec!["lofi-tools/taskstream"]);
         assert_eq!(
             storage
                 .tag_settings(tag.id)
@@ -6446,11 +6446,11 @@ mod tests {
                 .sync_target
                 .unwrap()
                 .external_id,
-            "lofi-tools/todo-lofi"
+            "lofi-tools/taskstream"
         );
         // Removing the last one clears the target entirely.
         storage
-            .unbind_repo_tag(tag.id, integration.id, "lofi-tools/todo-lofi")
+            .unbind_repo_tag(tag.id, integration.id, "lofi-tools/taskstream")
             .await?;
         assert!(
             storage
@@ -6468,20 +6468,20 @@ mod tests {
         let mut storage = TodoStore::for_test().await?;
         let integration = storage.create_integration("github", None).await?;
         let first = storage
-            .ensure_repo_tag(integration.id, "lofi-tools", "todo-lofi")
+            .ensure_repo_tag(integration.id, "lofi-tools", "taskstream")
             .await?;
         let second = storage
-            .ensure_repo_tag(integration.id, "lofi-tools", "todo-lofi")
+            .ensure_repo_tag(integration.id, "lofi-tools", "taskstream")
             .await?;
         assert_eq!(first, second);
         let tag = storage.get_tag(first).await?;
-        assert_eq!(tag.name, "github/lofi-tools/todo-lofi");
-        assert_eq!(tag.label(), "lofi-tools/todo-lofi");
+        assert_eq!(tag.name, "github/lofi-tools/taskstream");
+        assert_eq!(tag.label(), "lofi-tools/taskstream");
         // Bound, so the engine finds it without re-detecting the remote.
         assert_eq!(storage.bound_repos(integration.id).await?.len(), 1);
         assert_eq!(
             storage.tag_settings(first).await?.sync_target.unwrap().external_id,
-            "lofi-tools/todo-lofi"
+            "lofi-tools/taskstream"
         );
         Ok(())
     }
@@ -6503,10 +6503,10 @@ mod tests {
         storage
             .link_issue(
                 github.id,
-                "lofi-tools/todo-lofi#3",
+                "lofi-tools/taskstream#3",
                 task.id,
                 &IssueFieldState {
-                    url: Some("https://github.com/lofi-tools/todo-lofi/issues/3".to_string()),
+                    url: Some("https://github.com/lofi-tools/taskstream/issues/3".to_string()),
                     ..Default::default()
                 },
                 jiff::Timestamp::from_second(50).ok(),
@@ -6752,27 +6752,27 @@ mod tests {
             draft: true,
         };
         let opened = fake
-            .create_pull_request("lofi-tools", "todo-lofi", &request)
+            .create_pull_request("lofi-tools", "taskstream", &request)
             .await?;
         assert!(opened.draft);
 
         // A re-run finds the branch's existing PR instead of opening another.
         let found = fake
-            .find_pull_request("lofi-tools", "todo-lofi", "feature/42-add-login")
+            .find_pull_request("lofi-tools", "taskstream", "feature/42-add-login")
             .await?
             .expect("the adopted pull request");
         assert_eq!(found.number, opened.number);
         assert!(
-            fake.find_pull_request("lofi-tools", "todo-lofi", "feature/other")
+            fake.find_pull_request("lofi-tools", "taskstream", "feature/other")
                 .await?
                 .is_none()
         );
 
         // Marking ready goes through the PR's node id.
-        fake.mark_pull_request_ready("lofi-tools", "todo-lofi", opened.number)
+        fake.mark_pull_request_ready("lofi-tools", "taskstream", opened.number)
             .await?;
         let updated = fake
-            .get_pull_request("lofi-tools", "todo-lofi", opened.number)
+            .get_pull_request("lofi-tools", "taskstream", opened.number)
             .await?;
         assert!(!updated.draft);
 
@@ -6782,7 +6782,7 @@ mod tests {
                 repo_dir: "/repos/api".to_string(),
                 integration_id: integration.id,
                 owner: "lofi-tools".to_string(),
-                repo: "todo-lofi".to_string(),
+                repo: "taskstream".to_string(),
                 number: opened.number,
                 url: opened.url.clone(),
                 head_branch: request.head.clone(),
@@ -6816,9 +6816,9 @@ mod tests {
                         repo_dir: repo_dir.to_string(),
                         integration_id: integration.id,
                         owner: "lofi-tools".to_string(),
-                        repo: "todo-lofi".to_string(),
+                        repo: "taskstream".to_string(),
                         number,
-                        url: format!("https://github.com/lofi-tools/todo-lofi/pull/{number}"),
+                        url: format!("https://github.com/lofi-tools/taskstream/pull/{number}"),
                         head_branch: "feature/42-add-login".to_string(),
                         base_branch: "main".to_string(),
                         draft: true,

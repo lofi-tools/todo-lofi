@@ -22,7 +22,7 @@ pub mod ui_parts {
 }
 
 #[derive(argh::FromArgs)]
-/// todo-lofi desktop application
+/// taskstream desktop application
 struct Args {
     /// path to the JSON configuration file
     #[argh(option)]

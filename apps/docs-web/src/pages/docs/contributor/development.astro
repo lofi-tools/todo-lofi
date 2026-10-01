@@ -39,11 +39,11 @@ direnv allow
 direnv status        # should show "Found RC allowed true"
 which cargo rustc    # should resolve into the Nix store`
 
-const runApp = `cargo run -p todo-2    # run the desktop app
+const runApp = `cargo run -p taskstream-desktop    # run the desktop app
 t2                     # or run it under cargo-watch for auto-rebuilds`
 
 const commands = [
-  { command: 'cargo run -p todo-2', purpose: 'Run the desktop app.' },
+  { command: 'cargo run -p taskstream-desktop', purpose: 'Run the desktop app.' },
   { command: 't2', purpose: 'Run the desktop app under cargo-watch, rebuilding on change.' },
   { command: 't2-bundle', purpose: 'Assemble the macOS bundle (icon, Info.plist, signing) without launching it.' },
   { command: 'ccheck', purpose: 'cargo check the main workspace crates.' },

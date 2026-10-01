@@ -4,14 +4,14 @@ Status: Draft v1 (analysis + recommended revised model; supersedes the data mode
 `workflow-engine-spec.md`)
 
 Purpose: Answer whether the workflow engine can be simplified by re-using or refactoring
-the existing todo-2 database schema concepts, assess problems and UX clarity for each
+the existing taskstream-desktop database schema concepts, assess problems and UX clarity for each
 change, and define the recommended simplified data model.
 
 ## 1. Intent
 
 The workflow engine spec (v1) invented run-level machinery — `workflow_runs` with
 task-level bookkeeping columns (`item_type`, `node_id`, `workflow_details`), a dedicated
-`'workflow_dep'` link kind, `schedules` tables, and a `tick_timers()` loop. The todo-2
+`'workflow_dep'` link kind, `schedules` tables, and a `tick_timers()` loop. The taskstream-desktop
 schema already models most of what a workflow needs: time-based waiting (`blocked_until`
 with a built-in "hide far future" list filter), dependency gating and a computed `blocked`
 flag (`task_links` / `blocked_by`), recurrence (`repeat_task_templates` with a materializer),

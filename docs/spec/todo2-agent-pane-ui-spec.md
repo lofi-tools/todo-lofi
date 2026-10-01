@@ -1,4 +1,4 @@
-# todo-2 agent pane — gpui UI spec
+# taskstream-desktop agent pane — gpui UI spec
 
 ## 0. Scope
 
@@ -530,14 +530,14 @@ Cases worth covering, driven through the pane's model rather than through a real
 
 Per AGENTS.md, prefer existing files and avoid a sprawl of small modules. Suggested:
 
-- `apps/todo-2/src/ui_parts/agent_pane.rs` — the pane entity: header, transcript rows, prompt
+- `apps/taskstream-desktop/src/ui_parts/agent_pane.rs` — the pane entity: header, transcript rows, prompt
   box, states (§4, §7, §8).
-- `apps/todo-2/src/ui_parts/agent_transcript.rs` — the transcript model + entry types and the
+- `apps/taskstream-desktop/src/ui_parts/agent_transcript.rs` — the transcript model + entry types and the
   `session/update` → entry reduction (§4.4), if `agent_pane.rs` grows past comfortable size.
-- `apps/todo-2/src/theme.rs` — new tokens (§8).
-- `apps/todo-2/src/main.rs` — `RightPane` state, split wiring, footer strip, navbar subscription
+- `apps/taskstream-desktop/src/theme.rs` — new tokens (§8).
+- `apps/taskstream-desktop/src/main.rs` — `RightPane` state, split wiring, footer strip, navbar subscription
   for the busy dot.
-- `apps/todo-2/src/ui_parts/mod.rs` — module declarations.
+- `apps/taskstream-desktop/src/ui_parts/mod.rs` — module declarations.
 
 ---
 

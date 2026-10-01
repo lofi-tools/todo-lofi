@@ -1,6 +1,6 @@
 # docs-web
 
-The documentation website for todo-lofi: what the app does, how to run it, how the
+The documentation website for taskstream: what the app does, how to run it, how the
 workspace is put together, and what contributing looks like.
 
 It is a plain Astro site built with the repository's own design system

@@ -2607,7 +2607,7 @@ fn main() {
     // `--version`/`-V` reports the build and exits before a window or a store
     // is set up, so it works in a terminal and inside a packaging script.
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
-        println!("todo-lofi {VERSION}");
+        println!("taskstream {VERSION}");
         return;
     }
 
@@ -2723,13 +2723,13 @@ fn main() {
     });
 }
 
-/// TEMPORARY DIAGNOSTIC. With `TODO_LOFI_WATCH_HANGS` set, a background thread
+/// TEMPORARY DIAGNOSTIC. With `TASKSTREAM_WATCH_HANGS` set, a background thread
 /// drains gpui's foreground journal and warns about every interval that
 /// blocked the UI thread: the event kind, how long it blocked, and — for a
 /// task poll — the source location the task was spawned from. Remove once the
 /// stall it was added for is found. Requires the `profiler` feature on `gpui`.
 fn watch_for_foreground_hangs(cx: &mut App) {
-    if std::env::var_os("TODO_LOFI_WATCH_HANGS").is_none() {
+    if std::env::var_os("TASKSTREAM_WATCH_HANGS").is_none() {
         return;
     }
     // A frame's worth of work is normal; only a stall a user would feel is

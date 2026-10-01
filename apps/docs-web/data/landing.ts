@@ -132,14 +132,14 @@ export const agentThread: ChatMessage[] = [
   ),
   message(
     'agent',
-    'todo-lofi agent',
+    'taskstream agent',
     'Added a repeat — every 3 days at 08:00. Tomorrow’s occurrence stays blocked until 08:00, so it will not show up in your list before it is actually doable.',
     '09:12',
   ),
   message('user', 'You', 'Good. Take T-1303 through the coding workflow.', '09:14'),
   message(
     'agent',
-    'todo-lofi agent',
+    'taskstream agent',
     'Started a coding run on T-1303, now in Interview. I will ask questions before anything is written, then turn the answers into a spec.',
     '09:14',
   ),

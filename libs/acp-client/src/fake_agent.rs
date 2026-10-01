@@ -446,7 +446,7 @@ async fn new_session_carries_the_mcp_server() {
     let (connection, observations, dir) = connect_to_fake(FakeScript::default(), confirm_all()).await;
     assert!(connection.info.mcp_http, "the agent advertises http MCP");
     let server = McpServer::Http(
-        McpServerHttp::new("todo-2-coding", "http://127.0.0.1:4444/mcp")
+        McpServerHttp::new("taskstream-desktop-coding", "http://127.0.0.1:4444/mcp")
             .headers(vec![HttpHeader::new("Authorization", "Bearer token")]),
     );
     connection

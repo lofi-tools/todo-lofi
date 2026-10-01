@@ -30,10 +30,10 @@ const mcpConfig = `{
 }`
 
 const modules = [
-  { surface: 'Todoist', code: 'apps/todo-2/src/todoist_auth.rs, libs/storage/src/todoist.rs, apps/todo-2/src/ui_parts/todoist_sync.rs', spec: 'docs/spec/todoist-sync-spec.md' },
-  { surface: 'GitHub', code: 'apps/todo-2/src/github_auth.rs, libs/storage/src/github.rs', spec: 'docs/spec/github-integration-spec.md' },
-  { surface: 'Coding workflow git side', code: 'apps/todo-2/src/coding_git.rs, apps/todo-2/src/coding_mcp.rs', spec: 'docs/spec/coding-workflow-runs-spec.md' },
-  { surface: 'Agent panel ← ACP client', code: 'apps/todo-2/src/ui_parts/agent_pane.rs, libs/acp-client', spec: 'docs/spec/acp-client-and-agent-panel-spec.md' },
+  { surface: 'Todoist', code: 'apps/taskstream-desktop/src/todoist_auth.rs, libs/storage/src/todoist.rs, apps/taskstream-desktop/src/ui_parts/todoist_sync.rs', spec: 'docs/spec/todoist-sync-spec.md' },
+  { surface: 'GitHub', code: 'apps/taskstream-desktop/src/github_auth.rs, libs/storage/src/github.rs', spec: 'docs/spec/github-integration-spec.md' },
+  { surface: 'Coding workflow git side', code: 'apps/taskstream-desktop/src/coding_git.rs, apps/taskstream-desktop/src/coding_mcp.rs', spec: 'docs/spec/coding-workflow-runs-spec.md' },
+  { surface: 'Agent panel ← ACP client', code: 'apps/taskstream-desktop/src/ui_parts/agent_pane.rs, libs/acp-client', spec: 'docs/spec/acp-client-and-agent-panel-spec.md' },
   { surface: 'Provider layer', code: 'libs/ai_providers, apps/agent-cli/src/providers.rs', spec: 'apps/agent-cli/README.md' },
 ]
 ---

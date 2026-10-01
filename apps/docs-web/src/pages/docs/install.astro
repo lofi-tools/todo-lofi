@@ -24,26 +24,26 @@ const requirements = [
 ]
 
 const appimage = `# Make it executable and run it; there is no install step.
-chmod +x todo-lofi-<version>-linux-x86_64.AppImage
-./todo-lofi-<version>-linux-x86_64.AppImage`
+chmod +x taskstream-<version>-linux-x86_64.AppImage
+./taskstream-<version>-linux-x86_64.AppImage`
 
 const debian = `# Installs into /usr; the package carries its own libraries.
-sudo apt install ./todo-lofi-<version>-linux-x86_64.deb
-todo-lofi`
+sudo apt install ./taskstream-<version>-linux-x86_64.deb
+taskstream`
 
-const tarball = `tar -xzf todo-lofi-<version>-linux-x86_64.tar.gz
-./todo-lofi/usr/bin/todo-lofi`
+const tarball = `tar -xzf taskstream-<version>-linux-x86_64.tar.gz
+./taskstream/usr/bin/taskstream`
 
 const clone = `git clone ${REPO_URL}.git
-cd todo-lofi
+cd taskstream
 
 # Run the desktop app
-cargo run -p todo-2`
+cargo run -p taskstream-desktop`
 ---
 
 <Docs
   title="Install and run"
-  description="Download a prebuilt bundle for macOS, Linux, or Windows, or build todo-lofi from source."
+  description="Download a prebuilt bundle for macOS, Linux, or Windows, or build taskstream from source."
   toc={toc}
 >
   <Callout tone="warning" title="Pre-release">
@@ -79,7 +79,7 @@ cargo run -p todo-2`
   </ul>
   <ol>
     <li>Download the <code>.dmg</code> and open it, or download the <code>.zip</code> and unzip it.</li>
-    <li>Drag <code>todo-lofi.app</code> into your <code>/Applications</code> folder.</li>
+    <li>Drag <code>taskstream.app</code> into your <code>/Applications</code> folder.</li>
     <li>
       Open the app once. Gatekeeper stops an unsigned build the first time: go to
       <strong>System Settings → Privacy &amp; Security</strong>, scroll to the security notice, and
@@ -127,7 +127,7 @@ cargo run -p todo-2`
   <ol>
     <li>Download the <code>.zip</code> and extract it.</li>
     <li>
-      Run <code>todo-lofi.exe</code>. SmartScreen may warn about an unsigned build the first time:
+      Run <code>taskstream.exe</code>. SmartScreen may warn about an unsigned build the first time:
       choose <strong>More info</strong>, then <strong>Run anyway</strong>.
     </li>
   </ol>
@@ -147,7 +147,7 @@ cargo run -p todo-2`
 
   <h2 id="from-source">From source</h2>
   <p>
-    Everything below builds todo-lofi from a checkout instead of downloading a bundle. Use it if you
+    Everything below builds taskstream from a checkout instead of downloading a bundle. Use it if you
     are working on the code, if your platform has no bundle, or if you would rather not run a
     prebuilt binary.
   </p>
@@ -184,20 +184,20 @@ cargo run -p todo-2`
 
   <h3 id="macos-app">Build a macOS app</h3>
   <p>
-    On macOS, the dev shell's <code>t2-bundle</code> assembles a real <code>todo-lofi.app</code> for you —
+    On macOS, the dev shell's <code>t2-bundle</code> assembles a real <code>taskstream.app</code> for you —
     it builds the binary, copies the icon and <code>Info.plist</code> into the bundle, writes the
     Cargo.toml version into the bundle's <code>Info.plist</code>, signs it with the
-    <code>todo-lofi-dev</code> identity when that certificate exists, and clears the quarantine flag. It
+    <code>taskstream-dev</code> identity when that certificate exists, and clears the quarantine flag. It
     assembles the bundle without launching it.
   </p>
   <p>
     That is also how release builds are produced, so it is the closest thing to a local install. For
     everyday development, run the raw binary instead (<code>t2</code>, or{' '}
-    <code>cargo run -p todo-2</code>) — see{' '}
+    <code>cargo run -p taskstream-desktop</code>) — see{' '}
     <a href="/docs/contributor/development#command-reference">the command reference</a>.
   </p>
   <p>
-    <code>todo-2 --version</code> prints the version the build was made from, and the same number is
+    <code>taskstream-desktop --version</code> prints the version the build was made from, and the same number is
     shown in the app's <strong>Settings → About</strong> pane.
   </p>
 </Docs>

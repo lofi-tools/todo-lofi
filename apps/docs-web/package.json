@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The todo-lofi documentation website, built with the web design system.",
+  "description": "The taskstream documentation website, built with the web design system.",
   "scripts": {
     "codegen": "panda codegen && panda cssgen --outfile styled-system/styles.css",
     "predev": "pnpm run codegen",

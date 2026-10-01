@@ -15,7 +15,7 @@ The request, verbatim:
 > the agent should be launched in a new session without write tools. How to
 > remove default tools on opencode via cli (the agent is spawned in the
 > background via cli, right?)
-> todo-lofi should inject get_spec & set_spec tools via mcp (into the new agent
+> taskstream should inject get_spec & set_spec tools via mcp (into the new agent
 > session)
 >
 > Where to store the spec ? in a extra_data column on task ? namespaced by
@@ -29,7 +29,7 @@ So this spec answers three things:
    must run against a **read-only opencode profile** (writes and destructive
    shell denied) in a **separate process**.
 2. **The spec arrives through MCP, not the filesystem.** A read-only model
-   cannot write a file, so the spec is delivered to todo-lofi by a tool call:
+   cannot write a file, so the spec is delivered to taskstream by a tool call:
    `set_spec` (renamed from `save_spec`) with `get_spec` to read it back.
 3. **A reusable place to store per-task extension data.** Specs move out of the
    `tasks` table's dedicated columns into a **namespaced key/value store**
@@ -80,9 +80,9 @@ Superseded during the interview (recorded so the reasoning is not lost):
 ### 3.1 The interview runs with full tools
 
 - The details pane emits `TaskDetailsEvent::CodingLaunch { phase, prompt }`
-  (`apps/todo-2/src/ui_parts/task_details.rs:421`, emitted at `:4274`); the
+  (`apps/taskstream-desktop/src/ui_parts/task_details.rs:421`, emitted at `:4274`); the
   Layout inserts the composed prompt into the agent pane and switches the right
-  pane to `Agent` (`apps/todo-2/src/main.rs:654`).
+  pane to `Agent` (`apps/taskstream-desktop/src/main.rs:654`).
 - The pane **hardcodes** `Arc::new(OpenCodeAgent)` (`agent_pane.rs:515`), whose
   `args()` is `["acp"]` (`libs/acp-client/src/agent.rs:66`). There is no
   read-only variant and no per-profile process.
@@ -141,7 +141,7 @@ columns touches the same three parsers.
 project directory
 │
 ├── interview process   (opencode acp, OPENCODE_CONFIG_CONTENT: read-only agent)
-│     session/new  + mcpServers → todo-lofi MCP (per-profile token)
+│     session/new  + mcpServers → taskstream MCP (per-profile token)
 │     visible in the pane while the interview phase runs
 │     killed when set_spec lands
 │
@@ -188,7 +188,7 @@ delivered with **no writes to the user's config** via env.
 
 ### 5.2 The injected config
 
-Per launch, todo-lofi builds an inline config (serialized to
+Per launch, taskstream builds an inline config (serialized to
 `OPENCODE_CONFIG_CONTENT`) along the lines of:
 
 ```json
@@ -197,7 +197,7 @@ Per launch, todo-lofi builds an inline config (serialized to
   "agent": {
     "todo-interview": {
       "mode": "primary",
-      "description": "todo-lofi interview: gathers context and saves a spec; never changes files.",
+      "description": "taskstream interview: gathers context and saves a spec; never changes files.",
       "prompt": "<the interview instructions, see §9.1>",
       "permission": {
         "edit": "deny",
@@ -477,7 +477,7 @@ shows it in the pane. Nothing here auto-sends.
    `task_extra`.
 7. `lib.rs` exports for the new type/API.
 
-**`apps/todo-2/`**
+**`apps/taskstream-desktop/`**
 8. `coding_mcp.rs`: rename `save_spec` → `set_spec`; add `get_spec`; per-profile
    tokens (`start` mints a token per profile/run, `tools/call` resolves the
    profile); update the two tool-count tests.
@@ -516,7 +516,7 @@ shows it in the pane. Nothing here auto-sends.
 - Coverage helpers: unchanged results after the storage move (regression).
 - Task deletion removes its `task_extra` rows.
 
-**todo-2 (`cargo test -p todo-2`)**
+**taskstream-desktop (`cargo test -p taskstream-desktop`)**
 - `coding_mcp`: 9 tools declared; `get_spec` returns the markdown and `null`
   when absent; `set_spec` writes and advances the interview step; the old
   `save_spec` name is gone; a per-profile token resolves the right profile and a

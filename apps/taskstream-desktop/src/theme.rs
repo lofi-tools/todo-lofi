@@ -1,4 +1,4 @@
-//! Shared design tokens for the todo-2 dark UI.
+//! Shared design tokens for the taskstream-desktop dark UI.
 //!
 //! Colors are defined once here so surfaces stay consistent instead of
 //! repeating hex literals across views.

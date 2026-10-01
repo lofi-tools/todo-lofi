@@ -6668,7 +6668,7 @@ mod tags_row_tests {
     fn direct_tag_then_implied_parent() {
         let rows = details_tag_rows(
             &labels(&["bugs"]),
-            &labels(&["todo-lofi", "bugs"]),
+            &labels(&["taskstream", "bugs"]),
             &HashSet::new(),
         );
         let rendered: Vec<(String, bool)> = rows
@@ -6679,7 +6679,7 @@ mod tags_row_tests {
             rendered,
             vec![
                 ("bugs".to_string(), false),
-                ("todo-lofi".to_string(), true),
+                ("taskstream".to_string(), true),
             ]
         );
     }
@@ -6690,7 +6690,7 @@ mod tags_row_tests {
     fn inferred_tail_is_sorted_and_deduplicated() {
         let rows = details_tag_rows(
             &labels(&["Bugs"]),
-            &labels(&["todo-lofi", "bugs", "area"]),
+            &labels(&["taskstream", "bugs", "area"]),
             &HashSet::new(),
         );
         let rendered: Vec<(String, bool)> = rows
@@ -6702,7 +6702,7 @@ mod tags_row_tests {
             vec![
                 ("Bugs".to_string(), false),
                 ("area".to_string(), true),
-                ("todo-lofi".to_string(), true),
+                ("taskstream".to_string(), true),
             ]
         );
     }
@@ -7420,7 +7420,7 @@ mod coding_tests {
         let mut task = feature("Add OAuth", Some("Sign in with Google."));
         task.spec = Some("# Add OAuth".to_string());
         task.direct_tags = vec!["about-me".to_string()];
-        task.inferred_tags = vec!["todo-lofi".to_string(), "about-me".to_string()];
+        task.inferred_tags = vec!["taskstream".to_string(), "about-me".to_string()];
         let project_tags: std::collections::HashSet<String> =
             ["about-me".to_string()].into_iter().collect();
 
@@ -7431,7 +7431,7 @@ mod coding_tests {
         assert_eq!(json["spec"], "# Add OAuth");
         assert_eq!(
             json["context"]["tags"],
-            serde_json::json!(["about-me", "todo-lofi"])
+            serde_json::json!(["about-me", "taskstream"])
         );
         assert_eq!(json["context"]["folders"], serde_json::json!(["about-me"]));
     }

@@ -23,7 +23,7 @@
         let
           # bin = inputs.my-nix.bin.${system} // (mapAttrs (n: p: "${p}/bin/${n}") scripts);
           # crane's `buildDepsOnly` builds the dependencies of every workspace
-          # member, not just the one being packaged, so `nix build .#todo-2`
+          # member, not just the one being packaged, so `nix build .#taskstream-desktop`
           # also has to satisfy demos/desktop-tauri's tauri stack on Linux:
           # gtk-sys, atk-sys, cairo-sys-rs, pango-sys, gdk-pixbuf-sys,
           # soup3-sys, webkit2gtk-sys and libdbus-sys each ask pkg-config for
@@ -48,7 +48,7 @@
           devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch pkgs.nodejs_22 pkgs.pnpm ];
 
           # The macOS bundle's Info.plist is checked in at
-          # apps/todo-2/assets/Info.plist and its assembly recipe (icon,
+          # apps/taskstream-desktop/assets/Info.plist and its assembly recipe (icon,
           # signing, archives) lives in scripts/package-macos.sh, so the dev
           # bundle and the CI artifact are produced by one implementation.
 
@@ -89,20 +89,20 @@
             # turns off cargo-watch's own local-dependency discovery. Watching
             # the repository instead would let the pnpm/Astro side wake the
             # Rust build on every `node_modules`, `styled-system` or `dist`
-            # write. These are the crates in todo-2's closure, at directory
+            # write. These are the crates in taskstream-desktop's closure, at directory
             # granularity so a crate's embedded assets (`assets/icons`, reached
             # by `include_bytes!`) and its migrations (`toasty/migrations`,
             # reached by `include_dir!`) rebuild too — neither is a `.rs` file.
-            # Add a line here when todo-2 gains an in-workspace dependency.
+            # Add a line here when taskstream-desktop gains an in-workspace dependency.
             t2 = ''cargo watch \
-              -w apps/todo-2 \
+              -w apps/taskstream-desktop \
               -w libs/storage \
               -w libs/acp-client \
               -w libs/gpui-tokio \
               -w libs/derive_entity_id \
               -w Cargo.toml \
               -w Cargo.lock \
-              -x "run -p todo-2"'';
+              -x "run -p taskstream-desktop"'';
 
             # Assemble the macOS bundle for local use. The recipe (icon,
             # Info.plist, signing, de-quarantine) is scripts/package-macos.sh,
@@ -114,21 +114,21 @@
               if [ -n "''${CARGO_BUILD_TARGET:-}" ]; then
                 BIN_DIR="target/''${CARGO_BUILD_TARGET}/debug"
               fi
-              cargo build -p todo-2
-              "${wd}/scripts/package-macos.sh" --binary "$BIN_DIR/todo-2" --out target/debug --link --register --no-archives
+              cargo build -p taskstream-desktop
+              "${wd}/scripts/package-macos.sh" --binary "$BIN_DIR/taskstream-desktop" --out target/debug --link --register --no-archives
             '';
 
-            # t2-clean-icon = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
+            # t2-clean-icon = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
 
             # Build test binaries, strip quarantine + sign them with the
-            # self-signed todo-lofi-dev identity so Gatekeeper doesn't slow
+            # self-signed taskstream-dev identity so Gatekeeper doesn't slow
             # down test launches, then run cargo test.
             tt = with bash; ''
               set -e
               TEST_BINS=$(cargo test "$@" --no-run --message-format=json 2>/dev/null | jq -r 'select(.reason == "compiler-artifact" and (.target.test // false)) | .filenames[]')
-              if security find-identity -v -p codesigning 2>/dev/null | grep -q "todo-lofi-dev"; then
+              if security find-identity -v -p codesigning 2>/dev/null | grep -q "taskstream-dev"; then
                 for bin in $TEST_BINS; do
-                  codesign --force --sign "todo-lofi-dev" "$bin" 2>/dev/null || true
+                  codesign --force --sign "taskstream-dev" "$bin" 2>/dev/null || true
                 done
               fi
               for bin in $TEST_BINS; do
@@ -201,8 +201,8 @@
           # Shared crane setup for the outputs below. my-nix's rust module
           # builds each crate from a fileset of just the crate's own
           # directory plus the workspace root manifests. That omits workspace
-          # path dependencies (`todo-2 -> ../../libs/*`), so `cargo build -p
-          # todo-2` fails in the sandbox with "failed to read
+          # path dependencies (`taskstream-desktop -> ../../libs/*`), so `cargo build -p
+          # taskstream-desktop` fails in the sandbox with "failed to read
           # .../source/libs/acp-client/Cargo.toml". All outputs below build
           # from the full workspace source instead.
           crane = config.extraLib.craneLib;
@@ -211,14 +211,14 @@
           # after: read from Cargo.toml, the single source of truth (see
           # scripts/version.sh for the non-nix readers of the same field).
           version = (builtins.fromTOML (builtins.readFile (relPath "/Cargo.toml"))).workspace.package.version;
-          # `commonCargoSources` drops non-Rust files, but todo-2 embeds its
+          # `commonCargoSources` drops non-Rust files, but taskstream-desktop embeds its
           # icons via `include_bytes!` and storage embeds its migrations via
           # `include_dir!`, so keep those trees in the build source.
           fullSrc = lib.fileset.toSource {
             root = (/. + builtins.unsafeDiscardStringContext self.outPath);
             fileset = lib.fileset.unions [
               (crane.fileset.commonCargoSources (relPath "/"))
-              (relPath "/apps/todo-2/assets")
+              (relPath "/apps/taskstream-desktop/assets")
               (relPath "/libs/storage/toasty")
             ];
           };
@@ -253,7 +253,7 @@
           myDevShell.env = env;
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
-          myDevShell.cleanups.icons.script = ''rm -f target/debug/todo-lofi.app/Contents/Resources/todo-lofi.icns'';
+          myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
 
           # my-nix's `configure-editors` hook shells out to `code` unguarded,
           # so entering the devshell where VSCode is not installed prints
@@ -271,7 +271,7 @@
           # build-script binary. Same crate set the `t2` watch loop covers.
           # Test binaries that commit to throwaway repos need a git identity,
           # hence GIT_* below (mirrors .github/workflows/test.yml).
-          checks.todo-2-tests = crane.cargoTest {
+          checks.taskstream-desktop-tests = crane.cargoTest {
             src = fullSrc;
             cargoArtifacts = fullDeps;
             nativeBuildInputs = config.rust.nativeBuildInputs ++ [
@@ -284,14 +284,14 @@
               pkgs.cacert
             ];
             buildInputs = config.rust.buildInputs;
-            pname = "todo-2-tests";
+            pname = "taskstream-desktop-tests";
             inherit version;
-            cargoTestExtraArgs = "-p todo-2 -p storage -p acp-client -p gpui_tokio";
+            cargoTestExtraArgs = "-p taskstream-desktop -p storage -p acp-client -p gpui_tokio";
             env = config.rust.buildEnv // {
               GIT_AUTHOR_NAME = "CI";
-              GIT_AUTHOR_EMAIL = "ci@todo-lofi.invalid";
+              GIT_AUTHOR_EMAIL = "ci@taskstream.invalid";
               GIT_COMMITTER_NAME = "CI";
-              GIT_COMMITTER_EMAIL = "ci@todo-lofi.invalid";
+              GIT_COMMITTER_EMAIL = "ci@taskstream.invalid";
               # Debug info for build scripts (e.g. rustls), so a failing
               # `cargoTest` phase reports usable backtraces.
               CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG = "true";
@@ -304,18 +304,18 @@
             };
           };
 
-          # Linux binary of todo-2 built with one expression on any host:
+          # Linux binary of taskstream-desktop built with one expression on any host:
           # native on a Linux host, cross-compiled on macOS. Rust cross needs
           # the target std plus a linker/C toolchain for the target; `zig cc`
           # provides both C/C++/ar behind wrapper scripts, so no per-host
           # pkgsCross stdenv is required. `doCheck` stays off: cross-built
-          # test binaries cannot run on the build host; `checks.todo-2-tests`
+          # test binaries cannot run on the build host; `checks.taskstream-desktop-tests`
           # runs the suites natively per runner instead.
           # A single `packages` set: Nix forbids mixing `packages.x` entries
           # with a wholesale `packages` assignment in one attrset.
           packages =
             {
-              todo-2-linux =
+              taskstream-desktop-linux =
                 let
               linuxTarget = "x86_64-unknown-linux-gnu";
               linuxTargetEnv = "x86_64_unknown_linux_gnu";
@@ -352,14 +352,14 @@
             # No `buildDepsOnly` layer here: it builds the dependencies of
             # every workspace member, including demos/desktop-tauri's Linux
             # gtk stack, which cannot resolve when cross-compiling from macOS.
-            # Building `-p todo-2` directly only needs its own closure.
+            # Building `-p taskstream-desktop` directly only needs its own closure.
             linuxCrane.buildPackage {
               src = fullSrc;
               inherit (config.rust) nativeBuildInputs;
               buildInputs = config.rust.buildInputs;
-              pname = "todo-2-linux";
+              pname = "taskstream-desktop-linux";
               inherit version;
-              cargoExtraArgs = "-p todo-2";
+              cargoExtraArgs = "-p taskstream-desktop";
               doCheck = false;
               # `zig cc` resolves its cache dir via HOME, which the build env
               # leaves unset/unwritable; point it at the per-build temp dir.
@@ -367,15 +367,15 @@
               env = config.rust.buildEnv // crossEnv;
                 };
 
-              todo-2 =
+              taskstream-desktop =
                 lib.mkForce (crane.buildPackage {
               src = fullSrc;
               cargoArtifacts = fullDeps;
               inherit (config.rust) nativeBuildInputs;
               buildInputs = config.rust.buildInputs;
-              pname = "todo-2";
+              pname = "taskstream-desktop";
               inherit version;
-              cargoExtraArgs = "-p todo-2";
+              cargoExtraArgs = "-p taskstream-desktop";
               doCheck = false;
               env = config.rust.buildEnv;
                 });
@@ -387,7 +387,7 @@
               # curl'd appimagetool (it arrives via `fetchurl`, pinned by hash).
               # Linux-only: appimagetool is an x86_64 executable and ldd/dpkg-deb
               # only make sense there.
-              todo-lofi-linux-dist =
+              taskstream-linux-dist =
               let
                 # Pinned out-of-store tool, fetched purely by content hash
                 # (same revision the workflow used to curl: 1.9.1).
@@ -409,12 +409,12 @@
                   root = (/. + builtins.unsafeDiscardStringContext self.outPath);
                   fileset = lib.fileset.unions [
                     (relPath "/scripts/package-linux.sh")
-                    (relPath "/apps/todo-2/assets")
+                    (relPath "/apps/taskstream-desktop/assets")
                   ];
                 };
               in
               pkgs.stdenv.mkDerivation {
-                pname = "todo-lofi-linux-dist";
+                pname = "taskstream-linux-dist";
                 inherit version;
                 src = packagingSrc;
                 # Everything package-linux.sh shells out to: ldd (glibc),
@@ -438,7 +438,7 @@
                   cp -f ${appimagetool} "$appimage"
                   chmod +x "$appimage"
                   PACKAGE_LINUX_SKIP_STORE_CHECK=1 bash scripts/package-linux.sh \
-                    --binary ${config.packages.todo-2}/bin/todo-2 \
+                    --binary ${config.packages.taskstream-desktop}/bin/taskstream-desktop \
                     --version ${version} \
                     --out dist \
                     --appimagetool "$appimage" \

@@ -33,7 +33,7 @@ pub const INTERVIEW_AGENT_NAME: &str = "todo-interview";
 /// writes to the user's own config.
 pub const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
 /// Name the app attaches its loopback MCP endpoint under.
-pub const MCP_SERVER_NAME: &str = "todo-lofi-coding";
+pub const MCP_SERVER_NAME: &str = "taskstream-coding";
 
 /// What the read-only interview agent is told, as its system prompt. Kept free
 /// of any file-writing instruction: the spec reaches the app through
@@ -67,7 +67,7 @@ questions, and the planned approach.";
 
 /// The description shown for the injected agent in opencode's UI.
 pub const INTERVIEW_AGENT_DESCRIPTION: &str =
-    "todo-lofi interview: gathers context and saves a spec; never changes files.";
+    "taskstream interview: gathers context and saves a spec; never changes files.";
 
 /// Shell commands the read-only profile may run. The deny-all rule comes
 /// first because opencode matches `bash` globs in order and the **last**

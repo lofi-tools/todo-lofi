@@ -2,7 +2,7 @@
  * Resolves the download links on the downloads page and the install page to
  * the bundles of the current release.
  *
- * The bundles carry their version in the file name (`todo-lofi-<version>-…`),
+ * The bundles carry their version in the file name (`taskstream-<version>-…`),
  * so there is no fixed `releases/latest/download/<name>` URL to hard-code — the
  * asset name changes with every version. Rather than guess, the page asks the
  * GitHub releases API for the newest release that has an asset for the
@@ -15,11 +15,11 @@
  * not styles.
  */
 
-export const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
+export const REPO_URL = 'https://github.com/lofi-tools/taskstream'
 /** Every release, including the rolling pre-release the bundle workflow publishes. */
 export const RELEASES_URL = `${REPO_URL}/releases`
 
-const RELEASES_API = `https://api.github.com/repos/lofi-tools/todo-lofi/releases?per_page=30`
+const RELEASES_API = `https://api.github.com/repos/lofi-tools/taskstream/releases?per_page=30`
 
 export type PlatformId = 'macos' | 'linux' | 'windows'
 export type FormatId = 'dmg' | 'zip' | 'appimage' | 'deb' | 'tarball'
@@ -51,13 +51,13 @@ export const FORMATS: Record<PlatformId, BundleFormat[]> = {
       id: 'dmg',
       suffix: '.dmg',
       label: '.dmg',
-      hint: 'Disk image: open it and drag todo-lofi into Applications.',
+      hint: 'Disk image: open it and drag taskstream into Applications.',
     },
     {
       id: 'zip',
       suffix: '.zip',
       label: '.zip',
-      hint: 'Archive: unzip it and move todo-lofi.app into Applications.',
+      hint: 'Archive: unzip it and move taskstream.app into Applications.',
     },
   ],
   linux: [
@@ -77,7 +77,7 @@ export const FORMATS: Record<PlatformId, BundleFormat[]> = {
       id: 'tarball',
       suffix: '.tar.gz',
       label: '.tar.gz',
-      hint: 'Tarball: unpack it and run usr/bin/todo-lofi.',
+      hint: 'Tarball: unpack it and run usr/bin/taskstream.',
     },
   ],
   windows: [
@@ -85,7 +85,7 @@ export const FORMATS: Record<PlatformId, BundleFormat[]> = {
       id: 'zip',
       suffix: '.zip',
       label: '.zip',
-      hint: 'Archive: unzip it and run todo-lofi.exe.',
+      hint: 'Archive: unzip it and run taskstream.exe.',
     },
   ],
 }
@@ -172,9 +172,9 @@ function findAsset(
   return undefined
 }
 
-/** `todo-lofi-0.1.0-macos-arm64.zip` → `0.1.0`. */
+/** `taskstream-0.1.0-macos-arm64.zip` → `0.1.0`. */
 function versionOf(assetName: string): string | undefined {
-  return /^todo-lofi-(.+?)-(?:macos|linux|windows)-/.exec(assetName)?.[1]
+  return /^taskstream-(.+?)-(?:macos|linux|windows)-/.exec(assetName)?.[1]
 }
 
 async function loadReleases(): Promise<Release[]> {

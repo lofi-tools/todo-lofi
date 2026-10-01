@@ -46,7 +46,7 @@ phases?**
 | 2 | Run identity | **One feature task is the run root.** The existing task gets `workflow_run_id`; phase steps materialize as its subtasks. |
 | 3 | Driving | **User-driven.** The user clicks each phase action in the details panel; the agent works when asked. |
 | 4 | Execution | **The existing per-project ACP session** in the agent pane — the transcript is visible and the user can type into it. No headless/background agent runs in v1. |
-| 5 | Tool transport | **todo-2 hosts a local MCP server** and passes it to the agent launch (the `mcp_servers` the ACP client already sends, currently ignored server-side). |
+| 5 | Tool transport | **taskstream-desktop hosts a local MCP server** and passes it to the agent launch (the `mcp_servers` the ACP client already sends, currently ignored server-side). |
 | 6 | Agent capabilities | Save/attach spec, create sub-tasks, request sub-task interview, annotate/append notes, propose branch + summary. |
 | 7 | Sub-task shape | Sub-tasks are **subtasks of the feature task** (`parent_id`); the model may make a complex sub-task a **nested run**. |
 | 8 | Sub-task re-interview | The app creates an **interview step** for that sub-task; the **user manually launches** it; the model asks questions; the user answers; the interview step **auto-completes when the user answers**. |
@@ -106,7 +106,7 @@ Implemented per the v2 simplification spec:
 - Sync guard is implemented: `libs/storage/src/todoist.rs:554` skips
   `task.is_seed || task.workflow_run_id.is_some()`.
 
-### 3.2 Workflow UI — `apps/todo-2/src/ui_parts/automations.rs`
+### 3.2 Workflow UI — `apps/taskstream-desktop/src/ui_parts/automations.rs`
 
 There is no longer a separate Workflows page: the run UI lives inside the
 Automations catalog. Each recipe card carries its own active runs as nested
@@ -117,7 +117,7 @@ card. Starting a run is the card's **Enable** button; stopping it is the
 "Active runs → Stop" row in the card's settings. Emits
 `AutomationsEvent::Changed`; `main.rs` reloads the task list on it.
 
-### 3.3 Task details — `apps/todo-2/src/ui_parts/task_details.rs`
+### 3.3 Task details — `apps/taskstream-desktop/src/ui_parts/task_details.rs`
 
 `TaskDetails` renders the selected task: title/description editing, subtasks
 (inline `+ subtasks` input), follow-up tasks, blockers, "after" links,
@@ -125,7 +125,7 @@ card. Starting a run is the card's **Enable** button; stopping it is the
 `PendingConfirmed`, `PendingCancelled`, `SelectTask`, `TaskRefreshed`,
 `SubtaskCreated`, `FollowUpCreated`. No workflow awareness today.
 
-### 3.4 Agent pane — `apps/todo-2/src/ui_parts/agent_pane.rs`
+### 3.4 Agent pane — `apps/taskstream-desktop/src/ui_parts/agent_pane.rs`
 
 One ACP session per directory-backed project (`ProjectEntry`): transcript,
 busy flag, prompt queue, tool-permission cards, terminals, slash-command
@@ -370,7 +370,7 @@ today, which is already a subtask of the root).
 
 ### 7.1 Transport and wiring
 
-- todo-2 runs one **loopback MCP server** (streamable HTTP, bound to
+- taskstream-desktop runs one **loopback MCP server** (streamable HTTP, bound to
   `127.0.0.1:0`, ephemeral port) for the whole app, in-process, sharing the same
   `Store` handle as the UI. A loopback-only bearer/`X-Token` header mirrors the
   webhook pattern from the v1 spec.
@@ -520,7 +520,7 @@ The templates live next to the `TaskDetails` stepper (one function per phase,
   interview round, the app calls
   `complete_workflow_step(interview_task_id, {})` for that sub-task's interview
   step (decision #8).
-- **Tool permission cards** for the todo-2 MCP tools reuse the existing
+- **Tool permission cards** for the taskstream-desktop MCP tools reuse the existing
   permission UI; "Always allow" writes the tool rule into the project's
   `tool_permissions` so the steady state is frictionless.
 - Switching to `Agent` must not steal focus while a permission card or a
@@ -630,34 +630,34 @@ sub-tasks nested under the step they belong to.
     feature task (also `workflow_run_id`-tagged) is intentionally not synced,
     or exclude the root if the user wants the feature task in Todoist.
 
-**`apps/todo-2/src/store.rs`**
+**`apps/taskstream-desktop/src/store.rs`**
 12. Wrappers: `start_coding_run(task_id)`, `coding_run_for_task`,
     `approve_phase`, `reject_phase(notes)`, `save_note`, `merge_branch`,
     `create_sub_task`, `request_sub_task_interview`,
     `branch_cleanup_list/delete`, `set_project_branch`.
 
-**`apps/todo-2/src/coding_git.rs`** (new, small)
+**`apps/taskstream-desktop/src/coding_git.rs`** (new, small)
 13. The `git` shell-out helpers (branch create, status, merge, delete, abort,
     current branch) with stderr capture.
 
-**`apps/todo-2/src/coding_mcp.rs`** (new)
+**`apps/taskstream-desktop/src/coding_mcp.rs`** (new)
 14. The loopback MCP server: tool schemas, dispatch into `Store`, token check,
     lifecycle bound to the app.
 
-**`apps/todo-2/src/ui_parts/task_details.rs`**
+**`apps/taskstream-desktop/src/ui_parts/task_details.rs`**
 15. Coding section: stepper, round log, sub-task list, branch/spec artifacts,
     phase action handlers, inline blocked reasons; new event
     `CodingAction { task_id, action, notes }`.
 
-**`apps/todo-2/src/ui_parts/agent_pane.rs`**
+**`apps/taskstream-desktop/src/ui_parts/agent_pane.rs`**
 16. Phase-prompt insertion helper (reuse `insert_prompt_text`), optional run
     strip, `ask_user` question card (with `acp-client`).
 
-**`apps/todo-2/src/ui_parts/workflows.rs`**
+**`apps/taskstream-desktop/src/ui_parts/workflows.rs`**
 17. Filter phase recipes from the start row; phase chip on run cards; branch
     cleanup section.
 
-**`apps/todo-2/src/main.rs`**
+**`apps/taskstream-desktop/src/main.rs`**
 18. Wire `CodingAction` → store + prompt insertion + `right_pane = Agent`;
     subscribe the details panel to coding-run changes; start the MCP server;
     ensure recipes at startup.
@@ -694,7 +694,7 @@ Unit (storage, `workflow.rs` tests, `TodoStore::for_test()`):
   (regression against the current tests).
 - Sync guard: coding step tasks and root are skipped by the Todoist push.
 
-Integration (todo-2):
+Integration (taskstream-desktop):
 - MCP tool calls against a stub client mutate run state and emit
   `CodingAction`-equivalent refreshes.
 - Git helpers against a temp repo: branch create, dirty-tree refusal, merge,
@@ -882,7 +882,7 @@ Decline).
 ## 19. Implementation status
 
 Implemented and verified (`cargo check --workspace` clean; `cargo test -p
-storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
+storage` 97 pass, `cargo test -p taskstream-desktop` 42 pass, including the new cases).
 
 **Storage (`libs/storage`)**
 
@@ -904,7 +904,7 @@ storage` 97 pass, `cargo test -p todo-2` 42 pass, including the new cases).
   second `spec` step with the log preserved, one run per project, cancelled run
   keeping its branch, branch normalization, idempotent seeding.
 
-**todo-2**
+**taskstream-desktop**
 
 - `src/store.rs`: `start_coding_run`, `coding_run_for_task`, `save_coding_spec`
   (stores the spec and completes the open interview step), `approve_coding_spec`

@@ -28,7 +28,7 @@ new source of truth, an existing dangling-edge bug, lazily-loaded children).
 Facts about today's code that the design leans on:
 
 - A project dir **is** a tag. The home-directory scan
-  (`apps/todo-2/src/projects.rs`) and the project picker create
+  (`apps/taskstream-desktop/src/projects.rs`) and the project picker create
   `project:{abs-path}` tags whose `display_name` is the directory name
   (`libs/storage/src/tag.rs::get_or_create_project_tag`). There is no separate
   "project" entity.
@@ -71,7 +71,7 @@ Facts about today's code that the design leans on:
 | 3 | Persisted or a lens | **A pure view over existing edges: no schema change, no new tables, no migration.** (Writing edges with the existing API is expected — see #4.) |
 | 4 | How a project gets placed | **A new tag settings popover**: a gear right of the tag title at the top of the main task list pane; clicking it overlays a popover card over the pane content. It contains a **tag picker** (the same chip-based picker the task details pane uses) and, for directory-backed tags, a **dirs picker**. |
 | 5 | Scope | **Navbar plus selection semantics.** Creation flows are untouched (#29). |
-| 6 | Rendering of children | **Uniform** — any child tag renders the same way. A project tag, a plain tag, and a section tag are all just child rows; the tree may reach 3+ levels (`work > todo-lofi > backlog`). |
+| 6 | Rendering of children | **Uniform** — any child tag renders the same way. A project tag, a plain tag, and a section tag are all just child rows; the tree may reach 3+ levels (`work > taskstream > backlog`). |
 | 7 | Which nodes count as a "project dir" | `project:{path}` tags for the purposes of the *name* only; **dirs are the real source of truth** (#25), so project-ness in the UI is directory-backed-ness (#19, #25). |
 | 8 | Unplaced projects | **Stay top-level, exactly as today**, alongside normal tags with the folder icon. |
 | 9 | Number of parents | **Multiple parents allowed (DAG).** A project can sit under several tags and appears once under each; duplicated rows are expected and accepted. |
@@ -121,7 +121,7 @@ Facts about today's code that the design leans on:
   (existing behavior).
 - **Every child row renders, always** (#14 as revised). `collect_visible_tags`
   no longer gates descent on `selected_path`; it walks the whole in-memory
-  graph, so `work > todo-lofi > backlog` is fully laid out on load. Nothing is
+  graph, so `work > taskstream > backlog` is fully laid out on load. Nothing is
   collapsed, so there is no chevron, count, or expand state (#30).
 - Any implication child renders uniformly (#6). No new row kinds, no group
   headers inside the tree, no badges for "this is a placed project".
@@ -296,7 +296,7 @@ libs/storage (changed)
                                  the tree in memory; may subsume
                                  get_top_level_tags / get_children for the nav.
 
-apps/todo-2
+apps/taskstream-desktop
   ui_parts/navbar.rs          -- kind-driven prefix (folder for dirs-backed), a
                                  context menu on rows, ordering, and full expansion:
                                  load all tags + edges once, build the tree in memory,
@@ -412,7 +412,7 @@ to actually bite.
     it has to be decided before the dirs picker ships. See §9.G.
 12. **Placement durability — confirmed: nothing persists.** Decision #3 rests on
     placements being ordinary rows, but the app opens `turso::memory:` and
-    re-seeds at startup (`apps/todo-2/src/main.rs`: `StorageConfig { db_uri:
+    re-seeds at startup (`apps/taskstream-desktop/src/main.rs`: `StorageConfig { db_uri:
     "turso::memory:" }` followed by `store.seed()`, with the app's own comment
     "The database is in-memory, so re-register the Todoist connection row when
     tokens survived"). So a placement — like every tag edit the user makes —
@@ -481,7 +481,7 @@ to actually bite.
    edits the previously selected tag.
 9. **Sections are placeable parents unless filtered.** The picker lists tags and
    the filter (decision #13) only excludes self, descendants, and existing
-   parents. Sections are tags, so `work > todo-lofi > backlog` can be made a
+   parents. Sections are tags, so `work > taskstream > backlog` can be made a
    parent of another project. That is almost certainly meaningless; if so, the
    picker needs a fourth exclusion rule (or those rows need a disabled
    explanation), which needs the per-tag `tag_sections` fetch of §5.1.5.
@@ -517,7 +517,7 @@ to actually bite.
 - **No reverse direction.** Tags are not nested under project dirs; there is no
   project-parented view.
 - **No filesystem hierarchy.** Project dirs are not grouped by their real path
-  (`~/src/me/todo-lofi` does not sit under a `~/src/me` node).
+  (`~/src/me/taskstream` does not sit under a `~/src/me` node).
 - **No schema change.** No new tables, columns, or migrations; placement reuses
   `tag_implications`.
 - **No creation-flow changes.** The `+` picker and new-tag modal gain no parent
@@ -578,7 +578,7 @@ cycle guard, dirs-backed classification) is asserted in the storage tests
 listed above, because the navbar is a mapper over `TagTreeRow` and holds no
 logic of its own.
 
-App (`cargo test -p todo-2`):
+App (`cargo test -p taskstream-desktop`):
 
 - the placement picker omits the tag itself, its descendants, and its existing
   parents (unit test over `eligible_parents`, which is why that filter lives in
@@ -656,7 +656,7 @@ Implemented, no schema change:
   `tag_settings.dirs` over the name.
 
 Verified: `cargo check --workspace` clean (no warnings); `cargo test -p storage`
-119 passed (9 new); `cargo test -p todo-2` 47 passed (3 new). Not yet run: the
+119 passed (9 new); `cargo test -p taskstream-desktop` 47 passed (3 new). Not yet run: the
 app under a real window, so the manual walkthrough at the end of §8 is still a
 checklist, not a completed step.
 
@@ -702,25 +702,25 @@ directory, which the dirs picker reaches through the session key.
 | `libs/storage/src/tag.rs:88-99` (`create_seed_project_tag`) | Builds `project:{path.display()}` (not canonicalized) for seed data | Unchanged; seeds keep the legacy shape |
 | `libs/storage/src/tag.rs:120-137` (`get_or_create_project_tag`) | Builds `project:{canonicalized path}`, `display_name` = dir name; the only writer of new project tags | Unchanged (#24 keeps the name). Consider also seeding `tag_settings.dirs` with that same canonical path so name and dirs agree from birth |
 | `libs/storage/src/tag_settings.rs:145,156,166` (`set_tag_dirs` / `add_tag_dir` / `remove_tag_dir`) | The dirs-list write path | The new panel's dirs picker is their **first app caller**; nothing in `apps/` calls them today |
-| `apps/todo-2/src/projects.rs:56` (`Project::tag`) | Turns a scanned repo into a tag on pick | Unchanged (#29) |
+| `apps/taskstream-desktop/src/projects.rs:56` (`Project::tag`) | Turns a scanned repo into a tag on pick | Unchanged (#29) |
 
 ### B. Readers that must widen to directory-backed (#19, #25)
 
 | Location | What it does | Verdict |
 |----------|--------------|---------|
 | `libs/storage/src/managed.rs:544-553` (`attach_app_to_tag`, doc at `:537`) | Rejects `tag.is_project()` → "backs a local directory and cannot be managed by an app" | **Widen**, or a dirs-only tag becomes app-manageable while being a project everywhere else |
-| `apps/todo-2/src/ui_parts/navbar.rs:220, 375` | `is_project: tag.is_project()` per row picks the folder icon | **Widen** (#19) |
-| `apps/todo-2/src/ui_parts/apps.rs:313-318` (`attach_blocker`) | Grays project tags out in the attach picker with "Backs a local folder" | **Widen**; otherwise the picker offers a tag the store then rejects — §5.2's mismatch in reverse |
+| `apps/taskstream-desktop/src/ui_parts/navbar.rs:220, 375` | `is_project: tag.is_project()` per row picks the folder icon | **Widen** (#19) |
+| `apps/taskstream-desktop/src/ui_parts/apps.rs:313-318` (`attach_blocker`) | Grays project tags out in the attach picker with "Backs a local folder" | **Widen**; otherwise the picker offers a tag the store then rejects — §5.2's mismatch in reverse |
 
 ### C. Already dirs-aware, but still seeding candidates from the name (#24)
 
 | Location | What it does | Verdict |
 |----------|--------------|---------|
-| `apps/todo-2/src/main.rs:802-809` (`sync_agent_project`) | Pushes the `project:`-decoded path into `candidates` **unconditionally**, then extends with `dirs`; `directory_backed = tag.is_project() \|\| !dirs.is_empty()`; gates `agent_available` | Availability is already dirs-based, but the name branch must stop feeding a directory the user removed — `AgentProject::resolve` only drops candidates that do not exist, so a still-present removed dir is offered. This is the site with real user-visible damage |
-| `apps/todo-2/src/store.rs:1355-1385` (`project_dir`) | Walks the ancestor chain: first `strip_prefix("project:")` + `path.is_dir()`, then `tag_settings.dirs` + `path.is_dir()` | Both branches exist, but the name branch is **preferred order**, so a stale name outranks a configured dir |
-| `apps/todo-2/src/store.rs:1072-1085` (`coding_directory`) | Doc: "carries a `project:` tag, or a tag with a configured directory"; delegates to `project_dir` | Comment adopts the dirs-based phrasing; behavior follows `project_dir` |
-| `apps/todo-2/src/ui_parts/agent_pane.rs:78-95` (`AgentProject::candidates`, `resolve`) | Doc: "the path encoded in the tag name first, then `tag_settings.dirs`" | Decide whether name-first ordering survives once dirs are the source of truth |
-| `apps/todo-2/src/ui_parts/task_details.rs:449-452, 717` | `coding_directory_backed` gates the coding workflow section | No direct prefix test — follows `coding_directory`; keep in sync |
+| `apps/taskstream-desktop/src/main.rs:802-809` (`sync_agent_project`) | Pushes the `project:`-decoded path into `candidates` **unconditionally**, then extends with `dirs`; `directory_backed = tag.is_project() \|\| !dirs.is_empty()`; gates `agent_available` | Availability is already dirs-based, but the name branch must stop feeding a directory the user removed — `AgentProject::resolve` only drops candidates that do not exist, so a still-present removed dir is offered. This is the site with real user-visible damage |
+| `apps/taskstream-desktop/src/store.rs:1355-1385` (`project_dir`) | Walks the ancestor chain: first `strip_prefix("project:")` + `path.is_dir()`, then `tag_settings.dirs` + `path.is_dir()` | Both branches exist, but the name branch is **preferred order**, so a stale name outranks a configured dir |
+| `apps/taskstream-desktop/src/store.rs:1072-1085` (`coding_directory`) | Doc: "carries a `project:` tag, or a tag with a configured directory"; delegates to `project_dir` | Comment adopts the dirs-based phrasing; behavior follows `project_dir` |
+| `apps/taskstream-desktop/src/ui_parts/agent_pane.rs:78-95` (`AgentProject::candidates`, `resolve`) | Doc: "the path encoded in the tag name first, then `tag_settings.dirs`" | Decide whether name-first ordering survives once dirs are the source of truth |
+| `apps/taskstream-desktop/src/ui_parts/task_details.rs:449-452, 717` | `coding_directory_backed` gates the coding workflow section | No direct prefix test — follows `coding_directory`; keep in sync |
 
 ### D. Seeds, tests, migrations (no behavior change expected)
 
@@ -751,6 +751,6 @@ project's directory is determined (decision #24, §9.C) reaches them too.
 | Location | What it does | Verdict |
 |----------|--------------|---------|
 | `libs/acp-client/src/session_store.rs:1-6, 18-28, 79-126` | `StoredSession` keyed by `project_path` ("canonical project directory; the key"); header claims the path "survives tag renames"; `tag_id` present but "for display only"; `get`/`put`/`remove` all take the path | **Affected** (§5.1.11): the key is the resolved candidate, so editing dirs strands the session. Key by `tag_id`, or migrate on dir change |
-| `apps/todo-2/src/ui_parts/agent_pane.rs:544-560, 620-628` | Sets `stored_path` from the resolved `cwd`; `store.get(&project_path)` to decide resume; writes `StoredSession { project_path, tag_id, … }` | Same; also the one place that already has the tag id in hand when the key is written |
+| `apps/taskstream-desktop/src/ui_parts/agent_pane.rs:544-560, 620-628` | Sets `stored_path` from the resolved `cwd`; `store.get(&project_path)` to decide resume; writes `StoredSession { project_path, tag_id, … }` | Same; also the one place that already has the tag id in hand when the key is written |
 | `libs/acp-client/src/acp_client.rs:138-161` | `SessionSpec`/`SessionRoots` — "the directories a session is scoped to, in the order the project lists them"; filters non-existent roots | Candidate **order** is semantic (`cwd` vs additional roots); dirs reordering is a behavior change, not a UI nicety |
-| `apps/todo-2/src/ui_parts/agent_pane.rs:78-95` | `AgentProject::candidates` order: name-encoded path first, then dirs | Listed in §9.C; here because `resolve()`'s winner becomes the session key |
+| `apps/taskstream-desktop/src/ui_parts/agent_pane.rs:78-95` | `AgentProject::candidates` order: name-encoded path first, then dirs | Listed in §9.C; here because `resolve()`'s winner becomes the session key |

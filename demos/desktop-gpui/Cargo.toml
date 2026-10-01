@@ -22,7 +22,7 @@ uuid = { workspace = true, features = ["v4"] }
 # [dependencies] # UI
 gpui = { package = "gpui-pre", version = "0.3.4" }
 # `runtime_shaders` keeps the Metal shader compile out of the build sandbox,
-# which has no Xcode toolchain: see apps/todo-2/Cargo.toml.
+# which has no Xcode toolchain: see apps/taskstream-desktop/Cargo.toml.
 gpui_platform = { package = "gpui-pre-platform", version = "0.3.4", features = [
   "font-kit",
   "runtime_shaders",

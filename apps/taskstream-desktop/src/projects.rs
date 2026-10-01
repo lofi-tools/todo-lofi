@@ -61,7 +61,7 @@ impl Project {
 /// Scan for git repos on the tokio runtime. Returns repos sorted by name; the
 /// scan is best-effort and never fails the startup path.
 ///
-/// `TODO_LOFI_SCAN_ROOT` scans that directory instead of the default
+/// `TASKSTREAM_SCAN_ROOT` scans that directory instead of the default
 /// `~/src`. The scan stays out of the home root itself so a bundled macOS
 /// app never walks TCC-protected folders (Documents, Music, Photos).
 pub fn scan(cx: &impl AppContext) -> Task<anyhow::Result<Vec<Project>>> {
@@ -74,9 +74,9 @@ pub fn scan(cx: &impl AppContext) -> Task<anyhow::Result<Vec<Project>>> {
     })
 }
 
-/// Where the repo scan starts: `TODO_LOFI_SCAN_ROOT`, defaulting to `~/src`.
+/// Where the repo scan starts: `TASKSTREAM_SCAN_ROOT`, defaulting to `~/src`.
 fn scan_root() -> PathBuf {
-    if let Ok(root) = std::env::var("TODO_LOFI_SCAN_ROOT")
+    if let Ok(root) = std::env::var("TASKSTREAM_SCAN_ROOT")
         && !root.is_empty()
     {
         return PathBuf::from(root);
@@ -143,7 +143,7 @@ mod tests {
             unreachable!("scan env lock poisoned");
         };
         unsafe {
-            std::env::remove_var("TODO_LOFI_SCAN_ROOT");
+            std::env::remove_var("TASKSTREAM_SCAN_ROOT");
         }
         assert_eq!(
             scan_root(),
@@ -153,11 +153,11 @@ mod tests {
                 .unwrap_or_else(|| PathBuf::from("src"))
         );
         unsafe {
-            std::env::set_var("TODO_LOFI_SCAN_ROOT", "/tmp/somewhere");
+            std::env::set_var("TASKSTREAM_SCAN_ROOT", "/tmp/somewhere");
         }
         assert_eq!(scan_root(), PathBuf::from("/tmp/somewhere"));
         unsafe {
-            std::env::remove_var("TODO_LOFI_SCAN_ROOT");
+            std::env::remove_var("TASKSTREAM_SCAN_ROOT");
         }
     }
 }

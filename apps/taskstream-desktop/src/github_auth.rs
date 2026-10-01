@@ -592,7 +592,7 @@ async fn account_login_request(token: String) -> Result<String, AttemptError> {
     let response = reqwest::Client::new()
         .get(format!("{API_BASE}/user"))
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .header(reqwest::header::USER_AGENT, "todo-lofi")
+        .header(reqwest::header::USER_AGENT, "taskstream")
         .bearer_auth(token)
         .send()
         .await

@@ -15,9 +15,9 @@ const toc = [
   { label: 'Specs', href: '#specs' },
 ]
 
-const tree = `todo-lofi/
+const tree = `taskstream/
 ├── apps/
-│   ├── todo-2/                # GPUI desktop application
+│   ├── taskstream-desktop/                # GPUI desktop application
 │   └── agent-cli/             # terminal agent + ACP server
 ├── libs/
 │   ├── storage/               # SQLite persistence, migrations, sync tables
@@ -36,7 +36,7 @@ const tree = `todo-lofi/
 
 const apps = [
   {
-    name: 'apps/todo-2',
+    name: 'apps/taskstream-desktop',
     role: 'The desktop application',
     detail:
       'GPUI views and app state: task lists and details, the agent pane, mini-apps, sync panes, and settings.',
@@ -122,7 +122,7 @@ const specs = [
   { file: 'coding-workflow-subtasks-spec.md', status: 'Proposed', topic: 'Subtasks inside a run and coverage of the spec they implement.' },
   { file: 'todoist-sync-spec.md', status: 'Draft v1', topic: 'Todoist import plus immediate push of title/description/done deltas.' },
   { file: 'github-integration-spec.md', status: 'Draft v1', topic: 'GitHub issues/projects sync and a git-backed coding workflow.' },
-  { file: 'acp-client-and-agent-panel-spec.md', status: 'Draft v1', topic: 'The ACP client crate and the todo-2 agent panel that drives it.' },
+  { file: 'acp-client-and-agent-panel-spec.md', status: 'Draft v1', topic: 'The ACP client crate and the taskstream-desktop agent panel that drives it.' },
   { file: 'todo2-agent-pane-ui-spec.md', status: 'Draft v1', topic: 'The agent pane UI: layout, states, and interactions.' },
   { file: 'agent-cli-interview-feature-spec.md', status: 'Draft v1', topic: 'The /interview command that turns a request into a spec.' },
   { file: 'todo2-managed-apps-spec.md', status: 'Draft v2', topic: 'Managed tags, sections, and tasks — the model behind mini-apps.' },
@@ -139,7 +139,7 @@ const specs = [
   toc={toc}
 >
   <h2 id="workspace-layout">Workspace layout</h2>
-  <CodeBlock filename="todo-lofi" code={tree} showLineNumbers={false} />
+  <CodeBlock filename="taskstream" code={tree} showLineNumbers={false} />
   <p>
     <code>Cargo.toml</code> declares members as <code>apps/*</code>, <code>libs/*</code>, and
     <code>demos/*</code>, and explicitly excludes the three JavaScript packages so{' '}
@@ -148,7 +148,7 @@ const specs = [
 
   <h2 id="desktop-app">The desktop app</h2>
   <p>
-    <code>apps/todo-2</code> is GPUI all the way down: one window, a handful of panes, and entities that
+    <code>apps/taskstream-desktop</code> is GPUI all the way down: one window, a handful of panes, and entities that
     hold state. Async work (sync, agent sessions, file reads) is pushed onto Tokio through{' '}
     <code>libs/gpui-tokio</code> and applied back on the UI thread.
   </p>
@@ -173,7 +173,7 @@ const specs = [
     </table>
   </TableScroll>
   <Callout tone="note" title="Two themes, on purpose">
-    <code>apps/todo-2/src/theme.rs</code> is the desktop palette. It is intentionally not generated from
+    <code>apps/taskstream-desktop/src/theme.rs</code> is the desktop palette. It is intentionally not generated from
     the web design system's tokens — the two surfaces share no code, and the design system spec lists that
     as a non-goal.
   </Callout>

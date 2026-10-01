@@ -1,8 +1,8 @@
-# ACP client crate + todo-2 agent panel — spec
+# ACP client crate + taskstream-desktop agent panel — spec
 
 ## 1. Intent
 
-Add an AI coding-agent panel to the **todo-2** app (`apps/todo-2`). The panel talks to an
+Add an AI coding-agent panel to the **taskstream-desktop** app (`apps/taskstream-desktop`). The panel talks to an
 agent subprocess over the **Agent Client Protocol (ACP)** using a new workspace crate
 `libs/acp-client`, whose implementation follows **Zed's ACP client** as its blueprint.
 
@@ -14,7 +14,7 @@ Two deliverables:
 
 1. `libs/acp-client` — a reusable ACP **client** crate (process launch, JSON-RPC connection,
    session lifecycle, thread/transcript model, fs + terminal client capabilities).
-2. The **Agent panel** in `apps/todo-2` — a right-hand pane with prompt input, streaming
+2. The **Agent panel** in `apps/taskstream-desktop` — a right-hand pane with prompt input, streaming
    transcript, model/mode/command controls, permissions, and per-project session continuity.
 
 ---
@@ -29,7 +29,7 @@ tension explicitly:
   code GPL. Decision: **reimplement, using Zed as the blueprint** — same architecture, same
   behaviours, same protocol coverage — with no copied source text.
 - "Exactly as it is" therefore means **behavioural fidelity**: the same client-side surface
-  Zed provides to its agent panel, reproduced against todo-2's stack.
+  Zed provides to its agent panel, reproduced against taskstream-desktop's stack.
 - The ACP protocol layer itself is not hand-copied either: we depend on the official Rust SDK
   (`agent-client-protocol`).
 
@@ -80,7 +80,7 @@ pin (see §3).
 - Per repo convention (AGENTS.md), specify the library root explicitly:
   `[lib] path = "src/acp_client.rs"` — **not** `lib.rs`, and no `mod.rs` paths.
 - Dependencies: `agent-client-protocol`, `gpui` (as `gpui-pre`, workspace-style pin matching
-  todo-2), `gpui_tokio`, `tokio`, `serde`/`serde_json`, `anyhow`, `tracing`.
+  taskstream-desktop), `gpui_tokio`, `tokio`, `serde`/`serde_json`, `anyhow`, `tracing`.
 - No license field additions or GPL text: this is a reimplementation, not a copy.
 - Error handling follows AGENTS.md: `?` over `unwrap()`, no `let _ =` on fallible calls, errors
   surfaced to the UI layer, no comments that merely restate code.
@@ -134,7 +134,7 @@ agent then falls back to doing the work itself.
 
 ---
 
-## 5. The Agent panel in todo-2
+## 5. The Agent panel in taskstream-desktop
 
 > **Companion:** `docs/spec/todo2-agent-pane-ui-spec.md` holds the implementation-facing gpui UI
 > detail for this panel — verified component inventory, element trees, transcript row rendering,
@@ -309,7 +309,7 @@ All of the following are in scope for v1:
   (write/read/update, resume-failure replacement).
 - GPUI tests follow the repo's timing rule: `cx.background_executor().timer(...)` for waits
   that `run_until_parked()` must observe — not `smol::Timer`.
-- Manual verification path: run todo-2, select a `project:{path}` tag, open the Agent pane,
+- Manual verification path: run taskstream-desktop, select a `project:{path}` tag, open the Agent pane,
   confirm `opencode acp` spawns with the right cwd, stream a prompt, exercise permissions,
   restart the app, confirm the session resumes.
 - Optional dev aid (not a deliverable): this repo's own `apps/agent-cli --acp` implements an
@@ -377,7 +377,7 @@ Rules:
 
 Why: a session whose working directory no longer exists cannot do anything useful, and leaving
 orphaned agent processes that keep editing a removed project is strictly worse than losing the
-transcript. Note that todo-2 has **no tag-deletion UI today** (only trip cleanup calls
+transcript. Note that taskstream-desktop has **no tag-deletion UI today** (only trip cleanup calls
 `storage::delete_tag`), so this rule is mostly future-proofing plus the directory-removal case,
 which *is* reachable through `tag_settings.dirs`.
 

@@ -17,7 +17,7 @@ agent-cli does with it: the database it owns, what it writes, and how it chooses
 
 | # | Decision |
 |---|----------|
-| D1 | **agent-cli owns the database and its migrations.** Storage is toasty + `toasty-driver-turso` (SQLite), the same stack `libs/storage` uses, but a **separate database, separate code, separate migrations**. Nothing is shared with todo-2. |
+| D1 | **agent-cli owns the database and its migrations.** Storage is toasty + `toasty-driver-turso` (SQLite), the same stack `libs/storage` uses, but a **separate database, separate code, separate migrations**. Nothing is shared with taskstream-desktop. |
 | D2 | **`libs/ai_providers` defines the storage trait; agent-cli implements it.** The library asks for `TelemetryStore` (attempts, cooldowns, windows); agent-cli provides the toasty-backed implementation and the `.sql` migrations that make the tables real. |
 | D3 | **Sessions, turns and outcomes are persisted**, forming the success/failure history tree. Message transcripts are **not** stored in v1. |
 | D4 | **The unfinished `sessions list / show / rm` subcommands get implemented** as the read side of that data. |
@@ -29,7 +29,7 @@ agent-cli does with it: the database it owns, what it writes, and how it chooses
 | D10 | **Attempts are attributed with a shared `AttemptScope`**, not a SQL backfill: one scope per built agent, holding the session id plus the current turn id, handed to the library at `provider_impl` time and updated by the agent at turn boundaries and on fallback switches. |
 | D11 | **Sub-agents get their own scope** carrying their parent turn id; their attempts and turns therefore hang off the spawning turn in the history tree. |
 | D12 | **The store is raw SQL** — `toasty::sql::statement(..)` for writes and `toasty::sql::query(..).column_types([..])` for reads, over a `tokio::sync::Mutex<toasty::db::Db>`. No `#[derive(Model)]` schema: the library's trait is the interface, and typed models would add a parallel definition of the same tables. |
-| D13 | **The migration runner is copied from `libs/storage/src/migrations.rs`** (embed + checksum + statement splitter), not shared: extracting a crate would touch todo-2, which D1 excludes. |
+| D13 | **The migration runner is copied from `libs/storage/src/migrations.rs`** (embed + checksum + statement splitter), not shared: extracting a crate would touch taskstream-desktop, which D1 excludes. |
 
 ---
 
@@ -52,7 +52,7 @@ agent-cli does with it: the database it owns, what it writes, and how it chooses
   out (`main.rs:215`).
 - **The DB stack already in the workspace**: `libs/storage` (`toasty 0.7` + `toasty-driver-turso`,
   `include_dir!` over `toasty/migrations`, a hand-rolled checksum runner in `migrations.rs`,
-  `toasty::models!` registration, `Turso::new(db_uri)`), used only by `apps/todo-2`. It is a
+  `toasty::models!` registration, `Turso::new(db_uri)`), used only by `apps/taskstream-desktop`. It is a
   reference for the pattern, not a dependency (D1).
 
 ---
@@ -107,7 +107,7 @@ let rows = toasty::sql::query("SELECT at, ok, error_kind, latency_ms, input_toke
   `libs/storage/src/migrations.rs` (embed via `include_dir!`, per-file SHA-256 checksum recorded in
   `_migrations_history`, `split_sql` for multi-statement files, checksum mismatch = hard error).
   `apps/agent-cli/migrations/0001_telemetry.sql` holds the schema in §4.3. Copying rather than
-  sharing is D13: a shared crate would mean touching todo-2.
+  sharing is D13: a shared crate would mean touching taskstream-desktop.
 - The DB URL is `turso:<path>`; for tests,  `turso::memory:` (as `libs/storage/src/lib.rs:114` does
   with `StorageConfig { db_uri: "turso::memory:" }`).
 - Startup order in `main.rs`: load config → open the store (best-effort) → apply migrations → build
@@ -475,7 +475,7 @@ Agent-side (`cargo test -p agent-cli`):
 - Cross-machine sync of the telemetry DB.
 - An ML/bandit router (D5 chose the deterministic score).
 - A `/why` history browser (only the last decision is rendered).
-- Sharing this schema with todo-2 or moving it into a shared crate.
+- Sharing this schema with taskstream-desktop or moving it into a shared crate.
 
 ---
 
@@ -529,7 +529,7 @@ Resolved as: copy `libs/storage/src/migrations.rs` — `MigrationEntry` + `split
 apply, ~200 lines of substance with its own tests — into `apps/agent-cli/src/telemetry_migrations.rs`.
 The statement splitter is the risky part to rewrite (quotes, comments, `BEGIN…END` bodies), so
 reusing proven code beats a minimal reimplementation. Extraction into a shared crate is deferred
-until a third consumer exists, precisely because it would touch todo-2.
+until a third consumer exists, precisely because it would touch taskstream-desktop.
 
 ---
 

@@ -46,7 +46,7 @@ const GITHUB_NEW_CLASSIC_TOKEN_URL: &str = concat!(
     "https://github.com/settings/tokens/new",
     // A non-expiring token keeps background syncing from silently failing
     // once the default 30 days are up.
-    "?scopes=repo&description=todo-lofi&default_expires_at=none",
+    "?scopes=repo&description=taskstream&default_expires_at=none",
 );
 
 pub enum IntegrationsEvent {
@@ -1679,7 +1679,7 @@ impl IntegrationsView {
             ))
             .child(pat_step(
                 2,
-                "Click \"Generate new token\" → \"Generate new token (classic)\", give it a name (e.g. \"todo-lofi\"), and tick the repo scope."
+                "Click \"Generate new token\" → \"Generate new token (classic)\", give it a name (e.g. \"taskstream\"), and tick the repo scope."
                     .to_string(),
                 &[(
                     "github-pat-new-classic",

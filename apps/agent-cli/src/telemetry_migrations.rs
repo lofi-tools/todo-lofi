@@ -2,7 +2,7 @@
 //!
 //! Copied from `libs/storage/src/migrations.rs` rather than shared (see the
 //! telemetry spec §12.6): the two databases belong to different binaries, and
-//! extracting a crate would touch todo-2. The statement splitter is the risky
+//! extracting a crate would touch taskstream-desktop. The statement splitter is the risky
 //! part — quotes, comments, `BEGIN…END` bodies — so it is reused verbatim
 //! instead of re-derived.
 

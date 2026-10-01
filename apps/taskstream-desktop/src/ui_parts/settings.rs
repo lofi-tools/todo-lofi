@@ -1140,7 +1140,7 @@ mod tests {
                 .await
                 .expect("the integration's app")
                 .expect("an app");
-            let tag = store.create_tag("todo-lofi").await.expect("the tag");
+            let tag = store.create_tag("taskstream").await.expect("the tag");
             store
                 .attach_app_to_tag(app.id, tag.id, storage::BindingRole::Partial, false)
                 .await
@@ -1158,7 +1158,7 @@ mod tests {
                     .github_maps
                     .values()
                     .flatten()
-                    .any(|row| row.tag_label == "todo-lofi")
+                    .any(|row| row.tag_label == "taskstream")
             });
             if has_row {
                 return;

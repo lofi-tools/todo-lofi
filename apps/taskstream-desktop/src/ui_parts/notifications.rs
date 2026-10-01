@@ -227,7 +227,7 @@ impl NoticeFeed {
 
 /// The crates whose warnings and errors the user can act on. A dependency's
 /// (`gpui`, `toasty`, `reqwest`) noise would bury them.
-const APP_TARGETS: [&str; 4] = ["todo_2", "storage", "acp_client", "gpui_tokio"];
+const APP_TARGETS: [&str; 4] = ["taskstream_desktop", "storage", "acp_client", "gpui_tokio"];
 
 fn is_app_target(target: &str) -> bool {
     APP_TARGETS.iter().any(|name| {
@@ -377,8 +377,8 @@ mod tests {
 
     #[test]
     fn only_the_apps_own_crates_reach_the_pane() {
-        assert!(is_app_target("todo_2"));
-        assert!(is_app_target("todo_2::ui_parts::integrations"));
+        assert!(is_app_target("taskstream_desktop"));
+        assert!(is_app_target("taskstream_desktop::ui_parts::integrations"));
         assert!(is_app_target("storage::github"));
         assert!(is_app_target("acp_client"));
         // A dependency's warning is not something the user can act on.

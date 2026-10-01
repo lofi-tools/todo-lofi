@@ -11186,6 +11186,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "taskstream-desktop"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "anyhow",
+ "dirs 6.0.0",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "gpui_tokio",
+ "jiff",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "storage",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tauri"
 version = "2.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11798,29 +11821,6 @@ dependencies = [
  "jiff",
  "serde_json",
  "toasty-core",
-]
-
-[[package]]
-name = "todo-2"
-version = "0.1.0"
-dependencies = [
- "acp-client",
- "anyhow",
- "dirs 6.0.0",
- "gpui-component",
- "gpui-kit-assets",
- "gpui-pre",
- "gpui-pre-platform",
- "gpui_tokio",
- "jiff",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "storage",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

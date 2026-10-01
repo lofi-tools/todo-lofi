@@ -1,4 +1,4 @@
-# todo-lofi
+# taskstream
 
 A local-first task manager for macOS and Linux, built on [GPUI](https://github.com/nmrshll/gpui). Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow—all running offline.
 
@@ -31,17 +31,17 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
    ```
 3. Run the app:
    ```bash
-   cargo run -p todo-2    # run the desktop app
+   cargo run -p taskstream-desktop    # run the desktop app
    t2                     # or use the watch script for auto-rebuilds
    ```
 
 ### Useful commands
 
 #### Launching
-- `cargo run -p todo-2` — run the desktop app
-- `t2` — run the desktop app with auto-rebuilds. It watches todo-2's own sources and its in-workspace dependencies, so editing the web packages does not restart the Rust build (see `flake.nix` for the watched paths)
+- `cargo run -p taskstream-desktop` — run the desktop app
+- `t2` — run the desktop app with auto-rebuilds. It watches taskstream-desktop's own sources and its in-workspace dependencies, so editing the web packages does not restart the Rust build (see `flake.nix` for the watched paths)
 #### Testing
-- `ccheck` — cargo check all workspace packages (todo-2, storage, report_proc, agent-cli)
+- `ccheck` — cargo check all workspace packages (taskstream-desktop, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)
 #### Docs website
 - `pnpm dev` — run the documentation site (`apps/docs-web`) with auto-rebuilds
@@ -75,9 +75,9 @@ showcase is where the components themselves are documented.
 ## Project Structure
 
 ```
-todo-lofi/
+taskstream/
 ├── apps/
-│   ├── todo-2/        # Desktop GPUI application
+│   ├── taskstream-desktop/        # Desktop GPUI application
 │   ├── agent-cli/     # Terminal AI agent + ACP server
 │   └── docs-web/      # Documentation website (Astro + web design system)
 
@@ -104,13 +104,13 @@ integrations it talks to — built with the in-repo web design system. Run it wi
 `pnpm dev`: `/` is the landing page, and every page of documentation lives under
 `/docs`, split into a user guide (`/docs`) and a contributor guide
 (`/docs/contributor`). The
-[deepwiki mirror](https://deepwiki.com/lofi-tools/todo-lofi) remains available as
+[deepwiki mirror](https://deepwiki.com/lofi-tools/taskstream) remains available as
 a temporary fallback.
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.
 
 1. Fork the repo and create a feature branch.
-2. Run `cargo check -p todo-2` and `cargo test -p storage` before pushing.
+2. Run `cargo check -p taskstream-desktop` and `cargo test -p storage` before pushing.
 3. Keep commits focused and rebased.
 
 ### License

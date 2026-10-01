@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$binary" ] && [ -f "$binary" ] || {
-	echo "package-windows.sh: --binary must name a built todo-2.exe" >&2
+	echo "package-windows.sh: --binary must name a built taskstream-desktop.exe" >&2
 	exit 2
 }
 # Version comes from Cargo.toml, so the archive is named after the build. Run
@@ -53,11 +53,11 @@ version=${version:-$(bash "$repo/scripts/version.sh")}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-stage=$work/todo-lofi
+stage=$work/taskstream
 mkdir -p "$stage"
 
-# The crate is `todo-2`; the shipped program is the product's name.
-cp -f "$binary" "$stage/todo-lofi.exe"
+# The crate is `taskstream-desktop`; the shipped program is the product's name.
+cp -f "$binary" "$stage/taskstream.exe"
 for dll in "$(dirname "$binary")"/*.dll; do
 	[ -f "$dll" ] || continue
 	cp -f "$dll" "$stage/"
@@ -71,11 +71,11 @@ out=$(cd "$out" && pwd)
 # Git Bash on the Windows runner image has no `zip`; 7-Zip is on PATH there
 # instead. Either makes the same .zip container.
 if command -v zip >/dev/null 2>&1; then
-	(cd "$work" && zip -qr "$out/todo-lofi-$version-windows-x86_64.zip" todo-lofi)
+	(cd "$work" && zip -qr "$out/taskstream-$version-windows-x86_64.zip" taskstream)
 elif command -v 7z >/dev/null 2>&1; then
-	(cd "$work" && 7z a -tzip "$out/todo-lofi-$version-windows-x86_64.zip" todo-lofi >/dev/null)
+	(cd "$work" && 7z a -tzip "$out/taskstream-$version-windows-x86_64.zip" taskstream >/dev/null)
 else
 	echo "package-windows.sh: need zip or 7z to make the archive" >&2
 	exit 1
 fi
-echo "package-windows.sh: $out/todo-lofi-$version-windows-x86_64.zip"
+echo "package-windows.sh: $out/taskstream-$version-windows-x86_64.zip"

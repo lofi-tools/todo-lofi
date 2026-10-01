@@ -25,7 +25,7 @@ cargo test -p storage
 git fetch origin && git rebase origin/main`
 
 const checks = [
-  { command: 'cargo check -p todo-2', purpose: 'The desktop app compiles.' },
+  { command: 'cargo check -p taskstream-desktop', purpose: 'The desktop app compiles.' },
   { command: 'cargo test -p storage', purpose: 'Persistence and migration tests pass.' },
   { command: 'ccheck', purpose: 'cargo check across the main workspace crates.' },
   { command: 'tt', purpose: 'Run the Rust test suite (macOS adds signing/quarantine fixups).' },

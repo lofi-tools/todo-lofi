@@ -580,18 +580,18 @@ mod tests {
     #[test]
     fn a_menu_step_leaves_the_visited_tag_clickable() {
         let mut nav = NavHistory::default();
-        assert!(nav.navigate(tag("todo-lofi")));
+        assert!(nav.navigate(tag("taskstream")));
         assert!(nav.navigate(NavDestination::Integrations));
 
         // The branch of the tag visited before the menu stays expanded, so
         // the very row that leads back to it is still on screen.
-        assert_eq!(nav.expanded_path(), ["todo-lofi".to_string()]);
+        assert_eq!(nav.expanded_path(), ["taskstream".to_string()]);
 
         // And re-clicking it navigates back to the tag: the whole point of
         // tracking the destination rather than the panel.
-        assert!(nav.navigate(tag("todo-lofi")));
-        assert_eq!(nav.current(), &tag("todo-lofi"));
-        assert_eq!(nav.expanded_path(), ["todo-lofi".to_string()]);
+        assert!(nav.navigate(tag("taskstream")));
+        assert_eq!(nav.current(), &tag("taskstream"));
+        assert_eq!(nav.expanded_path(), ["taskstream".to_string()]);
     }
 
     #[test]

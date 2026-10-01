@@ -73,11 +73,11 @@ describe, so building it first would mean building it against a stub.
   retrigger_node`; `@notes`; one-run-per-project with nested runs exempt.
 - Its §16 states plainly: *"Remote PR creation and any GitHub integration (local
   merge only)"* is out of scope. **This spec is that follow-up.**
-- `apps/todo-2/src/coding_git.rs` (193 lines) shells out to `git` with an
+- `apps/taskstream-desktop/src/coding_git.rs` (193 lines) shells out to `git` with an
   explicit `current_dir` and captures stderr: `is_repo`, `current_branch`,
   `changed_paths`, `branch_exists`, `create_branch`, `switch_branch`,
   `merge_no_ff`, `abort_merge`, `delete_branch` (+ 4 tests against temp repos).
-- `apps/todo-2/src/store.rs` orchestrates: `start_coding_run`,
+- `apps/taskstream-desktop/src/store.rs` orchestrates: `start_coding_run`,
   `coding_run_for_task`, `save_coding_spec`, `approve_coding_spec` (cuts the
   branch), `merge_coding_branch`, `cancel_coding_run`,
   `list_branch_cleanup_runs`, `delete_coding_branch`, plus `project_dir`
@@ -109,18 +109,18 @@ session with that same cwd.
 - `docs/spec/todoist-sync-spec.md` §4.1 already states identity is a generic
   many-to-many map precisely so *"the app supports multiple integrations
   (Todoist today, others later)"* — GitHub is that "later".
-- `apps/todo-2/src/todoist_auth.rs`: PKCE OAuth, token file
+- `apps/taskstream-desktop/src/todoist_auth.rs`: PKCE OAuth, token file
   `~/.config/my-todo/todoist.json` (0600), `MY_TODO_CONFIG_DIR` override,
   `TODOIST_CLIENT_ID` env override, `access_token()` refresh logic,
   `list_projects()`. The GitHub client should mirror this file's shape.
-- `apps/todo-2/src/ui_parts/integrations.rs` renders the Todoist card and a
+- `apps/taskstream-desktop/src/ui_parts/integrations.rs` renders the Todoist card and a
   **GitHub card that is a "Coming soon" stub** ("Turn issues and PRs into tasks").
 - Migrations currently end at `0022_drop_managed_by_recipe_id.sql`, so this spec
   takes `0023_*`.
 
 ### 3.3 The agent pane is cwd-keyed
 
-`apps/todo-2/src/ui_parts/agent_pane.rs` resolves a project to
+`apps/taskstream-desktop/src/ui_parts/agent_pane.rs` resolves a project to
 `AgentProject::resolve() -> (cwd, additional roots)` and stores sessions in a
 `SessionStore` keyed by `cwd.display().to_string()` (line 525), with
 `SessionRoots` built from cwd + additional roots (line 565). **Pointing a run at
@@ -157,7 +157,7 @@ branch-creation guard refuses a dirty tree; see §6.2).
 
 ### 5.1 Auth — device flow
 
-- New `apps/todo-2/src/github_auth.rs`, mirroring `todoist_auth.rs`:
+- New `apps/taskstream-desktop/src/github_auth.rs`, mirroring `todoist_auth.rs`:
   - `POST https://github.com/login/device/code` with `client_id` + `scope`;
     returns `device_code`, `user_code`, `verification_uri`, `expires_in` (900s),
     `interval` (5s).
@@ -810,7 +810,7 @@ Everything runs against fakes; **no live network in CI** (decision 29).
 - Worktree/PR rows: several per run, per-repo base branches, UNIQUE on PR
   identity, `state` transitions.
 
-**todo-2**
+**taskstream-desktop**
 
 - `coding_git` temp-repo tests (extending the existing four): `worktree add` in
   the decided path, `info/exclude` written once and idempotently, `workdir

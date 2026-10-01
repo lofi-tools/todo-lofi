@@ -33,9 +33,9 @@ jobs:
       # needs an identity the runner does not have. (Also set inside the check
       # derivation itself; repeated here so a local `cargo test` in CI matches.)
       GIT_AUTHOR_NAME: CI
-      GIT_AUTHOR_EMAIL: ci@todo-lofi.invalid
+      GIT_AUTHOR_EMAIL: ci@taskstream.invalid
       GIT_COMMITTER_NAME: CI
-      GIT_COMMITTER_EMAIL: ci@todo-lofi.invalid
+      GIT_COMMITTER_EMAIL: ci@taskstream.invalid
     steps:
       - uses: actions/checkout@v4
 
@@ -60,11 +60,11 @@ jobs:
           gc-max-store-size-linux: 4G
           gc-max-store-size-macos: 4G
 
-      # Hermetic test suites from the flake (`checks.todo-2-tests`: todo-2 and
+      # Hermetic test suites from the flake (`checks.taskstream-desktop-tests`: taskstream-desktop and
       # the crates in its build closure, the same set the `t2` watch loop
       # covers). `--impure` is what the repo's own .envrc passes: the shared
       # nix modules resolve one flake input with getFlake, which a pure
       # evaluation refuses. `--print-build-logs` streams cargo output so
       # failures are visible without a separate `nix log` step.
       - name: Test
-        run: nix build --impure --print-build-logs .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).todo-2-tests
+        run: nix build --impure --print-build-logs .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).taskstream-desktop-tests

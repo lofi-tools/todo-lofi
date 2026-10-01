@@ -4,7 +4,7 @@
 //! This is agent-cli's implementation of the library's `TelemetryStore` port,
 //! plus the session/turn history the `sessions` subcommands read. The database
 //! is its own SQLite file (`~/.abstract/agent.db` by default) with its own
-//! migrations — nothing is shared with `libs/storage` or todo-2.
+//! migrations — nothing is shared with `libs/storage` or taskstream-desktop.
 //!
 //! Two rules shape everything here:
 //!

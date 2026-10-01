@@ -4,7 +4,7 @@ Status: Draft v1 (import in `libs/storage/src/todoist.rs` plus immediate
 push of title/description/done deltas via `/sync` commands; full push of
 all fields and the recurrence engine still open)
 
-Purpose: Define how Todoist concepts map onto the todo-lofi data model and how a
+Purpose: Define how Todoist concepts map onto the taskstream data model and how a
 bidirectional sync between Todoist and the app behaves.
 
 ## 1. Intent
@@ -21,8 +21,8 @@ repeatedly and in both directions.
   changes flow both ways.
 - **Surface:** mixed.
   - Mapping and sync logic live in the shared storage library (`libs/storage`),
-    so every app (todo-2, desktop-gpui, agent-cli, …) can use it.
-  - A thin UI entry point lives in the `todo-2` app: connect/disconnect,
+    so every app (taskstream-desktop, desktop-gpui, agent-cli, …) can use it.
+  - A thin UI entry point lives in the `taskstream-desktop` app: connect/disconnect,
   - sync status, and project selection.
 - **Auth:** OAuth flow (Todoist OAuth 2.0, `data:read_write` scope). Token
   storage/refresh details are left open (see §8).
@@ -251,7 +251,7 @@ marker label (§3.2).
   - per `(integration_id, project_id)`: last successful sync watermark
   - OAuth token + refresh token storage location (see §8)
 
-## 6. todo-2 UI (thin)
+## 6. taskstream-desktop UI (thin)
 
 - Connect/disconnect Todoist (OAuth).
 - "Sync now" button plus a subtle "last synced" indicator.

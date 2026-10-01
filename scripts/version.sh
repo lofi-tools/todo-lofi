@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Print the version of the todo-2 package, resolved the way cargo resolves it:
+# Print the version of the taskstream-desktop package, resolved the way cargo resolves it:
 # the package's own `version` when it has one, and the workspace's when it
 # inherits it with `version.workspace = true`.
 #
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-member=$repo/apps/todo-2/Cargo.toml
+member=$repo/apps/taskstream-desktop/Cargo.toml
 workspace=$repo/Cargo.toml
 
 [ -f "$member" ] || { echo "version.sh: no $member" >&2; exit 1; }
@@ -38,5 +38,5 @@ if [ -z "$version" ] && grep -qE '^[[:space:]]*version\.workspace[[:space:]]*=[[
   ' "$workspace")
 fi
 
-[ -n "$version" ] || { echo "version.sh: could not resolve todo-2's version from $member" >&2; exit 1; }
+[ -n "$version" ] || { echo "version.sh: could not resolve taskstream-desktop's version from $member" >&2; exit 1; }
 printf '%s\n' "$version"

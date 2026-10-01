@@ -1,7 +1,7 @@
 name: Bundle
 
 # Artifacts are built only off main and version tags. Each packaging job
-# compiles todo-2 through nix, which the nix store cache makes free on a repeat
+# compiles taskstream-desktop through nix, which the nix store cache makes free on a repeat
 # run but expensive the first time a lockfile changes — which is why a pull
 # request gets the test workflow alone.
 #
@@ -48,16 +48,16 @@ jobs:
       # The release binary comes out of the flake's crane package, so a cache hit
       # means no compilation at all.
       - name: Build
-        run: nix build .#todo-2 --no-link --print-out-paths > /tmp/todo-2-path
+        run: nix build .#taskstream-desktop --no-link --print-out-paths > /tmp/taskstream-desktop-path
 
       # The bundle, its .zip and its .dmg. `t2-bundle` runs the same script for
       # local use, over a debug binary.
       - name: Package
-        run: ./scripts/package-macos.sh --binary "$(cat /tmp/todo-2-path)/bin/todo-2" --out dist
+        run: ./scripts/package-macos.sh --binary "$(cat /tmp/taskstream-desktop-path)/bin/taskstream-desktop" --out dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: todo-lofi-macos
+          name: taskstream-macos
           path: |
             dist/*.zip
             dist/*.dmg
@@ -78,21 +78,21 @@ jobs:
           purge-primary-key: never
 
       # Fully hermetic, no `--impure`: the tarball, .deb and AppImage are all
-      # assembled by `packages.todo-lofi-linux-dist`, which runs
+      # assembled by `packages.taskstream-linux-dist`, which runs
       # scripts/package-linux.sh inside the sandbox with every tool (down to
       # appimagetool, fetched by content hash) from nixpkgs. The AppImage's
       # runtime is pinned the same way and handed to appimagetool with
       # `--runtime-file`: left to itself appimagetool downloads it, and a
       # sandbox has no network to do that with.
       - name: Build
-        run: nix build .#todo-lofi-linux-dist --print-out-paths > /tmp/todo-2-dist
+        run: nix build .#taskstream-linux-dist --print-out-paths > /tmp/taskstream-desktop-dist
 
       - name: Collect
-        run: mkdir -p dist && cp "$(cat /tmp/todo-2-dist)"/* dist/
+        run: mkdir -p dist && cp "$(cat /tmp/taskstream-desktop-dist)"/* dist/
 
       - uses: actions/upload-artifact@v4
         with:
-          name: todo-lofi-linux
+          name: taskstream-linux
           path: |
             dist/*.tar.gz
             dist/*.deb
@@ -117,10 +117,10 @@ jobs:
       - name: Restore cargo caches
         uses: Swatinem/rust-cache@v2
         with:
-          key: windows-todo-2-${{ hashFiles('Cargo.lock') }}
+          key: windows-taskstream-desktop-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
-        run: cargo build --release --locked -p todo-2
+        run: cargo build --release --locked -p taskstream-desktop
 
       # Git Bash ships on the runner image; the default PowerShell would not
       # execute the packaging script.
@@ -128,12 +128,12 @@ jobs:
         shell: bash
         run: |
           ./scripts/package-windows.sh \
-            --binary target/release/todo-2.exe \
+            --binary target/release/taskstream-desktop.exe \
             --out dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: todo-lofi-windows
+          name: taskstream-windows
           path: dist/*
           if-no-files-found: error
 
@@ -167,15 +167,15 @@ jobs:
           # Bash rather than the executable bit: the flag file bit is not
           # reliable across the runners the job could move to.
           version=$(bash ./scripts/version.sh)
-          notes="Unsigned development builds of todo-lofi $version.
+          notes="Unsigned development builds of taskstream $version.
 
-          macOS: todo-lofi-$version-macos-<arch>.zip or .dmg
-          Linux: todo-lofi-$version-linux-<arch>.tar.gz, .deb or .AppImage
-          Windows: todo-lofi-$version-windows-x86_64.zip"
+          macOS: taskstream-$version-macos-<arch>.zip or .dmg
+          Linux: taskstream-$version-linux-<arch>.tar.gz, .deb or .AppImage
+          Windows: taskstream-$version-windows-x86_64.zip"
 
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             gh release create "${GITHUB_REF#refs/tags/}" dist/* \
-              --title "todo-lofi ${GITHUB_REF#refs/tags/}" \
+              --title "taskstream ${GITHUB_REF#refs/tags/}" \
               --notes "$notes"
             exit 0
           fi
@@ -196,6 +196,6 @@ jobs:
           gh release delete latest --yes --cleanup-tag >/dev/null 2>&1 || true
           gh release create latest dist/* \
             --target "$GITHUB_SHA" \
-            --title "todo-lofi $version (latest main)" \
+            --title "taskstream $version (latest main)" \
             --notes "$notes" \
             --prerelease
