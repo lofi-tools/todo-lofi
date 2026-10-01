@@ -268,6 +268,36 @@ export const kbd = {
   },
 }
 
+/**
+ * 1px-gap grids for marketing/landing pages: the gaps read as hairlines
+ * between tiles. One width, one color token everywhere.
+ */
+export const tileGrid = {
+  className: 'tileGrid',
+  base: {
+    display: 'grid',
+    gridTemplateColumns: { base: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+    gap: 'px',
+    bg: 'border.subtle',
+    borderWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    borderRadius: 'lg',
+    overflow: 'hidden',
+  },
+}
+
+export const tile = {
+  className: 'tile',
+  base: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2',
+    p: { base: '5', md: '6' },
+    bg: 'surface.subtle',
+  },
+}
+
 export const statusDot = {
   className: 'statusDot',
   base: {

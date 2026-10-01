@@ -1,0 +1,23 @@
+---
+import { css } from "styled-system/css";
+import HomepageSection from "./HomepageSection.astro";
+import FeatureSection from "web-design-system/astro/marketing/FeatureSection.astro";
+import IssueRow from "web-design-system/astro/product/IssueRow.astro";
+import { taskRows } from "../../../data/landing";
+---
+
+<HomepageSection bare index={2} label="one list">
+  <FeatureSection
+    eyebrow="One list"
+    title="Your whole life, not just your job"
+    description="Feed the dog and review the release pull request from the same list. Most task apps are built for a team and expect your personal errands to live somewhere else; todo-lofi is centred on you, so the work that syncs in from Todoist or GitHub sits next to the tasks nobody else needs to see — and neither half is the guest."
+    href="/docs/tasks"
+    linkLabel="Read about the task list"
+  >
+    <div class={css({ display: "flex", flexDirection: "column", gap: "2", p: "4" })}>
+      {taskRows.map((issue) => (
+        <IssueRow issue={issue} />
+      ))}
+    </div>
+  </FeatureSection>
+</HomepageSection>

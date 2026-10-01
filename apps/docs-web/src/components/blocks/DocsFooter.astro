@@ -1,6 +1,13 @@
 ---
 import { css } from 'styled-system/css'
-import { docGuides, guideLinks, REPO_URL } from '../data/docs'
+import { docGuides, guideLinks, REPO_URL } from '../../data/docs'
+
+interface Props {
+  /** Align the footer to the homepage blueprint's content column. */
+  blueprint?: boolean
+}
+
+const { blueprint = false } = Astro.props
 
 const columns = [
   ...docGuides.map((guide) => ({ heading: guide.heading, links: guideLinks(guide) })),
@@ -43,11 +50,39 @@ const linkStyle = css({
   _hover: { color: 'fg.default' },
   _focusVisible: { outline: 'none', boxShadow: 'focus' },
 })
+
+// The sub-footer rule sits on a full-width wrapper so it spans the page like
+// the section dividers, instead of stopping at the content column.
+const subFooterRule = css({
+  w: '100%',
+  borderTopWidth: 'hairline',
+  // The other sides default to `medium` (3px) once the style is set.
+  borderBottomWidth: '0',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+})
+
+const subFooterInner = css({
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '3',
+  w: '100%',
+  maxW: blueprint ? '1104px' : '1280px',
+  mx: 'auto',
+  px: { base: '5', md: '8' },
+  py: '5',
+  fontSize: 'xs',
+  color: 'fg.subtle',
+})
 ---
 
 <footer
   class={css({
     borderTopWidth: 'hairline',
+    // The other sides default to `medium` (3px) once the style is set.
+    borderBottomWidth: '0',
     borderStyle: 'solid',
     borderColor: 'border.subtle',
     mt: '20',
@@ -59,7 +94,7 @@ const linkStyle = css({
       gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(2, 1fr)', lg: '2fr repeat(4, 1fr)' },
       gap: '10',
       w: '100%',
-      maxW: '1280px',
+      maxW: blueprint ? '1104px' : '1280px',
       mx: 'auto',
       px: { base: '5', md: '8' },
       py: '12',
@@ -117,28 +152,12 @@ const linkStyle = css({
     }
   </div>
 
-  <div
-    class={css({
-      borderTopWidth: 'hairline',
-      borderStyle: 'solid',
-      borderColor: 'border.subtle',
-      display: 'flex',
-      flexWrap: 'wrap',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: '3',
-      w: '100%',
-      maxW: '1280px',
-      mx: 'auto',
-      px: { base: '5', md: '8' },
-      py: '5',
-      fontSize: 'xs',
-      color: 'fg.subtle',
-    })}
-  >
-    <span>© 2026 todo-lofi contributors. Licensed AGPL-3.0.</span>
-    <span>
-      This site is built with <code class={css({ fontFamily: 'mono', fontSize: 'xs' })}>libs/web-design-system</code>.
-    </span>
+  <div class={subFooterRule}>
+    <div class={subFooterInner}>
+      <span>© 2026 todo-lofi contributors. Licensed AGPL-3.0.</span>
+      <span>
+        This site is built with <code class={css({ fontFamily: 'mono', fontSize: 'xs' })}>libs/web-design-system</code>.
+      </span>
+    </div>
   </div>
 </footer>

@@ -1,0 +1,62 @@
+---
+import { css } from "styled-system/css";
+import { blueprintBleed, blueprintContent, blueprintDivider } from "./homeStyles";
+
+interface Props {
+  /**
+   * Bare mode for sections whose content brings its own padding
+   * (design-system blocks like FeatureSection): the row adds no padding of
+   * its own.
+   */
+  bare?: boolean;
+  /** Span the full viewport instead of staying inside the global margin. */
+  bleed?: boolean;
+  /** Section number, shown as a zero-padded blueprint marker. */
+  index?: number;
+  /** Short section name shown beside the number, e.g. "reasons". */
+  label?: string;
+}
+
+const { bare = false, bleed = false, index, label } = Astro.props;
+
+// `blueprintContent` places the row in the content column; `blueprintBleed`
+// lets it span the global margin to the edges. `blueprintDivider` draws the
+// full-bleed hairline above the row.
+const placement = bleed ? blueprintBleed : blueprintContent;
+const padding = bare ? "" : css({ px: { base: "5", md: "8" }, py: { base: "12", md: "20" } });
+const inner = css({ position: "relative" });
+
+const coordBase = {
+  position: "absolute",
+  top: { base: "4", md: "6" },
+  fontFamily: "mono",
+  fontSize: "2xs",
+  letterSpacing: "wide",
+  textTransform: "uppercase",
+  color: "fg.subtle",
+  pointerEvents: "none",
+  userSelect: "none",
+} as const;
+
+const leftCoord = css({ ...coordBase, left: { base: "5", md: "8" } });
+const rightCoord = css({ ...coordBase, right: { base: "5", md: "8" } });
+const coordLabel = css({ color: "fg.muted" });
+
+const code = index === undefined ? undefined : String(index).padStart(3, "0");
+---
+
+<section class={`${placement} ${blueprintDivider}`}>
+  <div class={`${inner} ${padding}`}>
+    {
+      index !== undefined && (
+        <>
+          <span class={leftCoord}>
+            {code} <span class={coordLabel}>// {label}</span>
+          </span>
+          <span class={rightCoord}>x:0 y:{index - 1}</span>
+        </>
+      )
+    }
+    <slot />
+  </div>
+</section>

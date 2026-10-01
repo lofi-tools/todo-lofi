@@ -1,0 +1,54 @@
+---
+import { css } from "styled-system/css";
+import HomepageSection from "./HomepageSection.astro";
+import { Badge } from "web-design-system/components";
+import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
+import AutomationsPanel from "../panes/AutomationsPanel.astro";
+import { extensionCards } from "../../../data/landing";
+import { card, cardTitle, cardHeading, cardBody, cardLink, panel } from "./homeStyles";
+---
+
+<HomepageSection index={5} label="extensions">
+      <SectionHeading
+        eyebrow="Extensions"
+        title="Apps that fit your workflows"
+        description="Beyond the list itself, todo-lofi ships apps that own a slice of your work. They are ordinary tasks underneath — the value is the vocabulary and the defaults they bring, not a private store that holds your data hostage."
+        align="left"
+      />
+
+      <div
+        class={css({
+          mt: { base: "8", md: "12" },
+          display: "grid",
+          gridTemplateColumns: { base: "1fr", lg: "minmax(0, 1fr) minmax(0, 1.15fr)" },
+          gap: "4",
+          alignItems: "start",
+        })}
+      >
+        <div class={css({ display: "flex", flexDirection: "column", gap: "4" })}>
+          {extensionCards.map((entry) => (
+            <div class={card}>
+              <div class={cardTitle}>
+                <h3 class={cardHeading}>{entry.name}</h3>
+                <Badge tone={entry.tone} variant="subtle">
+                  {entry.badge}
+                </Badge>
+              </div>
+              <p class={cardBody}>{entry.body}</p>
+              <a href={entry.href} class={cardLink}>
+                {entry.linkLabel} →
+              </a>
+            </div>
+          ))}
+        </div>
+
+        <div class={css({ display: "flex", flexDirection: "column", gap: "3" })}>
+          <div class={panel}>
+            <AutomationsPanel />
+          </div>
+          <p class={css({ m: "0", fontSize: "xs", color: "fg.subtle" })}>
+            The automations pane: a recipe, the runs under it with the phase each one has reached, and the branch cleanup a coding run leaves behind.
+          </p>
+        </div>
+      </div>
+    </HomepageSection>

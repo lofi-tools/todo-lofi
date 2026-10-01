@@ -1,0 +1,13 @@
+---
+import HomepageSection from "./HomepageSection.astro";
+import StatsBand from "web-design-system/astro/marketing/StatsBand.astro";
+---
+
+<HomepageSection bare index={3} label="offline">
+  <StatsBand
+    value="Offline"
+    label="Your tasks live in a database file on your machine rather than on somebody's server. There is no account to create and no telemetry, and the list works with the network unplugged — sync and the agent are things you switch on when you want them."
+    linkLabel="How sync stays optional"
+    linkHref="/docs/sync#offline"
+  />
+</HomepageSection>

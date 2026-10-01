@@ -1,0 +1,23 @@
+---
+import { css } from "styled-system/css";
+import { tileGrid, tile } from "styled-system/recipes";
+import HomepageSection from "./HomepageSection.astro";
+import { cardBody, tileHeading } from "./homeStyles";
+---
+
+<HomepageSection index={1} label="reasons">
+    <div class={tileGrid()}>
+      <div class={tile()}>
+        <h2 class={tileHeading}>Work and personal in the same list</h2>
+        <p class={cardBody}>The release review sits next to feeding the dog. One list you own, not a team tool with your errands as guests.</p>
+      </div>
+      <div class={tile()}>
+        <h2 class={tileHeading}>Priorities surfaced for you</h2>
+        <p class={cardBody}>Importance, urgency, and deadline pressure sort the list, so the next thing to do is already at the top.</p>
+      </div>
+      <div class={tile()}>
+        <h2 class={tileHeading}>An agent to manage your lists</h2>
+        <p class={cardBody}>Explore a task, chunk it into actionable sub-tasks, and drive it through its workflow — with you deciding when it is done.</p>
+      </div>
+    </div>
+  </HomepageSection>

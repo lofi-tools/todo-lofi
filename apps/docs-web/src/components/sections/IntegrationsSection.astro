@@ -1,0 +1,34 @@
+---
+import { css } from "styled-system/css";
+import HomepageSection from "./HomepageSection.astro";
+import { Badge } from "web-design-system/components";
+import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
+import { integrationCards } from "../../../data/landing";
+import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeStyles";
+---
+
+<HomepageSection index={7} label="integrations">
+      <SectionHeading
+        eyebrow="Integrations"
+        title="Sync with tools you already use"
+        description="Can't choose what tools your company uses ? Sync work tasks with other tools, yet keep your personal tasks in the same list"
+        align="left"
+      />
+
+      <div class={`${grid} ${css({ mt: { base: "8", md: "12" } })}`}>
+        {integrationCards.map((entry) => (
+          <div class={card}>
+            <div class={cardTitle}>
+              <h3 class={cardHeading}>{entry.name}</h3>
+              <Badge tone={entry.tone} variant="subtle">
+                {entry.badge}
+              </Badge>
+            </div>
+            <p class={cardBody}>{entry.body}</p>
+            <a href={entry.href} class={cardLink}>
+              {entry.linkLabel} →
+            </a>
+          </div>
+        ))}
+      </div>
+    </HomepageSection>

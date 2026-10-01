@@ -1,0 +1,28 @@
+---
+import { css } from "styled-system/css";
+import HomepageSection from "./HomepageSection.astro";
+import { band, bandText, bandLink, inlineLink } from "./homeStyles";
+---
+
+<HomepageSection index={8} label="roadmap">
+      <div class={band}>
+        <div class={bandText}>
+          <span class={css({ fontSize: "xl", fontWeight: "semibold", color: "fg.default" })}>What is coming next</span>
+          <p class={css({ m: "0", fontSize: "sm", color: "fg.muted", maxW: "640px" })}>
+            GitHub sync and the coding workflow are in preview, and a few mini-apps — message follow-ups, birthdays, job applications — are still only specified. The roadmap says
+            where each one stands, including the ideas that have no promise behind them.
+          </p>
+        </div>
+        <a href="/roadmap" class={bandLink}>
+          See the roadmap
+        </a>
+      </div>
+
+      <p class={css({ m: "0", mt: "8", fontSize: "sm", color: "fg.muted" })}>
+        Every feature here has a page: installation, the task list, repeats, the agent, workflows, sync, and configuration all live in{" "}
+        <a href="/docs" class={inlineLink}>
+          the user guide
+        </a>
+        .
+      </p>
+    </HomepageSection>

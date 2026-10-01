@@ -1,0 +1,19 @@
+---
+import HomepageSection from "./HomepageSection.astro";
+import FeatureSection from "web-design-system/astro/marketing/FeatureSection.astro";
+import ChatThread from "web-design-system/astro/product/ChatThread.astro";
+import { agentThread } from "../../../data/landing";
+---
+
+<HomepageSection bare index={4} label="agent">
+  <FeatureSection
+    eyebrow="The agent"
+    title="A pane beside your list, not another chat window"
+    description="The agent works in the lists you already have: it adds and edits tasks, sets up a repeat, and drives a task through its workflow stages. Every tool it calls and every file it touches is visible while it works, and nothing runs until you point it at a provider and give it a key."
+    href="/docs/agent"
+    linkLabel="Read about the agent"
+    reverse
+  >
+    <ChatThread messages={agentThread} />
+  </FeatureSection>
+</HomepageSection>
