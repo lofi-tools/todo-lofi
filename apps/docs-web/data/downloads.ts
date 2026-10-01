@@ -2,7 +2,7 @@
  * Resolves the download links on the downloads page and the install page to
  * the bundles of the current release.
  *
- * The bundles carry their version in the file name (`taskstream-<version>-…`),
+ * The bundles carry their version in the file name (`<name>-<version>-…`),
  * so there is no fixed `releases/latest/download/<name>` URL to hard-code — the
  * asset name changes with every version. Rather than guess, the page asks the
  * GitHub releases API for the newest release that has an asset for the
@@ -15,11 +15,14 @@
  * not styles.
  */
 
-export const REPO_URL = 'https://github.com/lofi-tools/taskstream'
+// The repository has not moved yet: the code is renamed, the repo is not.
+// Point every repo link (header, footer, source URLs) and the releases API at
+// the old name until the rename happens on GitHub.
+export const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
 /** Every release, including the rolling pre-release the bundle workflow publishes. */
 export const RELEASES_URL = `${REPO_URL}/releases`
 
-const RELEASES_API = `https://api.github.com/repos/lofi-tools/taskstream/releases?per_page=30`
+const RELEASES_API = `https://api.github.com/repos/lofi-tools/todo-lofi/releases?per_page=30`
 
 export type PlatformId = 'macos' | 'linux' | 'windows'
 export type FormatId = 'dmg' | 'zip' | 'appimage' | 'deb' | 'tarball'
@@ -172,9 +175,9 @@ function findAsset(
   return undefined
 }
 
-/** `taskstream-0.1.0-macos-arm64.zip` → `0.1.0`. */
+/** `taskstream-0.1.0-macos-arm64.zip` (or the old `todo-lofi-…` name) → `0.1.0`. */
 function versionOf(assetName: string): string | undefined {
-  return /^taskstream-(.+?)-(?:macos|linux|windows)-/.exec(assetName)?.[1]
+  return /^(?:taskstream|todo-lofi)-(.+?)-(?:macos|linux|windows)-/.exec(assetName)?.[1]
 }
 
 async function loadReleases(): Promise<Release[]> {
