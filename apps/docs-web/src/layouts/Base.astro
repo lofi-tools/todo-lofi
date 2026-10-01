@@ -9,11 +9,11 @@ import '../styles/app.css'
 interface Props {
   title: string
   description?: string
-  /** What follows the title in the tab: `taskstream · <suffix>`. */
+  /** What follows the title in the tab: `Taskstream · <suffix>`. */
   suffix?: string
 }
 
-const { title, description, suffix = 'taskstream docs' } = Astro.props
+const { title, description, suffix = 'Taskstream docs' } = Astro.props
 ---
 
 <!doctype html>
