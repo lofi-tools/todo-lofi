@@ -1,7 +1,7 @@
 ---
 import { css } from 'styled-system/css'
 import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
-import { LogoMark } from 'web-design-system/icons'
+import { GitHub } from 'web-design-system/icons'
 import { REPO_URL } from '../data/docs'
 
 const links = [
@@ -74,7 +74,17 @@ const linkStyle = (active: boolean) =>
         _focusVisible: { outline: 'none', boxShadow: 'focus' },
       })}
     >
-      <LogoMark size={18} />
+      <img
+        src="/favicon.svg"
+        alt=""
+        width="20"
+        height="20"
+        class={css({
+          borderRadius: 'xs',
+          boxShadow: '0 0 0 0.25px rgba(255, 255, 255, 0.65)',
+          _light: { boxShadow: '0 0 0 0.25px rgba(0, 0, 0, 0.35)' },
+        })}
+      />
       <span>todo-lofi</span>
     </a>
 
@@ -105,7 +115,27 @@ const linkStyle = (active: boolean) =>
 
     <div class={css({ flex: '1' })} />
 
-    <a class={linkStyle(false)} href={REPO_URL} target="_blank" rel="noreferrer">GitHub</a>
+    <a
+      href={REPO_URL}
+      target="_blank"
+      rel="noreferrer"
+      aria-label="GitHub repository"
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        w: '8',
+        h: '8',
+        borderRadius: 'sm',
+        color: 'fg.muted',
+        transitionProperty: 'color, background-color',
+        transitionDuration: 'fast',
+        _hover: { color: 'fg.default', bg: 'surface.hover' },
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+    >
+      <GitHub size={18} />
+    </a>
     <ThemeToggle />
   </nav>
 </header>

@@ -270,7 +270,10 @@ pub fn default_config_jsonc() -> String {
                         "Score combo entries instead of walking them in order (true/false)",
                     ),
                     ("window_hours", "History window the score reads (f64)"),
-                    ("half_life_hours", "Decay half-life inside that window (f64)"),
+                    (
+                        "half_life_hours",
+                        "Decay half-life inside that window (f64)",
+                    ),
                     (
                         "min_samples",
                         "Weighted attempts before history outranks the prior (f64)",
@@ -432,9 +435,7 @@ impl PacingEntryConfig {
         ai_providers::PacingSpec {
             requests_per_minute: self.requests_per_minute,
             max_concurrency: self.max_concurrency,
-            min_interval: self
-                .min_interval_ms
-                .map(std::time::Duration::from_millis),
+            min_interval: self.min_interval_ms.map(std::time::Duration::from_millis),
             min_cooldown: self
                 .min_cooldown_seconds
                 .map(std::time::Duration::from_secs),
@@ -1075,7 +1076,7 @@ mod tests {
     fn default_config_jsonc_round_trips_through_lenient_parser() {
         let jsonc = default_config_jsonc();
         // serde_json_lenient accepts the `//` comments; the strict parser
-        // rejects them, proving the file is JSONC, not plain JSON.
+        // rejects them, proving the file is JSONC.
         let parsed: AppConfig = serde_json_lenient::from_str(&jsonc).unwrap();
         let defaults = AppConfig::default();
         assert_eq!(parsed.model, defaults.model);

@@ -2,7 +2,7 @@
 import { css } from 'styled-system/css'
 import { Badge } from 'web-design-system/components'
 import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
-import { LogoMark } from 'web-design-system/icons'
+import { GitHub } from 'web-design-system/icons'
 import { docGuides, guideFor, REPO_URL } from '../data/docs'
 
 const active = guideFor(Astro.url.pathname)
@@ -66,7 +66,17 @@ const navItem = (active: boolean) =>
         _focusVisible: { outline: 'none', boxShadow: 'focus' },
       })}
     >
-      <LogoMark size={18} />
+      <img
+        src="/favicon.svg"
+        alt=""
+        width="20"
+        height="20"
+        class={css({
+          borderRadius: 'xs',
+          boxShadow: '0 0 0 0.25px rgba(255, 255, 255, 0.65)',
+          _light: { boxShadow: '0 0 0 0.25px rgba(0, 0, 0, 0.35)' },
+        })}
+      />
       <span>todo-lofi</span>
     </a>
     <Badge tone="accent" variant="subtle">docs</Badge>
@@ -105,27 +115,24 @@ const navItem = (active: boolean) =>
 
     <a
       class={css({
-        display: { base: 'none', sm: 'inline-flex' },
+        display: 'inline-flex',
         alignItems: 'center',
+        justifyContent: 'center',
+        w: '8',
         h: '8',
-        px: '3',
         borderRadius: 'sm',
-        fontSize: 'sm',
         color: 'fg.muted',
-        borderWidth: 'hairline',
-        borderStyle: 'solid',
-        borderColor: 'border',
-        bg: 'surface.subtle',
-        transitionProperty: 'color, border-color',
+        transitionProperty: 'color, background-color',
         transitionDuration: 'fast',
-        _hover: { color: 'fg.default', borderColor: 'border.strong' },
+        _hover: { color: 'fg.default', bg: 'surface.hover' },
         _focusVisible: { outline: 'none', boxShadow: 'focus' },
       })}
       href={REPO_URL}
       target="_blank"
       rel="noreferrer"
+      aria-label="GitHub repository"
     >
-      GitHub
+      <GitHub size={18} />
     </a>
 
     <ThemeToggle />

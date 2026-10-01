@@ -1,6 +1,5 @@
 ---
 import { css } from 'styled-system/css'
-import { LogoMark } from 'web-design-system/icons'
 import { docGuides, guideLinks, REPO_URL } from '../data/docs'
 
 const columns = [
@@ -68,7 +67,17 @@ const linkStyle = css({
   >
     <div>
       <div class={css({ display: 'inline-flex', alignItems: 'center', gap: '2', fontWeight: 'semibold', color: 'fg.default', mb: '3' })}>
-        <LogoMark size={18} />
+        <img
+        src="/favicon.svg"
+        alt=""
+        width="20"
+        height="20"
+        class={css({
+          borderRadius: 'xs',
+          boxShadow: '0 0 0 0.25px rgba(255, 255, 255, 0.65)',
+          _light: { boxShadow: '0 0 0 0.25px rgba(0, 0, 0, 0.35)' },
+        })}
+      />
         <span>todo-lofi</span>
       </div>
       <p class={css({ fontSize: 'sm', color: 'fg.subtle', maxW: '280px', lineHeight: 'relaxed' })}>

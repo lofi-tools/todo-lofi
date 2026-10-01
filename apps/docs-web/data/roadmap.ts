@@ -106,7 +106,7 @@ export const roadmapBuckets: RoadmapBucket[] = [
     heading: 'Later',
     badge: 'coming soon',
     tone: 'warning',
-    summary: 'Specified or sketched, not built.',
+    summary: 'Specified or sketched, not built yet.',
     items: [
       {
         name: 'Message follow-ups and birthday wishes',
@@ -148,11 +148,13 @@ export const roadmapBuckets: RoadmapBucket[] = [
         name: 'More keyboard coverage',
         note: 'The jump-to-task and move-to-project pickers exist; extending that to every action is open.',
       },
+      {
+        name: 'Team and collaboration',
+        note: 'Sharing lists and working together. The app is a personal tool today — one person, one list — so this is an open question rather than a plan.',
+      },
     ],
   },
 ]
 
 /** The short list of things the project has decided against. */
-export const notPlanned = [
-  'Team and collaboration features. todo-lofi is a personal tool: one person, one list, no accounts to share and no server holding your work.',
-]
+export const notPlanned: string[] = []

@@ -95,6 +95,7 @@ const itemNote = css({ display: 'block', fontSize: 'sm', color: 'fg.muted', mt: 
           ))
         }
 
+        {notPlanned.length > 0 && (
         <section class={css({ mt: { base: '10', md: '14' } })}>
           <h2 id="not-planned" class={css({ textStyle: 'h2', color: 'fg.default' })}>Not planned</h2>
           <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: '5' })}>
@@ -104,6 +105,7 @@ const itemNote = css({ display: 'block', fontSize: 'sm', color: 'fg.muted', mt: 
             {notPlanned.map((entry) => <li class={row}>{entry}</li>)}
           </ul>
         </section>
+        )}
 
         <p class={css({ mt: '10', fontSize: 'sm', color: 'fg.muted' })}>
           Want to know how something works rather than whether it exists? The{' '}
