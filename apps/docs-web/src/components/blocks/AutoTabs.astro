@@ -1,0 +1,179 @@
+---
+import { css } from "styled-system/css";
+import {
+  glyph,
+  itemHeading,
+  tab,
+  tabContent,
+  tabDescription,
+  tabIndex,
+  tabList,
+  tabPanel,
+  tabProgressBar,
+  tabProgressTrack,
+  tabsColumn,
+  tabsLayout,
+  tabSubtitle,
+  tabTitle,
+} from "../sections/homeStyles";
+
+interface TabItem {
+  title: string;
+  subtitle: string;
+  description: string;
+  /** Glyph shown in the panel when the item has no illustration. */
+  Icon?: any;
+  /** Panel content; replaces the icon-and-title panel when present. */
+  Illustration?: any;
+}
+
+interface Props {
+  /** Accessible name for the tab list, and the base for the panel ids. */
+  label: string;
+  items: TabItem[];
+}
+
+const { label, items } = Astro.props;
+
+const idBase = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+/** An illustration brings its own frame, so its panel adds none. */
+const tabPanelBare = css({ "&[hidden]": { display: "none" } });
+---
+
+<div class={tabsLayout} data-auto-tabs>
+  <div class={tabsColumn}>
+    <div class={tabList} role="tablist" aria-orientation="vertical" aria-label={label}>
+      {
+        items.map(({ title, subtitle, description }, index) => (
+          <button
+            type="button"
+            role="tab"
+            id={`${idBase}-tab-${index}`}
+            aria-controls={`${idBase}-panel-${index}`}
+            aria-selected={index === 0 ? "true" : "false"}
+            tabindex={index === 0 ? 0 : -1}
+            data-active={index === 0 ? "" : undefined}
+            class={tab}
+          >
+            <span class={tabContent}>
+              <span class={tabIndex}>{String(index + 1).padStart(2, "0")}</span>
+              <span class={tabTitle} data-tab-title>
+                {title}
+              </span>
+              <span class={tabSubtitle}>{subtitle}</span>
+              <span class={tabDescription} data-tab-description>
+                {description}
+              </span>
+            </span>
+            <span class={tabProgressTrack} data-tab-progress-track aria-hidden="true">
+              <span class={tabProgressBar} data-tab-progress />
+            </span>
+          </button>
+        ))
+      }
+    </div>
+  </div>
+
+  <div>
+    {
+      items.map(({ title, Icon, Illustration }, index) => (
+        <div
+          role="tabpanel"
+          id={`${idBase}-panel-${index}`}
+          aria-labelledby={`${idBase}-tab-${index}`}
+          tabindex="0"
+          hidden={index !== 0}
+          class={Illustration ? tabPanelBare : tabPanel}
+        >
+          {Illustration ? (
+            <Illustration />
+          ) : (
+            <>
+              <span class={glyph}>{Icon && <Icon size={22} />}</span>
+              <h3 class={itemHeading}>{title}</h3>
+            </>
+          )}
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  const DURATION = 6000;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-auto-tabs]")) {
+    const tabs = Array.from(root.querySelectorAll<HTMLElement>('[role="tab"]'));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
+    if (tabs.length === 0) continue;
+
+    let active = 0;
+    let timer: number | undefined;
+    let animation: Animation | undefined;
+
+    const startProgress = () => {
+      if (reduceMotion) return;
+      // The bar lives inside the active tab, so it runs under the tab it times.
+      const progress = tabs[active]?.querySelector<HTMLElement>("[data-tab-progress]");
+      if (!progress) return;
+      animation?.cancel();
+      animation = progress.animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], {
+        duration: DURATION,
+        easing: "linear",
+      });
+    };
+
+    const select = (index: number) => {
+      active = index;
+      tabs.forEach((tab, i) => {
+        const on = i === index;
+        tab.setAttribute("aria-selected", String(on));
+        tab.tabIndex = on ? 0 : -1;
+        tab.toggleAttribute("data-active", on);
+      });
+      panels.forEach((panel, i) => {
+        panel.hidden = i !== index;
+      });
+      startProgress();
+    };
+
+    const stop = () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      timer = undefined;
+      animation?.pause();
+    };
+
+    const start = () => {
+      if (reduceMotion) return;
+      stop();
+      animation?.play();
+      timer = window.setInterval(() => select((active + 1) % tabs.length), DURATION);
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => {
+        select(index);
+        start();
+      });
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        const next = (index + delta + tabs.length) % tabs.length;
+        select(next);
+        tabs[next]?.focus();
+        start();
+      });
+    });
+
+    root.addEventListener("mouseenter", stop);
+    root.addEventListener("mouseleave", start);
+    root.addEventListener("focusin", stop);
+    root.addEventListener("focusout", start);
+
+    select(0);
+    start();
+  }
+</script>

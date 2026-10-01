@@ -1,0 +1,58 @@
+---
+import { css } from "styled-system/css";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, label, mono, row } from "./styles";
+
+const panes = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", md: "1fr auto 1fr" },
+  alignItems: "center",
+  gap: "2",
+});
+
+const pane = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "canvas",
+});
+
+const swap = css({ fontFamily: "mono", fontSize: "lg", color: "accent.text", textAlign: "center" });
+---
+
+<IllustrationFrame title="two-way sync">
+  <div class={panes}>
+    <div class={pane}>
+      <span class={mono}>Taskstream</span>
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>Ship the release</span>
+      </div>
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>Reply to Sam</span>
+      </div>
+    </div>
+
+    <span class={swap} aria-hidden="true">⇄</span>
+
+    <div class={pane}>
+      <span class={mono}>Todoist</span>
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>Ship the release</span>
+      </div>
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>Reply to Sam</span>
+      </div>
+    </div>
+  </div>
+
+  <p class={caption}>Completing a task on either side updates the other.</p>
+</IllustrationFrame>

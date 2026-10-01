@@ -1,0 +1,195 @@
+---
+import { css } from "styled-system/css";
+
+interface Row {
+  id: string;
+  label: string;
+}
+
+interface RowState {
+  id: string;
+  importance: "low" | "medium" | "high";
+  due: string;
+}
+
+/**
+ * A miniature task list for the "sorted for you" story: the rows reorder on
+ * their own as importance rises and a deadline closes in, animated with FLIP.
+ * Each step lists the rows in their sorted order along with the signals that
+ * put them there, so the movement always has a visible cause.
+ */
+const rows: Row[] = [
+  { id: "ship", label: "Ship the release" },
+  { id: "sam", label: "Reply to Sam" },
+  { id: "dog", label: "Feed the dog" },
+];
+
+const steps: RowState[][] = [
+  [
+    { id: "sam", importance: "medium", due: "in 3d" },
+    { id: "ship", importance: "low", due: "in 5d" },
+    { id: "dog", importance: "low", due: "today" },
+  ],
+  [
+    { id: "ship", importance: "high", due: "in 5d" },
+    { id: "sam", importance: "medium", due: "in 3d" },
+    { id: "dog", importance: "low", due: "today" },
+  ],
+  [
+    { id: "ship", importance: "high", due: "today" },
+    { id: "dog", importance: "low", due: "today" },
+    { id: "sam", importance: "medium", due: "in 3d" },
+  ],
+];
+
+const labels = new Map(rows.map((row) => [row.id, row.label]));
+
+const root = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "3",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+});
+
+const list = css({ display: "flex", flexDirection: "column", gap: "2" });
+
+const rowStyle = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "3",
+  px: "3",
+  py: "2.5",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  willChange: "transform",
+});
+
+const rowLabel = css({ fontSize: "sm", color: "fg.default", whiteSpace: "nowrap" });
+
+const signals = css({ display: "inline-flex", alignItems: "center", gap: "2", flexShrink: "0" });
+
+const importance = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  textTransform: "uppercase",
+  letterSpacing: "wide",
+  color: "fg.subtle",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  borderRadius: "sm",
+  px: "1.5",
+  py: "0.5",
+  "&[data-importance=\"high\"]": { color: "accent.text", borderColor: "accent" },
+  "&[data-importance=\"medium\"]": { color: "fg.muted" },
+});
+
+const due = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  minW: "8",
+  textAlign: "right",
+});
+---
+
+<div class={root} data-reorder-rows>
+  <script type="application/json" data-reorder-steps set:html={JSON.stringify(steps)} />
+  <div class={list} data-reorder-list>
+    {
+      steps[0]?.map((state) => (
+        <div class={rowStyle} data-row-id={state.id} data-importance={state.importance}>
+          <span class={rowLabel}>{labels.get(state.id)}</span>
+          <span class={signals}>
+            <span class={importance} data-row-importance data-importance={state.importance}>
+              {state.importance}
+            </span>
+            <span class={due} data-row-due>
+              {state.due}
+            </span>
+          </span>
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  const DURATION = 3400;
+  const MOTION = 420;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  interface RowState {
+    id: string;
+    importance: string;
+    due: string;
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-reorder-rows]")) {
+    const list = root.querySelector<HTMLElement>("[data-reorder-list]");
+    const source = root.querySelector<HTMLScriptElement>("[data-reorder-steps]");
+    if (!list || !source?.textContent) continue;
+
+    const steps = JSON.parse(source.textContent) as RowState[][];
+    if (steps.length === 0) continue;
+
+    const rows = new Map<string, HTMLElement>();
+    for (const node of list.querySelectorAll<HTMLElement>("[data-row-id]")) {
+      const id = node.dataset.rowId;
+      if (id) rows.set(id, node);
+    }
+
+    let step = 0;
+    const advance = () => {
+      step = (step + 1) % steps.length;
+      const next = steps[step];
+      if (!next) return;
+
+      for (const state of next) {
+        const node = rows.get(state.id);
+        if (!node) continue;
+        node.dataset.importance = state.importance;
+        const chip = node.querySelector<HTMLElement>("[data-row-importance]");
+        if (chip) {
+          chip.textContent = state.importance;
+          chip.dataset.importance = state.importance;
+        }
+        const due = node.querySelector<HTMLElement>("[data-row-due]");
+        if (due) due.textContent = state.due;
+      }
+
+      const before = new Map<string, DOMRect>();
+      for (const [id, node] of rows) before.set(id, node.getBoundingClientRect());
+
+      for (const state of next) {
+        const node = rows.get(state.id);
+        if (node) list.append(node);
+      }
+
+      if (reduceMotion) return;
+      for (const [id, node] of rows) {
+        const first = before.get(id);
+        if (!first) continue;
+        const last = node.getBoundingClientRect();
+        const deltaX = first.left - last.left;
+        const deltaY = first.top - last.top;
+        if (deltaX === 0 && deltaY === 0) continue;
+        node.animate(
+          [{ transform: `translate(${deltaX}px, ${deltaY}px)` }, { transform: "translate(0, 0)" }],
+          { duration: MOTION, easing: "cubic-bezier(0.2, 0, 0, 1)" },
+        );
+      }
+    };
+
+    window.setInterval(advance, DURATION);
+  }
+</script>

@@ -1,0 +1,244 @@
+---
+import { css } from "styled-system/css";
+import { ArrowUpRight } from "web-design-system/icons";
+
+/**
+ * A cut-down desktop list for the "centered on you" story: just the tags
+ * navbar and a simplified main pane. Two tags reach out of the app — #work to
+ * a company list, #life admin to the same list on a phone — with a small
+ * handset mock-up standing in for that second surface.
+ */
+const root = css({
+  display: "flex",
+  flexDirection: { base: "column", md: "row" },
+  gap: "3",
+  alignItems: "stretch",
+  p: "3",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+});
+
+const appWindow = css({
+  flex: "1",
+  minW: "0",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  overflow: "hidden",
+});
+
+const titleBar = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  px: "3",
+  h: "7",
+  borderBottomWidth: "hairline",
+  borderBottomStyle: "solid",
+  borderBottomColor: "border.subtle",
+});
+
+const windowDot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
+const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+
+const windowBody = css({
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 116px) minmax(0, 1fr)",
+  minH: "40",
+});
+
+const tagsNav = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1",
+  p: "2",
+  borderRightWidth: "hairline",
+  borderRightStyle: "solid",
+  borderRightColor: "border.subtle",
+});
+
+const paneLabel = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  textTransform: "uppercase",
+  letterSpacing: "wide",
+  color: "fg.subtle",
+  px: "1",
+  mb: "0.5",
+});
+
+const tagRow = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "2",
+  px: "1.5",
+  py: "1.5",
+  borderRadius: "sm",
+});
+
+const tagName = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
+
+const tagLink = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.5",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "accent.text",
+  whiteSpace: "nowrap",
+});
+
+const mainPane = css({ display: "flex", flexDirection: "column", gap: "2", p: "3" });
+
+const taskRow = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  px: "2",
+  py: "2",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "surface.subtle",
+});
+
+const checkbox = css({
+  w: "3",
+  h: "3",
+  flexShrink: "0",
+  borderRadius: "xs",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const taskLabel = css({ fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
+
+const phone = css({
+  flexShrink: "0",
+  w: { base: "full", md: "112px" },
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "1.5",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  bg: "canvas",
+});
+
+const notch = css({ w: "8", h: "1", mx: "auto", borderRadius: "full", bg: "border.strong" });
+
+const screen = css({
+  flex: "1",
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "surface.subtle",
+});
+
+const phoneTask = css({ display: "flex", alignItems: "center", gap: "1.5" });
+
+const phoneCheck = css({
+  w: "2",
+  h: "2",
+  flexShrink: "0",
+  borderRadius: "xs",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const phoneBar = css({ flex: "1", h: "1.5", borderRadius: "full", bg: "border.strong" });
+
+const caption = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  textAlign: "center",
+  whiteSpace: "nowrap",
+});
+---
+
+<div class={root}>
+  <div class={appWindow}>
+    <div class={titleBar}>
+      <span class={windowDot} />
+      <span class={windowDot} />
+      <span class={windowTitle}>Taskstream</span>
+    </div>
+    <div class={windowBody}>
+      <div class={tagsNav}>
+        <span class={paneLabel}>tags</span>
+        <span class={tagRow}>
+          <span class={tagName}>#inbox</span>
+        </span>
+        <span class={tagRow}>
+          <span class={tagName}>#work</span>
+          <span class={tagLink}>
+            company list <ArrowUpRight size={10} />
+          </span>
+        </span>
+        <span class={tagRow}>
+          <span class={tagName}>#life admin</span>
+          <span class={tagLink}>
+            mobile <ArrowUpRight size={10} />
+          </span>
+        </span>
+        <span class={tagRow}>
+          <span class={tagName}>#home</span>
+        </span>
+      </div>
+      <div class={mainPane}>
+        <span class={paneLabel}>today</span>
+        <span class={taskRow}>
+          <span class={checkbox} />
+          <span class={taskLabel}>Reply to Sam</span>
+        </span>
+        <span class={taskRow}>
+          <span class={checkbox} />
+          <span class={taskLabel}>Ship the release</span>
+        </span>
+        <span class={taskRow}>
+          <span class={checkbox} />
+          <span class={taskLabel}>Water the plants</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div class={phone}>
+    <span class={notch} />
+    <div class={screen}>
+      <span class={paneLabel}>life admin</span>
+      <span class={phoneTask}>
+        <span class={phoneCheck} />
+        <span class={phoneBar} />
+      </span>
+      <span class={phoneTask}>
+        <span class={phoneCheck} />
+        <span class={phoneBar} />
+      </span>
+      <span class={phoneTask}>
+        <span class={phoneCheck} />
+        <span class={phoneBar} />
+      </span>
+    </div>
+    <span class={caption}>on mobile</span>
+  </div>
+</div>

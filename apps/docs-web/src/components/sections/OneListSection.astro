@@ -3,46 +3,40 @@ import { css } from "styled-system/css";
 import { Filter, Layers, User, Zap } from "web-design-system/icons";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import {
-  cardBody,
-  glyph,
-  itemHeading,
-  tab,
-  tabIndex,
-  tabList,
-  tabPanel,
-  tabProgressBar,
-  tabProgressTrack,
-  tabsColumn,
-  tabsLayout,
-  tabSubtitle,
-  tabTitle,
-} from "./homeStyles";
+import AutoTabs from "../blocks/AutoTabs.astro";
+import AutoSortRows from "../illustrations/AutoSortRows.astro";
+import CenteredOnYou from "../illustrations/CenteredOnYou.astro";
 
 const areas = [
   {
     Icon: User,
+    Illustration: CenteredOnYou,
     title: "Centered on you",
     subtitle: "Work & personal",
-    body: "Work and personal tasks share one list that is yours; nothing assumes a team, and no one else's workflow shapes how you organize.",
+    description:
+      "Work and personal tasks share one list that is yours; nothing assumes a team, and no one else's workflow shapes how you organize.",
   },
   {
     Icon: Zap,
+    Illustration: AutoSortRows,
     title: "Sorted for you",
     subtitle: "Auto-sort",
-    body: "Importance, urgency, and deadline pressure order the list. There is no reminder to set — your next task floats to the top on its own.",
+    description:
+      "Importance, urgency, and deadline pressure order the list. There is no reminder to set — your next task floats to the top on its own.",
   },
   {
     Icon: Layers,
     title: "Tags and subtasks",
     subtitle: "Organize",
-    body: "Tags cut across projects, and subtasks with blocked-by chains show what you can start now and what is waiting.",
+    description:
+      "Tags cut across projects, and subtasks with blocked-by chains show what you can start now and what is waiting.",
   },
   {
     Icon: Filter,
     title: "Projects, areas, filters",
     subtitle: "Structure",
-    body: "Projects hold tasks, areas hold projects, and a tag filter saves a view. The tree is yours to arrange, drag-and-drop and all.",
+    description:
+      "Projects hold tasks, areas hold projects, and a tag filter saves a view. The tree is yours to arrange, drag-and-drop and all.",
   },
 ];
 ---
@@ -55,130 +49,7 @@ const areas = [
     align="left"
   />
 
-  <div class={`${tabsLayout} ${css({ mt: { base: "8", md: "12" } })}`} data-task-tabs>
-    <div class={tabsColumn}>
-      <div class={tabList} role="tablist" aria-orientation="vertical" aria-label="Task organization">
-        {
-          areas.map(({ title, subtitle }, index) => (
-            <button
-              type="button"
-              role="tab"
-              id={`task-tab-${index}`}
-              aria-controls={`task-panel-${index}`}
-              aria-selected={index === 0 ? "true" : "false"}
-              tabindex={index === 0 ? 0 : -1}
-              data-active={index === 0 ? "" : undefined}
-              class={tab}
-            >
-              <span class={tabIndex}>{String(index + 1).padStart(2, "0")}</span>
-              <span class={tabTitle} data-tab-title>
-                {title}
-              </span>
-              <span class={tabSubtitle}>{subtitle}</span>
-            </button>
-          ))
-        }
-      </div>
-      <div class={tabProgressTrack} aria-hidden="true">
-        <span class={tabProgressBar} data-tab-progress></span>
-      </div>
-    </div>
-
-    <div>
-      {
-        areas.map(({ Icon, title, body }, index) => (
-          <div
-            role="tabpanel"
-            id={`task-panel-${index}`}
-            aria-labelledby={`task-tab-${index}`}
-            tabindex="0"
-            hidden={index !== 0}
-            class={tabPanel}
-          >
-            <span class={glyph}>
-              <Icon size={22} />
-            </span>
-            <h3 class={itemHeading}>{title}</h3>
-            <p class={cardBody}>{body}</p>
-          </div>
-        ))
-      }
-    </div>
+  <div class={css({ mt: { base: "8", md: "12" } })}>
+    <AutoTabs label="Task organization" items={areas} />
   </div>
 </HomepageSection>
-
-<script>
-  const DURATION = 6000;
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  for (const root of document.querySelectorAll<HTMLElement>("[data-task-tabs]")) {
-    const tabs = Array.from(root.querySelectorAll<HTMLElement>('[role="tab"]'));
-    const panels = Array.from(root.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
-    const progress = root.querySelector<HTMLElement>("[data-tab-progress]");
-    if (tabs.length === 0) continue;
-
-    let active = 0;
-    let timer: number | undefined;
-    let animation: Animation | undefined;
-
-    const startProgress = () => {
-      if (!progress || reduceMotion) return;
-      animation?.cancel();
-      animation = progress.animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], {
-        duration: DURATION,
-        easing: "linear",
-      });
-    };
-
-    const select = (index: number) => {
-      active = index;
-      tabs.forEach((tab, i) => {
-        const on = i === index;
-        tab.setAttribute("aria-selected", String(on));
-        tab.tabIndex = on ? 0 : -1;
-        tab.toggleAttribute("data-active", on);
-      });
-      panels.forEach((panel, i) => {
-        panel.hidden = i !== index;
-      });
-      startProgress();
-    };
-
-    const stop = () => {
-      if (timer !== undefined) window.clearInterval(timer);
-      timer = undefined;
-      animation?.pause();
-    };
-
-    const start = () => {
-      if (reduceMotion) return;
-      stop();
-      animation?.play();
-      timer = window.setInterval(() => select((active + 1) % tabs.length), DURATION);
-    };
-
-    tabs.forEach((tab, index) => {
-      tab.addEventListener("click", () => {
-        select(index);
-        start();
-      });
-      tab.addEventListener("keydown", (event) => {
-        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-        event.preventDefault();
-        const delta = event.key === "ArrowDown" ? 1 : -1;
-        const next = (index + delta + tabs.length) % tabs.length;
-        select(next);
-        tabs[next]?.focus();
-        start();
-      });
-    });
-
-    root.addEventListener("mouseenter", stop);
-    root.addEventListener("mouseleave", start);
-    root.addEventListener("focusin", stop);
-    root.addEventListener("focusout", start);
-
-    select(0);
-    start();
-  }
-</script>

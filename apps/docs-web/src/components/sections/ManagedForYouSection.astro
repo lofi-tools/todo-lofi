@@ -1,0 +1,59 @@
+---
+import { css } from "styled-system/css";
+import { Box, Link, Sparkles, Users } from "web-design-system/icons";
+import HomepageSection from "./HomepageSection.astro";
+import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
+import AutoTabs from "../blocks/AutoTabs.astro";
+import AgentPane from "../illustrations/AgentPane.astro";
+import ExternalSync from "../illustrations/ExternalSync.astro";
+import SharedList from "../illustrations/SharedList.astro";
+import MiniAppList from "../illustrations/MiniAppList.astro";
+
+const options = [
+  {
+    Icon: Sparkles,
+    Illustration: AgentPane,
+    title: "The AI agent can manage your tasks",
+    subtitle: "Agent",
+    description:
+      "The agent works inside your lists: it splits a task into sub-tasks, sets up repeats, and moves work through its stages — and you decide when each step is done.",
+  },
+  {
+    Icon: Link,
+    Illustration: ExternalSync,
+    title: "An external app can manage your tasks",
+    subtitle: "Two-way sync",
+    description:
+      "Todoist syncs both ways: completing a task in either app updates the other. GitHub issues and projects map onto your lists through the same surface, in preview.",
+  },
+  {
+    Icon: Users,
+    Illustration: SharedList,
+    title: "Other people can manage your tasks",
+    subtitle: "Sharing",
+    description:
+      "Sharing lists and working together is not built yet. Taskstream is a personal tool today — one person, one list — so this is an open question rather than a plan.",
+  },
+  {
+    Icon: Box,
+    Illustration: MiniAppList,
+    title: "Built-in extensions can manage your tasks",
+    subtitle: "Mini-apps",
+    description:
+      "Mini-apps own a slice of your work with their own vocabulary and defaults. Travel turns a trip into a packing list and pre-departure chores, as ordinary tasks.",
+  },
+];
+---
+
+<HomepageSection index={5} label="managed for you">
+  <SectionHeading
+    eyebrow="Managed for you"
+    title="Your tasks, managed for you"
+    description="The list is yours, but you are not the only one who can work it. The agent, the apps around it, and the mini-apps that ship with it all act on the same tasks."
+    align="left"
+  />
+
+  <div class={css({ mt: { base: "8", md: "12" } })}>
+    <AutoTabs label="Who can manage your tasks" items={options} />
+  </div>
+</HomepageSection>

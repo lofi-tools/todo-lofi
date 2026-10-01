@@ -1,0 +1,44 @@
+---
+import { css } from "styled-system/css";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+const avatars = css({ display: "inline-flex", alignItems: "center", ml: "auto" });
+
+const avatar = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  w: "5",
+  h: "5",
+  ml: "-1.5",
+  borderRadius: "full",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.muted",
+  "&:first-child": { ml: "0" },
+});
+---
+
+<IllustrationFrame title="shared list">
+  <div class={rowHead}>
+    <span class={mono}>today</span>
+    <span class={chip}>planned</span>
+  </div>
+
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Book the venue</span>
+    <span class={avatars}>
+      <span class={avatar}>S</span>
+      <span class={avatar}>A</span>
+    </span>
+  </div>
+
+  <p class={caption}>Ava completed "Book the venue" — the same list, edited by someone else.</p>
+  <span class={mono}>not built yet · sharing is on the roadmap</span>
+</IllustrationFrame>

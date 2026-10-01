@@ -1,0 +1,53 @@
+---
+import { css } from "styled-system/css";
+import { Sparkles } from "web-design-system/icons";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { checkbox, chip, column, label, mono, row, rowHead } from "./styles";
+
+const subTask = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  pl: "5",
+  fontSize: "xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+});
+
+const activity = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "accent.text",
+});
+---
+
+<IllustrationFrame title="agent">
+  <div class={rowHead}>
+    <span class={mono}>working on</span>
+    <span class={chip}>agent</span>
+  </div>
+
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Ship the release</span>
+  </div>
+
+  <div class={column}>
+    <span class={subTask}>
+      <span class={checkbox} />Write the changelog
+    </span>
+    <span class={subTask}>
+      <span class={checkbox} />Cut the tag
+    </span>
+    <span class={subTask}>
+      <span class={checkbox} />Announce it
+    </span>
+  </div>
+
+  <span class={activity}>
+    <Sparkles size={11} /> added 3 sub-tasks
+  </span>
+</IllustrationFrame>

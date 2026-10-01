@@ -1,0 +1,28 @@
+---
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+---
+
+<IllustrationFrame title="mini-app · travel">
+  <div class={rowHead}>
+    <span class={mono}>trip · Lisbon</span>
+    <span class={chip}>#travel</span>
+  </div>
+
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Renew passport</span>
+  </div>
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Pack chargers and adapters</span>
+  </div>
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Book airport transfer</span>
+  </div>
+
+  <p class={caption}>
+    The Travel mini-app fills in the packing list and pre-departure chores.
+  </p>
+</IllustrationFrame>

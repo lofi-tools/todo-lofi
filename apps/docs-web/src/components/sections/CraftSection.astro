@@ -2,7 +2,7 @@
 import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import { cardBody } from "./homeStyles";
+import { band, bandLink, bandText, cardBody } from "./homeStyles";
 
 const claims = [
   {
@@ -26,14 +26,28 @@ const claims = [
 ];
 
 /**
+ * Section padding. The columns carry the bottom padding on desktop, so their
+ * separators run down to the closing card instead of stopping at the last line
+ * of text.
+ */
+const sectionBox = css({
+  px: { base: "5", md: "8" },
+  pt: { base: "12", md: "20" },
+  pb: { base: "12", md: "0" },
+});
+
+/**
  * Three hairline-separated columns, the way the rest of the homepage states a
- * feature: a mono kicker, one claim, and a paragraph of support. Column rules
- * only stand on desktop; narrow screens stack the claims with rules between.
+ * feature: a mono kicker, one claim, and a paragraph of support. The negative
+ * margin cancels the section padding so the block spans the section's full
+ * width and the first column reaches its left edge. Column rules only stand on
+ * desktop; narrow screens stack the claims with rules between.
  */
 const columns = css({
   display: "grid",
   gridTemplateColumns: { base: "1fr", md: "repeat(3, minmax(0, 1fr))" },
   mt: { base: "8", md: "12" },
+  mx: { base: "0", md: "-8" },
   borderTopWidth: "hairline",
   borderTopStyle: "solid",
   borderTopColor: "border.subtle",
@@ -43,7 +57,8 @@ const column = css({
   display: "flex",
   flexDirection: "column",
   gap: "3",
-  py: { base: "5", md: "8" },
+  pt: { base: "5", md: "8" },
+  pb: { base: "0", md: "20" },
   px: { base: "0", md: "8" },
   borderTopWidth: { base: "hairline", md: "0" },
   borderTopStyle: "solid",
@@ -51,9 +66,11 @@ const column = css({
   borderLeftWidth: { base: "0", md: "hairline" },
   borderLeftStyle: "solid",
   borderLeftColor: "border.subtle",
-  _first: { pt: { base: "0", md: "8" }, pl: "0", borderTopWidth: "0" },
-  _last: { pr: "0" },
+  _first: { pt: { base: "0", md: "8" }, borderTopWidth: "0" },
 });
+
+/** The offline card closes the section; the section's own padding resumes under it. */
+const offlineCard = css({ mt: { base: "8", md: "0" }, pb: { base: "0", md: "20" } });
 
 const kicker = css({
   display: "flex",
@@ -77,17 +94,12 @@ const columnTitle = css({
 });
 ---
 
-<HomepageSection index={9} label="built with care">
-  <SectionHeading
-    eyebrow="Built with care"
-    title="No web wrapper, no server in the middle"
-    description="Taskstream is a native desktop app: local-first storage, a GPU-accelerated Rust interface, and a keyboard path to every action."
-    align="left"
-  />
+<HomepageSection bare index={9} label="craft">
+  <div class={sectionBox}>
+    <SectionHeading eyebrow="Performant tech" title="Crafted with care" description="A native, fast, battery-friendly desktop app" align="left" />
 
-  <div class={columns}>
-    {
-      claims.map((claim) => (
+    <div class={columns}>
+      {claims.map((claim) => (
         <div class={column}>
           <span class={kicker}>
             <span class={kickerIndex}>{claim.index}</span>
@@ -96,7 +108,21 @@ const columnTitle = css({
           <h3 class={columnTitle}>{claim.title}</h3>
           <p class={cardBody}>{claim.body}</p>
         </div>
-      ))
-    }
+      ))}
+    </div>
+
+    <div class={offlineCard}>
+      <div class={band}>
+        <div class={bandText}>
+          <span class={css({ fontSize: "xl", fontWeight: "semibold", color: "fg.default" })}>Offline by default</span>
+          <p class={css({ m: "0", fontSize: "sm", color: "fg.muted", maxW: "640px" })}>
+            No account, no telemetry, and no server in the loop. Sync and the agent are opt-in, and everything else keeps working without a connection.
+          </p>
+        </div>
+        <a href="/docs/sync#offline" class={bandLink}>
+          How sync stays optional
+        </a>
+      </div>
+    </div>
   </div>
 </HomepageSection>

@@ -125,14 +125,9 @@ export const tabList = css({
 });
 
 export const tab = css({
-  display: "grid",
-  gridTemplateColumns: "auto 1fr",
-  alignItems: "baseline",
-  columnGap: "3",
-  rowGap: "1",
+  display: "flex",
+  flexDirection: "column",
   w: "100%",
-  px: "4",
-  py: "3",
   textAlign: "left",
   bg: "canvas",
   cursor: "pointer",
@@ -141,8 +136,24 @@ export const tab = css({
   borderLeftColor: "transparent",
   _hover: { bg: "surface.hover" },
   _focusVisible: { outline: "none", boxShadow: "focus" },
-  "&[data-active]": { bg: "surface.subtle", borderLeftColor: "accent" },
+  "&[data-active]": { bg: "surface.subtle", borderLeftColor: "accent.text" },
   "&[data-active] [data-tab-title]": { color: "fg.default" },
+  // The active tab grows to show its description, and each tab carries its own
+  // progress track so the bar always sits directly under the tab it belongs to.
+  "&[data-active] [data-tab-description]": { display: "block" },
+  "&[data-active] [data-tab-progress-track]": { display: "block" },
+});
+
+/** The tab's own grid, wrapped in the button so the progress track can sit
+ * flush against the button's bottom edge instead of inside this padding. */
+export const tabContent = css({
+  display: "grid",
+  gridTemplateColumns: "auto 1fr",
+  alignItems: "baseline",
+  columnGap: "3",
+  rowGap: "1",
+  px: "4",
+  py: "3",
 });
 
 export const tabIndex = css({
@@ -156,7 +167,19 @@ export const tabTitle = css({ fontSize: "md", fontWeight: "medium", color: "fg.m
 
 export const tabSubtitle = css({ fontSize: "xs", color: "fg.subtle" });
 
+export const tabDescription = css({
+  display: "none",
+  // Column two, so the description lines up with the title and subtitle
+  // rather than with the index gutter.
+  gridColumn: "2",
+  m: "0",
+  fontSize: "sm",
+  color: "fg.muted",
+  lineHeight: "relaxed",
+});
+
 export const tabProgressTrack = css({
+  display: "none",
   w: "100%",
   h: "2px",
   bg: "border.subtle",
@@ -167,7 +190,7 @@ export const tabProgressBar = css({
   display: "block",
   w: "100%",
   h: "2px",
-  bg: "accent",
+  bg: "accent.text",
   transformOrigin: "left",
   transform: "scaleX(0)",
 });
