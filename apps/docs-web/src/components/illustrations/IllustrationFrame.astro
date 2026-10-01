@@ -1,13 +1,18 @@
 ---
 import { css } from "styled-system/css";
-import { chromeBar, dot, windowSurface } from "./styles";
+import { dot, windowBar, windowSurface } from "./styles";
 
 interface Props {
   /** Name shown in the window bar; the bar is the illustration's chrome. */
   title?: string;
+  /**
+   * Whether the body pads itself. Turn it off for content that brings its own
+   * padding, such as a pane replica.
+   */
+  pad?: boolean;
 }
 
-const { title } = Astro.props;
+const { title, pad = true } = Astro.props;
 
 const root = css({
   display: "flex",
@@ -19,26 +24,19 @@ const root = css({
   overflow: "hidden",
 });
 
-const bar = css({
-  display: "flex",
-  alignItems: "center",
-  gap: "1.5",
-  px: "3",
-  h: "7",
-});
-
 const titleStyle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
 
-const body = css({ display: "flex", flexDirection: "column", gap: "2", p: "3", flex: "1" });
+const body = css({ display: "flex", flexDirection: "column", gap: "2", flex: "1" });
+const paddedBody = css({ p: "3" });
 ---
 
 <div class={`${root} ${windowSurface}`}>
-  <div class={`${bar} ${chromeBar}`}>
+  <div class={windowBar}>
     <span class={dot} />
     <span class={dot} />
     {title && <span class={titleStyle}>{title}</span>}
   </div>
-  <div class={body}>
+  <div class={pad ? `${body} ${paddedBody}` : body}>
     <slot />
   </div>
 </div>

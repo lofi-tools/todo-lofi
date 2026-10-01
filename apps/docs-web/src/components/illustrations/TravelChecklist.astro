@@ -1,0 +1,30 @@
+---
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+const items = [
+  "Passport and visas",
+  "Chargers and adapters",
+  "Walking shoes",
+  "Book the airport transfer",
+];
+---
+
+<IllustrationFrame title="mini-app · travel">
+  <div class={rowHead}>
+    <span class={mono}>trip · Lisbon</span>
+    <span class={chip}>#travel</span>
+  </div>
+
+  <span class={mono}>checklist</span>
+  {
+    items.map((item) => (
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>{item}</span>
+      </div>
+    ))
+  }
+
+  <p class={caption}>Give it a trip and it writes the list as ordinary tasks.</p>
+</IllustrationFrame>

@@ -122,7 +122,7 @@ test.describe('landing page', () => {
     expect(response?.ok()).toBeTruthy()
     await expect(page.locator('h1').first()).toBeVisible()
     await expect(page.locator('header nav[aria-label="Main"] a[aria-current="page"]')).toHaveText(
-      /taskstream/,
+      /taskstream/i,
     )
     expect(errors).toEqual([])
   })
@@ -147,24 +147,20 @@ test.describe('landing page', () => {
   })
 
   // The automations pane is a replica, not a bitmap: it has to be built and
-  // styled on both pages that illustrate with it.
-  for (const [where, path] of [
-    ['landing page', '/'],
-    ['overview', '/docs'],
-  ] as const) {
-    test(`the automations pane illustration renders on the ${where}`, async ({ page }) => {
-      await page.goto(path)
+  // styled on the overview, which is the only page that still illustrates with
+  // it — the landing page draws the workflow as a diagram instead.
+  test('the automations pane illustration renders on the overview', async ({ page }) => {
+    await page.goto('/docs')
 
-      await expect(page.getByText('Branches to clean up')).toBeVisible()
+    await expect(page.getByText('Branches to clean up')).toBeVisible()
 
-      const badge = page.getByText('Round 2 · Implement')
-      await expect(badge).toBeVisible()
-      // Present is not enough: the design system's recipe class has to have
-      // reached it, which shows up as the tone's tinted background.
-      const background = await badge.evaluate((node) => getComputedStyle(node).backgroundColor)
-      expect(background).not.toBe('rgba(0, 0, 0, 0)')
-    })
-  }
+    const badge = page.getByText('Round 2 · Implement')
+    await expect(badge).toBeVisible()
+    // Present is not enough: the design system's recipe class has to have
+    // reached it, which shows up as the tone's tinted background.
+    const background = await badge.evaluate((node) => getComputedStyle(node).backgroundColor)
+    expect(background).not.toBe('rgba(0, 0, 0, 0)')
+  })
 })
 
 // `/downloads` and `/roadmap` share the landing page's header, which marks the

@@ -3,52 +3,77 @@ import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import { Badge } from "web-design-system/components";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import AutomationsPanel from "../panes/AutomationsPanel.astro";
+import IllustrationCycle from "../blocks/IllustrationCycle.astro";
+import BirthdayReminders from "../illustrations/BirthdayReminders.astro";
+import CodingWorkflow from "../illustrations/CodingWorkflow.astro";
+import JobTracking from "../illustrations/JobTracking.astro";
+import TravelChecklist from "../illustrations/TravelChecklist.astro";
+import WorkflowDiagram from "../illustrations/WorkflowDiagram.astro";
 import { extensionCards } from "../../../data/landing";
-import { card, cardTitle, cardHeading, cardBody, cardLink, panel } from "./homeStyles";
+import { cardBody, cardHeading, cardLink, cardTitle, item, subGrid } from "./homeStyles";
+
+const [miniApps, workflows, coding] = extensionCards;
+
+const examples = [
+  { title: "travel", Illustration: TravelChecklist },
+  { title: "birthdays", Illustration: BirthdayReminders },
+  { title: "jobs", Illustration: JobTracking },
+];
+
+/** The sub-section's ordinal, in the same mono voice as the section markers. */
+const ordinal = css({ fontFamily: "mono", fontSize: "2xs", color: "accent.text" });
+
+/** The nested card under the workflows illustration. */
+const secondary = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  pt: "4",
+  borderTopWidth: "hairline",
+  borderTopStyle: "solid",
+  borderTopColor: "border.subtle",
+});
+
+const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default", m: "0" });
 ---
 
 <HomepageSection index={4} label="extensions">
-      <SectionHeading
-        eyebrow="Extensions"
-        title="Apps that fit your workflows"
-        description="Beyond the list, Taskstream ships apps that own a slice of your work. Underneath they're ordinary tasks — the value is their vocabulary and defaults, not a private store."
-        align="left"
-      />
+  <SectionHeading
+    eyebrow="Extensions"
+    title="Apps that fit your workflows"
+    description="Beyond the list, Taskstream ships apps that own a slice of your work. Underneath they're ordinary tasks — the value is their vocabulary and defaults, not a private store."
+    align="left"
+  />
 
-      <div
-        class={css({
-          mt: { base: "8", md: "12" },
-          display: "grid",
-          gridTemplateColumns: { base: "1fr", lg: "minmax(0, 1fr) minmax(0, 1.15fr)" },
-          gap: "4",
-          alignItems: "start",
-        })}
-      >
-        <div class={css({ display: "flex", flexDirection: "column", gap: "4" })}>
-          {extensionCards.map((entry) => (
-            <div class={card}>
-              <div class={cardTitle}>
-                <h3 class={cardHeading}>{entry.name}</h3>
-                <Badge tone={entry.tone} variant="subtle">
-                  {entry.badge}
-                </Badge>
-              </div>
-              <p class={cardBody}>{entry.body}</p>
-              <a href={entry.href} class={cardLink}>
-                {entry.linkLabel} →
-              </a>
-            </div>
-          ))}
-        </div>
-
-        <div class={css({ display: "flex", flexDirection: "column", gap: "3" })}>
-          <div class={panel}>
-            <AutomationsPanel />
-          </div>
-          <p class={css({ m: "0", fontSize: "xs", color: "fg.subtle" })}>
-            The automations pane: a recipe, its runs with the phase each has reached, and the branches a coding run leaves behind.
-          </p>
-        </div>
+  <div class={`${subGrid} ${css({ mt: { base: "8", md: "12" } })}`}>
+    <div class={item}>
+      <div class={cardTitle}>
+        <span class={ordinal}>01</span>
+        <h3 class={cardHeading}>{miniApps.name}</h3>
       </div>
-    </HomepageSection>
+      <p class={cardBody}>{miniApps.body}</p>
+      <a href={miniApps.href} class={cardLink}>{miniApps.linkLabel} →</a>
+      <IllustrationCycle label="Mini-app examples" items={examples} />
+    </div>
+
+    <div class={item}>
+      <div class={cardTitle}>
+        <span class={ordinal}>02</span>
+        <h3 class={cardHeading}>{workflows.name}</h3>
+      </div>
+      <p class={cardBody}>{workflows.body}</p>
+      <a href={workflows.href} class={cardLink}>{workflows.linkLabel} →</a>
+      <WorkflowDiagram />
+
+      <div class={secondary}>
+        <div class={cardTitle}>
+          <h4 class={secondaryHeading}>{coding.name}</h4>
+          <Badge tone={coding.tone} variant="subtle">{coding.badge}</Badge>
+        </div>
+        <p class={cardBody}>{coding.body}</p>
+        <a href={coding.href} class={cardLink}>{coding.linkLabel} →</a>
+        <CodingWorkflow />
+      </div>
+    </div>
+  </div>
+</HomepageSection>

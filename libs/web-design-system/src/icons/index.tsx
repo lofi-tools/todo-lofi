@@ -309,6 +309,13 @@ export const Lock = (props: IconProps) => (
   </Svg>
 )
 
+/** A project directory, matching the folder glyph the app lists them with. */
+export const Folder = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2.5h8A1.5 1.5 0 0 1 21 9v9.5A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5Z" />
+  </Svg>
+)
+
 /** Neutral placeholder mark. Deliberately not any real company's logo. */
 export const LogoMark = (props: IconProps) => (
   <Svg {...props}>

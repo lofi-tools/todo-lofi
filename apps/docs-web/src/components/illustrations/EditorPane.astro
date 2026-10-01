@@ -1,0 +1,94 @@
+---
+import { css } from "styled-system/css";
+import { dot, windowBar, windowSurface } from "./styles";
+
+interface Segment {
+  /** Bar width, in pixels. */
+  w: number;
+  tone: "accent" | "danger" | "success" | "info" | "muted";
+}
+
+interface Props {
+  /** File name shown in the editor's bar. */
+  name: string;
+  /** Code lines to render; the body clips whatever does not fit. */
+  lines?: number;
+}
+
+const { name, lines = 10 } = Astro.props;
+
+/** Cycled line shapes, so no two adjacent lines read the same. */
+const patterns: Segment[][] = [
+  [{ w: 34, tone: "accent" }, { w: 22, tone: "muted" }],
+  [{ w: 20, tone: "muted" }, { w: 64, tone: "success" }, { w: 22, tone: "danger" }],
+  [{ w: 46, tone: "info" }, { w: 30, tone: "muted" }],
+  [{ w: 58, tone: "success" }, { w: 18, tone: "accent" }],
+];
+
+const rows = Array.from({ length: lines }, (_, index) => patterns[index % patterns.length]);
+
+const fileName = css({ ml: "1", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+
+const body = css({
+  flex: "1",
+  minH: "0",
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  p: "2",
+  overflow: "hidden",
+  backgroundImage:
+    "linear-gradient(170deg, token(colors.surface.subtle) 0%, token(colors.canvas) 100%)",
+});
+
+const codeLine = css({ display: "flex", alignItems: "center", gap: "1.5" });
+const gutter = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  w: "3",
+  textAlign: "right",
+  flexShrink: "0",
+});
+const token = css({ h: "1.5", borderRadius: "full" });
+
+const tint = {
+  accent: css({ bg: "accent.text" }),
+  danger: css({ bg: "danger" }),
+  success: css({ bg: "success" }),
+  info: css({ bg: "info" }),
+  muted: css({ bg: "border.strong" }),
+};
+
+/** The editor window: a title bar with the open file, and a clipped code body. */
+const root = css({
+  flex: "1",
+  minW: "0",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  overflow: "hidden",
+});
+---
+
+<div class={`${root} ${windowSurface}`}>
+  <div class={windowBar}>
+    <span class={dot} />
+    <span class={fileName}>{name}</span>
+  </div>
+  <div class={body}>
+    {
+      rows.map((segments, index) => (
+        <div class={codeLine}>
+          <span class={gutter}>{index + 1}</span>
+          {segments.map((segment) => (
+            <span class={`${token} ${tint[segment.tone]}`} style={{ width: `${segment.w}px` }} />
+          ))}
+        </div>
+      ))
+    }
+  </div>
+</div>

@@ -1,0 +1,95 @@
+---
+import { css } from "styled-system/css";
+import { startAutoSwitch } from "./autoSwitch";
+
+interface Item {
+  /** Chip label for the example. */
+  title: string;
+  /** The illustration, taken as a component. */
+  Illustration: any;
+}
+
+interface Props {
+  /** Accessible name for the cycle's tab list. */
+  label: string;
+  items: Item[];
+}
+
+const { label, items } = Astro.props;
+
+const idBase = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+const root = css({ display: "flex", flexDirection: "column", gap: "3" });
+
+const rail = css({ display: "flex", flexWrap: "wrap", gap: "2" });
+
+const railButton = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  px: "2",
+  py: "1",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  color: "fg.subtle",
+  cursor: "pointer",
+  _hover: { bg: "surface.hover", color: "fg.default" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+  "&[data-active]": { borderColor: "accent.text", color: "accent.text", bg: "surface.subtle" },
+});
+
+// The floor keeps the illustrations from shifting the page as they cycle; the
+// tallest example decides the height beyond it.
+const panel = css({
+  display: "flex",
+  flexDirection: "column",
+  minH: "58",
+  "&[hidden]": { display: "none" },
+});
+---
+
+<div class={root} data-illustration-cycle>
+  <div class={rail} role="tablist" aria-label={label}>
+    {
+      items.map(({ title }, index) => (
+        <button
+          type="button"
+          role="tab"
+          id={`${idBase}-tab-${index}`}
+          aria-controls={`${idBase}-panel-${index}`}
+          aria-selected={index === 0 ? "true" : "false"}
+          tabindex={index === 0 ? 0 : -1}
+          data-active={index === 0 ? "" : undefined}
+          class={railButton}
+        >
+          {title}
+        </button>
+      ))
+    }
+  </div>
+
+  <div>
+    {
+      items.map(({ Illustration }, index) => (
+        <div
+          role="tabpanel"
+          id={`${idBase}-panel-${index}`}
+          aria-labelledby={`${idBase}-tab-${index}`}
+          hidden={index !== 0}
+          class={panel}
+        >
+          <Illustration />
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  import { startAutoSwitch } from "./autoSwitch";
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-illustration-cycle]")) {
+    startAutoSwitch(root);
+  }
+</script>

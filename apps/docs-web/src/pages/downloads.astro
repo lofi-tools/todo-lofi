@@ -95,9 +95,13 @@ const card = css({
   bg: "surface.subtle",
 });
 
+/** A card CI does not build: no fill, a hairline border, and dimmed labels. */
+const cardOff = css({ borderColor: "border.subtle", bg: "canvas" });
+
 const cardHead = css({ display: "flex", alignItems: "baseline", gap: "2", flexWrap: "wrap" });
 
 const platformLabel = css({ fontSize: "md", fontWeight: "semibold", color: "fg.default" });
+const platformLabelOff = css({ color: "fg.muted" });
 
 const noBuilds = css({ fontSize: "xs", color: "fg.subtle" });
 
@@ -144,7 +148,10 @@ const formatLink = css({
   _focusVisible: { outline: "none", boxShadow: "focus" },
 });
 
-/** A combination CI does not build: shown, but inert and muted. */
+/**
+ * A combination CI does not build: shown, but inert and well below the
+ * contrast of a live link, so the card reads as unavailable at a glance.
+ */
 const formatOff = css({
   display: "inline-flex",
   alignItems: "center",
@@ -162,6 +169,7 @@ const formatOff = css({
   color: "fg.subtle",
   whiteSpace: "nowrap",
   cursor: "not-allowed",
+  opacity: "0.45",
 });
 
 const codeBlock = css({
@@ -209,6 +217,50 @@ const installTab = css({
   "&[data-active]": { color: "fg.default", borderBottomColor: "accent" },
 });
 
+/** The two segmented controls that narrow the steps below them. */
+const installControls = css({
+  display: "flex",
+  flexWrap: "wrap",
+  gap: "3",
+  mt: "5",
+});
+
+const controlGroup = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.5",
+  p: "0.5",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+});
+
+const option = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+  h: "7",
+  px: "3",
+  borderRadius: "xs",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  cursor: "pointer",
+  _hover: { color: "fg.default", bg: "surface.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+  "&[data-active]": { color: "fg.default", bg: "surface.active" },
+  _disabled: {
+    opacity: "0.45",
+    cursor: "not-allowed",
+    _hover: { color: "fg.muted", bg: "transparent" },
+  },
+});
+
+const optionNote = css({ color: "fg.subtle" });
+
 const installPanel = css({
   mt: "6",
   p: { base: "5", md: "6" },
@@ -224,20 +276,6 @@ const installPanel = css({
 /** Row order: the arches of the first platform, then any the others add. */
 const archOrder = [...new Set(PLATFORMS.flatMap((platform) => ARCHES[platform.id].map((arch) => arch.id)))];
 
-const notes = [
-  {
-    platform: "macOS",
-    detail: "The bundle is unsigned, so the first launch needs System Settings → Privacy & Security → Open Anyway. Dragging the app into Applications is the usual move.",
-  },
-  {
-    platform: "Linux",
-    detail: "The AppImage needs no install step — make it executable and run it. The .deb installs under /usr, and the tarball unpacks anywhere.",
-  },
-  {
-    platform: "Windows",
-    detail: "Unzip the archive and run taskstream.exe. SmartScreen may warn about the unsigned build the first time: More info, then Run anyway.",
-  },
-];
 ---
 
 <Base
@@ -298,9 +336,11 @@ const notes = [
               const arch = ARCHES[platform.id].find((candidate) => candidate.id === archId);
               if (!arch) return null;
               return (
-                <div class={card}>
+                <div class={arch.available ? card : `${card} ${cardOff}`}>
                   <div class={cardHead}>
-                    <span class={platformLabel}>{platform.label}</span>
+                    <span class={arch.available ? platformLabel : `${platformLabel} ${platformLabelOff}`}>
+                      {platform.label}
+                    </span>
                     {primaryArch(platform.id).id === arch.id && (
                       <span data-download-detected={platform.id} hidden class={detectedBadge}>
                         this machine
@@ -309,7 +349,9 @@ const notes = [
                     <span class={archBadge}>{arch.label}</span>
                     {!arch.available && <span class={noBuilds}>no builds yet</span>}
                   </div>
-                  <p class={css({ m: "0", fontSize: "xs", color: "fg.subtle" })}>{platform.requirement}</p>
+                  {platform.requirement && (
+                    <p class={css({ m: "0", fontSize: "xs", color: "fg.subtle" })}>{platform.requirement}</p>
+                  )}
                   <div class={formatList}>
                     {FORMATS[platform.id].map((format) =>
                       arch.available ? (
@@ -380,32 +422,53 @@ const notes = [
               hidden={index !== 0}
               class={installPanel}
             >
+              <div class={installControls}>
+                <div
+                  role="group"
+                  aria-label={`${platform.label} architecture`}
+                  class={controlGroup}
+                >
+                  {ARCHES[platform.id].map((arch) => (
+                    <button
+                      type="button"
+                      data-install-arch-option={arch.id}
+                      data-active={primaryArch(platform.id).id === arch.id ? "" : undefined}
+                      disabled={!arch.available}
+                      class={option}
+                      title={arch.available ? undefined : `No ${platform.label} ${arch.label} builds yet`}
+                    >
+                      {arch.label}
+                      {!arch.available && <span class={optionNote}>no builds</span>}
+                    </button>
+                  ))}
+                </div>
+
+                <div role="group" aria-label={`${platform.label} install method`} class={controlGroup}>
+                  <button type="button" data-install-format-option="all" data-active class={option}>
+                    all
+                  </button>
+                  {FORMATS[platform.id].map((format) => (
+                    <button type="button" data-install-format-option={format.id} class={option}>
+                      {format.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <Prose>
-                <InstallSteps platform={platform.id} />
+                <InstallSteps platform={platform.id} arches={ARCHES[platform.id].map((arch) => arch.id)} />
               </Prose>
             </div>
           ))}
         </div>
-      </section>
 
-      <section class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
-        <div class={css({ p: { base: "5", md: "6" }, borderRadius: "lg", borderWidth: "hairline", borderStyle: "solid", borderColor: "border", bg: "surface.subtle" })}>
-          <h2 class={css({ fontSize: "md", fontWeight: "semibold", color: "fg.default", m: "0", mb: "3" })}>Before you run it</h2>
-          <ul class={css({ m: "0", pl: "5", display: "flex", flexDirection: "column", gap: "2" })}>
-            {notes.map((note) => (
-              <li class={css({ fontSize: "sm", color: "fg.muted", lineHeight: "relaxed" })}>
-                <span class={css({ fontWeight: "medium", color: "fg.default" })}>{note.platform}</span>
-                {" — "}
-                {note.detail}
-              </li>
-            ))}
-          </ul>
-          <p class={css({ m: "0", mt: "4", fontSize: "sm", color: "fg.muted" })}>
-            <a href="/docs/install" class={inlineLink}>
-              Full install instructions →
-            </a>
-          </p>
-        </div>
+        <p class={css({ m: "0", mt: "6", fontSize: "sm", color: "fg.muted" })}>
+          The same steps as the{" "}
+          <a href="/docs/install" class={inlineLink}>
+            install guide
+          </a>
+          , which also covers building from source.
+        </p>
       </section>
 
       <section class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
@@ -469,6 +532,42 @@ cargo run -p taskstream-desktop`}</code></pre>
         tabs[next]?.focus();
       });
     });
+
+    // The two segmented controls narrow the steps to the chosen architecture
+    // and install method. Every step carries the values it belongs to; a step
+    // without an attribute belongs to all of them.
+    const applyChoices = (panel: HTMLElement) => {
+      const arch = panel.querySelector<HTMLElement>("[data-install-arch-option][data-active]")
+        ?.dataset.installArchOption;
+      const format =
+        panel.querySelector<HTMLElement>("[data-install-format-option][data-active]")?.dataset
+          .installFormatOption ?? "all";
+
+      for (const step of panel.querySelectorAll<HTMLElement>("[data-install-arch], [data-install-format]")) {
+        const archMatches = !step.dataset.installArch || step.dataset.installArch === arch;
+        const formatMatches =
+          format === "all" || !step.dataset.installFormat || step.dataset.installFormat === format;
+        step.hidden = !(archMatches && formatMatches);
+      }
+    };
+
+    for (const panel of panels) {
+      for (const choice of panel.querySelectorAll<HTMLButtonElement>(
+        "[data-install-arch-option], [data-install-format-option]",
+      )) {
+        choice.addEventListener("click", () => {
+          if (choice.disabled) return;
+          const group = choice.parentElement;
+          if (!group) return;
+          for (const sibling of group.querySelectorAll("[data-active]")) {
+            sibling.removeAttribute("data-active");
+          }
+          choice.setAttribute("data-active", "");
+          applyChoices(panel);
+        });
+      }
+      applyChoices(panel);
+    }
 
     const detected = tabs.findIndex((tab) => tab.dataset.installPlatform === platform);
     select(detected >= 0 ? detected : 0);

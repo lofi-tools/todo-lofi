@@ -1,35 +1,40 @@
 ---
 import CodeBlock from "web-design-system/astro/product/CodeBlock.astro";
-import { FORMATS, RELEASES_URL } from "../../../data/downloads";
-import type { PlatformId } from "../../../data/downloads";
+import { FORMATS, RELEASES_URL, archToken, primaryArch } from "../../../data/downloads";
+import type { FormatId, PlatformId } from "../../../data/downloads";
 
 interface Props {
   platform: PlatformId;
+  /**
+   * Architectures to write into the file names. Providing more than one
+   * renders a copy of each architecture-specific block, tagged so the caller
+   * can filter between them; omitted, the blocks are written once for the
+   * platform's primary architecture.
+   */
+  arches?: string[];
 }
 
-/**
- * One platform's install steps, shared by the install guide and the downloads
- * page's install tabs so the two cannot drift. Callers supply the surrounding
- * heading and prose styles.
- */
-const { platform } = Astro.props;
+const { platform, arches } = Astro.props;
 
-const appimage = `# Make it executable and run it; there is no install step.
-chmod +x taskstream-<version>-linux-x86_64.AppImage
-./taskstream-<version>-linux-x86_64.AppImage`;
+const archIds = arches?.length ? arches : [primaryArch(platform).id];
 
-const debian = `# Installs into /usr; the package carries its own libraries.
-sudo apt install ./taskstream-<version>-linux-x86_64.deb
-taskstream`;
-
-const tarball = `tar -xzf taskstream-<version>-linux-x86_64.tar.gz
-./taskstream/usr/bin/taskstream`;
+/** The steps that differ by architecture, keyed by format. */
+const linuxScripts: Partial<Record<FormatId, string>> = {
+  appimage: `# Make it executable and run it; there is no install step.
+chmod +x taskstream-<version>-linux-<arch>.AppImage
+./taskstream-<version>-linux-<arch>.AppImage`,
+  deb: `# Installs into /usr; the package carries its own libraries.
+sudo apt install ./taskstream-<version>-linux-<arch>.deb
+taskstream`,
+  tarball: `tar -xzf taskstream-<version>-linux-<arch>.tar.gz
+./taskstream/usr/bin/taskstream`,
+};
 ---
 
 <ul>
   {
     FORMATS[platform].map((format) => (
-      <li>
+      <li data-install-format={format.id}>
         <a data-download data-platform={platform} data-format={format.id} href={RELEASES_URL}>
           <code data-download-name>{format.label}</code>
         </a>
@@ -62,9 +67,23 @@ const tarball = `tar -xzf taskstream-<version>-linux-x86_64.tar.gz
         The AppImage runs without installing anything. The other two fit the usual layouts: the{" "}
         <code>.deb</code> installs under <code>/usr</code>, and the tarball unpacks anywhere.
       </p>
-      <CodeBlock filename="terminal" code={appimage} showLineNumbers={false} />
-      <CodeBlock filename="terminal" code={debian} showLineNumbers={false} />
-      <CodeBlock filename="terminal" code={tarball} showLineNumbers={false} />
+      {
+        FORMATS.linux.map((format) =>
+          archIds.map((arch) => (
+            <div
+              data-install-format={format.id}
+              data-install-arch={arch}
+              hidden={arch !== primaryArch("linux").id}
+            >
+              <CodeBlock
+                filename="terminal"
+                code={(linuxScripts[format.id] ?? "").replaceAll("<arch>", archToken("linux", arch))}
+                showLineNumbers={false}
+              />
+            </div>
+          )),
+        )
+      }
     </>
   )
 }
@@ -75,7 +94,8 @@ const tarball = `tar -xzf taskstream-<version>-linux-x86_64.tar.gz
       <li>Download the <code>.zip</code> and extract it.</li>
       <li>
         Run <code>taskstream.exe</code>. SmartScreen may warn about an unsigned build the first time:
-        choose <strong>More info</strong>, then <strong>Run anyway</strong>.
+        choose <strong>More info</strong>, then <strong>Run anyway</strong>. The archive is
+        self-contained — nothing to install and nothing to clean up.
       </li>
     </ol>
   )

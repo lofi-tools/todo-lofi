@@ -1,60 +1,112 @@
 ---
 import { css } from "styled-system/css";
-import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption, checkbox, label, mono, row } from "./styles";
+import AppMockup from "./AppMockup.astro";
+import {
+  backdropSurface,
+  label,
+  paneLabel,
+  threadLayer,
+  threadNode,
+  threadPath,
+  windowSurface,
+} from "./styles";
 
-const panes = css({
-  display: "grid",
-  gridTemplateColumns: { base: "1fr", md: "1fr auto 1fr" },
-  alignItems: "center",
-  gap: "2",
+/**
+ * Two-way sync: a Todoist list beside the Taskstream app, with a loose thread
+ * drawn from each synced project to the tag it maps to. The external list sits
+ * on the left, so the threads leave the tag rows straight into it instead of
+ * crossing the app's main pane.
+ */
+const root = css({
+  position: "relative",
+  display: "flex",
+  flexDirection: { base: "column", md: "row" },
+  gap: "3",
+  alignItems: "stretch",
+  p: "3",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
 });
 
-const pane = css({
+const tags = [
+  { name: "#inbox" },
+  { name: "#work", thread: "work" },
+  { name: "#life admin", thread: "life" },
+  { name: "#home" },
+];
+
+/** The external list: a tall panel that centers its projects beside the app. */
+const external = css({
   display: "flex",
   flexDirection: "column",
-  gap: "2",
+  justifyContent: "center",
+  gap: "1.5",
+  flexShrink: "0",
+  w: { base: "full", md: "132px" },
   p: "2",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const projectRow = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  px: "2",
+  py: "2",
   borderRadius: "md",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border",
-  bgGradient: "to-b",
-  gradientFrom: "surface.subtle",
-  gradientTo: "canvas",
+  borderColor: "border.strong",
+  backgroundImage:
+    "linear-gradient(160deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 55%, token(colors.surface.subtle) 100%)",
 });
 
-const swap = css({ fontFamily: "mono", fontSize: "lg", color: "accent.text", textAlign: "center" });
+const projectMark = css({
+  w: "2.5",
+  h: "2.5",
+  flexShrink: "0",
+  borderRadius: "xs",
+  bg: "accent.text",
+  opacity: "0.8",
+});
 ---
 
-<IllustrationFrame title="two-way sync">
-  <div class={panes}>
-    <div class={pane}>
-      <span class={mono}>Taskstream</span>
-      <div class={row}>
-        <span class={checkbox} />
-        <span class={label}>Ship the release</span>
-      </div>
-      <div class={row}>
-        <span class={checkbox} />
-        <span class={label}>Reply to Sam</span>
-      </div>
-    </div>
-
-    <span class={swap} aria-hidden="true">⇄</span>
-
-    <div class={pane}>
-      <span class={mono}>Todoist</span>
-      <div class={row}>
-        <span class={checkbox} />
-        <span class={label}>Ship the release</span>
-      </div>
-      <div class={row}>
-        <span class={checkbox} />
-        <span class={label}>Reply to Sam</span>
-      </div>
-    </div>
+<div class={`${root} ${backdropSurface}`} data-threads>
+  <div class={`${external} ${windowSurface}`}>
+    <span class={paneLabel}>todoist</span>
+    <span class={projectRow} data-thread-to="work">
+      <span class={projectMark} />
+      <span class={label}>work</span>
+    </span>
+    <span class={projectRow} data-thread-to="life">
+      <span class={projectMark} />
+      <span class={label}>life admin</span>
+    </span>
   </div>
 
-  <p class={caption}>Completing a task on either side updates the other.</p>
-</IllustrationFrame>
+  <AppMockup tags={tags} taskRows={4} />
+
+  <svg class={threadLayer} data-thread-svg aria-hidden="true">
+    <g data-thread="work" data-from="work" data-to="work">
+      <path class={threadPath} data-thread-path />
+      <circle class={threadNode} r="2.5" data-thread-node />
+      <circle class={threadNode} r="2.5" data-thread-node />
+    </g>
+    <g data-thread="life" data-from="life" data-to="life">
+      <path class={threadPath} data-thread-path />
+      <circle class={threadNode} r="2.5" data-thread-node />
+      <circle class={threadNode} r="2.5" data-thread-node />
+    </g>
+  </svg>
+</div>
+
+<script>
+  import { observeThreads } from "./threads";
+
+  observeThreads();
+</script>

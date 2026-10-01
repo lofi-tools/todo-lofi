@@ -2,7 +2,8 @@
 import { css } from "styled-system/css";
 import AppMockup from "./AppMockup.astro";
 import MobileMockup from "./MobileMockup.astro";
-import { backdropSurface, paneLabel, windowSurface } from "./styles";
+import PlaceholderList from "./PlaceholderList.astro";
+import { backdropSurface, paneLabel, threadLayer, threadNode, threadPath, windowSurface } from "./styles";
 
 /**
  * A cut-down desktop list for the "centered on you" story: the tags navbar
@@ -30,8 +31,6 @@ const tags = [
   { name: "#home" },
 ];
 
-const tasks = ["Reply to Sam", "Ship the release", "Water the plants"];
-
 /**
  * The external surfaces sit in a column beside the app, targets for the
  * threads. Fixed width so the handset keeps its proportions; centered when the
@@ -56,90 +55,24 @@ const companyList = css({
   borderStyle: "solid",
   borderColor: "border.strong",
 });
-
-const placeholderRow = css({ display: "flex", alignItems: "center", gap: "1.5" });
-
-const placeholderCheck = css({
-  w: "2",
-  h: "2",
-  flexShrink: "0",
-  borderRadius: "xs",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.strong",
-});
-
-const placeholderBar = css({ flex: "1", h: "1.5", borderRadius: "full", bg: "border.strong" });
-
-/**
- * A full-bleed overlay for the connector threads; the script draws the paths.
- * Only shown in the side-by-side layout — stacked, the targets sit below the
- * app and a thread would loop back across it.
- */
-const threadLayer = css({
-  position: "absolute",
-  inset: "0",
-  w: "full",
-  h: "full",
-  overflow: "visible",
-  pointerEvents: "none",
-  zIndex: "raised",
-  display: { base: "none", md: "block" },
-});
-
-const threadPath = css({
-  fill: "none",
-  stroke: "accent.text",
-  strokeWidth: "1.5",
-  strokeLinecap: "round",
-  opacity: "0.55",
-});
-
-const threadNode = css({ fill: "accent.text", opacity: "0.75" });
 ---
 
 <div class={`${root} ${backdropSurface}`} data-threads>
   <div class={side}>
     <div class={`${companyList} ${windowSurface}`} data-thread-to="company">
       <span class={paneLabel}>company's tasklist</span>
-      <span class={placeholderRow}>
-        <span class={placeholderCheck} />
-        <span class={placeholderBar} />
-      </span>
-      <span class={placeholderRow}>
-        <span class={placeholderCheck} />
-        <span class={placeholderBar} />
-      </span>
+      <PlaceholderList rows={2} />
     </div>
 
     <div data-thread-to="mobile">
       <MobileMockup caption="on mobile">
         <span class={paneLabel}>life admin</span>
-        <span class={placeholderRow}>
-          <span class={placeholderCheck} />
-          <span class={placeholderBar} />
-        </span>
-        <span class={placeholderRow}>
-          <span class={placeholderCheck} />
-          <span class={placeholderBar} />
-        </span>
-        <span class={placeholderRow}>
-          <span class={placeholderCheck} />
-          <span class={placeholderBar} />
-        </span>
-        <span class={placeholderRow}>
-          <span class={placeholderCheck} />
-          <span class={placeholderBar} />
-        </span>
-        <span class={placeholderRow}>
-          <span class={placeholderCheck} />
-          <span class={placeholderBar} />
-        </span>
+        <PlaceholderList rows={5} spread />
       </MobileMockup>
     </div>
   </div>
 
-  <AppMockup tags={tags} tasks={tasks} />
+  <AppMockup tags={tags} taskRows={4} />
 
   <svg class={threadLayer} data-thread-svg aria-hidden="true">
     <g data-thread="work" data-from="work" data-to="company">
@@ -156,54 +89,7 @@ const threadNode = css({ fill: "accent.text", opacity: "0.75" });
 </div>
 
 <script>
-  const drawThreads = () => {
-    for (const root of document.querySelectorAll<HTMLElement>("[data-threads]")) {
-      const svg = root.querySelector<SVGSVGElement>("[data-thread-svg]");
-      if (!svg) continue;
+  import { observeThreads } from "./threads";
 
-      const box = root.getBoundingClientRect();
-      if (!box.width || !box.height) continue;
-      svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
-
-      for (const group of root.querySelectorAll<SVGGElement>("g[data-thread]")) {
-        const from = root.querySelector<HTMLElement>(`[data-thread-from="${group.dataset.from}"]`);
-        const to = root.querySelector<HTMLElement>(`[data-thread-to="${group.dataset.to}"]`);
-        const path = group.querySelector<SVGPathElement>("[data-thread-path]");
-        const nodes = group.querySelectorAll<SVGCircleElement>("[data-thread-node]");
-        if (!from || !to || !path || nodes.length < 2) continue;
-
-        const start = from.getBoundingClientRect();
-        const end = to.getBoundingClientRect();
-        // Connect the facing edges, so the thread works whichever side of the
-        // app the target sits on.
-        const forward = end.left + end.width / 2 >= start.left + start.width / 2;
-        const x1 = (forward ? start.right : start.left) - box.left;
-        const y1 = start.top + start.height / 2 - box.top;
-        const x2 = (forward ? end.left : end.right) - box.left;
-        const y2 = end.top + end.height / 2 - box.top;
-
-        // Pull both control points sideways so the connector leaves and lands
-        // flat, then bows between the two ends: a loose thread, not a ruler.
-        const reach = Math.min(56, Math.max(10, Math.abs(x2 - x1) * 0.5)) * (forward ? 1 : -1);
-        path.setAttribute(
-          "d",
-          `M ${x1} ${y1} C ${x1 + reach} ${y1}, ${x2 - reach} ${y2}, ${x2} ${y2}`,
-        );
-        nodes[0]?.setAttribute("cx", String(x1));
-        nodes[0]?.setAttribute("cy", String(y1));
-        nodes[1]?.setAttribute("cx", String(x2));
-        nodes[1]?.setAttribute("cy", String(y2));
-      }
-    }
-  };
-
-  drawThreads();
-  window.addEventListener("resize", drawThreads);
-
-  if (typeof ResizeObserver !== "undefined") {
-    const observer = new ResizeObserver(drawThreads);
-    for (const root of document.querySelectorAll<HTMLElement>("[data-threads]")) {
-      observer.observe(root);
-    }
-  }
+  observeThreads();
 </script>

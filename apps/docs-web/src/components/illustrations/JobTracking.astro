@@ -1,0 +1,34 @@
+---
+import { css } from "styled-system/css";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+const applications = [
+  { role: "Northwind · backend", state: "interview" },
+  { role: "Lumen · platform", state: "applied" },
+  { role: "Orbit · infrastructure", state: "offer" },
+  { role: "Vela · frontend", state: "closed" },
+];
+
+const trailingChip = css({ ml: "auto" });
+---
+
+<IllustrationFrame title="mini-app · jobs">
+  <div class={rowHead}>
+    <span class={mono}>this month</span>
+    <span class={chip}>#career</span>
+  </div>
+
+  <span class={mono}>applications</span>
+  {
+    applications.map((application) => (
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>{application.role}</span>
+        <span class={`${chip} ${trailingChip}`}>{application.state}</span>
+      </div>
+    ))
+  }
+
+  <p class={caption}>Each stage is a section, so an application moves like any task.</p>
+</IllustrationFrame>

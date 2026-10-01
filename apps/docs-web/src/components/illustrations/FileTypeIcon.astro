@@ -1,0 +1,56 @@
+---
+import { css } from "styled-system/css";
+
+interface Props {
+  /** Extension written inside the icon, e.g. "TSX". */
+  type: string;
+  /** Semantic color for the document's outline and label. */
+  tone?: "accent" | "danger" | "success" | "info" | "warning";
+  /** Rendered width, in pixels. */
+  size?: number;
+}
+
+const { type, tone = "accent", size = 22 } = Astro.props;
+
+const toneClass = {
+  accent: css({ color: "accent.text" }),
+  danger: css({ color: "danger" }),
+  success: css({ color: "success" }),
+  info: css({ color: "info" }),
+  warning: css({ color: "warning" }),
+};
+
+const label = css({ fontFamily: "mono", fontWeight: "600" });
+
+// The document is 20 wide by 16 tall, so the height follows the requested width.
+const height = Math.round(size * (16 / 20) * 10) / 10;
+---
+
+<svg
+  class={`${toneClass[tone]} ${label}`}
+  width={size}
+  height={height}
+  viewBox="0 0 20 16"
+  aria-hidden="true"
+>
+  <path
+    d="M1.5 2.6A1.1 1.1 0 0 1 2.6 1.5H12.4L18.5 7.6V13.4A1.1 1.1 0 0 1 17.4 14.5H2.6A1.1 1.1 0 0 1 1.5 13.4Z"
+    fill="currentColor"
+    fill-opacity="0.12"
+    stroke="currentColor"
+    stroke-opacity="0.45"
+    stroke-width="1"></path>
+  <path
+    d="M12.4 1.5V7.6H18.5"
+    fill="none"
+    stroke="currentColor"
+    stroke-opacity="0.45"
+    stroke-width="1"></path>
+  <text
+    x="10"
+    y="10.8"
+    text-anchor="middle"
+    font-size="6.2"
+    letter-spacing="-0.4"
+    fill="currentColor">{type}</text>
+</svg>

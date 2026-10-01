@@ -43,7 +43,9 @@ export interface BundleFormat {
 
 export const PLATFORMS: Platform[] = [
   { id: 'macos', label: 'macOS', requirement: 'macOS 12 or newer' },
-  { id: 'linux', label: 'Linux', requirement: 'x86_64 or aarch64' },
+  // Linux cards are per architecture, so a requirement naming two of them
+  // would contradict the card it sits in; that axis is the card's own badge.
+  { id: 'linux', label: 'Linux', requirement: '' },
   { id: 'windows', label: 'Windows', requirement: 'Windows 10 or newer' },
 ]
 
@@ -179,7 +181,7 @@ async function detectArch(platform: PlatformId): Promise<string> {
  * The arch segment the packaging script wrote into the file name. Only macOS
  * differs: `uname -m` reports `arm64` there, while Linux reports `aarch64`.
  */
-function archToken(platform: PlatformId, arch: string): string {
+export function archToken(platform: PlatformId, arch: string): string {
   return platform === 'macos' && arch === 'aarch64' ? 'arm64' : arch
 }
 

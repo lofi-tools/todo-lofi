@@ -36,13 +36,21 @@ export const windowBody = css({
     "linear-gradient(180deg, token(colors.surface.subtle) 0%, token(colors.canvas) 100%)",
 });
 
-/** The chrome bar atop a mock window: dots, a title, and a hairline. */
-export const chromeBar = css({
-  backgroundImage:
-    "linear-gradient(180deg, token(colors.surface.active) 0%, token(colors.surface.elevated) 100%)",
+/**
+ * The header of a mock window: dots, a title, and a hairline. It paints no
+ * background of its own, so the window's own gradient runs through the header
+ * and the whole panel reads as one surface.
+ */
+export const windowBar = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  flexShrink: "0",
+  px: "3",
+  h: "7",
   borderBottomWidth: "hairline",
   borderBottomStyle: "solid",
-  borderBottomColor: "border.strong",
+  borderBottomColor: "border.subtle",
 });
 
 /** A mock task row: checkbox, label, optional trailing detail. */
@@ -109,6 +117,31 @@ export const chip = css({
   color: "fg.muted",
   whiteSpace: "nowrap",
 });
+
+/**
+ * A full-bleed overlay for connector threads; `threads.ts` draws the paths.
+ * Hidden when the layout stacks, since a thread would loop back across the app.
+ */
+export const threadLayer = css({
+  position: "absolute",
+  inset: "0",
+  w: "full",
+  h: "full",
+  overflow: "visible",
+  pointerEvents: "none",
+  zIndex: "raised",
+  display: { base: "none", md: "block" },
+});
+
+export const threadPath = css({
+  fill: "none",
+  stroke: "accent.text",
+  strokeWidth: "1.5",
+  strokeLinecap: "round",
+  opacity: "0.55",
+});
+
+export const threadNode = css({ fill: "accent.text", opacity: "0.75" });
 
 export const dot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
 

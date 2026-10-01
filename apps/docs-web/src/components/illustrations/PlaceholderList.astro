@@ -1,0 +1,45 @@
+---
+import { css } from "styled-system/css";
+
+interface Props {
+  /** Number of placeholder rows. */
+  rows?: number;
+  /** Grow to fill the container, spreading the rows over its height. */
+  spread?: boolean;
+}
+
+const { rows = 3, spread = false } = Astro.props;
+
+/**
+ * A low-fidelity task list: an empty checkbox and a bar where the text would
+ * be. Used wherever a surface shows a list without naming its work, so the app
+ * mockup, an external list, and a handset all read the same way.
+ */
+const list = css({ display: "flex", flexDirection: "column", gap: "1.5" });
+const spreadList = css({ flex: "1", justifyContent: "space-between" });
+
+const row = css({ display: "flex", alignItems: "center", gap: "1.5" });
+
+const check = css({
+  w: "2",
+  h: "2",
+  flexShrink: "0",
+  borderRadius: "xs",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const bar = css({ flex: "1", h: "1.5", borderRadius: "full", bg: "border.strong" });
+---
+
+<div class={spread ? `${list} ${spreadList}` : list}>
+  {
+    Array.from({ length: rows }).map(() => (
+      <span class={row}>
+        <span class={check} />
+        <span class={bar} />
+      </span>
+    ))
+  }
+</div>

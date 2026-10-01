@@ -1,0 +1,36 @@
+---
+import { css } from "styled-system/css";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+const people = [
+  { name: "Amara", when: "12 Mar", note: "in 4 days" },
+  { name: "Mum", when: "2 Apr", note: "repeats yearly" },
+  { name: "Jonas", when: "9 May", note: "gift saved" },
+  { name: "Priya", when: "21 Jun", note: "repeats yearly" },
+];
+
+const when = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+const trailingChip = css({ ml: "auto" });
+---
+
+<IllustrationFrame title="mini-app · birthdays">
+  <div class={rowHead}>
+    <span class={mono}>next 90 days</span>
+    <span class={chip}>#people</span>
+  </div>
+
+  <span class={mono}>birthdays</span>
+  {
+    people.map((person) => (
+      <div class={row}>
+        <span class={checkbox} />
+        <span class={label}>{person.name}</span>
+        <span class={when}>{person.when}</span>
+        <span class={`${chip} ${trailingChip}`}>{person.note}</span>
+      </div>
+    ))
+  }
+
+  <p class={caption}>A yearly reminder and a gift idea per person, kept as tasks.</p>
+</IllustrationFrame>

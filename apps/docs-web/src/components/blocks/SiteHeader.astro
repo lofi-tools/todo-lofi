@@ -97,6 +97,8 @@ const linkStyle = (active: boolean) =>
       <span>Taskstream</span>
     </a>
 
+    <div class={css({ flex: '1' })} />
+
     <ul
       class={css({
         display: { base: 'none', sm: 'flex' },
@@ -121,8 +123,6 @@ const linkStyle = (active: boolean) =>
         ))
       }
     </ul>
-
-    <div class={css({ flex: '1' })} />
 
     <a
       href={REPO_URL}

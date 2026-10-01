@@ -107,6 +107,17 @@ export const reasonsGrid = css({
   gridTemplateColumns: { base: "1fr", md: "repeat(3, minmax(0, 1fr))" },
 });
 
+/**
+ * Sub-sections of one feature, delimited by the same hairline gaps: the page
+ * background shows through the 1px gutter, so the rule is drawn by the grid
+ * rather than added as a border.
+ */
+export const subGrid = css({
+  ...itemGrid,
+  gridTemplateColumns: { base: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
+  alignItems: "start",
+});
+
 /** Vertical auto-advancing tabs: a tab column beside the active panel. */
 export const tabsLayout = css({
   display: "grid",
@@ -163,9 +174,11 @@ export const tabIndex = css({
   color: "fg.subtle",
 });
 
-export const tabTitle = css({ fontSize: "md", fontWeight: "medium", color: "fg.muted" });
+// The tab is a button, and buttons do not select their text by default; the
+// copy inside one is worth quoting, so opt each part back in.
+export const tabTitle = css({ fontSize: "md", fontWeight: "medium", color: "fg.muted", userSelect: "text" });
 
-export const tabSubtitle = css({ fontSize: "xs", color: "fg.subtle" });
+export const tabSubtitle = css({ fontSize: "xs", color: "fg.subtle", userSelect: "text" });
 
 export const tabDescription = css({
   display: "none",
@@ -176,6 +189,7 @@ export const tabDescription = css({
   fontSize: "sm",
   color: "fg.muted",
   lineHeight: "relaxed",
+  userSelect: "text",
 });
 
 export const tabProgressTrack = css({

@@ -1,0 +1,115 @@
+---
+import { css } from "styled-system/css";
+import { ChevronDown } from "web-design-system/icons";
+import EditorPane from "./EditorPane.astro";
+import FileTypeIcon from "./FileTypeIcon.astro";
+import type { FileTreeEntry } from "./fileTree";
+import { dot, paneLabel, windowBar, windowSurface } from "./styles";
+
+interface Props {
+  /** Window title shown in the chrome bar. */
+  title?: string;
+  /** Heading over the file tree. */
+  explorerLabel?: string;
+  files: FileTreeEntry[];
+  /** The one file open in the editor pane. */
+  editor: { name: string; lines?: number };
+  /**
+   * Id of a surface this window is linked to. The owning illustration draws
+   * the connector thread from the window.
+   */
+  thread?: string;
+}
+
+const { title, explorerLabel = "files", files, editor, thread } = Astro.props;
+
+const root = css({
+  flex: "1",
+  minW: "0",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  overflow: "hidden",
+});
+
+const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+
+const grid = css({
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 132px) minmax(0, 1fr)",
+  flex: "1",
+  minH: "40",
+});
+
+const explorer = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.5",
+  minW: "0",
+  p: "2",
+  borderRightWidth: "hairline",
+  borderRightStyle: "solid",
+  borderRightColor: "border.subtle",
+});
+
+const dirRow = css({ display: "flex", alignItems: "center", gap: "1.5", py: "0.5", minW: "0" });
+const folderName = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.default",
+  whiteSpace: "nowrap",
+});
+const fileName = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+});
+const folderCaret = css({ display: "inline-flex", w: "3", flexShrink: "0", color: "fg.subtle" });
+const fileSpacer = css({ display: "inline-flex", w: "3", flexShrink: "0" });
+
+const stage = css({ display: "flex", minW: "0", p: "3" });
+---
+
+<div class={`${root} ${windowSurface}`} data-thread-to={thread}>
+  <div class={windowBar}>
+    <span class={dot} />
+    <span class={dot} />
+    {title && <span class={windowTitle}>{title}</span>}
+  </div>
+
+  <div class={grid}>
+    <div class={explorer}>
+      <span class={paneLabel}>{explorerLabel}</span>
+      {
+        files.map((entry) => (
+          <div class={dirRow} style={{ paddingInlineStart: `${entry.depth * 12}px` }}>
+            {entry.folder ? (
+              <>
+                <span class={folderCaret}>
+                  <ChevronDown size={12} />
+                </span>
+                <span class={folderName}>{entry.name}</span>
+              </>
+            ) : (
+              <>
+                <span class={fileSpacer} />
+                <FileTypeIcon type={entry.type} tone={entry.tone} />
+                <span class={fileName}>{entry.name}</span>
+              </>
+            )}
+          </div>
+        ))
+      }
+    </div>
+
+    <div class={stage}>
+      <EditorPane name={editor.name} lines={editor.lines} />
+    </div>
+  </div>
+</div>

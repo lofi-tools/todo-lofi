@@ -1,6 +1,8 @@
 ---
 import { css } from "styled-system/css";
-import { checkbox, label, paneLabel, windowSurface } from "./styles";
+import { Folder } from "web-design-system/icons";
+import PlaceholderList from "./PlaceholderList.astro";
+import { dot, paneLabel, windowBar, windowSurface } from "./styles";
 
 interface Tag {
   /** Tag name including its leading `#`. */
@@ -20,10 +22,26 @@ interface Props {
   tags: Tag[];
   /** Heading over the task list. */
   listLabel?: string;
-  tasks: string[];
+  /** Low-fidelity rows shown in the list. */
+  taskRows?: number;
+  /** Draw each tag as a project directory, with the folder glyph the app uses. */
+  folderTags?: boolean;
 }
 
-const { title = "Taskstream", tagsLabel = "tags", tags, listLabel = "today", tasks } = Astro.props;
+/**
+ * The window adds a third column when the caller fills the `details` slot, the
+ * way the app puts the selected task's pane beside its list.
+ */
+const hasDetails = Astro.slots.has("details");
+
+const {
+  title = "Taskstream",
+  tagsLabel = "tags",
+  tags,
+  listLabel = "today",
+  taskRows = 6,
+  folderTags = false,
+} = Astro.props;
 
 const window = css({
   flex: "1",
@@ -37,26 +55,28 @@ const window = css({
   overflow: "hidden",
 });
 
-// No background of its own: the header shares the window's gradient so the
-// whole app surface reads as one continuous panel.
-const titleBar = css({
-  display: "flex",
-  alignItems: "center",
-  gap: "1.5",
-  px: "3",
-  h: "7",
-  borderBottomWidth: "hairline",
-  borderBottomStyle: "solid",
-  borderBottomColor: "border.subtle",
-});
-
-const windowDot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
 const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
 
 const windowGrid = css({
   display: "grid",
   gridTemplateColumns: "minmax(0, 116px) minmax(0, 1fr)",
+  flex: "1",
   minH: "40",
+});
+
+const windowGridWithDetails = css({
+  gridTemplateColumns: "minmax(0, 106px) minmax(0, 1fr) minmax(0, 170px)",
+});
+
+const detailsPane = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  minW: "0",
+  p: "3",
+  borderLeftWidth: "hairline",
+  borderLeftStyle: "solid",
+  borderLeftColor: "border.subtle",
 });
 
 const tagsNav = css({
@@ -79,52 +99,45 @@ const tagRow = css({
   borderRadius: "sm",
 });
 
+const tagLabel = css({ display: "inline-flex", alignItems: "center", gap: "1.5", minW: "0" });
+const tagIcon = css({ display: "inline-flex", flexShrink: "0", color: "fg.subtle" });
 const tagName = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
 
-const mainPane = css({ display: "flex", flexDirection: "column", gap: "2", p: "3" });
-
-const taskRow = css({
-  display: "flex",
-  alignItems: "center",
-  gap: "2.5",
-  px: "2",
-  py: "2",
-  borderRadius: "md",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.strong",
-  backgroundImage:
-    "linear-gradient(160deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 55%, token(colors.surface.subtle) 100%)",
-});
+const mainPane = css({ display: "flex", flexDirection: "column", p: "3" });
 ---
 
 <div class={`${window} ${windowSurface}`}>
-  <div class={titleBar}>
-    <span class={windowDot} />
-    <span class={windowDot} />
+  <div class={windowBar}>
+    <span class={dot} />
+    <span class={dot} />
     <span class={windowTitle}>{title}</span>
   </div>
-  <div class={windowGrid}>
+  <div class={hasDetails ? `${windowGrid} ${windowGridWithDetails}` : windowGrid}>
     <div class={tagsNav}>
       <span class={paneLabel}>{tagsLabel}</span>
       {
         tags.map((tag) => (
           <span class={tagRow} data-thread-from={tag.thread}>
-            <span class={tagName}>{tag.name}</span>
+            <span class={tagLabel}>
+              {folderTags && (
+                <span class={tagIcon}>
+                  <Folder size={13} />
+                </span>
+              )}
+              <span class={tagName}>{tag.name}</span>
+            </span>
           </span>
         ))
       }
     </div>
     <div class={mainPane}>
       <span class={paneLabel}>{listLabel}</span>
-      {
-        tasks.map((task) => (
-          <span class={taskRow}>
-            <span class={checkbox} />
-            <span class={label}>{task}</span>
-          </span>
-        ))
-      }
+      <PlaceholderList rows={taskRows} spread />
     </div>
+    {hasDetails && (
+      <div class={detailsPane}>
+        <slot name="details" />
+      </div>
+    )}
   </div>
 </div>

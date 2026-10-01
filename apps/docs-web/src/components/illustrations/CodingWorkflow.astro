@@ -1,0 +1,149 @@
+---
+import { css } from "styled-system/css";
+import AppMockup from "./AppMockup.astro";
+import { automationRuns } from "../../../data/landing";
+import { backdropSurface, dot, mono, paneLabel, windowBar, windowSurface } from "./styles";
+
+/** The run the strip below shows; the same task is open in the app mockup. */
+const [run] = automationRuns;
+
+/**
+ * The branch's last segment. The whole `feature/42-add-oauth` pushes the line
+ * past the strip's width; the full name is the span's tooltip.
+ */
+const branchName = run.branch ? run.branch.split("/").pop() : "not proposed yet";
+
+const root = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  p: "3",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const strip = css({
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  overflow: "hidden",
+});
+
+const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+/**
+ * The stages and the branch share one line. The round badge stays in the
+ * window bar above: all four together overflow the strip, and the round only
+ * changes at a phase boundary anyway.
+ */
+const stripRow = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2",
+  flexWrap: "wrap",
+  p: "3",
+});
+
+const round = css({
+  ml: "auto",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  px: "1.5",
+  py: "0.5",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "accent.text",
+  color: "accent.text",
+  whiteSpace: "nowrap",
+});
+
+const phases = css({ display: "flex", alignItems: "center", gap: "1", flexWrap: "wrap" });
+const phase = css({ display: "inline-flex", alignItems: "center", gap: "1" });
+
+/** Done phases are green, the working one is indigo, the rest wait. */
+const phaseDot = (state: "done" | "active" | "pending") =>
+  css({
+    w: "2",
+    h: "2",
+    borderRadius: "full",
+    flexShrink: "0",
+    bg: state === "done" ? "success" : state === "active" ? "accent" : "border.strong",
+  });
+
+const phaseLabel = (state: "done" | "active" | "pending") =>
+  css({
+    fontFamily: "mono",
+    fontSize: "2xs",
+    whiteSpace: "nowrap",
+    color: state === "pending" ? "fg.subtle" : "fg.default",
+    fontWeight: state === "active" ? "semibold" : "normal",
+  });
+
+// Not the shared `mono` style: branch names must keep their case.
+const branch = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.muted", whiteSpace: "nowrap" });
+
+const detailTitle = css({ fontSize: "sm", fontWeight: "semibold", color: "fg.default", lineHeight: "snug" });
+const detailField = css({
+  display: "flex",
+  alignItems: "baseline",
+  justifyContent: "space-between",
+  gap: "2",
+});
+const detailValue = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.default" });
+---
+
+<div class={`${root} ${backdropSurface}`}>
+  <div class={`${strip} ${windowSurface}`}>
+    <div class={windowBar}>
+      <span class={dot} />
+      <span class={dot} />
+      <span class={windowTitle}>workflow · coding</span>
+      <span class={round}>{run.round}</span>
+    </div>
+
+    <div class={stripRow}>
+      <div class={phases}>
+        {
+          run.phases.map((entry) => (
+            <span class={phase}>
+              <span class={phaseDot(entry.state)} />
+              <span class={phaseLabel(entry.state)}>{entry.label}</span>
+            </span>
+          ))
+        }
+      </div>
+
+      <span class={branch} title={`branch ${run.branch || "not proposed yet"}`}>
+        {branchName}
+      </span>
+    </div>
+  </div>
+
+  <AppMockup
+    tagsLabel="tags"
+    tags={[{ name: "#api" }, { name: "#auth" }, { name: "#release" }]}
+    taskRows={4}
+  >
+    <div slot="details" class={css({ display: "flex", flexDirection: "column", gap: "2" })}>
+      <span class={paneLabel}>task</span>
+      <span class={detailTitle}>{run.task}</span>
+      <span class={detailField}>
+        <span class={mono}>project</span>
+        <span class={detailValue}>api</span>
+      </span>
+      <span class={detailField}>
+        <span class={mono}>priority</span>
+        <span class={detailValue}>high</span>
+      </span>
+      <span class={detailField}>
+        <span class={mono}>stage</span>
+        <span class={detailValue}>Implement</span>
+      </span>
+    </div>
+  </AppMockup>
+</div>
