@@ -51,17 +51,34 @@ export interface Arch {
   /** The internal arch id (`aarch64` maps to the `arm64` file-name token on macOS). */
   id: string
   label: string
+  /** Whether CI builds this arch (see `.github/workflows/bundle.yml`). */
+  available: boolean
 }
 
 /**
- * The architectures CI actually builds per OS (see `.github/workflows/bundle.yml`:
- * macOS on Apple Silicon, Linux and Windows on x86_64). Add an entry here when a
- * new runner ships another arch and the dropdown grows a button for it.
+ * Every OS/arch combination the page shows, in display order. CI builds one
+ * arch per OS today (macOS on Apple Silicon, Linux and Windows on x86_64);
+ * unavailable combinations render grayed out. Flip a flag (and add a runner)
+ * when a new arch ships and both the site and the dropdown pick it up.
  */
 export const ARCHES: Record<PlatformId, Arch[]> = {
-  macos: [{ id: 'aarch64', label: 'arm64' }],
-  linux: [{ id: 'x86_64', label: 'x86_64' }],
-  windows: [{ id: 'x86_64', label: 'x86_64' }],
+  macos: [
+    { id: 'aarch64', label: 'arm64', available: true },
+    { id: 'x86_64', label: 'x86_64', available: false },
+  ],
+  linux: [
+    { id: 'x86_64', label: 'x86_64', available: true },
+    { id: 'aarch64', label: 'aarch64', available: false },
+  ],
+  windows: [
+    { id: 'x86_64', label: 'x86_64', available: true },
+    { id: 'aarch64', label: 'arm64', available: false },
+  ],
+}
+
+/** The arch a single-button surface (e.g. the homepage dropdown) downloads. */
+export function primaryArch(platform: PlatformId): Arch {
+  return ARCHES[platform].find((arch) => arch.available) ?? ARCHES[platform][0]
 }
 
 /** The first format of each platform is the one the primary button downloads. */
@@ -134,7 +151,8 @@ interface NavigatorWithUAData extends Navigator {
   }
 }
 
-function detectPlatform(): PlatformId {
+/** The OS the visitor is on, from user-agent hints with a UA-string fallback. */
+export function detectPlatform(): PlatformId {
   const nav = navigator as NavigatorWithUAData
   const hinted = nav.userAgentData?.platform ?? nav.platform ?? ''
   const agent = navigator.userAgent
@@ -216,6 +234,10 @@ async function loadReleases(): Promise<Release[]> {
  *   visitor is actually on.
  * - `[data-download-primary]` / `[data-download-primary-label]` — the main
  *   button and the label that names its platform.
+ * - `[data-download-primary-format]` — text replaced with the install method
+ *   the primary button points at, and `[data-download-primary-arch]` with the
+ *   architecture it was detected on. Both stay hidden until the button has an
+ *   asset to point at, so neither claims anything the link does not do.
  * - `[data-download-name]` — an element inside a link, replaced with the
  *   resolved asset's file name.
  * - `[data-download-version]` — text replaced with the resolved version.
@@ -251,6 +273,22 @@ export async function initDownloads(): Promise<void> {
     }
   }
 
+  // The install method and the machine's architecture only mean something
+  // once the primary link has resolved to a file.
+  const applyPrimaryDetails = () => {
+    const archLabel = ARCHES[platform].find((candidate) => candidate.id === arch)?.label ?? arch
+    const details: Array<[string, string]> = [
+      ['[data-download-primary-format]', FORMATS[platform][0].label],
+      ['[data-download-primary-arch]', archLabel],
+    ]
+    for (const [selector, text] of details) {
+      for (const node of document.querySelectorAll<HTMLElement>(selector)) {
+        node.textContent = text
+        node.hidden = !primaryResolved
+      }
+    }
+  }
+
   const applyLinks = () => {
     let version: string | undefined
     primaryResolved = false
@@ -276,10 +314,12 @@ export async function initDownloads(): Promise<void> {
       }
     }
     applyPrimaryLabel()
+    applyPrimaryDetails()
   }
 
   applyDetected()
   applyPrimaryLabel()
+  applyPrimaryDetails()
   try {
     arch = await detectArch(platform)
   } catch {

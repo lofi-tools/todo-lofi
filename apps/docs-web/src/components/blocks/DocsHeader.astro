@@ -5,12 +5,6 @@ import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
 import { GitHub } from 'web-design-system/icons'
 import { docGuides, guideFor, REPO_URL } from '../../data/docs'
 
-interface Props {
-  /** Align the nav to the homepage blueprint's content column. */
-  blueprint?: boolean
-}
-
-const { blueprint = false } = Astro.props
 const active = guideFor(Astro.url.pathname)
 
 const navItem = (active: boolean) =>
@@ -54,11 +48,12 @@ const navItem = (active: boolean) =>
       gap: '4',
       h: '14',
       w: '100%',
-      maxW: blueprint ? '1104px' : '1280px',
+      maxW: '1280px',
       mx: 'auto',
       px: { base: '5', md: '8' },
     })}
   >
+    <span class={css({ display: 'inline-flex', alignItems: 'center', gap: '1', flexShrink: '0' })}>
     <a
       href="/"
       class={css({
@@ -86,6 +81,7 @@ const navItem = (active: boolean) =>
       <span>Taskstream</span>
     </a>
     <Badge tone="accent" variant="subtle">docs</Badge>
+    </span>
 
     <!--
       The two guides, one per audience. Each tab opens its guide's landing
@@ -98,6 +94,7 @@ const navItem = (active: boolean) =>
         gap: '0.5',
         listStyle: 'none',
         m: '0',
+        ml: '6',
         p: '0',
       })}
     >

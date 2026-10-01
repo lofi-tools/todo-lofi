@@ -1,0 +1,102 @@
+---
+import { css } from "styled-system/css";
+import HomepageSection from "./HomepageSection.astro";
+import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
+import { cardBody } from "./homeStyles";
+
+const claims = [
+  {
+    index: "01",
+    kicker: "local-first",
+    title: "Instant, because it is local",
+    body: "Tasks live in a file on your machine, so there is no server round-trip between a keystroke and the list. It opens immediately and keeps working with no connection.",
+  },
+  {
+    index: "02",
+    kicker: "native",
+    title: "Native and GPU-accelerated",
+    body: "Written in Rust on GPUI — the GPU-accelerated UI framework behind Zed. The interface is drawn on the GPU, so scrolling and animation stay smooth even on a long list.",
+  },
+  {
+    index: "03",
+    kicker: "keyboard",
+    title: "Shortcuts for nearly everything",
+    body: "Move, edit, tag, and complete without reaching for the mouse, and open the command palette to reach any action by name. The full list lives in the app.",
+  },
+];
+
+/**
+ * Three hairline-separated columns, the way the rest of the homepage states a
+ * feature: a mono kicker, one claim, and a paragraph of support. Column rules
+ * only stand on desktop; narrow screens stack the claims with rules between.
+ */
+const columns = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+  mt: { base: "8", md: "12" },
+  borderTopWidth: "hairline",
+  borderTopStyle: "solid",
+  borderTopColor: "border.subtle",
+});
+
+const column = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  py: { base: "5", md: "8" },
+  px: { base: "0", md: "8" },
+  borderTopWidth: { base: "hairline", md: "0" },
+  borderTopStyle: "solid",
+  borderTopColor: "border.subtle",
+  borderLeftWidth: { base: "0", md: "hairline" },
+  borderLeftStyle: "solid",
+  borderLeftColor: "border.subtle",
+  _first: { pt: { base: "0", md: "8" }, pl: "0", borderTopWidth: "0" },
+  _last: { pr: "0" },
+});
+
+const kicker = css({
+  display: "flex",
+  alignItems: "baseline",
+  gap: "3",
+  fontFamily: "mono",
+  fontSize: "xs",
+  letterSpacing: "wide",
+  textTransform: "uppercase",
+  color: "fg.subtle",
+});
+
+const kickerIndex = css({ color: "accent.text" });
+
+const columnTitle = css({
+  fontSize: "lg",
+  fontWeight: "semibold",
+  color: "fg.default",
+  lineHeight: "snug",
+  m: "0",
+});
+---
+
+<HomepageSection index={9} label="built with care">
+  <SectionHeading
+    eyebrow="Built with care"
+    title="No web wrapper, no server in the middle"
+    description="Taskstream is a native desktop app: local-first storage, a GPU-accelerated Rust interface, and a keyboard path to every action."
+    align="left"
+  />
+
+  <div class={columns}>
+    {
+      claims.map((claim) => (
+        <div class={column}>
+          <span class={kicker}>
+            <span class={kickerIndex}>{claim.index}</span>
+            {claim.kicker}
+          </span>
+          <h3 class={columnTitle}>{claim.title}</h3>
+          <p class={cardBody}>{claim.body}</p>
+        </div>
+      ))
+    }
+  </div>
+</HomepageSection>

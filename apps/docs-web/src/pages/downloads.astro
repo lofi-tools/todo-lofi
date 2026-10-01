@@ -1,146 +1,243 @@
 ---
-import { css } from 'styled-system/css'
-import Base from '../layouts/Base.astro'
-import SiteHeader from '../components/blocks/SiteHeader.astro'
-import DocsFooter from '../components/blocks/DocsFooter.astro'
-import { Download } from 'web-design-system/icons'
-import { ARCHES, FORMATS, PLATFORMS, RELEASES_URL } from '../../data/downloads'
-import { blueprintContent, blueprintGrid, blueprintRules } from '../components/sections/homeStyles'
+import { css } from "styled-system/css";
+import Base from "../layouts/Base.astro";
+import SiteHeader from "../components/blocks/SiteHeader.astro";
+import DocsFooter from "../components/blocks/DocsFooter.astro";
+import { Download } from "web-design-system/icons";
+import { ARCHES, FORMATS, PLATFORMS, REPO_URL, RELEASES_URL, primaryArch } from "../../data/downloads";
+import InstallSteps from "../components/blocks/InstallSteps.astro";
+import Prose from "web-design-system/astro/marketing/Prose.astro";
+import { blueprintContent, blueprintGrid, blueprintRules } from "../components/sections/homeStyles";
 
 const eyebrow = css({
-  fontSize: '2xs',
-  fontWeight: 'semibold',
-  letterSpacing: 'wider',
-  textTransform: 'uppercase',
-  color: 'accent.text',
-})
+  fontSize: "2xs",
+  fontWeight: "semibold",
+  letterSpacing: "wider",
+  textTransform: "uppercase",
+  color: "accent.text",
+});
 
 const primary = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  h: '12',
-  px: '8',
-  borderRadius: 'sm',
-  bg: 'accent',
-  color: 'fg.onAccent',
-  fontSize: 'lg',
-  fontWeight: 'medium',
-  _hover: { bg: 'accent.hover' },
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "2.5",
+  h: "12",
+  px: "8",
+  borderRadius: "sm",
+  bg: "accent",
+  color: "fg.onAccent",
+  fontSize: "lg",
+  fontWeight: "medium",
+  _hover: { bg: "accent.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+/** The install method, set apart from the button's label by a hairline rule. */
+const primaryFormat = css({
+  fontFamily: "mono",
+  fontSize: "sm",
+  fontWeight: "normal",
+  borderLeftWidth: "hairline",
+  borderLeftStyle: "solid",
+  borderLeftColor: "rgba(255, 255, 255, 0.35)",
+  pl: "2.5",
+  ml: "0.5",
+  "&[hidden]": { display: "none" },
+});
 
 const inlineLink = css({
-  color: 'fg.muted',
-  textDecoration: 'underline',
-  textUnderlineOffset: '2px',
-  _hover: { color: 'fg.default' },
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
+  color: "fg.muted",
+  textDecoration: "underline",
+  textUnderlineOffset: "2px",
+  _hover: { color: "fg.default" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
 
 const ctaPanel = css({
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'flex-start',
-  gap: '4',
-  mt: { base: '8', md: '10' },
-  p: { base: '6', md: '8' },
-  borderRadius: 'xl',
-  borderWidth: 'hairline',
-  borderStyle: 'solid',
-  borderColor: 'border',
-  bg: 'surface.subtle',
-})
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-start",
+  gap: "4",
+  mt: { base: "8", md: "10" },
+  p: { base: "6", md: "8" },
+  borderRadius: "xl",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+});
 
+/**
+ * One column per OS and one row per architecture, so the same arch lines up
+ * across platforms (arm64 in one row, x86_64 in the next). That needs the
+ * cards laid out arch-major, which is why the markup loops arches on the
+ * outside — a mobile single column reads arch-first, where the alignment does
+ * not apply anyway.
+ */
+const downloadGrid = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", lg: "repeat(3, minmax(0, 1fr))" },
+  gap: { base: "6", lg: "5" },
+  alignItems: "start",
+});
+
+/** One card per OS/arch; the platform name lives in the card head. */
 const card = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '3',
-  p: { base: '5', md: '6' },
-  borderRadius: 'lg',
-  borderWidth: 'hairline',
-  borderStyle: 'solid',
-  borderColor: 'border',
-  bg: 'surface.subtle',
-})
+  display: "flex",
+  flexDirection: "column",
+  gap: "3",
+  p: { base: "4", md: "5" },
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+});
 
-const cardHead = css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })
+const cardHead = css({ display: "flex", alignItems: "baseline", gap: "2", flexWrap: "wrap" });
+
+const platformLabel = css({ fontSize: "md", fontWeight: "semibold", color: "fg.default" });
+
+const noBuilds = css({ fontSize: "xs", color: "fg.subtle" });
+
+const formatList = css({ display: "flex", flexDirection: "column", gap: "2" });
 
 const detectedBadge = css({
-  fontSize: '2xs',
-  fontWeight: 'semibold',
-  textTransform: 'uppercase',
-  letterSpacing: 'wider',
-  color: 'accent.text',
-})
+  fontSize: "2xs",
+  fontWeight: "semibold",
+  textTransform: "uppercase",
+  letterSpacing: "wider",
+  color: "accent.text",
+});
 
 const archBadge = css({
-  fontFamily: 'mono',
-  fontSize: '2xs',
-  color: 'fg.subtle',
-  borderWidth: 'hairline',
-  borderStyle: 'solid',
-  borderColor: 'border',
-  borderRadius: 'sm',
-  px: '1.5',
-  py: '0.5',
-})
-
-const secondaryFormats = css({
-  display: 'flex',
-  alignItems: 'baseline',
-  gap: '2',
-  flexWrap: 'wrap',
-  fontSize: 'xs',
-  color: 'fg.subtle',
-})
-
-const secondaryLink = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '1',
-  color: 'fg.muted',
-  textDecoration: 'underline',
-  textUnderlineOffset: '2px',
-  _hover: { color: 'fg.default' },
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  borderRadius: "sm",
+  px: "1.5",
+  py: "0.5",
+});
 
 const formatLink = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '1.5',
-  h: '8',
-  px: '3',
-  borderRadius: 'sm',
-  borderWidth: 'hairline',
-  borderStyle: 'solid',
-  borderColor: 'border',
-  bg: 'canvas',
-  fontFamily: 'mono',
-  fontSize: 'xs',
-  color: 'fg.default',
-  _hover: { borderColor: 'border.strong', bg: 'surface.hover' },
-  _focusVisible: { outline: 'none', boxShadow: 'focus' },
-})
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "1.5",
+  w: "100%",
+  h: "8",
+  px: "3",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  fontFamily: "mono",
+  fontSize: "xs",
+  color: "fg.default",
+  whiteSpace: "nowrap",
+  _hover: { borderColor: "border.strong", bg: "surface.hover" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+/** A combination CI does not build: shown, but inert and muted. */
+const formatOff = css({
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: "1.5",
+  w: "100%",
+  h: "8",
+  px: "3",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  fontFamily: "mono",
+  fontSize: "xs",
+  color: "fg.subtle",
+  whiteSpace: "nowrap",
+  cursor: "not-allowed",
+});
+
+const codeBlock = css({
+  m: "0",
+  mt: "4",
+  p: "4",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "surface.subtle",
+  overflowX: "auto",
+  fontFamily: "mono",
+  fontSize: "xs",
+  lineHeight: "relaxed",
+  color: "fg.default",
+});
+
+const installTabList = css({
+  display: "flex",
+  gap: "1",
+  mt: { base: "6", md: "8" },
+  borderBottomWidth: "hairline",
+  borderBottomStyle: "solid",
+  borderBottomColor: "border",
+  overflowX: "auto",
+});
+
+const installTab = css({
+  h: "10",
+  px: "4",
+  mb: "-1px",
+  fontSize: "sm",
+  fontWeight: "medium",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  cursor: "pointer",
+  borderBottomWidth: "2px",
+  borderBottomStyle: "solid",
+  borderBottomColor: "transparent",
+  transitionProperty: "color, border-color",
+  transitionDuration: "fast",
+  _hover: { color: "fg.default" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+  "&[data-active]": { color: "fg.default", borderBottomColor: "accent" },
+});
+
+const installPanel = css({
+  mt: "6",
+  p: { base: "5", md: "6" },
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  "&[hidden]": { display: "none" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+});
+
+/** Row order: the arches of the first platform, then any the others add. */
+const archOrder = [...new Set(PLATFORMS.flatMap((platform) => ARCHES[platform.id].map((arch) => arch.id)))];
 
 const notes = [
   {
-    platform: 'macOS',
-    detail:
-      'The bundle is unsigned, so the first launch needs System Settings → Privacy & Security → Open Anyway. Dragging the app into Applications is the usual move.',
+    platform: "macOS",
+    detail: "The bundle is unsigned, so the first launch needs System Settings → Privacy & Security → Open Anyway. Dragging the app into Applications is the usual move.",
   },
   {
-    platform: 'Linux',
-    detail:
-      'The AppImage needs no install step — make it executable and run it. The .deb installs under /usr, and the tarball unpacks anywhere.',
+    platform: "Linux",
+    detail: "The AppImage needs no install step — make it executable and run it. The .deb installs under /usr, and the tarball unpacks anywhere.",
   },
   {
-    platform: 'Windows',
-    detail:
-      'Unzip the archive and run taskstream.exe. SmartScreen may warn about the unsigned build the first time: More info, then Run anyway.',
+    platform: "Windows",
+    detail: "Unzip the archive and run taskstream.exe. SmartScreen may warn about the unsigned build the first time: More info, then Run anyway.",
   },
-]
+];
 ---
 
 <Base
@@ -152,135 +249,180 @@ const notes = [
 
   <main id="content" class={blueprintGrid}>
     <div class={blueprintContent}>
-    <section id="download" class={css({ py: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
-        <div class={css({ display: 'flex', flexDirection: 'column', gap: '3', alignItems: 'flex-start' })}>
+      <section id="download" class={css({ py: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
+        <div class={css({ display: "flex", flexDirection: "column", gap: "3", alignItems: "flex-start" })}>
           <span class={eyebrow}>Download</span>
-          <h1 class={css({ textStyle: 'h1', color: 'fg.default', textWrap: 'balance' })}>
-            Download Taskstream
-          </h1>
+          <h1 class={css({ textStyle: "h1", color: "fg.default", textWrap: "balance" })}>Download Taskstream</h1>
           <p
             class={css({
-              textStyle: 'body.lg',
-              color: 'fg.muted',
-              maxW: '640px',
-              textWrap: 'pretty',
+              textStyle: "body.lg",
+              color: "fg.muted",
+              maxW: "640px",
+              textWrap: "pretty",
             })}
           >
-            Prebuilt bundles for macOS, Linux, and Windows. The button below starts on the platform
-            you are reading this from; every other file is listed underneath it.
+            Prebuilt bundles for macOS, Linux, and Windows.
           </p>
         </div>
 
         <div class={ctaPanel}>
-          <a
-            data-download
-            data-platform="auto"
-            data-download-primary
-            href={RELEASES_URL}
-            class={primary}
-          >
-            <span data-download-primary-label>Download for your platform</span>
-          </a>
-          <p class={css({ m: '0', fontSize: 'sm', color: 'fg.muted' })}>
+          <div class={css({ display: "flex", alignItems: "center", gap: "3", flexWrap: "wrap" })}>
+            <a data-download data-platform="auto" data-download-primary href={RELEASES_URL} class={primary}>
+              <Download size={16} />
+              <span data-download-primary-label>Download for your platform</span>
+              <span data-download-primary-format hidden class={primaryFormat}></span>
+            </a>
+            <span data-download-primary-arch hidden class={archBadge}></span>
+          </div>
+          <p class={css({ m: "0", fontSize: "sm", color: "fg.muted" })}>
             <span data-download-version>the latest release</span>
-            {' · '}
-            <a href={RELEASES_URL} class={inlineLink}>all versions</a>
-            {' · '}
+            {" · "}
+            <a href={RELEASES_URL} class={inlineLink}>
+              all versions
+            </a>
+            {" · "}
             unsigned development builds
           </p>
         </div>
-    </section>
+      </section>
 
-    <section id="all-downloads" class={css({ pb: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
-        <h2 class={css({ textStyle: 'h2', color: 'fg.default' })}>All downloads</h2>
-        <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: { base: '6', md: '8' } })}>
-          Every bundle in the newest release, grouped by platform. Each link points at the file for
-          the architecture it was built for, and the platform you are on is marked.
+      <section id="all-downloads" class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
+        <h2 class={css({ textStyle: "h2", color: "fg.default" })}>All downloads</h2>
+        <p class={css({ fontSize: "sm", color: "fg.muted", mt: "2", mb: { base: "6", md: "8" } })}>
+          Every bundle in the newest release, one column per platform and one card per architecture. Each link points at the file for the architecture it was built for, and the card for the machine you are on is marked.
         </p>
 
-        <div
-          class={css({
-            display: 'grid',
-            gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(3, minmax(0, 1fr))' },
-            gap: '4',
-            alignItems: 'start',
-          })}
-        >
-          {
-            PLATFORMS.map((platform) => (
-              <div class={card} id={platform.id}>
-                <div class={cardHead}>
-                  <h3 class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
-                    {platform.label}
-                  </h3>
-                  {ARCHES[platform.id].map((arch) => (
+        <div class={downloadGrid}>
+          {archOrder.map((archId) =>
+            PLATFORMS.map((platform) => {
+              const arch = ARCHES[platform.id].find((candidate) => candidate.id === archId);
+              if (!arch) return null;
+              return (
+                <div class={card}>
+                  <div class={cardHead}>
+                    <span class={platformLabel}>{platform.label}</span>
+                    {primaryArch(platform.id).id === arch.id && (
+                      <span data-download-detected={platform.id} hidden class={detectedBadge}>
+                        this machine
+                      </span>
+                    )}
                     <span class={archBadge}>{arch.label}</span>
-                  ))}
-                  <span data-download-detected={platform.id} hidden class={detectedBadge}>
-                    this machine
-                  </span>
+                    {!arch.available && <span class={noBuilds}>no builds yet</span>}
+                  </div>
+                  <p class={css({ m: "0", fontSize: "xs", color: "fg.subtle" })}>{platform.requirement}</p>
+                  <div class={formatList}>
+                    {FORMATS[platform.id].map((format) =>
+                      arch.available ? (
+                        <a
+                          data-download
+                          data-platform={platform.id}
+                          data-arch={arch.id}
+                          data-format={format.id}
+                          href={RELEASES_URL}
+                          title={`${platform.label} (${arch.label}): ${format.hint}`}
+                          class={formatLink}
+                        >
+                          <Download size={12} />
+                          {format.label}
+                        </a>
+                      ) : (
+                        <span class={formatOff} title={`${platform.label} (${arch.label}): not built`} aria-disabled="true">
+                          <Download size={12} />
+                          {format.label}
+                        </span>
+                      ),
+                    )}
+                  </div>
                 </div>
-                <p class={css({ m: '0', fontSize: 'xs', color: 'fg.subtle' })}>
-                  {platform.requirement}
-                </p>
-                <div>
-                  <a
-                    data-download
-                    data-platform={platform.id}
-                    data-format={FORMATS[platform.id][0].id}
-                    href={RELEASES_URL}
-                    title={FORMATS[platform.id][0].hint}
-                    class={formatLink}
-                  >
-                    <Download size={12} />
-                    {FORMATS[platform.id][0].label}
-                  </a>
-                </div>
-                {FORMATS[platform.id].length > 1 && (
-                  <p class={secondaryFormats}>
-                    <span>Also:</span>
-                    {FORMATS[platform.id].slice(1).map((format) => (
-                      <a
-                        data-download
-                        data-platform={platform.id}
-                        data-format={format.id}
-                        href={RELEASES_URL}
-                        title={format.hint}
-                        class={secondaryLink}
-                      >
-                        <Download size={12} />
-                        {format.label}
-                      </a>
-                    ))}
-                  </p>
-                )}
-              </div>
-            ))
-          }
+              );
+            }),
+          )}
         </div>
-    </section>
 
-    <section class={css({ pb: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
-        <div class={css({ p: { base: '5', md: '6' }, borderRadius: 'lg', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', bg: 'surface.subtle' })}>
-          <h2 class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default', m: '0', mb: '3' })}>
-            Before you run it
-          </h2>
-          <ul class={css({ m: '0', pl: '5', display: 'flex', flexDirection: 'column', gap: '2' })}>
-            {
-              notes.map((note) => (
-                <li class={css({ fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
-                  <span class={css({ fontWeight: 'medium', color: 'fg.default' })}>{note.platform}</span>
-                  {' — '}
-                  {note.detail}
-                </li>
-              ))
-            }
+        <p class={css({ m: "0", mt: "6", fontSize: "sm", color: "fg.muted" })}>
+          <a href={RELEASES_URL} class={inlineLink}>
+            Browse all past releases on GitHub →
+          </a>
+        </p>
+      </section>
+
+      <section id="installation" class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
+        <h2 class={css({ textStyle: "h2", color: "fg.default" })}>Installation instructions</h2>
+        <p class={css({ fontSize: "sm", color: "fg.muted", mt: "2" })}>
+          The same steps as the install guide. The platform you are on is already selected, and the links point at the newest matching file.
+        </p>
+
+        <div data-install-tabs>
+          <div role="tablist" aria-label="Installation instructions" class={installTabList}>
+            {PLATFORMS.map((platform, index) => (
+              <button
+                type="button"
+                role="tab"
+                id={`install-tab-${platform.id}`}
+                aria-controls={`install-panel-${platform.id}`}
+                aria-selected={index === 0 ? "true" : "false"}
+                tabindex={index === 0 ? 0 : -1}
+                data-active={index === 0 ? "" : undefined}
+                data-install-platform={platform.id}
+                class={installTab}
+              >
+                {platform.label}
+              </button>
+            ))}
+          </div>
+
+          {PLATFORMS.map((platform, index) => (
+            <div
+              role="tabpanel"
+              id={`install-panel-${platform.id}`}
+              aria-labelledby={`install-tab-${platform.id}`}
+              tabindex="0"
+              hidden={index !== 0}
+              class={installPanel}
+            >
+              <Prose>
+                <InstallSteps platform={platform.id} />
+              </Prose>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
+        <div class={css({ p: { base: "5", md: "6" }, borderRadius: "lg", borderWidth: "hairline", borderStyle: "solid", borderColor: "border", bg: "surface.subtle" })}>
+          <h2 class={css({ fontSize: "md", fontWeight: "semibold", color: "fg.default", m: "0", mb: "3" })}>Before you run it</h2>
+          <ul class={css({ m: "0", pl: "5", display: "flex", flexDirection: "column", gap: "2" })}>
+            {notes.map((note) => (
+              <li class={css({ fontSize: "sm", color: "fg.muted", lineHeight: "relaxed" })}>
+                <span class={css({ fontWeight: "medium", color: "fg.default" })}>{note.platform}</span>
+                {" — "}
+                {note.detail}
+              </li>
+            ))}
           </ul>
-          <p class={css({ m: '0', mt: '4', fontSize: 'sm', color: 'fg.muted' })}>
-            <a href="/docs/install" class={inlineLink}>Full install instructions →</a>
+          <p class={css({ m: "0", mt: "4", fontSize: "sm", color: "fg.muted" })}>
+            <a href="/docs/install" class={inlineLink}>
+              Full install instructions →
+            </a>
           </p>
         </div>
-    </section>
+      </section>
+
+      <section class={css({ pb: { base: "12", md: "20" }, px: { base: "5", md: "8" } })}>
+        <h2 class={css({ textStyle: "h2", color: "fg.default" })}>Build from source</h2>
+        <p class={css({ fontSize: "sm", color: "fg.muted", mt: "2" })}>
+          No bundle for your machine, or you would rather not run a prebuilt binary? A Rust toolchain
+          (edition 2024, 1.85+) and the platform GUI dependencies are all it takes.
+        </p>
+        <pre class={codeBlock}><code>{`git clone ${REPO_URL}.git
+cd taskstream
+cargo run -p taskstream-desktop`}</code></pre>
+        <p class={css({ m: "0", mt: "4", fontSize: "sm", color: "fg.muted" })}>
+          <a href="/docs/install#from-source" class={inlineLink}>
+            Full build instructions →
+          </a>
+        </p>
+      </section>
     </div>
   </main>
 
@@ -292,6 +434,43 @@ const notes = [
 </Base>
 
 <script>
-  import { initDownloads } from '../../data/downloads'
-  void initDownloads()
+  import { detectPlatform, initDownloads } from "../../data/downloads";
+
+  void initDownloads();
+
+  // Pre-select the install tab for the platform the visitor is on; the steps
+  // themselves are the same per OS, so the architecture does not change them.
+  const platform = detectPlatform();
+  for (const root of document.querySelectorAll<HTMLElement>("[data-install-tabs]")) {
+    const tabs = Array.from(root.querySelectorAll<HTMLElement>('[role="tab"]'));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
+    if (tabs.length === 0) continue;
+
+    const select = (index: number) => {
+      tabs.forEach((tab, i) => {
+        const active = i === index;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        tab.toggleAttribute("data-active", active);
+      });
+      panels.forEach((panel, i) => {
+        panel.hidden = i !== index;
+      });
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => select(index));
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const delta = event.key === "ArrowRight" ? 1 : -1;
+        const next = (index + delta + tabs.length) % tabs.length;
+        select(next);
+        tabs[next]?.focus();
+      });
+    });
+
+    const detected = tabs.findIndex((tab) => tab.dataset.installPlatform === platform);
+    select(detected >= 0 ? detected : 0);
+  }
 </script>

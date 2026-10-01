@@ -14,6 +14,7 @@ import ExtensionsSection from "../components/sections/ExtensionsSection.astro";
 import EverydaySection from "../components/sections/EverydaySection.astro";
 import IntegrationsSection from "../components/sections/IntegrationsSection.astro";
 import RoadmapSection from "../components/sections/RoadmapSection.astro";
+import CraftSection from "../components/sections/CraftSection.astro";
 import DownloadButton from "../components/blocks/DownloadButton.astro";
 import { blueprintContent, blueprintGrid, blueprintRules } from "../components/sections/homeStyles";
 import screenshot from "../assets/app.png";
@@ -71,8 +72,9 @@ import screenshot from "../assets/app.png";
     <EverydaySection />
     <IntegrationsSection />
     <RoadmapSection />
+    <CraftSection />
 
-    <HomepageSection bare index={9} label="get it now">
+    <HomepageSection bare index={10} label="get it now">
       <CTASection title="Get it now" secondaryCta={{ label: "All downloads", href: "/downloads" }}>
         <DownloadButton slot="primary" />
       </CTASection>

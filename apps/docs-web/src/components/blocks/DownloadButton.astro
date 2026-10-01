@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import { ChevronDown, ArrowRight, Download } from "web-design-system/icons";
-import { FORMATS, ARCHES, PLATFORMS, RELEASES_URL } from "../../../data/downloads";
+import { FORMATS, ARCHES, PLATFORMS, RELEASES_URL, primaryArch } from "../../../data/downloads";
 
 const group = css({ position: "relative", display: "inline-flex", alignItems: "stretch" });
 
@@ -156,7 +156,7 @@ const menuLabelWithArrow = css({
         <div class={platformRow}>
           <span class={platformLabel}>
             {platform.label}
-            {ARCHES[platform.id].map((arch) => (
+            {ARCHES[platform.id].filter((arch) => arch.available).map((arch) => (
               <span class={archBadge}>{arch.label}</span>
             ))}
           </span>
@@ -165,10 +165,10 @@ const menuLabelWithArrow = css({
               class={formatButton}
               data-download
               data-platform={platform.id}
-              data-arch={ARCHES[platform.id][0].id}
+              data-arch={primaryArch(platform.id).id}
               data-format={FORMATS[platform.id][0].id}
               href={RELEASES_URL}
-              title={`${platform.label} (${ARCHES[platform.id][0].label}): ${FORMATS[platform.id][0].hint}`}
+              title={`${platform.label} (${primaryArch(platform.id).label}): ${FORMATS[platform.id][0].hint}`}
             >
               <Download size={12} />
               {FORMATS[platform.id][0].label}

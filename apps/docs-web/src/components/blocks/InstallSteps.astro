@@ -1,0 +1,82 @@
+---
+import CodeBlock from "web-design-system/astro/product/CodeBlock.astro";
+import { FORMATS, RELEASES_URL } from "../../../data/downloads";
+import type { PlatformId } from "../../../data/downloads";
+
+interface Props {
+  platform: PlatformId;
+}
+
+/**
+ * One platform's install steps, shared by the install guide and the downloads
+ * page's install tabs so the two cannot drift. Callers supply the surrounding
+ * heading and prose styles.
+ */
+const { platform } = Astro.props;
+
+const appimage = `# Make it executable and run it; there is no install step.
+chmod +x taskstream-<version>-linux-x86_64.AppImage
+./taskstream-<version>-linux-x86_64.AppImage`;
+
+const debian = `# Installs into /usr; the package carries its own libraries.
+sudo apt install ./taskstream-<version>-linux-x86_64.deb
+taskstream`;
+
+const tarball = `tar -xzf taskstream-<version>-linux-x86_64.tar.gz
+./taskstream/usr/bin/taskstream`;
+---
+
+<ul>
+  {
+    FORMATS[platform].map((format) => (
+      <li>
+        <a data-download data-platform={platform} data-format={format.id} href={RELEASES_URL}>
+          <code data-download-name>{format.label}</code>
+        </a>
+        {" — "}
+        {format.hint}
+      </li>
+    ))
+  }
+</ul>
+
+{
+  platform === "macos" && (
+    <ol>
+      <li>Download the <code>.dmg</code> and open it, or download the <code>.zip</code> and unzip it.</li>
+      <li>Drag <code>taskstream.app</code> into your <code>/Applications</code> folder.</li>
+      <li>
+        Open the app once. Gatekeeper stops an unsigned build the first time: go to
+        <strong>System Settings → Privacy &amp; Security</strong>, scroll to the security notice, and
+        choose <strong>Open Anyway</strong>. Right-clicking the app in the Finder and choosing
+        <strong>Open</strong> does the same thing.
+      </li>
+    </ol>
+  )
+}
+
+{
+  platform === "linux" && (
+    <>
+      <p>
+        The AppImage runs without installing anything. The other two fit the usual layouts: the{" "}
+        <code>.deb</code> installs under <code>/usr</code>, and the tarball unpacks anywhere.
+      </p>
+      <CodeBlock filename="terminal" code={appimage} showLineNumbers={false} />
+      <CodeBlock filename="terminal" code={debian} showLineNumbers={false} />
+      <CodeBlock filename="terminal" code={tarball} showLineNumbers={false} />
+    </>
+  )
+}
+
+{
+  platform === "windows" && (
+    <ol>
+      <li>Download the <code>.zip</code> and extract it.</li>
+      <li>
+        Run <code>taskstream.exe</code>. SmartScreen may warn about an unsigned build the first time:
+        choose <strong>More info</strong>, then <strong>Run anyway</strong>.
+      </li>
+    </ol>
+  )
+}

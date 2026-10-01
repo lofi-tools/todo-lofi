@@ -16,15 +16,15 @@
 
   body {
     background-color: var(--colors-canvas);
-    color: var(--colors-fg-default);
+    color: var(--colors-fg\.default);
     font-family: var(--fonts-sans);
     font-size: var(--font-sizes-md);
     line-height: 1.5;
   }
 
   ::selection {
-    background-color: var(--colors-accent-subtle);
-    color: var(--colors-fg-default);
+    background-color: var(--colors-accent);
+    color: var(--colors-fg\.on-accent);
   }
 
   :focus-visible {
