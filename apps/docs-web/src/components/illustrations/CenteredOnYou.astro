@@ -1,14 +1,17 @@
 ---
 import { css } from "styled-system/css";
-import { ArrowUpRight } from "web-design-system/icons";
+import AppMockup from "./AppMockup.astro";
+import MobileMockup from "./MobileMockup.astro";
+import { backdropSurface, paneLabel, windowSurface } from "./styles";
 
 /**
- * A cut-down desktop list for the "centered on you" story: just the tags
- * navbar and a simplified main pane. Two tags reach out of the app — #work to
- * a company list, #life admin to the same list on a phone — with a small
- * handset mock-up standing in for that second surface.
+ * A cut-down desktop list for the "centered on you" story: the tags navbar
+ * and a simplified main pane. Two tags reach out of the app — #work to a
+ * company list, #life admin to the same list on a phone — with a loose thread
+ * drawn from each tag row to the surface it lives on.
  */
 const root = css({
+  position: "relative",
   display: "flex",
   flexDirection: { base: "column", md: "row" },
   gap: "3",
@@ -17,144 +20,46 @@ const root = css({
   borderRadius: "lg",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border",
-  bg: "surface.subtle",
-});
-
-const appWindow = css({
-  flex: "1",
-  minW: "0",
-  display: "flex",
-  flexDirection: "column",
-  borderRadius: "md",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border",
-  bg: "canvas",
-  overflow: "hidden",
-});
-
-const titleBar = css({
-  display: "flex",
-  alignItems: "center",
-  gap: "1.5",
-  px: "3",
-  h: "7",
-  borderBottomWidth: "hairline",
-  borderBottomStyle: "solid",
-  borderBottomColor: "border.subtle",
-});
-
-const windowDot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
-const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
-
-const windowBody = css({
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 116px) minmax(0, 1fr)",
-  minH: "40",
-});
-
-const tagsNav = css({
-  display: "flex",
-  flexDirection: "column",
-  gap: "1",
-  p: "2",
-  borderRightWidth: "hairline",
-  borderRightStyle: "solid",
-  borderRightColor: "border.subtle",
-});
-
-const paneLabel = css({
-  fontFamily: "mono",
-  fontSize: "2xs",
-  textTransform: "uppercase",
-  letterSpacing: "wide",
-  color: "fg.subtle",
-  px: "1",
-  mb: "0.5",
-});
-
-const tagRow = css({
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: "2",
-  px: "1.5",
-  py: "1.5",
-  borderRadius: "sm",
-});
-
-const tagName = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
-
-const tagLink = css({
-  display: "inline-flex",
-  alignItems: "center",
-  gap: "0.5",
-  fontFamily: "mono",
-  fontSize: "2xs",
-  color: "accent.text",
-  whiteSpace: "nowrap",
-});
-
-const mainPane = css({ display: "flex", flexDirection: "column", gap: "2", p: "3" });
-
-const taskRow = css({
-  display: "flex",
-  alignItems: "center",
-  gap: "2.5",
-  px: "2",
-  py: "2",
-  borderRadius: "sm",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.subtle",
-  bg: "surface.subtle",
-});
-
-const checkbox = css({
-  w: "3",
-  h: "3",
-  flexShrink: "0",
-  borderRadius: "xs",
-  borderWidth: "hairline",
-  borderStyle: "solid",
   borderColor: "border.strong",
 });
 
-const taskLabel = css({ fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
+const tags = [
+  { name: "#inbox" },
+  { name: "#work", thread: "work" },
+  { name: "#life admin", thread: "life" },
+  { name: "#home" },
+];
 
-const phone = css({
-  flexShrink: "0",
-  w: { base: "full", md: "112px" },
+const tasks = ["Reply to Sam", "Ship the release", "Water the plants"];
+
+/**
+ * The external surfaces sit in a column beside the app, targets for the
+ * threads. Fixed width so the handset keeps its proportions; centered when the
+ * layout stacks.
+ */
+const side = css({
   display: "flex",
   flexDirection: "column",
-  gap: "2",
-  p: "1.5",
+  gap: "3",
+  w: "112px",
+  flexShrink: "0",
+  alignSelf: { base: "center", md: "auto" },
+});
+
+const companyList = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  p: "2",
   borderRadius: "lg",
   borderWidth: "hairline",
   borderStyle: "solid",
   borderColor: "border.strong",
-  bg: "canvas",
 });
 
-const notch = css({ w: "8", h: "1", mx: "auto", borderRadius: "full", bg: "border.strong" });
+const placeholderRow = css({ display: "flex", alignItems: "center", gap: "1.5" });
 
-const screen = css({
-  flex: "1",
-  display: "flex",
-  flexDirection: "column",
-  gap: "1.5",
-  p: "2",
-  borderRadius: "md",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.subtle",
-  bg: "surface.subtle",
-});
-
-const phoneTask = css({ display: "flex", alignItems: "center", gap: "1.5" });
-
-const phoneCheck = css({
+const placeholderCheck = css({
   w: "2",
   h: "2",
   flexShrink: "0",
@@ -164,81 +69,141 @@ const phoneCheck = css({
   borderColor: "border.strong",
 });
 
-const phoneBar = css({ flex: "1", h: "1.5", borderRadius: "full", bg: "border.strong" });
+const placeholderBar = css({ flex: "1", h: "1.5", borderRadius: "full", bg: "border.strong" });
 
-const caption = css({
-  fontFamily: "mono",
-  fontSize: "2xs",
-  color: "fg.subtle",
-  textAlign: "center",
-  whiteSpace: "nowrap",
+/**
+ * A full-bleed overlay for the connector threads; the script draws the paths.
+ * Only shown in the side-by-side layout — stacked, the targets sit below the
+ * app and a thread would loop back across it.
+ */
+const threadLayer = css({
+  position: "absolute",
+  inset: "0",
+  w: "full",
+  h: "full",
+  overflow: "visible",
+  pointerEvents: "none",
+  zIndex: "raised",
+  display: { base: "none", md: "block" },
 });
+
+const threadPath = css({
+  fill: "none",
+  stroke: "accent.text",
+  strokeWidth: "1.5",
+  strokeLinecap: "round",
+  opacity: "0.55",
+});
+
+const threadNode = css({ fill: "accent.text", opacity: "0.75" });
 ---
 
-<div class={root}>
-  <div class={appWindow}>
-    <div class={titleBar}>
-      <span class={windowDot} />
-      <span class={windowDot} />
-      <span class={windowTitle}>Taskstream</span>
+<div class={`${root} ${backdropSurface}`} data-threads>
+  <div class={side}>
+    <div class={`${companyList} ${windowSurface}`} data-thread-to="company">
+      <span class={paneLabel}>company's tasklist</span>
+      <span class={placeholderRow}>
+        <span class={placeholderCheck} />
+        <span class={placeholderBar} />
+      </span>
+      <span class={placeholderRow}>
+        <span class={placeholderCheck} />
+        <span class={placeholderBar} />
+      </span>
     </div>
-    <div class={windowBody}>
-      <div class={tagsNav}>
-        <span class={paneLabel}>tags</span>
-        <span class={tagRow}>
-          <span class={tagName}>#inbox</span>
+
+    <div data-thread-to="mobile">
+      <MobileMockup caption="on mobile">
+        <span class={paneLabel}>life admin</span>
+        <span class={placeholderRow}>
+          <span class={placeholderCheck} />
+          <span class={placeholderBar} />
         </span>
-        <span class={tagRow}>
-          <span class={tagName}>#work</span>
-          <span class={tagLink}>
-            company list <ArrowUpRight size={10} />
-          </span>
+        <span class={placeholderRow}>
+          <span class={placeholderCheck} />
+          <span class={placeholderBar} />
         </span>
-        <span class={tagRow}>
-          <span class={tagName}>#life admin</span>
-          <span class={tagLink}>
-            mobile <ArrowUpRight size={10} />
-          </span>
+        <span class={placeholderRow}>
+          <span class={placeholderCheck} />
+          <span class={placeholderBar} />
         </span>
-        <span class={tagRow}>
-          <span class={tagName}>#home</span>
+        <span class={placeholderRow}>
+          <span class={placeholderCheck} />
+          <span class={placeholderBar} />
         </span>
-      </div>
-      <div class={mainPane}>
-        <span class={paneLabel}>today</span>
-        <span class={taskRow}>
-          <span class={checkbox} />
-          <span class={taskLabel}>Reply to Sam</span>
+        <span class={placeholderRow}>
+          <span class={placeholderCheck} />
+          <span class={placeholderBar} />
         </span>
-        <span class={taskRow}>
-          <span class={checkbox} />
-          <span class={taskLabel}>Ship the release</span>
-        </span>
-        <span class={taskRow}>
-          <span class={checkbox} />
-          <span class={taskLabel}>Water the plants</span>
-        </span>
-      </div>
+      </MobileMockup>
     </div>
   </div>
 
-  <div class={phone}>
-    <span class={notch} />
-    <div class={screen}>
-      <span class={paneLabel}>life admin</span>
-      <span class={phoneTask}>
-        <span class={phoneCheck} />
-        <span class={phoneBar} />
-      </span>
-      <span class={phoneTask}>
-        <span class={phoneCheck} />
-        <span class={phoneBar} />
-      </span>
-      <span class={phoneTask}>
-        <span class={phoneCheck} />
-        <span class={phoneBar} />
-      </span>
-    </div>
-    <span class={caption}>on mobile</span>
-  </div>
+  <AppMockup tags={tags} tasks={tasks} />
+
+  <svg class={threadLayer} data-thread-svg aria-hidden="true">
+    <g data-thread="work" data-from="work" data-to="company">
+      <path class={threadPath} data-thread-path />
+      <circle class={threadNode} r="2.5" data-thread-node />
+      <circle class={threadNode} r="2.5" data-thread-node />
+    </g>
+    <g data-thread="life" data-from="life" data-to="mobile">
+      <path class={threadPath} data-thread-path />
+      <circle class={threadNode} r="2.5" data-thread-node />
+      <circle class={threadNode} r="2.5" data-thread-node />
+    </g>
+  </svg>
 </div>
+
+<script>
+  const drawThreads = () => {
+    for (const root of document.querySelectorAll<HTMLElement>("[data-threads]")) {
+      const svg = root.querySelector<SVGSVGElement>("[data-thread-svg]");
+      if (!svg) continue;
+
+      const box = root.getBoundingClientRect();
+      if (!box.width || !box.height) continue;
+      svg.setAttribute("viewBox", `0 0 ${box.width} ${box.height}`);
+
+      for (const group of root.querySelectorAll<SVGGElement>("g[data-thread]")) {
+        const from = root.querySelector<HTMLElement>(`[data-thread-from="${group.dataset.from}"]`);
+        const to = root.querySelector<HTMLElement>(`[data-thread-to="${group.dataset.to}"]`);
+        const path = group.querySelector<SVGPathElement>("[data-thread-path]");
+        const nodes = group.querySelectorAll<SVGCircleElement>("[data-thread-node]");
+        if (!from || !to || !path || nodes.length < 2) continue;
+
+        const start = from.getBoundingClientRect();
+        const end = to.getBoundingClientRect();
+        // Connect the facing edges, so the thread works whichever side of the
+        // app the target sits on.
+        const forward = end.left + end.width / 2 >= start.left + start.width / 2;
+        const x1 = (forward ? start.right : start.left) - box.left;
+        const y1 = start.top + start.height / 2 - box.top;
+        const x2 = (forward ? end.left : end.right) - box.left;
+        const y2 = end.top + end.height / 2 - box.top;
+
+        // Pull both control points sideways so the connector leaves and lands
+        // flat, then bows between the two ends: a loose thread, not a ruler.
+        const reach = Math.min(56, Math.max(10, Math.abs(x2 - x1) * 0.5)) * (forward ? 1 : -1);
+        path.setAttribute(
+          "d",
+          `M ${x1} ${y1} C ${x1 + reach} ${y1}, ${x2 - reach} ${y2}, ${x2} ${y2}`,
+        );
+        nodes[0]?.setAttribute("cx", String(x1));
+        nodes[0]?.setAttribute("cy", String(y1));
+        nodes[1]?.setAttribute("cx", String(x2));
+        nodes[1]?.setAttribute("cy", String(y2));
+      }
+    }
+  };
+
+  drawThreads();
+  window.addEventListener("resize", drawThreads);
+
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(drawThreads);
+    for (const root of document.querySelectorAll<HTMLElement>("[data-threads]")) {
+      observer.observe(root);
+    }
+  }
+</script>

@@ -1,0 +1,68 @@
+---
+import { css } from "styled-system/css";
+import { ChevronDown, ChevronRight } from "web-design-system/icons";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { mono } from "./styles";
+
+interface Node {
+  name: string;
+  count: number;
+  depth: number;
+  /** Whether the node renders a disclosure caret. */
+  branch: boolean;
+  open: boolean;
+}
+
+/** A flat, pre-expanded tree: depth drives the indent. */
+const nodes: Node[] = [
+  { name: "#work", count: 12, depth: 0, branch: true, open: true },
+  { name: "#client-a", count: 5, depth: 1, branch: true, open: true },
+  { name: "#release", count: 2, depth: 2, branch: false, open: false },
+  { name: "#reviews", count: 3, depth: 1, branch: false, open: false },
+  { name: "#personal", count: 8, depth: 0, branch: true, open: true },
+  { name: "#life admin", count: 4, depth: 1, branch: false, open: false },
+  { name: "#home", count: 1, depth: 1, branch: false, open: false },
+];
+
+const tree = css({ display: "flex", flexDirection: "column", gap: "0.5" });
+
+const node = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  py: "1",
+  borderRadius: "sm",
+});
+
+const caret = css({ display: "inline-flex", w: "3.5", flexShrink: "0", color: "fg.subtle" });
+const caretGap = css({ display: "inline-flex", w: "3.5", flexShrink: "0" });
+const name = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
+const count = css({
+  ml: "auto",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  fontVariantNumeric: "tabular-nums",
+});
+---
+
+<IllustrationFrame title="nested tags">
+  <span class={mono}>tags</span>
+  <div class={tree}>
+    {
+      nodes.map((entry) => (
+        <div class={node} style={{ paddingInlineStart: `${entry.depth * 16}px` }}>
+          {entry.branch ? (
+            <span class={caret}>
+              {entry.open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </span>
+          ) : (
+            <span class={caretGap} />
+          )}
+          <span class={name}>{entry.name}</span>
+          <span class={count}>{entry.count}</span>
+        </div>
+      ))
+    }
+  </div>
+</IllustrationFrame>

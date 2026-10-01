@@ -1,11 +1,14 @@
 ---
 import { css } from "styled-system/css";
-import { Filter, Layers, User, Zap } from "web-design-system/icons";
+import { Filter, Layers, Link, User, Zap } from "web-design-system/icons";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
 import AutoTabs from "../blocks/AutoTabs.astro";
 import AutoSortRows from "../illustrations/AutoSortRows.astro";
+import BlockedTasks from "../illustrations/BlockedTasks.astro";
 import CenteredOnYou from "../illustrations/CenteredOnYou.astro";
+import ProjectFiles from "../illustrations/ProjectFiles.astro";
+import TagTree from "../illustrations/TagTree.astro";
 
 const areas = [
   {
@@ -13,30 +16,35 @@ const areas = [
     Illustration: CenteredOnYou,
     title: "Centered on you",
     subtitle: "Work & personal",
-    description:
-      "Work and personal tasks share one list that is yours; nothing assumes a team, and no one else's workflow shapes how you organize.",
+    description: "Work and personal tasks share one list that is yours; nothing assumes a team, and no one else's workflow shapes how you organize.",
   },
   {
     Icon: Zap,
     Illustration: AutoSortRows,
-    title: "Sorted for you",
+    title: "Prioritized for you",
     subtitle: "Auto-sort",
-    description:
-      "Importance, urgency, and deadline pressure order the list. There is no reminder to set — your next task floats to the top on its own.",
+    description: "Surfaces your next task.",
   },
   {
     Icon: Layers,
-    title: "Tags and subtasks",
-    subtitle: "Organize",
-    description:
-      "Tags cut across projects, and subtasks with blocked-by chains show what you can start now and what is waiting.",
+    Illustration: TagTree,
+    title: "Organized for you",
+    subtitle: "Tags and subtasks",
+    description: "Quick-add from anywhere via keyboard shortcuts, or let the AI agent manage, sort, and break down tasks for you.",
   },
   {
     Icon: Filter,
+    Illustration: ProjectFiles,
     title: "Projects, areas, filters",
     subtitle: "Structure",
-    description:
-      "Projects hold tasks, areas hold projects, and a tag filter saves a view. The tree is yours to arrange, drag-and-drop and all.",
+    description: "Projects hold tasks, areas hold projects, and a tag filter saves a view. The tree is yours to arrange, drag-and-drop and all.",
+  },
+  {
+    Icon: Link,
+    Illustration: BlockedTasks,
+    title: "Hides blocked tasks",
+    subtitle: "Blocked-by",
+    description: "Hides the tasks you can't do.",
   },
 ];
 ---

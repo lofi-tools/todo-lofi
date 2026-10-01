@@ -1,0 +1,130 @@
+---
+import { css } from "styled-system/css";
+import { checkbox, label, paneLabel, windowSurface } from "./styles";
+
+interface Tag {
+  /** Tag name including its leading `#`. */
+  name: string;
+  /**
+   * Optional id of an external surface this tag connects to. The owning
+   * illustration draws the connector thread from the rendered tag row.
+   */
+  thread?: string;
+}
+
+interface Props {
+  /** Window title shown in the title bar. */
+  title?: string;
+  /** Heading over the tags nav. */
+  tagsLabel?: string;
+  tags: Tag[];
+  /** Heading over the task list. */
+  listLabel?: string;
+  tasks: string[];
+}
+
+const { title = "Taskstream", tagsLabel = "tags", tags, listLabel = "today", tasks } = Astro.props;
+
+const window = css({
+  flex: "1",
+  minW: "0",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  overflow: "hidden",
+});
+
+// No background of its own: the header shares the window's gradient so the
+// whole app surface reads as one continuous panel.
+const titleBar = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  px: "3",
+  h: "7",
+  borderBottomWidth: "hairline",
+  borderBottomStyle: "solid",
+  borderBottomColor: "border.subtle",
+});
+
+const windowDot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
+const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+
+const windowGrid = css({
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 116px) minmax(0, 1fr)",
+  minH: "40",
+});
+
+const tagsNav = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1",
+  p: "2",
+  borderRightWidth: "hairline",
+  borderRightStyle: "solid",
+  borderRightColor: "border.subtle",
+});
+
+const tagRow = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "2",
+  px: "1.5",
+  py: "1.5",
+  borderRadius: "sm",
+});
+
+const tagName = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
+
+const mainPane = css({ display: "flex", flexDirection: "column", gap: "2", p: "3" });
+
+const taskRow = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "2.5",
+  px: "2",
+  py: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  backgroundImage:
+    "linear-gradient(160deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 55%, token(colors.surface.subtle) 100%)",
+});
+---
+
+<div class={`${window} ${windowSurface}`}>
+  <div class={titleBar}>
+    <span class={windowDot} />
+    <span class={windowDot} />
+    <span class={windowTitle}>{title}</span>
+  </div>
+  <div class={windowGrid}>
+    <div class={tagsNav}>
+      <span class={paneLabel}>{tagsLabel}</span>
+      {
+        tags.map((tag) => (
+          <span class={tagRow} data-thread-from={tag.thread}>
+            <span class={tagName}>{tag.name}</span>
+          </span>
+        ))
+      }
+    </div>
+    <div class={mainPane}>
+      <span class={paneLabel}>{listLabel}</span>
+      {
+        tasks.map((task) => (
+          <span class={taskRow}>
+            <span class={checkbox} />
+            <span class={label}>{task}</span>
+          </span>
+        ))
+      }
+    </div>
+  </div>
+</div>

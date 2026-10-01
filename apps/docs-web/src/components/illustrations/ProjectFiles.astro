@@ -1,0 +1,315 @@
+---
+import { css } from "styled-system/css";
+import { ChevronDown } from "web-design-system/icons";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { mono } from "./styles";
+
+interface Entry {
+  name: string;
+  depth: number;
+  folder?: boolean;
+  type?: string;
+  tone?: "accent" | "danger" | "success" | "info" | "warning";
+}
+
+const entries: Entry[] = [
+  { name: "src", depth: 0, folder: true },
+  { name: "components", depth: 1, folder: true },
+  { name: "Editor.tsx", depth: 2, type: "TSX", tone: "accent" },
+  { name: "Button.tsx", depth: 2, type: "TSX", tone: "accent" },
+  { name: "index.ts", depth: 1, type: "TS", tone: "accent" },
+  { name: "assets", depth: 0, folder: true },
+  { name: "hero.png", depth: 1, type: "PNG", tone: "warning" },
+  { name: "brief.pdf", depth: 1, type: "PDF", tone: "danger" },
+  { name: "budget.xlsx", depth: 1, type: "XLSX", tone: "success" },
+  { name: "notes.docx", depth: 1, type: "DOCX", tone: "info" },
+];
+
+const tAccent = css({ color: "accent.text" });
+const tDanger = css({ color: "danger" });
+const tSuccess = css({ color: "success" });
+const tInfo = css({ color: "info" });
+const tWarning = css({ color: "warning" });
+const toneClass = { accent: tAccent, danger: tDanger, success: tSuccess, info: tInfo, warning: tWarning };
+
+const panes = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", md: "minmax(0, 164px) minmax(0, 1fr)" },
+  gap: "2",
+  alignItems: "start",
+});
+
+const directory = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.5",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "canvas",
+});
+
+const dirRow = css({ display: "flex", alignItems: "center", gap: "1.5", py: "0.5", minW: "0" });
+const folderName = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.default", whiteSpace: "nowrap" });
+const fileName = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+});
+const folderCaret = css({ display: "inline-flex", w: "3", flexShrink: "0", color: "fg.subtle" });
+const fileSpacer = css({ display: "inline-flex", w: "3", flexShrink: "0" });
+
+const fileBadge = css({
+  ml: "auto",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  flexShrink: "0",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  bg: "surface.hover",
+  borderRadius: "sm",
+  px: "1",
+});
+
+const previews = css({ display: "flex", flexDirection: "column", gap: "2", minW: "0" });
+
+const editor = css({
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  overflow: "hidden",
+});
+const editorBar = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  px: "2",
+  h: "6",
+  backgroundImage:
+    "linear-gradient(180deg, token(colors.surface.active) 0%, token(colors.surface.elevated) 100%)",
+  borderBottomWidth: "hairline",
+  borderBottomStyle: "solid",
+  borderBottomColor: "border.subtle",
+});
+const windowDot = css({ w: "1.5", h: "1.5", borderRadius: "full", bg: "border.strong" });
+const editorName = css({ ml: "1", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+const editorBody = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  p: "2",
+  backgroundImage:
+    "linear-gradient(170deg, token(colors.surface.subtle) 0%, token(colors.canvas) 100%)",
+});
+const codeLine = css({ display: "flex", alignItems: "center", gap: "1.5" });
+const gutter = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  w: "3",
+  textAlign: "right",
+  flexShrink: "0",
+});
+const token = css({ h: "1.5", borderRadius: "full" });
+const tAccentBar = css({ bg: "accent.text" });
+const tDangerBar = css({ bg: "danger" });
+const tSuccessBar = css({ bg: "success" });
+const tInfoBar = css({ bg: "info" });
+const tMutedBar = css({ bg: "border.strong" });
+const w6 = css({ w: "6" });
+const w10 = css({ w: "10" });
+const w14 = css({ w: "14" });
+const w20 = css({ w: "20" });
+
+const grid = css({ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "2" });
+const tile = css({ display: "flex", flexDirection: "column", gap: "1.5", minW: "0" });
+const thumb = css({
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  h: "16",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  bg: "canvas",
+  overflow: "hidden",
+});
+const landscape = css({ w: "full", h: "full", color: "info" });
+const meta = css({ display: "flex", alignItems: "center", gap: "1.5", minW: "0" });
+const metaName = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+});
+const metaBadge = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  flexShrink: "0",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+  bg: "surface.hover",
+  borderRadius: "sm",
+  px: "1",
+});
+
+const page = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "1",
+  w: "10",
+  p: "1.5",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "surface.hover",
+});
+const pageTitle = css({ fontFamily: "mono", fontSize: "2xs" });
+const line = css({ h: "1", borderRadius: "full", bg: "border.strong" });
+const lineShort = css({ w: "2/3" });
+
+const sheet = css({
+  display: "grid",
+  gridTemplateColumns: "repeat(3, 1fr)",
+  w: "14",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  overflow: "hidden",
+});
+const cell = css({
+  h: "3",
+  borderRightWidth: "hairline",
+  borderBottomWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+  bg: "surface.hover",
+});
+---
+
+<IllustrationFrame title="project · website">
+  <div class={panes}>
+    <div class={directory}>
+      <span class={mono}>files</span>
+      {
+        entries.map((entry) => (
+          <div class={dirRow} style={{ paddingInlineStart: `${entry.depth * 12}px` }}>
+            {entry.folder ? (
+              <>
+                <span class={folderCaret}>
+                  <ChevronDown size={12} />
+                </span>
+                <span class={folderName}>{entry.name}</span>
+              </>
+            ) : (
+              <>
+                <span class={fileSpacer} />
+                <span class={fileName}>{entry.name}</span>
+                <span class={`${fileBadge} ${entry.tone ? toneClass[entry.tone] : ""}`}>{entry.type}</span>
+              </>
+            )}
+          </div>
+        ))
+      }
+    </div>
+
+    <div class={previews}>
+      <div class={editor}>
+        <div class={editorBar}>
+          <span class={windowDot} />
+          <span class={editorName}>Editor.tsx</span>
+        </div>
+        <div class={editorBody}>
+          <div class={codeLine}>
+            <span class={gutter}>1</span>
+            <span class={`${token} ${w10} ${tAccentBar}`} />
+            <span class={`${token} ${w6} ${tMutedBar}`} />
+          </div>
+          <div class={codeLine}>
+            <span class={gutter}>2</span>
+            <span class={`${token} ${w6} ${tMutedBar}`} />
+            <span class={`${token} ${w20} ${tSuccessBar}`} />
+            <span class={`${token} ${w6} ${tDangerBar}`} />
+          </div>
+          <div class={codeLine}>
+            <span class={gutter}>3</span>
+            <span class={`${token} ${w14} ${tInfoBar}`} />
+            <span class={`${token} ${w10} ${tMutedBar}`} />
+          </div>
+        </div>
+      </div>
+
+      <div class={grid}>
+        <div class={tile}>
+          <div class={thumb}>
+            <svg class={landscape} viewBox="0 0 64 40" preserveAspectRatio="none" aria-hidden="true">
+              <circle cx="47" cy="12" r="5" fill="currentColor" opacity="0.55" />
+              <path d="M0 40 18 16 31 40Z" fill="currentColor" opacity="0.3" />
+              <path d="M17 40 38 10 60 40Z" fill="currentColor" opacity="0.45" />
+            </svg>
+          </div>
+          <div class={meta}>
+            <span class={`${metaBadge} ${tWarning}`}>PNG</span>
+            <span class={metaName}>hero.png</span>
+          </div>
+        </div>
+
+        <div class={tile}>
+          <div class={thumb}>
+            <div class={page}>
+              <span class={`${pageTitle} ${tDanger}`}>PDF</span>
+              <span class={line} />
+              <span class={`${line} ${lineShort}`} />
+              <span class={line} />
+            </div>
+          </div>
+          <div class={meta}>
+            <span class={`${metaBadge} ${tDanger}`}>PDF</span>
+            <span class={metaName}>brief.pdf</span>
+          </div>
+        </div>
+
+        <div class={tile}>
+          <div class={thumb}>
+            <div class={sheet}>
+              {Array.from({ length: 9 }).map(() => <span class={cell} />)}
+            </div>
+          </div>
+          <div class={meta}>
+            <span class={`${metaBadge} ${tSuccess}`}>XLSX</span>
+            <span class={metaName}>budget.xlsx</span>
+          </div>
+        </div>
+
+        <div class={tile}>
+          <div class={thumb}>
+            <div class={page}>
+              <span class={`${pageTitle} ${tInfo}`}>DOC</span>
+              <span class={line} />
+              <span class={line} />
+              <span class={`${line} ${lineShort}`} />
+            </div>
+          </div>
+          <div class={meta}>
+            <span class={`${metaBadge} ${tInfo}`}>DOCX</span>
+            <span class={metaName}>notes.docx</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</IllustrationFrame>

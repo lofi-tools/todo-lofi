@@ -190,7 +190,10 @@ export const tabProgressBar = css({
   display: "block",
   w: "100%",
   h: "2px",
-  bg: "accent.text",
+  // A dimmer indigo than the `accent.text` selected-tab indicator, so the
+  // timed fill reads as secondary to the selection it advances.
+  bg: "accent",
+  opacity: "0.5",
   transformOrigin: "left",
   transform: "scaleX(0)",
 });

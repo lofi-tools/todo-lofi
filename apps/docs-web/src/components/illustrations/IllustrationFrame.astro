@@ -1,6 +1,6 @@
 ---
 import { css } from "styled-system/css";
-import { dot } from "./styles";
+import { chromeBar, dot, windowSurface } from "./styles";
 
 interface Props {
   /** Name shown in the window bar; the bar is the illustration's chrome. */
@@ -15,8 +15,7 @@ const root = css({
   borderRadius: "lg",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border",
-  bg: "surface.subtle",
+  borderColor: "border.strong",
   overflow: "hidden",
 });
 
@@ -26,9 +25,6 @@ const bar = css({
   gap: "1.5",
   px: "3",
   h: "7",
-  borderBottomWidth: "hairline",
-  borderBottomStyle: "solid",
-  borderBottomColor: "border.subtle",
 });
 
 const titleStyle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
@@ -36,8 +32,8 @@ const titleStyle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "f
 const body = css({ display: "flex", flexDirection: "column", gap: "2", p: "3", flex: "1" });
 ---
 
-<div class={root}>
-  <div class={bar}>
+<div class={`${root} ${windowSurface}`}>
+  <div class={`${bar} ${chromeBar}`}>
     <span class={dot} />
     <span class={dot} />
     {title && <span class={titleStyle}>{title}</span>}

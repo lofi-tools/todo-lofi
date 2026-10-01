@@ -2,6 +2,49 @@ import { css } from "styled-system/css";
 
 /** Shared pieces for the homepage feature illustrations. */
 
+/**
+ * The ambient backdrop from the reference screens: a few soft radial lifts
+ * over a dark falloff, plus a faint indigo tint in the top corner. Used by the
+ * outer illustration frames, with the windows and cards layered on top.
+ */
+export const backdropSurface = css({
+  backgroundImage: [
+    "radial-gradient(130% 100% at 62% 28%, token(colors.surface.hover) 0%, transparent 64%)",
+    "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
+    "radial-gradient(105% 85% at 12% 22%, token(colors.surface.elevated) 0%, transparent 62%)",
+    "radial-gradient(85% 62% at 90% 8%, token(colors.accent.subtle) 0%, transparent 62%)",
+    "linear-gradient(180deg, token(colors.surface.subtle) 0%, token(colors.canvas) 55%, token(colors.canvas) 100%)",
+  ].join(", "),
+});
+
+/**
+ * A mock window surface: the reference's panel gradient (a three-stop falloff
+ * with a light radial sheen at the top), lifted off the backdrop by a shadow.
+ */
+export const windowSurface = css({
+  backgroundImage: [
+    "radial-gradient(120% 90% at 62% 0%, token(colors.surface.hover) 0%, transparent 60%)",
+    "radial-gradient(80% 60% at 90% 6%, token(colors.accent.subtle) 0%, transparent 62%)",
+    "linear-gradient(170deg, token(colors.surface.elevated) 0%, token(colors.surface.subtle) 45%, token(colors.canvas) 100%)",
+  ].join(", "),
+  boxShadow: "xl",
+});
+
+/** The inset body of a mock window, a step darker than its chrome. */
+export const windowBody = css({
+  backgroundImage:
+    "linear-gradient(180deg, token(colors.surface.subtle) 0%, token(colors.canvas) 100%)",
+});
+
+/** The chrome bar atop a mock window: dots, a title, and a hairline. */
+export const chromeBar = css({
+  backgroundImage:
+    "linear-gradient(180deg, token(colors.surface.active) 0%, token(colors.surface.elevated) 100%)",
+  borderBottomWidth: "hairline",
+  borderBottomStyle: "solid",
+  borderBottomColor: "border.strong",
+});
+
 /** A mock task row: checkbox, label, optional trailing detail. */
 export const row = css({
   display: "flex",
@@ -9,11 +52,12 @@ export const row = css({
   gap: "2",
   px: "2",
   py: "1.5",
-  borderRadius: "sm",
+  borderRadius: "md",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border.subtle",
-  bg: "canvas",
+  borderColor: "border.strong",
+  backgroundImage:
+    "linear-gradient(160deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 55%, token(colors.surface.subtle) 100%)",
 });
 
 export const checkbox = css({
@@ -59,9 +103,22 @@ export const chip = css({
   borderRadius: "sm",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border",
-  color: "fg.subtle",
+  borderColor: "border.strong",
+  backgroundImage:
+    "linear-gradient(180deg, token(colors.surface.active) 0%, token(colors.surface.hover) 100%)",
+  color: "fg.muted",
   whiteSpace: "nowrap",
 });
 
 export const dot = css({ w: "2", h: "2", borderRadius: "full", bg: "border.strong" });
+
+/** A small mono heading over a pane, e.g. "tags" or "today". */
+export const paneLabel = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  textTransform: "uppercase",
+  letterSpacing: "wide",
+  color: "fg.subtle",
+  px: "1",
+  mb: "0.5",
+});

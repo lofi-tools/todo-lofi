@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
-import { band, bandText, bandLink, inlineLink } from "./homeStyles";
+import { band, bandText, bandLink } from "./homeStyles";
 ---
 
 <HomepageSection index={8} label="roadmap">
@@ -17,12 +17,4 @@ import { band, bandText, bandLink, inlineLink } from "./homeStyles";
           See the roadmap
         </a>
       </div>
-
-      <p class={css({ m: "0", mt: "8", fontSize: "sm", color: "fg.muted" })}>
-        Every feature has a page: install, tasks, repeats, the agent, workflows, sync, and configuration all live in{" "}
-        <a href="/docs" class={inlineLink}>
-          the user guide
-        </a>
-        .
-      </p>
     </HomepageSection>

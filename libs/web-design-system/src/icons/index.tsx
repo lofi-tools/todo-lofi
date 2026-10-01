@@ -295,6 +295,20 @@ export const BarChart = (props: IconProps) => (
   </Svg>
 )
 
+export const Flag = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M5 21V4" />
+    <path d="M5 5h13l-2.6 3.5L18 12H5" />
+  </Svg>
+)
+
+export const Lock = (props: IconProps) => (
+  <Svg {...props}>
+    <rect x="4.5" y="10.5" width="15" height="10.5" rx="2" />
+    <path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" />
+  </Svg>
+)
+
 /** Neutral placeholder mark. Deliberately not any real company's logo. */
 export const LogoMark = (props: IconProps) => (
   <Svg {...props}>

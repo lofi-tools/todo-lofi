@@ -1,0 +1,61 @@
+---
+import { css } from "styled-system/css";
+import { Lock } from "web-design-system/icons";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+/** The blocked set is dimmed and dashed, so it reads as set aside, not done. */
+const blockedGroup = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "dashed",
+  borderColor: "border.strong",
+  opacity: "0.72",
+});
+
+const blockedRow = css({ display: "flex", alignItems: "center", gap: "2", minW: "0" });
+const blockedName = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.muted", whiteSpace: "nowrap" });
+const blockedBy = css({
+  ml: "auto",
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  whiteSpace: "nowrap",
+});
+---
+
+<IllustrationFrame title="today">
+  <div class={rowHead}>
+    <span class={mono}>actions</span>
+    <span class={chip}>hide blocked</span>
+  </div>
+
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Ship the release</span>
+  </div>
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Reply to Sam</span>
+  </div>
+
+  <div class={blockedGroup}>
+    <span class={mono}>blocked · hidden</span>
+    <span class={blockedRow}>
+      <Lock size={12} />
+      <span class={blockedName}>Deploy to prod</span>
+      <span class={blockedBy}>blocked by “Tests pass”</span>
+    </span>
+    <span class={blockedRow}>
+      <Lock size={12} />
+      <span class={blockedName}>Run the release</span>
+      <span class={blockedBy}>blocked by “Cut the tag”</span>
+    </span>
+  </div>
+
+  <p class={caption}>Blocked-by chains stay out of the list until they can start.</p>
+</IllustrationFrame>

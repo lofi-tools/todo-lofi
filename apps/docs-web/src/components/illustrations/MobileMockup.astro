@@ -1,0 +1,56 @@
+---
+import { css } from "styled-system/css";
+import { windowBody, windowSurface } from "./styles";
+
+interface Props {
+  /** Caption under the handset. */
+  caption?: string;
+}
+
+const { caption } = Astro.props;
+
+const phone = css({
+  flexShrink: "0",
+  // Fixed width and ratio so the handset reads the same at every breakpoint.
+  w: "112px",
+  aspectRatio: "9 / 17",
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "1.5",
+  borderRadius: "lg",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.strong",
+});
+
+const notch = css({ w: "8", h: "1", mx: "auto", borderRadius: "full", bg: "border.strong" });
+
+const screen = css({
+  flex: "1",
+  display: "flex",
+  flexDirection: "column",
+  gap: "1.5",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+});
+
+const captionStyle = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  color: "fg.subtle",
+  textAlign: "center",
+  whiteSpace: "nowrap",
+});
+---
+
+<div class={`${phone} ${windowSurface}`}>
+  <span class={notch} />
+  <div class={`${screen} ${windowBody}`}>
+    <slot />
+  </div>
+  {caption && <span class={captionStyle}>{caption}</span>}
+</div>
