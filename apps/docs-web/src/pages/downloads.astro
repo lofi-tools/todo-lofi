@@ -3,7 +3,9 @@ import { css } from 'styled-system/css'
 import Base from '../layouts/Base.astro'
 import SiteHeader from '../components/blocks/SiteHeader.astro'
 import DocsFooter from '../components/blocks/DocsFooter.astro'
-import { FORMATS, PLATFORMS, RELEASES_URL } from '../../data/downloads'
+import { Download } from 'web-design-system/icons'
+import { ARCHES, FORMATS, PLATFORMS, RELEASES_URL } from '../../data/downloads'
+import { blueprintContent, blueprintGrid, blueprintRules } from '../components/sections/homeStyles'
 
 const eyebrow = css({
   fontSize: '2xs',
@@ -72,25 +74,42 @@ const detectedBadge = css({
   color: 'accent.text',
 })
 
-const formatList = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '2',
-  listStyle: 'none',
-  m: '0',
-  p: '0',
+const archBadge = css({
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  color: 'fg.subtle',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  borderRadius: 'sm',
+  px: '1.5',
+  py: '0.5',
 })
 
-const formatRow = css({
+const secondaryFormats = css({
   display: 'flex',
   alignItems: 'baseline',
-  gap: '3',
+  gap: '2',
   flexWrap: 'wrap',
+  fontSize: 'xs',
+  color: 'fg.subtle',
+})
+
+const secondaryLink = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1',
+  color: 'fg.muted',
+  textDecoration: 'underline',
+  textUnderlineOffset: '2px',
+  _hover: { color: 'fg.default' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
 })
 
 const formatLink = css({
   display: 'inline-flex',
   alignItems: 'center',
+  gap: '1.5',
   h: '8',
   px: '3',
   borderRadius: 'sm',
@@ -104,8 +123,6 @@ const formatLink = css({
   _hover: { borderColor: 'border.strong', bg: 'surface.hover' },
   _focusVisible: { outline: 'none', boxShadow: 'focus' },
 })
-
-const formatHint = css({ fontSize: 'xs', color: 'fg.subtle' })
 
 const notes = [
   {
@@ -128,18 +145,18 @@ const notes = [
 
 <Base
   title="Download"
-  suffix="taskstream"
-  description="Download taskstream for macOS, Linux, or Windows. Prebuilt bundles are named after their version; this page points each link at the newest matching file for the machine you are on."
+  suffix="Taskstream"
+  description="Download Taskstream for macOS, Linux, or Windows. Prebuilt bundles are named after their version; this page points each link at the newest matching file for the machine you are on."
 >
-  <SiteHeader />
+  <SiteHeader blueprint />
 
-  <main id="content">
-    <section id="download" class={css({ py: { base: '12', md: '20' } })}>
-      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+  <main id="content" class={blueprintGrid}>
+    <div class={blueprintContent}>
+    <section id="download" class={css({ py: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
         <div class={css({ display: 'flex', flexDirection: 'column', gap: '3', alignItems: 'flex-start' })}>
           <span class={eyebrow}>Download</span>
           <h1 class={css({ textStyle: 'h1', color: 'fg.default', textWrap: 'balance' })}>
-            Download taskstream
+            Download Taskstream
           </h1>
           <p
             class={css({
@@ -172,11 +189,9 @@ const notes = [
             unsigned development builds
           </p>
         </div>
-      </div>
     </section>
 
-    <section id="all-downloads" class={css({ pb: { base: '12', md: '20' } })}>
-      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+    <section id="all-downloads" class={css({ pb: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
         <h2 class={css({ textStyle: 'h2', color: 'fg.default' })}>All downloads</h2>
         <p class={css({ fontSize: 'sm', color: 'fg.muted', mt: '2', mb: { base: '6', md: '8' } })}>
           Every bundle in the newest release, grouped by platform. Each link points at the file for
@@ -198,6 +213,9 @@ const notes = [
                   <h3 class={css({ fontSize: 'xl', fontWeight: 'semibold', color: 'fg.default' })}>
                     {platform.label}
                   </h3>
+                  {ARCHES[platform.id].map((arch) => (
+                    <span class={archBadge}>{arch.label}</span>
+                  ))}
                   <span data-download-detected={platform.id} hidden class={detectedBadge}>
                     this machine
                   </span>
@@ -205,32 +223,44 @@ const notes = [
                 <p class={css({ m: '0', fontSize: 'xs', color: 'fg.subtle' })}>
                   {platform.requirement}
                 </p>
-                <ul class={formatList}>
-                  {FORMATS[platform.id].map((format) => (
-                    <li class={formatRow}>
+                <div>
+                  <a
+                    data-download
+                    data-platform={platform.id}
+                    data-format={FORMATS[platform.id][0].id}
+                    href={RELEASES_URL}
+                    title={FORMATS[platform.id][0].hint}
+                    class={formatLink}
+                  >
+                    <Download size={12} />
+                    {FORMATS[platform.id][0].label}
+                  </a>
+                </div>
+                {FORMATS[platform.id].length > 1 && (
+                  <p class={secondaryFormats}>
+                    <span>Also:</span>
+                    {FORMATS[platform.id].slice(1).map((format) => (
                       <a
                         data-download
                         data-platform={platform.id}
                         data-format={format.id}
                         href={RELEASES_URL}
                         title={format.hint}
-                        class={formatLink}
+                        class={secondaryLink}
                       >
+                        <Download size={12} />
                         {format.label}
                       </a>
-                      <span class={formatHint}>{format.hint}</span>
-                    </li>
-                  ))}
-                </ul>
+                    ))}
+                  </p>
+                )}
               </div>
             ))
           }
         </div>
-      </div>
     </section>
 
-    <section class={css({ pb: { base: '12', md: '20' } })}>
-      <div class={css({ w: '100%', maxW: '1200px', mx: 'auto', px: { base: '5', md: '8' } })}>
+    <section class={css({ pb: { base: '12', md: '20' }, px: { base: '5', md: '8' } })}>
         <div class={css({ p: { base: '5', md: '6' }, borderRadius: 'lg', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', bg: 'surface.subtle' })}>
           <h2 class={css({ fontSize: 'md', fontWeight: 'semibold', color: 'fg.default', m: '0', mb: '3' })}>
             Before you run it
@@ -250,11 +280,15 @@ const notes = [
             <a href="/docs/install" class={inlineLink}>Full install instructions →</a>
           </p>
         </div>
-      </div>
     </section>
+    </div>
   </main>
 
-  <DocsFooter />
+  <!-- Vertical blueprint rules: one fixed overlay so the lines run unbroken
+       from the header to the footer. -->
+  <div class={blueprintRules} aria-hidden="true"></div>
+
+  <DocsFooter blueprint />
 </Base>
 
 <script>

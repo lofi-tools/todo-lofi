@@ -5,6 +5,12 @@ import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
 import { GitHub } from 'web-design-system/icons'
 import { docGuides, guideFor, REPO_URL } from '../../data/docs'
 
+interface Props {
+  /** Align the nav to the homepage blueprint's content column. */
+  blueprint?: boolean
+}
+
+const { blueprint = false } = Astro.props
 const active = guideFor(Astro.url.pathname)
 
 const navItem = (active: boolean) =>
@@ -48,7 +54,7 @@ const navItem = (active: boolean) =>
       gap: '4',
       h: '14',
       w: '100%',
-      maxW: '1280px',
+      maxW: blueprint ? '1104px' : '1280px',
       mx: 'auto',
       px: { base: '5', md: '8' },
     })}

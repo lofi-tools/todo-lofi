@@ -47,6 +47,23 @@ export const PLATFORMS: Platform[] = [
   { id: 'windows', label: 'Windows', requirement: 'Windows 10 or newer' },
 ]
 
+export interface Arch {
+  /** The internal arch id (`aarch64` maps to the `arm64` file-name token on macOS). */
+  id: string
+  label: string
+}
+
+/**
+ * The architectures CI actually builds per OS (see `.github/workflows/bundle.yml`:
+ * macOS on Apple Silicon, Linux and Windows on x86_64). Add an entry here when a
+ * new runner ships another arch and the dropdown grows a button for it.
+ */
+export const ARCHES: Record<PlatformId, Arch[]> = {
+  macos: [{ id: 'aarch64', label: 'arm64' }],
+  linux: [{ id: 'x86_64', label: 'x86_64' }],
+  windows: [{ id: 'x86_64', label: 'x86_64' }],
+}
+
 /** The first format of each platform is the one the primary button downloads. */
 export const FORMATS: Record<PlatformId, BundleFormat[]> = {
   macos: [
@@ -192,7 +209,8 @@ async function loadReleases(): Promise<Release[]> {
  *
  * Markup contract:
  * - `[data-download]` — an `<a>` to fill. `data-platform` is a platform id or
- *   `auto` (the platform the visitor is on); `data-format` is a format id and
+ *   `auto` (the platform the visitor is on); `data-arch` pins an architecture
+ *   id and defaults to the visitor's; `data-format` is a format id and
  *   defaults to the platform's first format.
  * - `[data-download-detected]` — an element revealed only for the platform the
  *   visitor is actually on.
@@ -241,7 +259,8 @@ export async function initDownloads(): Promise<void> {
       const target: PlatformId = !raw || raw === 'auto' ? platform : (raw as PlatformId)
       if (!FORMATS[target]) continue
       const format = (link.dataset.format as FormatId | undefined) ?? FORMATS[target][0].id
-      const found = releases ? findAsset(releases, target, format, arch) : undefined
+      const wantArch = link.dataset.arch ?? arch
+      const found = releases ? findAsset(releases, target, format, wantArch) : undefined
       if (!found) continue
       link.href = found.asset.browser_download_url
       if (!version) version = versionOf(found.asset.name)

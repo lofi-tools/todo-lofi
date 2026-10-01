@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
-import { ChevronDown } from "web-design-system/icons";
-import { PLATFORMS, RELEASES_URL } from "../../../data/downloads";
+import { ChevronDown, ArrowRight, Download } from "web-design-system/icons";
+import { FORMATS, ARCHES, PLATFORMS, RELEASES_URL } from "../../../data/downloads";
 
 const group = css({ position: "relative", display: "inline-flex", alignItems: "stretch" });
 
@@ -43,7 +43,7 @@ const menu = css({
   top: "100%",
   right: "0",
   mt: "1",
-  minW: "48",
+  minW: "60",
   p: "1",
   display: "flex",
   flexDirection: "column",
@@ -57,22 +57,82 @@ const menu = css({
   "&[hidden]": { display: "none" },
 });
 
-const menuItem = css({
+const platformRow = css({
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
   gap: "6",
   px: "3",
-  h: "8",
+  py: "1.5",
   borderRadius: "sm",
   fontSize: "sm",
   color: "fg.default",
   whiteSpace: "nowrap",
-  _hover: { bg: "surface.hover" },
+});
+
+const platformLabel = css({ display: "inline-flex", alignItems: "center", gap: "2", fontWeight: "medium" });
+
+const archBadge = css({
+  fontFamily: "mono",
+  fontSize: "2xs",
+  fontWeight: "normal",
+  color: "fg.subtle",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  borderRadius: "sm",
+  px: "1.5",
+  py: "0.5",
+});
+
+const formatButtons = css({ display: "inline-flex", alignItems: "center", gap: "1.5" });
+
+const formatButton = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1",
+  h: "7",
+  px: "2",
+  borderRadius: "sm",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border",
+  fontSize: "xs",
+  color: "fg.muted",
+  whiteSpace: "nowrap",
+  transitionProperty: "color, background-color, border-color",
+  transitionDuration: "fast",
+  _hover: { bg: "surface.hover", color: "fg.default", borderColor: "border.strong" },
+  _focusVisible: { outline: "none", boxShadow: "focus" },
+  // The longest label (.AppImage) leaves no slack in the row: without this
+  // the icon, a shrinkable flex item, collapses to zero width.
+  "& svg": { flexShrink: "0" },
+});
+
+const menuItemLast = css({
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "flex-end",
+  gap: "6",
+  px: "3",
+  h: "8",
+  borderRadius: "sm",
+  fontSize: "sm",
+  color: "fg.subtle",
+  textDecoration: "underline",
+  textUnderlineOffset: "2px",
+  whiteSpace: "nowrap",
+  transitionProperty: "color, background-color",
+  transitionDuration: "fast",
+  _hover: { bg: "surface.hover", color: "fg.default" },
   _focusVisible: { outline: "none", boxShadow: "focus" },
 });
 
-const menuHint = css({ color: "fg.subtle", fontSize: "xs" });
+const menuLabelWithArrow = css({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "1.5",
+});
 ---
 
 <div class={group} data-download-button>
@@ -93,15 +153,35 @@ const menuHint = css({ color: "fg.subtle", fontSize: "xs" });
   <div class={menu} data-download-menu role="menu" hidden>
     {
       PLATFORMS.map((platform) => (
-        <a class={menuItem} role="menuitem" href={`/downloads#${platform.id}`}>
-          {platform.label}
-          <span class={menuHint}>download</span>
-        </a>
+        <div class={platformRow}>
+          <span class={platformLabel}>
+            {platform.label}
+            {ARCHES[platform.id].map((arch) => (
+              <span class={archBadge}>{arch.label}</span>
+            ))}
+          </span>
+          <span class={formatButtons}>
+            <a
+              class={formatButton}
+              data-download
+              data-platform={platform.id}
+              data-arch={ARCHES[platform.id][0].id}
+              data-format={FORMATS[platform.id][0].id}
+              href={RELEASES_URL}
+              title={`${platform.label} (${ARCHES[platform.id][0].label}): ${FORMATS[platform.id][0].hint}`}
+            >
+              <Download size={12} />
+              {FORMATS[platform.id][0].label}
+            </a>
+          </span>
+        </div>
       ))
     }
-    <a class={menuItem} role="menuitem" href="/downloads#all-downloads">
-      All downloads
-      <span class={menuHint}>every file</span>
+    <a class={menuItemLast} role="menuitem" href="/downloads#all-downloads">
+      <span class={menuLabelWithArrow}>
+        All downloads
+        <ArrowRight size={14} />
+      </span>
     </a>
   </div>
 </div>

@@ -33,6 +33,14 @@ function Svg(props: IconProps & { children: JSX.Element }): JSX.Element {
   )
 }
 
+export const Download = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <path d="m7 10 5 5 5-5" />
+    <path d="M12 15V3" />
+  </Svg>
+)
+
 export const ArrowRight = (props: IconProps) => (
   <Svg {...props}>
     <path d="M5 12h14" />
