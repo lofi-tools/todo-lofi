@@ -1,0 +1,59 @@
+---
+import { css } from "styled-system/css";
+import { Calendar, Repeat } from "web-design-system/icons";
+import IllustrationFrame from "./IllustrationFrame.astro";
+import { checkbox, chip, label, mono, row, rowHead } from "./styles";
+
+/** The rule the app stores, drawn the way its repeat picker shows it. */
+const rule = "every 3 days";
+
+// `chip` sets no display, so this adds the icon layout without a property
+// collision between two utility classes.
+const chipWithIcon = css({ display: "inline-flex", alignItems: "center", gap: "1" });
+
+/** The dates the rule writes, as the calendar hands them over. */
+const schedule = css({
+  display: "flex",
+  flexDirection: "column",
+  gap: "2",
+  p: "2",
+  borderRadius: "md",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+});
+
+const scheduleRow = css({ display: "flex", alignItems: "center", gap: "2" });
+const scheduleIcon = css({ display: "inline-flex", flexShrink: "0", color: "accent.text" });
+const scheduleText = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.muted" });
+---
+
+<IllustrationFrame chrome="plain">
+  <div class={rowHead}>
+    <span class={mono}>repeat</span>
+    <span class={`${chip} ${chipWithIcon}`}>
+      <Repeat size={11} />
+      {rule}
+    </span>
+  </div>
+
+  <div class={row}>
+    <span class={checkbox} />
+    <span class={label}>Water the plants</span>
+  </div>
+
+  <div class={schedule}>
+    <span class={scheduleRow}>
+      <span class={scheduleIcon}>
+        <Calendar size={12} />
+      </span>
+      <span class={scheduleText}>next: today, 6:00 PM</span>
+    </span>
+    <span class={scheduleRow}>
+      <span class={scheduleIcon}>
+        <Calendar size={12} />
+      </span>
+      <span class={scheduleText}>then: in 3 days</span>
+    </span>
+  </div>
+</IllustrationFrame>

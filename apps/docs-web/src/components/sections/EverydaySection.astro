@@ -2,53 +2,67 @@
 import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import RepeatPriority from "../illustrations/RepeatPriority.astro";
+import AutoSortRows from "../illustrations/AutoSortRows.astro";
+import RepeatRule from "../illustrations/RepeatRule.astro";
 import IllustrationStage from "../illustrations/IllustrationStage.astro";
 import { grid, card, cardBody, cardLink } from "./homeStyles";
 
 /** Padded top half: heading plus the two explainer cards. */
 const top = css({ px: { base: "5", md: "8" }, pt: { base: "12", md: "20" }, pb: { base: "8", md: "12" } });
+
+/**
+ * The two windows side by side, one per card: the auto-sorted list beside the
+ * repeat rule, so the section shows both features as the app does.
+ */
+const windows = css({
+  display: "grid",
+  gridTemplateColumns: { base: "1fr", md: "repeat(2, minmax(0, 1fr))" },
+  gap: { base: "4", md: "5" },
+});
 ---
 
 <HomepageSection bare index={6} label="everyday">
   <div class={top}>
-      <SectionHeading
-        eyebrow="Everyday"
-        title="What to do next, decided for you"
-        description="A long list only helps if it orders itself. Taskstream does that quietly, so you stop re-reading everything to find what matters now."
-        align="left"
-      />
+    <SectionHeading
+      eyebrow="Everyday"
+      title="What to do next, decided for you"
+      description="A long list only helps if it orders itself. Taskstream does that quietly, so you stop re-reading everything to find what matters now."
+      align="left"
+    />
 
-      <div class={`${grid} ${css({ mt: { base: "8", md: "12" } })}`}>
-        <div class={card}>
-          <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Priority that sorts itself</h3>
-          <p class={cardBody}>
-            Each task carries the importance and urgency you set, and the list folds in deadline pressure: near deadlines climb, overdue tasks keep rising. Subtasks,
-            blocked-by chains, and ordering hints resolve into what you can actually start.
-          </p>
-          <a href="/docs/tasks#priority" class={cardLink}>
-            Read about priority and ordering →
-          </a>
-        </div>
-
-        <div class={card}>
-          <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Repeats you configure, not syntax you memorise</h3>
-          <p class={cardBody}>
-            Set repeats in a picker — how often, which days, and when the occurrence becomes doable. A task that isn't due yet stays out of the way until it is.
-          </p>
-          <a href="/docs/repeats" class={cardLink}>
-            Read about repeats →
-          </a>
-        </div>
+    <div class={`${grid} ${css({ mt: { base: "8", md: "12" } })}`}>
+      <div class={card}>
+        <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Surfaces what you should do next</h3>
+        <p class={cardBody}>
+          Each task carries the importance and urgency you set, and the list folds in deadline pressure: near deadlines climb, overdue tasks keep rising. Subtasks, blocked-by
+          chains, and ordering hints resolve into what you can actually start.
+        </p>
+        <a href="/docs/tasks#priority" class={cardLink}>
+          Read about priority and ordering →
+        </a>
       </div>
+
+      <!-- <div class={card}>
+        <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Repeats you configure, not syntax you memorise</h3>
+        <p class={cardBody}>Set repeats in a picker — how often, which days, and when the occurrence becomes doable. A task that isn't due yet stays out of the way until it is.</p>
+        <a href="/docs/repeats" class={cardLink}>
+          Read about repeats →
+        </a>
+      </div> -->
+      <div class={card}>
+        <h3 class={css({ fontSize: "lg", fontWeight: "semibold", color: "fg.default" })}>Hides what you can't do</h3>
+        <p class={cardBody}>Set repeats in a picker — how often, which days, and when the occurrence becomes doable. A task that isn't due yet stays out of the way until it is.</p>
+        <a href="/docs/repeats" class={cardLink}>
+          Read about task dependencies and blockers →
+        </a>
+      </div>
+    </div>
   </div>
 
-  <IllustrationStage
-    flush
-    backdrop="spotlight"
-    fade="none"
-    note="The rule decides when an occurrence becomes doable; the priority score decides where it lands once it is."
-  >
-    <RepeatPriority />
+  <IllustrationStage backdrop="spotlight" fade="none" note="The rule decides when an occurrence becomes doable; the priority score decides where it lands once it is.">
+    <div class={windows}>
+      <AutoSortRows />
+      <RepeatRule />
+    </div>
   </IllustrationStage>
 </HomepageSection>

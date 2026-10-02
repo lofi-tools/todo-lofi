@@ -1,7 +1,7 @@
 ---
 import { css } from 'styled-system/css'
 import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
-import { GitHub } from 'web-design-system/icons'
+import { GitHub, Menu, X } from 'web-design-system/icons'
 import { REPO_URL } from '../../data/docs'
 
 interface Props {
@@ -38,9 +38,96 @@ const linkStyle = (active: boolean) =>
     _hover: { color: 'fg.default', bg: 'surface.hover' },
     _focusVisible: { outline: 'none', boxShadow: 'focus' },
   })
+
+// The hamburger, and the drawer it opens, only exist below `sm`: from there up
+// the links are already in the nav.
+const menuButton = css({
+  display: { base: 'inline-flex', sm: 'none' },
+  alignItems: 'center',
+  justifyContent: 'center',
+  w: '8',
+  h: '8',
+  p: '0',
+  // The page's reset does not cover buttons, so clear the UA chrome by hand.
+  borderWidth: '0',
+  bg: 'transparent',
+  borderRadius: 'sm',
+  color: 'fg.muted',
+  cursor: 'pointer',
+  transitionProperty: 'color, background-color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default', bg: 'surface.hover' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+// The toggle shows a hamburger and swaps to an X while open. The button carries
+// `aria-expanded`, so the swap needs no script.
+const menuGlyph = css({
+  display: 'inline-flex',
+  'button[aria-expanded="true"] &': { display: 'none' },
+})
+const closeGlyph = css({
+  display: 'none',
+  'button[aria-expanded="true"] &': { display: 'inline-flex' },
+})
+
+/**
+ * The drawer slides open by growing its grid row from `0fr` to `1fr` — the one
+ * transition that animates to a content height. The inner element clips the
+ * content (`min-height: 0`) so nothing shows while the row is collapsed, and
+ * the list fades in behind the slide. The hairline only colours once open, so
+ * the closed drawer leaves no line under the nav.
+ */
+const drawer = css({
+  display: { base: 'grid', sm: 'none' },
+  gridTemplateRows: '0fr',
+  overflow: 'hidden',
+  borderTopWidth: 'hairline',
+  borderTopStyle: 'solid',
+  borderTopColor: 'transparent',
+  transitionProperty: 'grid-template-rows, border-color',
+  transitionDuration: 'normal',
+  transitionTimingFunction: 'standard',
+  '&[data-open]': { gridTemplateRows: '1fr', borderTopColor: 'border.subtle' },
+})
+
+const drawerInner = css({ minH: '0', overflow: 'hidden' })
+
+const drawerList = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '0.5',
+  px: '5',
+  pt: '1',
+  pb: '4',
+  opacity: '0',
+  transform: 'translateY(-4px)',
+  transitionProperty: 'opacity, transform',
+  transitionDuration: 'normal',
+  transitionTimingFunction: 'standard',
+  '[data-open] &': { opacity: '1', transform: 'translateY(0)' },
+})
+
+const drawerLink = (active: boolean) =>
+  css({
+    display: 'flex',
+    alignItems: 'center',
+    h: '10',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    transitionProperty: 'color, background-color',
+    transitionDuration: 'fast',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
 ---
 
 <header
+  data-header-drawer
   class={css({
     position: 'sticky',
     top: '0',
@@ -146,5 +233,52 @@ const linkStyle = (active: boolean) =>
       <GitHub size={18} />
     </a>
     <ThemeToggle />
+
+    <button
+      type="button"
+      data-drawer-toggle
+      aria-expanded="false"
+      aria-controls="site-menu"
+      aria-label="Menu"
+      class={menuButton}
+    >
+      <span class={menuGlyph}>
+        <Menu size={18} />
+      </span>
+      <span class={closeGlyph}>
+        <X size={18} />
+      </span>
+    </button>
   </nav>
+
+  <!--
+    The mobile drawer: the same three links as a stacked list, opened by the
+    hamburger. It stays out of reach while collapsed (`inert`, set by the
+    script), and the nav's own links take over at `sm`.
+  -->
+  <div id="site-menu" data-drawer-panel class={drawer}>
+    <div class={drawerInner}>
+      <ul class={drawerList}>
+        {
+          links.map((link) => (
+            <li>
+              <a
+                class={drawerLink(path === link.href)}
+                href={link.href}
+                aria-current={path === link.href ? 'page' : undefined}
+              >
+                {link.label}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+  </div>
 </header>
+
+<script>
+  import { startHeaderDrawers } from './headerDrawer'
+
+  startHeaderDrawers()
+</script>
