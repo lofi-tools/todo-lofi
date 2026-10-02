@@ -3,7 +3,7 @@ import { css } from "styled-system/css";
 import AppMockup from "./AppMockup.astro";
 import MobileMockup from "./MobileMockup.astro";
 import PlaceholderList from "./PlaceholderList.astro";
-import { backdropSurface, paneLabel, threadLayer, threadNode, threadPath, windowSurface } from "./styles";
+import { paneLabel, threadLayer, threadNode, threadPath, windowSurface } from "./styles";
 
 /**
  * A cut-down desktop list for the "centered on you" story: the tags navbar
@@ -11,17 +11,15 @@ import { backdropSurface, paneLabel, threadLayer, threadNode, threadPath, window
  * company list, #life admin to the same list on a phone — with a loose thread
  * drawn from each tag row to the surface it lives on.
  */
+// Containment only: the illustration's own windows carry its surface, so the
+// root stays transparent and borderless and the threads have a positioning
+// context to measure against.
 const root = css({
   position: "relative",
   display: "flex",
   flexDirection: { base: "column", md: "row" },
   gap: "3",
   alignItems: "stretch",
-  p: "3",
-  borderRadius: "lg",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.strong",
 });
 
 const tags = [
@@ -57,7 +55,7 @@ const companyList = css({
 });
 ---
 
-<div class={`${root} ${backdropSurface}`} data-threads>
+<div class={root} data-threads>
   <div class={side}>
     <div class={`${companyList} ${windowSurface}`} data-thread-to="company">
       <span class={paneLabel}>company's tasklist</span>

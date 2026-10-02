@@ -1,15 +1,8 @@
 ---
 import { css } from "styled-system/css";
 import AppMockup from "./AppMockup.astro";
-import {
-  backdropSurface,
-  label,
-  paneLabel,
-  threadLayer,
-  threadNode,
-  threadPath,
-  windowSurface,
-} from "./styles";
+import PlaceholderList from "./PlaceholderList.astro";
+import { label, paneLabel, threadLayer, threadNode, threadPath, windowSurface } from "./styles";
 
 /**
  * Two-way sync: a Todoist list beside the Taskstream app, with a loose thread
@@ -17,17 +10,15 @@ import {
  * on the left, so the threads leave the tag rows straight into it instead of
  * crossing the app's main pane.
  */
+// Containment only: the synchronised panels carry the surface, so the root
+// stays transparent and borderless; it is only here to hold them and to give
+// the connector threads something to measure against.
 const root = css({
   position: "relative",
   display: "flex",
   flexDirection: { base: "column", md: "row" },
   gap: "3",
   alignItems: "stretch",
-  p: "3",
-  borderRadius: "lg",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.strong",
 });
 
 const tags = [
@@ -37,12 +28,11 @@ const tags = [
   { name: "#home" },
 ];
 
-/** The external list: a tall panel that centers its projects beside the app. */
+/** The external list: the Todoist projects stacked from the panel's top. */
 const external = css({
   display: "flex",
   flexDirection: "column",
-  justifyContent: "center",
-  gap: "1.5",
+  gap: "3",
   flexShrink: "0",
   w: { base: "full", md: "132px" },
   p: "2",
@@ -51,6 +41,11 @@ const external = css({
   borderStyle: "solid",
   borderColor: "border.strong",
 });
+
+const projectGroup = css({ display: "flex", flexDirection: "column", gap: "1.5" });
+
+/** The project's tasks, indented so the project row reads as their heading. */
+const projectTasks = css({ pl: "2" });
 
 const projectRow = css({
   display: "flex",
@@ -76,17 +71,27 @@ const projectMark = css({
 });
 ---
 
-<div class={`${root} ${backdropSurface}`} data-threads>
+<div class={root} data-threads>
   <div class={`${external} ${windowSurface}`}>
     <span class={paneLabel}>todoist</span>
-    <span class={projectRow} data-thread-to="work">
-      <span class={projectMark} />
-      <span class={label}>work</span>
-    </span>
-    <span class={projectRow} data-thread-to="life">
-      <span class={projectMark} />
-      <span class={label}>life admin</span>
-    </span>
+    <div class={projectGroup}>
+      <span class={projectRow} data-thread-to="work">
+        <span class={projectMark} />
+        <span class={label}>work</span>
+      </span>
+      <div class={projectTasks}>
+        <PlaceholderList rows={3} />
+      </div>
+    </div>
+    <div class={projectGroup}>
+      <span class={projectRow} data-thread-to="life">
+        <span class={projectMark} />
+        <span class={label}>life admin</span>
+      </span>
+      <div class={projectTasks}>
+        <PlaceholderList rows={3} />
+      </div>
+    </div>
   </div>
 
   <AppMockup tags={tags} taskRows={4} />

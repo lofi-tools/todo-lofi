@@ -1,0 +1,44 @@
+---
+import { css } from "styled-system/css";
+import { blueprintContent } from "./homeStyles";
+
+/**
+ * The blueprint rule between homepage sections: the content column is cut into
+ * four cells (two on narrow screens, so a 2x2 block) by the same 1px hairline
+ * gutters the rest of the page's grids draw.
+ *
+ * The band paints no border of its own. Its top hairline is a full-bleed
+ * pseudo-element, and its bottom line is the divider the next section already
+ * draws at its top — drawing both here as well is what made each edge read as
+ * a double rule, since a background painted under a border stacks the two.
+ */
+const band = css({
+  position: "relative",
+  display: "grid",
+  gridTemplateColumns: { base: "repeat(2, minmax(0, 1fr))", md: "repeat(4, minmax(0, 1fr))" },
+  gap: "1px",
+  bg: "border.subtle",
+  h: "20",
+  _before: {
+    content: '""',
+    position: "absolute",
+    top: "0",
+    left: "50%",
+    transform: "translateX(-50%)",
+    w: "100vw",
+    h: "1px",
+    bg: "border.subtle",
+    pointerEvents: "none",
+  },
+});
+
+const cell = css({ bg: "canvas" });
+---
+
+<div class={blueprintContent} aria-hidden="true">
+  <div class={band}>
+    {[0, 1, 2, 3].map(() => (
+      <div class={cell} />
+    ))}
+  </div>
+</div>

@@ -11,7 +11,6 @@ import GoogleTasksIcon from "./icons/GoogleTasksIcon.astro";
 import IntercomIcon from "./icons/IntercomIcon.astro";
 import JiraIcon from "./icons/JiraIcon.astro";
 import LinearIcon from "./icons/LinearIcon.astro";
-import PosthogIcon from "./icons/PosthogIcon.astro";
 import SlackIcon from "./icons/SlackIcon.astro";
 import TodoistIcon from "./icons/TodoistIcon.astro";
 import VercelIcon from "./icons/VercelIcon.astro";
@@ -45,9 +44,11 @@ const rowA: Tile[] = [
   { o: 0.9, label: "Todoist", Icon: TodoistIcon },
 ];
 
+// Five tiles per row so `space-around` divides the same leftover in every
+// strip: with six in one row and five in the others, the horizontal gaps
+// between tiles differed row to row.
 const rowB: Tile[] = [
   { o: 0.7, label: "Asana", Icon: AsanaIcon },
-  { o: 1, label: "PostHog", Icon: PosthogIcon },
   { o: 1, label: "Vercel", Icon: VercelIcon },
   { o: 0.9, label: "Datadog", Icon: DatadogIcon },
   { o: 0.95, label: "GitHub", Icon: GithubIcon },
@@ -91,11 +92,7 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
 
 <style>
   [data-spotlight] {
-    background:
-      radial-gradient(900px 620px at 50% 50%, #0e0e11 0%, rgba(10,10,12,0) 72%),
-      radial-gradient(1200px 780px at 62% 40%, #1d1d24 0%, rgba(29,29,36,0) 64%),
-      radial-gradient(820px 520px at 88% 10%, rgba(94,106,210,.10) 0%, rgba(94,106,210,0) 60%),
-      linear-gradient(180deg, #101014 0%, #070708 55%, #040405 100%);
+    background: linear-gradient(160deg, rgba(94,106,210,.10) 0%, #1b1b21 30%, #121217 66%, #0b0b0f 100%);
   }
   .spot-stage {
     position: relative;

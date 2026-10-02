@@ -108,7 +108,10 @@ const tagLabel = css({ display: "inline-flex", alignItems: "center", gap: "1.5",
 const tagIcon = css({ display: "inline-flex", flexShrink: "0", color: "fg.subtle" });
 const tagName = css({ fontFamily: "mono", fontSize: "xs", color: "fg.default", whiteSpace: "nowrap" });
 
-const mainPane = css({ display: "flex", flexDirection: "column", p: "3" });
+// The list holds its rows together at the top (`flex-start`) rather than
+// spreading them down the pane, and the gap keeps the pane title clear of the
+// first row.
+const mainPane = css({ display: "flex", flexDirection: "column", justifyContent: "flex-start", gap: "3", p: "3" });
 ---
 
 <div class={`${window} ${windowSurface}`}>
@@ -137,7 +140,7 @@ const mainPane = css({ display: "flex", flexDirection: "column", p: "3" });
     </div>
     <div class={mainPane}>
       <span class={paneLabel}>{listLabel}</span>
-      <PlaceholderList rows={taskRows} spread />
+      <PlaceholderList rows={taskRows} />
     </div>
     {hasDetails && (
       <div class={detailsPane}>

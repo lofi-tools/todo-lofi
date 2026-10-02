@@ -3,47 +3,54 @@ import { css } from "styled-system/css";
 /** Shared pieces for the homepage feature illustrations. */
 
 /**
- * The ambient backdrop from the reference screens: a few soft radial lifts
- * over a dark falloff, plus a faint indigo tint in the top corner. Used by the
- * outer illustration frames, with the windows and cards layered on top.
+ * The ambient backdrop from the reference screens: one diagonal falloff from
+ * the accent-tinted corner, through the lighter surfaces, to a dark floor. A
+ * single linear gradient rather than stacked radials, so the wash reads as a
+ * smooth ramp with no ring or seam where a radial would end. Used by the outer
+ * illustration frames, with the windows and cards layered on top.
  */
 export const backdropSurface = css({
-  backgroundImage: [
-    "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
-    "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-    "radial-gradient(105% 85% at 0% 0%, token(colors.surface.elevated) 0%, transparent 62%)",
-    "radial-gradient(85% 62% at 12% 0%, token(colors.accent.subtle) 0%, transparent 62%)",
-    "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 55%, token(colors.canvas) 100%)",
-  ].join(", "),
+  // An opaque base under the gradient: the tint stop is translucent, and on its
+  // own would let the page show through the corner.
+  bg: "surface.subtle",
+  backgroundImage:
+    "linear-gradient(140deg, token(colors.accent.subtle) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
 });
 
 /**
- * A mock window surface: the reference's panel gradient (a three-stop falloff
- * with a light radial sheen at the top), lifted off the backdrop by a shadow.
+ * The lit edge on a mock window: a bright hairline along the top that dims
+ * around the inner rim, over the window's own lift. It is what separates a
+ * window's top edge from the dark backdrop, the way a real panel catches the
+ * light, so the window reads as a lit surface rather than a flat bordered box.
+ */
+export const shineEdge = [
+  "inset 0 1px 0 0 rgba(255, 255, 255, 0.10)",
+  "inset 0 0 0 1px rgba(255, 255, 255, 0.035)",
+  "0 0 0 1px rgba(255, 255, 255, 0.05)",
+  "0 24px 64px -12px rgba(0, 0, 0, 0.6)",
+].join(", ");
+
+/**
+ * A mock window surface: the panel's three-stop falloff, dark enough to sit a
+ * clear step below the page canvas, with a shiny top edge and the lift off the
+ * backdrop carried in the same shadow.
  */
 export const windowSurface = css({
-  backgroundImage: [
-    "radial-gradient(120% 90% at 62% 0%, token(colors.surface.hover) 0%, transparent 60%)",
-    "radial-gradient(80% 60% at 90% 6%, token(colors.accent.subtle) 0%, transparent 62%)",
-    "linear-gradient(170deg, token(colors.surface.elevated) 0%, token(colors.surface.subtle) 45%, token(colors.canvas) 100%)",
-  ].join(", "),
-  boxShadow: "xl",
+  backgroundImage: "linear-gradient(170deg, #1e1e24 0%, #16161a 45%, #101014 100%)",
+  boxShadow: shineEdge,
 });
 
 /**
- * The dark spotlight backdrop (also the `IntegrationSpotlight` wash): deep
- * radial lifts over a near-black falloff. Deliberately the inverse of a mock
- * window — its linear runs light-at-the-bottom (`0deg`) while windows run
- * light-at-the-top (`170deg`), so backdrop and window never read as one
- * surface.
+ * The dark spotlight backdrop (also the `IntegrationSpotlight` wash): one
+ * diagonal falloff from a faint indigo corner to a near-black floor.
+ * Deliberately the inverse of a mock window — it is light-at-the-top while
+ * windows run light-at-the-top too, but its darkest end sits below any window's
+ * so backdrop and window never read as one surface.
  */
 export const spotlightBackdrop = css({
-  backgroundImage: [
-    "radial-gradient(900px 620px at 50% 50%, #0e0e11 0%, rgba(10,10,12,0) 72%)",
-    "radial-gradient(1200px 780px at 30% 20%, #1d1d24 0%, rgba(29,29,36,0) 64%)",
-    "radial-gradient(820px 520px at 0% 0%, rgba(94,106,210,.14) 0%, rgba(94,106,210,0) 60%)",
-    "linear-gradient(135deg, #1b1b21 0%, #070708 55%, #040405 100%)",
-  ].join(", "),
+  bg: "#0b0b0f",
+  backgroundImage:
+    "linear-gradient(140deg, rgba(94,106,210,0.14) 0%, #1b1b21 28%, #141419 62%, #0b0b0f 100%)",
 });
 
 /** The inset body of a mock window, a step darker than its chrome. */
@@ -185,11 +192,18 @@ export const paneLabel = css({
 const stageBackdropBase = {
   position: "relative",
   overflow: "hidden",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.subtle",
+  // Opaque base under the gradient for the same reason as `backdropSurface`.
+  bg: "surface.subtle",
 } as const;
 
+/**
+ * The three tones vary by hue only — indigo (the accent), purple, and
+ * red-purple — holding each source colour's own saturation and lightness, so
+ * adjacent stages shift in colour without changing how bright or strong the
+ * wash is. The purple and red-purple values are the success and warning
+ * accents' HSL with their hue moved onto the accent's arc; the green and
+ * yellow themselves never appear in an illustration backdrop.
+ */
 export const stageBackdrops = {
   indigo: css({
     ...stageBackdropBase,
@@ -197,25 +211,25 @@ export const stageBackdrops = {
       "radial-gradient(110% 90% at 0% 0%, token(colors.accent.subtle) 0%, transparent 55%)",
       "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
       "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
     ].join(", "),
   }),
-  teal: css({
+  purple: css({
     ...stageBackdropBase,
     backgroundImage: [
-      "radial-gradient(110% 90% at 0% 0%, token(colors.success.subtle) 0%, transparent 55%)",
+      "radial-gradient(110% 90% at 0% 0%, rgba(138, 76, 183, 0.16) 0%, transparent 55%)",
       "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
       "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
     ].join(", "),
   }),
-  warm: css({
+  redPurple: css({
     ...stageBackdropBase,
     backgroundImage: [
-      "radial-gradient(110% 90% at 0% 0%, token(colors.warning.subtle) 0%, transparent 55%)",
+      "radial-gradient(110% 90% at 0% 0%, rgba(242, 76, 214, 0.16) 0%, transparent 55%)",
       "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
       "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
     ].join(", "),
   }),
 } as const;

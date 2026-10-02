@@ -5,7 +5,8 @@ import { dot, windowBar, windowSurface } from "./styles";
 interface Segment {
   /** Bar width, in pixels. */
   w: number;
-  tone: "accent" | "danger" | "success" | "info" | "muted";
+  /** One of the mock syntax colours, walking bordeaux → indigo. */
+  tone: "bordeaux" | "crimson" | "magenta" | "purple" | "indigo" | "muted";
 }
 
 interface Props {
@@ -19,10 +20,10 @@ const { name, lines = 10 } = Astro.props;
 
 /** Cycled line shapes, so no two adjacent lines read the same. */
 const patterns: Segment[][] = [
-  [{ w: 34, tone: "accent" }, { w: 22, tone: "muted" }],
-  [{ w: 20, tone: "muted" }, { w: 64, tone: "success" }, { w: 22, tone: "danger" }],
-  [{ w: 46, tone: "info" }, { w: 30, tone: "muted" }],
-  [{ w: 58, tone: "success" }, { w: 18, tone: "accent" }],
+  [{ w: 34, tone: "bordeaux" }, { w: 22, tone: "muted" }],
+  [{ w: 20, tone: "muted" }, { w: 64, tone: "crimson" }, { w: 22, tone: "magenta" }],
+  [{ w: 46, tone: "purple" }, { w: 30, tone: "muted" }],
+  [{ w: 58, tone: "magenta" }, { w: 18, tone: "indigo" }],
 ];
 
 const rows = Array.from({ length: lines }, (_, index) => patterns[index % patterns.length]);
@@ -52,11 +53,17 @@ const gutter = css({
 });
 const token = css({ h: "1.5", borderRadius: "full" });
 
+/**
+ * The mock syntax palette: one hue family from bordeaux through crimson,
+ * magenta, and purple to the brand indigo, so a screen of code reads in the
+ * product's own colours rather than a generic highlighter.
+ */
 const tint = {
-  accent: css({ bg: "accent.text" }),
-  danger: css({ bg: "danger" }),
-  success: css({ bg: "success" }),
-  info: css({ bg: "info" }),
+  bordeaux: css({ bg: "#8f2d52" }),
+  crimson: css({ bg: "#c04a63" }),
+  magenta: css({ bg: "#c356d4" }),
+  purple: css({ bg: "#9a6ce6" }),
+  indigo: css({ bg: "#5e6ad2" }),
   muted: css({ bg: "border.strong" }),
 };
 
