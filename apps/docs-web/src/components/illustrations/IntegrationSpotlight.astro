@@ -34,7 +34,7 @@ interface Tile {
 // Rows scroll as marquee strips, alternating direction, so tile positions
 // are flow-based, not absolute. Every glyph is normalized inside its own
 // icon component to fill the same ~60% of the viewport, and all render at
-// the same size via the .spot-tile svg rule below.
+// the same size via the tile rule below.
 const rowA: Tile[] = [
   { o: 0.55, label: "Slack", Icon: SlackIcon },
   { o: 0.95, label: "Zapier", Icon: ZapierIcon },
@@ -154,9 +154,13 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
     opacity: var(--o, 1);
     transition: opacity .45s ease, border-color .25s ease;
   }
-  .spot-tile svg { width: 30%; height: 30%; display: block; transition: transform .45s cubic-bezier(.2,.7,.2,1); }
+  /* :global() so the rule reaches the <svg> inside the icon components: an
+     Astro <style> block is scoped to the elements this template renders, so a
+     plain `.spot-tile svg` selector never matched a child component's glyph
+     and the tiles drew it at its default size instead. */
+  .spot-tile :global(svg) { width: 48%; height: 48%; display: block; transition: transform .45s cubic-bezier(.2,.7,.2,1); }
   .spot-tile:hover { border-color: #2a2a30; }
-  .spot-tile:hover svg { transform: scale(1.06); }
+  .spot-tile:hover :global(svg) { transform: scale(1.06); }
   .spot-center {
     position: absolute;
     left: 50%; top: 50%;
@@ -170,7 +174,10 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
     z-index: 2;
   }
   .spot-center svg {
-    width: 30%; height: 30%;
+    /* Same box as a tile glyph: the cloud mark sits inside its own viewBox
+       with room to spare, so it reads lighter than the brand glyphs beside
+       it even when both are given the same share of the tile. */
+    width: 48%; height: 48%;
     filter: drop-shadow(0 0 16px rgba(255,255,255,.35));
     animation: spot-pulse 4s ease-in-out infinite;
   }

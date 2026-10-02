@@ -4,6 +4,12 @@ import HomepageSection from "./HomepageSection.astro";
 import { Badge } from "web-design-system/components";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
 import IntegrationSpotlight from "../illustrations/IntegrationSpotlight.astro";
+import AsanaIcon from "../illustrations/icons/AsanaIcon.astro";
+import GithubIcon from "../illustrations/icons/GithubIcon.astro";
+import GoogleTasksIcon from "../illustrations/icons/GoogleTasksIcon.astro";
+import JiraIcon from "../illustrations/icons/JiraIcon.astro";
+import LinearIcon from "../illustrations/icons/LinearIcon.astro";
+import TodoistIcon from "../illustrations/icons/TodoistIcon.astro";
 import { integrationCards, plannedIntegrations } from "../../../data/landing";
 import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeStyles";
 
@@ -27,6 +33,28 @@ const cardPlanned = css({
  * shorter than the shipped cards beside it and the grid would read as ragged.
  */
 const evenGrid = css({ gridAutoRows: "1fr" });
+
+/** The service mark beside each card's name, keyed by the name in the data. */
+const cardIcons: Record<string, typeof TodoistIcon> = {
+  Todoist: TodoistIcon,
+  GitHub: GithubIcon,
+  "Google Tasks": GoogleTasksIcon,
+  Linear: LinearIcon,
+  Jira: JiraIcon,
+  Asana: AsanaIcon,
+};
+
+/**
+ * The brand glyphs are Astro components whose <svg> carries no size of its own,
+ * and this declaration is emitted as plain CSS: an Astro <style> block would be
+ * scoped to this file and never reach a child component's <svg>.
+ */
+const cardIcon = css({
+  display: "inline-flex",
+  flexShrink: 0,
+  color: "fg.muted",
+  "& svg": { w: "5", h: "5", display: "block" },
+});
 ---
 
 <HomepageSection index={7} label="integrations">
@@ -42,9 +70,16 @@ const evenGrid = css({ gridAutoRows: "1fr" });
       </div>
 
       <div class={`${grid} ${evenGrid} ${css({ mt: { base: "8", md: "12" } })}`}>
-        {integrationCards.map((entry) => (
+        {integrationCards.map((entry) => {
+          const Icon = cardIcons[entry.name];
+          return (
           <div class={card}>
             <div class={cardTitle}>
+              {Icon ? (
+                <span class={cardIcon} aria-hidden="true">
+                  <Icon />
+                </span>
+              ) : null}
               <h3 class={cardHeading}>{entry.name}</h3>
               <Badge tone={entry.tone} variant="subtle">
                 {entry.badge}
@@ -55,11 +90,19 @@ const evenGrid = css({ gridAutoRows: "1fr" });
               {entry.linkLabel} →
             </a>
           </div>
-        ))}
+          );
+        })}
 
-        {plannedIntegrations.map((entry) => (
+        {plannedIntegrations.map((entry) => {
+          const Icon = cardIcons[entry.name];
+          return (
           <div class={`${card} ${cardPlanned}`}>
             <div class={cardTitle}>
+              {Icon ? (
+                <span class={cardIcon} aria-hidden="true">
+                  <Icon />
+                </span>
+              ) : null}
               <h3 class={cardHeading}>{entry.name}</h3>
               <Badge tone="neutral" variant="outline">
                 coming soon
@@ -67,6 +110,7 @@ const evenGrid = css({ gridAutoRows: "1fr" });
             </div>
             <p class={cardBody}>{entry.body}</p>
           </div>
-        ))}
+          );
+        })}
       </div>
     </HomepageSection>
