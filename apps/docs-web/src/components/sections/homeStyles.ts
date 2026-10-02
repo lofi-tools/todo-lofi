@@ -157,10 +157,12 @@ export const tab = css({
 });
 
 /** The tab's own grid, wrapped in the button so the progress track can sit
- * flush against the button's bottom edge instead of inside this padding. */
+ * flush against the button's bottom edge instead of inside this padding. The
+ * index gutter is a fixed track rather than `auto` so the text column — and the
+ * progress track, which lines up with it — lands at a known offset. */
 export const tabContent = css({
   display: "grid",
-  gridTemplateColumns: "auto 1fr",
+  gridTemplateColumns: "1rem 1fr",
   alignItems: "baseline",
   columnGap: "3",
   rowGap: "1",
@@ -193,12 +195,18 @@ export const tabDescription = css({
   userSelect: "text",
 });
 
+// Left-aligned with the tab's text rather than with the button: the leading
+// margin is the content's padding (`1rem`) plus the index gutter (`1rem`) plus
+// the content grid's gap (`0.75rem`), and the trailing margin is the padding
+// again. The track is a flex child of the column, so with no width of its own
+// it stretches to exactly what the margins leave.
 export const tabProgressTrack = css({
   display: "none",
-  w: "100%",
   h: "2px",
   bg: "border.subtle",
   overflow: "hidden",
+  ml: "2.75rem",
+  mr: "4",
 });
 
 export const tabProgressBar = css({

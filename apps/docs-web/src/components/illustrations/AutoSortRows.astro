@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import { Flag } from "web-design-system/icons";
-import { backdropSurface } from "./styles";
+import IllustrationFrame from "./IllustrationFrame.astro";
 
 interface Task {
   id: string;
@@ -58,8 +58,7 @@ const root = css({
   display: "flex",
   flexDirection: "column",
   gap: "2",
-  p: "3",
-  borderRadius: "lg",
+  minW: "0",
 });
 
 const list = css({ display: "flex", flexDirection: "column", gap: "2" });
@@ -154,35 +153,37 @@ const due = css({
 });
 ---
 
-<div class={`${root} ${backdropSurface}`} data-reorder-rows>
-  <script type="application/json" data-reorder-tasks set:html={JSON.stringify({ tasks, sim })} />
-  <div class={list} data-reorder-list>
-    {
-      tasks.map((task) => (
-        <div class={rowStyle} data-row-id={task.id}>
-          <span class={rowLabel}>{task.label}</span>
-          <span class={signals}>
-            <span class={priority}>
-              <Flag size={13} />
-              <span class={score} data-row-score>
-                {task.base.toFixed(2)}
+<IllustrationFrame chrome="plain">
+  <div class={root} data-reorder-rows>
+    <script type="application/json" data-reorder-tasks set:html={JSON.stringify({ tasks, sim })} />
+    <div class={list} data-reorder-list>
+      {
+        tasks.map((task) => (
+          <div class={rowStyle} data-row-id={task.id}>
+            <span class={rowLabel}>{task.label}</span>
+            <span class={signals}>
+              <span class={priority}>
+                <Flag size={13} />
+                <span class={score} data-row-score>
+                  {task.base.toFixed(2)}
+                </span>
+              </span>
+              <span class={warning} data-row-warning>
+                due soon
+              </span>
+              <span class={importance} data-row-importance data-importance={task.importance}>
+                {task.importance}
+              </span>
+              <span class={due} data-row-due>
+                {task.due}
               </span>
             </span>
-            <span class={warning} data-row-warning>
-              due soon
-            </span>
-            <span class={importance} data-row-importance data-importance={task.importance}>
-              {task.importance}
-            </span>
-            <span class={due} data-row-due>
-              {task.due}
-            </span>
-          </span>
-        </div>
-      ))
-    }
+          </div>
+        ))
+      }
+    </div>
   </div>
-</div>
+</IllustrationFrame>
 
 <script>
   interface AnimTask {

@@ -6,13 +6,32 @@ interface Props {
   /** Name shown in the window bar; the bar is the illustration's chrome. */
   title?: string;
   /**
+   * Window chrome. `titled` draws the header bar: the two handle buttons and,
+   * when a name is given, the title. `plain` drops the header entirely and
+   * leaves only the two handle buttons, for windows that need no label.
+   */
+  chrome?: "titled" | "plain";
+  /**
    * Whether the body pads itself. Turn it off for content that brings its own
    * padding, such as a pane replica.
    */
   pad?: boolean;
 }
 
-const { title, pad = true } = Astro.props;
+const { title, chrome = "titled", pad = true } = Astro.props;
+
+/**
+ * The headerless chrome: the two handle buttons with no title and no hairline
+ * under them, so the panel reads as a bare window rather than a titled one.
+ */
+const handleBar = css({
+  display: "flex",
+  alignItems: "center",
+  gap: "1.5",
+  flexShrink: "0",
+  px: "3",
+  pt: "3",
+});
 
 const root = css({
   display: "flex",
@@ -20,7 +39,6 @@ const root = css({
   borderRadius: "lg",
   borderWidth: "hairline",
   borderStyle: "solid",
-  borderColor: "border.strong",
   overflow: "hidden",
 });
 
@@ -31,11 +49,18 @@ const paddedBody = css({ p: "3" });
 ---
 
 <div class={`${root} ${windowSurface}`}>
-  <div class={windowBar}>
-    <span class={dot} />
-    <span class={dot} />
-    {title && <span class={titleStyle}>{title}</span>}
-  </div>
+  {chrome === "plain" ? (
+    <div class={handleBar}>
+      <span class={dot} />
+      <span class={dot} />
+    </div>
+  ) : (
+    <div class={windowBar}>
+      <span class={dot} />
+      <span class={dot} />
+      {title && <span class={titleStyle}>{title}</span>}
+    </div>
+  )}
   <div class={pad ? `${body} ${paddedBody}` : body}>
     <slot />
   </div>

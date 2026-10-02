@@ -4,8 +4,8 @@ import { css } from "styled-system/css";
 
 /**
  * The ambient backdrop from the reference screens: one diagonal falloff from
- * the accent-tinted corner, through the lighter surfaces, to a dark floor. A
- * single linear gradient rather than stacked radials, so the wash reads as a
+ * the accent-tinted corner, through the accent at lower alpha, to a dark floor.
+ * A single linear gradient rather than stacked radials, so the wash reads as a
  * smooth ramp with no ring or seam where a radial would end. Used by the outer
  * illustration frames, with the windows and cards layered on top.
  */
@@ -14,30 +14,29 @@ export const backdropSurface = css({
   // own would let the page show through the corner.
   bg: "surface.subtle",
   backgroundImage:
-    "linear-gradient(140deg, token(colors.accent.subtle) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
+    "linear-gradient(140deg, token(colors.accent.subtle) 0%, rgba(94, 106, 210, 0.08) 30%, rgba(94, 106, 210, 0.03) 62%, token(colors.surface.subtle) 100%)",
 });
 
 /**
- * The lit edge on a mock window: a bright hairline along the top that dims
- * around the inner rim, over the window's own lift. It is what separates a
- * window's top edge from the dark backdrop, the way a real panel catches the
- * light, so the window reads as a lit surface rather than a flat bordered box.
- */
-export const shineEdge = [
-  "inset 0 1px 0 0 rgba(255, 255, 255, 0.10)",
-  "inset 0 0 0 1px rgba(255, 255, 255, 0.035)",
-  "0 0 0 1px rgba(255, 255, 255, 0.05)",
-  "0 24px 64px -12px rgba(0, 0, 0, 0.6)",
-].join(", ");
-
-/**
  * A mock window surface: the panel's three-stop falloff, dark enough to sit a
- * clear step below the page canvas, with a shiny top edge and the lift off the
- * backdrop carried in the same shadow.
+ * clear step below the page canvas, with a single shiny border and the lift off
+ * the backdrop.
+ *
+ * The shine is the border itself. The panel's falloff is painted clipped to the
+ * padding box, and behind it a conic gradient is clipped to the border box, so
+ * the ring around the panel catches the light — brightest along the top edge
+ * and dimming around the sides and bottom, the way a real bezel does. The
+ * border is left transparent to let that ring through; the callers keep the
+ * `hairline solid` border so it has a 1px ring to paint in. One border, no
+ * stacked rings.
  */
 export const windowSurface = css({
-  backgroundImage: "linear-gradient(170deg, #1e1e24 0%, #16161a 45%, #101014 100%)",
-  boxShadow: shineEdge,
+  borderColor: "transparent",
+  backgroundOrigin: "padding-box, border-box",
+  backgroundClip: "padding-box, border-box",
+  backgroundImage:
+    "linear-gradient(170deg, #1e1e24 0%, #16161a 45%, #101014 100%), conic-gradient(from 0deg at 50% 50%, rgba(255, 255, 255, 0.26) 0deg, rgba(255, 255, 255, 0.18) 38deg, rgba(255, 255, 255, 0.085) 84deg, rgba(255, 255, 255, 0.022) 148deg, rgba(255, 255, 255, 0.022) 212deg, rgba(255, 255, 255, 0.085) 276deg, rgba(255, 255, 255, 0.18) 322deg, rgba(255, 255, 255, 0.26) 360deg)",
+  boxShadow: "inset 0 1px 0 0 rgba(255, 255, 255, 0.10), 0 24px 64px -12px rgba(0, 0, 0, 0.6)",
 });
 
 /**
@@ -215,22 +214,26 @@ const stageBackdropBase = {
  * wash is. The purple and red-purple values are the success and warning
  * accents' HSL with their hue moved onto the accent's arc; the green and
  * yellow themselves never appear in an illustration backdrop.
+ *
+ * Every stop keeps the stage's own hue: the two middle stops are the corner
+ * colour at a lower alpha, not neutral surfaces, so the wash ramps out of the
+ * tinted corner without the grey band a neutral mid colour would put across it.
  */
 export const stageBackdrops = {
   indigo: css({
     ...stageBackdropBase,
     backgroundImage:
-      "linear-gradient(140deg, token(colors.accent.subtle) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
+      "linear-gradient(140deg, token(colors.accent.subtle) 0%, rgba(94, 106, 210, 0.08) 30%, rgba(94, 106, 210, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
   purple: css({
     ...stageBackdropBase,
     backgroundImage:
-      "linear-gradient(140deg, rgba(138, 76, 183, 0.16) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
+      "linear-gradient(140deg, rgba(138, 76, 183, 0.16) 0%, rgba(138, 76, 183, 0.08) 30%, rgba(138, 76, 183, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
   redPurple: css({
     ...stageBackdropBase,
     backgroundImage:
-      "linear-gradient(140deg, rgba(242, 76, 214, 0.16) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
+      "linear-gradient(140deg, rgba(242, 76, 214, 0.16) 0%, rgba(242, 76, 214, 0.08) 30%, rgba(242, 76, 214, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
 } as const;
 
