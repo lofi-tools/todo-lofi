@@ -4,16 +4,17 @@ import IllustrationFrame from "./IllustrationFrame.astro";
 import { caption } from "./styles";
 
 /**
- * The coding workflow as a flowchart: five steps in two rows, with the review
- * decision splitting the run into a merge or a re-spec. It is a diagram rather
- * than a screen replica, so it draws the loop the app actually runs.
+ * The coding workflow as a flowchart: the happy path runs left to right in one
+ * row, and the reject/feedback loop is the only thing that needs a second row.
+ * It is a diagram rather than a screen replica, so it draws the loop the app
+ * actually runs.
  */
 const diagram = css({ w: "full", h: "auto", display: "block" });
 
 const box = css({ fill: "surface.active", stroke: "border.strong", strokeWidth: "1.5" });
 const decisionShape = css({ fill: "surface.active", stroke: "accent.text", strokeWidth: "1.5" });
 const stepLabel = css({ fill: "fg.default", fontFamily: "mono", fontSize: "9.5px" });
-const branchLabel = css({ fill: "fg.subtle", fontFamily: "mono", fontSize: "8px" });
+const branchLabel = css({ fill: "fg.subtle", fontFamily: "mono", fontSize: "8.5px" });
 const flow = css({ fill: "none", stroke: "border.strong", strokeWidth: "1.5" });
 const feedback = css({ fill: "none", stroke: "accent.text", strokeWidth: "1.5", opacity: "0.85" });
 
@@ -24,9 +25,9 @@ const feedbackHead = css({ fill: "accent.text", opacity: "0.85" });
 <IllustrationFrame title="workflow · coding">
   <svg
     class={diagram}
-    viewBox="0 0 460 172"
+    viewBox="0 0 472 92"
     role="img"
-    aria-label="A task moves from Interview to Spec to Implement, then to Review. Review asks whether the work is approved: approved work merges, and a rejection loops back to Spec so the feature is re-specified and re-implemented."
+    aria-label="A task moves left to right from Interview to Spec to Implement to Review. Review asks whether the work is approved: approved work merges, while a rejection loops back below the row to Spec so the feature is re-specified and re-implemented."
   >
     <defs>
       <marker
@@ -53,30 +54,29 @@ const feedbackHead = css({ fill: "accent.text", opacity: "0.85" });
       </marker>
     </defs>
 
-    <rect class={box} x="17" y="22" width="126" height="38" rx="8" />
-    <rect class={box} x="167" y="22" width="126" height="38" rx="8" />
-    <rect class={box} x="317" y="22" width="126" height="38" rx="8" />
+    <rect class={box} x="12" y="10" width="62" height="36" rx="8" />
+    <rect class={box} x="84" y="10" width="62" height="36" rx="8" />
+    <rect class={box} x="156" y="10" width="62" height="36" rx="8" />
+    <rect class={box} x="228" y="10" width="62" height="36" rx="8" />
+    <polygon class={decisionShape} points="338,10 376,28 338,46 300,28" />
+    <rect class={box} x="398" y="10" width="62" height="36" rx="8" />
 
-    <rect class={box} x="17" y="90" width="126" height="38" rx="8" />
-    <polygon class={decisionShape} points="230,74 295,109 230,144 165,109" />
-    <rect class={box} x="317" y="90" width="126" height="38" rx="8" />
+    <path class={flow} d="M74 28H84" marker-end="url(#flow-head)" />
+    <path class={flow} d="M146 28H156" marker-end="url(#flow-head)" />
+    <path class={flow} d="M218 28H228" marker-end="url(#flow-head)" />
+    <path class={flow} d="M290 28H300" marker-end="url(#flow-head)" />
+    <path class={flow} d="M376 28H398" marker-end="url(#flow-head)" />
+    <path class={feedback} d="M338 46V76H115V46" marker-end="url(#flow-head-back)" />
 
-    <path class={flow} d="M143 41H161" marker-end="url(#flow-head)" />
-    <path class={flow} d="M293 41H311" marker-end="url(#flow-head)" />
-    <path class={flow} d="M380 60V84" marker-end="url(#flow-head)" />
-    <path class={flow} d="M317 109H301" marker-end="url(#flow-head)" />
-    <path class={flow} d="M230 144V158H80V130" marker-end="url(#flow-head)" />
-    <path class={feedback} d="M165 109H154V14H205V20" marker-end="url(#flow-head-back)" />
+    <text class={stepLabel} x="43" y="31.5" text-anchor="middle">Interview</text>
+    <text class={stepLabel} x="115" y="31.5" text-anchor="middle">Spec</text>
+    <text class={stepLabel} x="187" y="31.5" text-anchor="middle">Implement</text>
+    <text class={stepLabel} x="259" y="31.5" text-anchor="middle">Review</text>
+    <text class={stepLabel} x="338" y="31.5" text-anchor="middle">approved?</text>
+    <text class={stepLabel} x="429" y="31.5" text-anchor="middle">Merge</text>
 
-    <text class={stepLabel} x="80" y="44.5" text-anchor="middle">Interview</text>
-    <text class={stepLabel} x="230" y="44.5" text-anchor="middle">Spec</text>
-    <text class={stepLabel} x="380" y="44.5" text-anchor="middle">Implement</text>
-    <text class={stepLabel} x="80" y="112.5" text-anchor="middle">Merge</text>
-    <text class={stepLabel} x="230" y="112.5" text-anchor="middle">approved?</text>
-    <text class={stepLabel} x="380" y="112.5" text-anchor="middle">Review</text>
-
-    <text class={branchLabel} x="238" y="153" text-anchor="start">yes</text>
-    <text class={branchLabel} x="158" y="10" text-anchor="start">no · re-spec, re-code</text>
+    <text class={branchLabel} x="387" y="22" text-anchor="middle">yes</text>
+    <text class={branchLabel} x="226" y="70" text-anchor="middle">no · re-spec, re-code</text>
   </svg>
 
   <p class={caption}>

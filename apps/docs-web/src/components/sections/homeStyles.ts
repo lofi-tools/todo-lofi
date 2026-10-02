@@ -115,7 +115,8 @@ export const reasonsGrid = css({
 export const subGrid = css({
   ...itemGrid,
   gridTemplateColumns: { base: "1fr", lg: "repeat(2, minmax(0, 1fr))" },
-  alignItems: "start",
+  // The items stretch to the row height: the grid's own colour is the gutter
+  // between them, so a short item would otherwise leave it exposed below.
 });
 
 /** Vertical auto-advancing tabs: a tab column beside the active panel. */
