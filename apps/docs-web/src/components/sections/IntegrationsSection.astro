@@ -3,6 +3,7 @@ import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import { Badge } from "web-design-system/components";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
+import IntegrationSpotlight from "../illustrations/IntegrationSpotlight.astro";
 import { integrationCards, plannedIntegrations } from "../../../data/landing";
 import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeStyles";
 
@@ -35,6 +36,10 @@ const evenGrid = css({ gridAutoRows: "1fr" });
         description="Can't choose your company's tools? Sync work tasks from them while keeping your personal tasks in the same list."
         align="left"
       />
+
+      <div class={css({ mt: { base: "8", md: "12" } })}>
+        <IntegrationSpotlight />
+      </div>
 
       <div class={`${grid} ${evenGrid} ${css({ mt: { base: "8", md: "12" } })}`}>
         {integrationCards.map((entry) => (
