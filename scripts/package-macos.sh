@@ -8,10 +8,9 @@
 # .github/workflows/bundle.yml runs it over the release binary `nix build .#taskstream-desktop`
 # produced, copying that binary in and writing the .zip and .dmg.
 #
-# The icon is generated rather than committed: sips rasterizes an SVG at its
-# intrinsic size, so the artwork is painted on a 1024px canvas instead, and the
-# grain is baked into that raster (scripts/icon-grain.py) so the SVG stays clean
-# for its web consumers.
+# The icon is generated rather than committed. scripts/make-icns.sh owns the
+# recipe, and picks the one toolchain the host has: macOS' sips + iconutil
+# here, or nixpkgs' rsvg-convert + png2icns when a nix build runs this.
 #
 # Usage: package-macos.sh --binary <path> [--out DIR] [--version X] [--link]
 #                         [--register] [--no-archives]
@@ -66,32 +65,11 @@ sed "s|\\(<key>CFBundleShortVersionString</key><string>\\)[^<]*\\(</string>\\)|\
 grep -q "<key>CFBundleShortVersionString</key><string>$version</string>" "$app/Contents/Info.plist" \
   || { echo "package-macos.sh: could not write version $version into the bundle's Info.plist" >&2; exit 1; }
 
-# Regenerate whenever the artwork or this recipe changed, so an icon baked
+# Regenerate whenever the artwork or the recipe changed, so an icon baked
 # earlier (qlmanage composites the SVG on a white matte) can't stick.
-if [ ! -f "$icns" ] || [ "$icon_svg" -nt "$icns" ] || [ "${BASH_SOURCE[0]}" -nt "$icns" ]; then
-  scratch=$(mktemp -d)
-  trap 'rm -rf "$scratch"' EXIT
-  iconset=$scratch/icon.iconset
-  mkdir -p "$iconset"
+if [ ! -f "$icns" ] || [ "$icon_svg" -nt "$icns" ] || [ "$repo/scripts/make-icns.sh" -nt "$icns" ]; then
   ico=$(cksum "$icns" 2>/dev/null || echo none)
-
-  sed 's|<svg |<svg width="1024" height="1024" |' "$icon_svg" > "$scratch/icon-1024.svg"
-  sips -s format png "$scratch/icon-1024.svg" --out "$iconset/master.png" >/dev/null
-  # Grain is composited into the raster rather than committed in the SVG, so the
-  # artwork stays clean for other consumers and only the built icon pays for the
-  # texture (cell px at 1024, amplitude, seed).
-  python3 "$repo/scripts/icon-grain.py" "$iconset/master.png" 20 5 11
-  for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$iconset/master.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
-    sips -z "$((size * 2))" "$((size * 2))" "$iconset/master.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
-  done
-  # The master already is the 1024px rep; copying it keeps the grained pixels
-  # instead of letting sips re-encode noise (which grows it ~20%).
-  cp "$iconset/master.png" "$iconset/icon_512x512@2x.png"
-  rm -f "$iconset/master.png"
-  iconutil -c icns "$iconset" -o "$icns"
-  rm -rf "$scratch"
-  trap - EXIT
+  "$repo/scripts/make-icns.sh" "$icon_svg" "$icns"
 
   # IconServices caches rendered tiles, so the Dock goes on painting the previous
   # icon until the bundle is re-registered and the Dock restarts. Only the dev

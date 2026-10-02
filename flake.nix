@@ -380,6 +380,64 @@
               env = config.rust.buildEnv;
                 });
             }
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+              # The macOS app bundle as a `nix build` output, so darwin is
+              # packaged the way Linux already is (packages.taskstream-linux-dist)
+              # and the bundle can be installed by home-manager, which links
+              # `$out/Applications/*.app` into the profile and therefore into
+              # the Dock.
+              #
+              # It is the same scripts/package-macos.sh the CI release job runs,
+              # driven over the binary `taskstream-desktop` builds. Its icon step
+              # falls back to rsvg-convert + png2icns (scripts/make-icns.sh),
+              # because a sandbox never sees sips or iconutil; signing is skipped
+              # for the same reason, and is not needed by a locally built bundle.
+              taskstream-desktop-app =
+                let
+                  # Only what assembling the bundle reads: the plist and artwork
+                  # it copies, and the scripts that render the icon and lay the
+                  # .app out.
+                  packagingSrc = lib.fileset.toSource {
+                    root = (/. + builtins.unsafeDiscardStringContext self.outPath);
+                    fileset = lib.fileset.unions [
+                      (relPath "/apps/taskstream-desktop/assets/Info.plist")
+                      (relPath "/apps/taskstream-desktop/assets/icons/do-list-app.svg")
+                      (relPath "/scripts/package-macos.sh")
+                      (relPath "/scripts/make-icns.sh")
+                      (relPath "/scripts/icon-grain.py")
+                      (relPath "/scripts/version.sh")
+                    ];
+                  };
+                in
+                pkgs.stdenvNoCC.mkDerivation {
+                  pname = "taskstream-desktop-app";
+                  inherit version;
+                  src = packagingSrc;
+                  nativeBuildInputs = [ pkgs.librsvg pkgs.libicns pkgs.python3 ];
+                  # A bundle is copied out of the store as it is: stripping or
+                  # rewriting the Mach-O inside it would break it.
+                  dontFixup = true;
+                  buildPhase = ''
+                    runHook preBuild
+                    bash scripts/package-macos.sh \
+                      --binary ${config.packages.taskstream-desktop}/bin/taskstream-desktop \
+                      --out "$PWD/dist" \
+                      --version ${version} \
+                      --no-archives
+                    runHook postBuild
+                  '';
+                  installPhase = ''
+                    runHook preInstall
+                    mkdir -p $out/Applications
+                    cp -R dist/taskstream.app $out/Applications/
+                    runHook postInstall
+                  '';
+                  meta = {
+                    description = "taskstream desktop, as a macOS app bundle";
+                    platforms = lib.platforms.darwin;
+                  };
+                };
+            }
             // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
               # Linux release artifacts (tarball, .deb, AppImage) as a `nix build`
               # output: runs scripts/package-linux.sh inside the sandbox with every
