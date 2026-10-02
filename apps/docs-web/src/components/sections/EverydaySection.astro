@@ -2,9 +2,8 @@
 import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import Timeline from "web-design-system/astro/product/Timeline.astro";
-import { repeatRows } from "../../../data/landing";
-import { grid, card, cardBody, cardLink, panel } from "./homeStyles";
+import RepeatPriority from "../illustrations/RepeatPriority.astro";
+import { grid, card, cardBody, cardLink } from "./homeStyles";
 ---
 
 <HomepageSection index={6} label="everyday">
@@ -38,7 +37,7 @@ import { grid, card, cardBody, cardLink, panel } from "./homeStyles";
         </div>
       </div>
 
-      <div class={`${panel} ${css({ mt: "4" })}`}>
-        <Timeline months={["Mon", "Tue", "Wed", "Thu", "Fri"]} rows={repeatRows} />
+      <div class={css({ mt: "4" })}>
+        <RepeatPriority />
       </div>
     </HomepageSection>

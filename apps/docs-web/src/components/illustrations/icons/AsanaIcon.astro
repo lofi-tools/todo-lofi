@@ -1,13 +1,23 @@
 ---
+interface Props {
+  class?: string;
+}
+
+const { class: className } = Astro.props;
 ---
 
-<svg viewBox="0 0 64 64" fill="currentColor" aria-hidden="true">
-  <g transform="translate(32 32) scale(0.55) translate(-31.5 -32)">
-    <g transform="rotate(-45 32 32)">
-      <rect x="6" y="26" width="7" height="20" rx="3" />
-      <rect x="15" y="17" width="7" height="29" rx="3" />
-      <rect x="24" y="8" width="7" height="38" rx="3" />
-    </g>
-    <path fill-rule="evenodd" d="M34 32 L58 52 H34 Z" />
+<svg
+  role="img"
+  viewBox="0 0 24 24"
+  fill="currentColor"
+  aria-label="Asana"
+  class={className}
+>
+  <!-- Scaled to 0.62 about the center: the mark runs full-bleed, while the
+    other glyphs only fill ~60-70% of their viewport. -->
+  <g transform="translate(12 12) scale(0.62) translate(-12 -12)">
+  <path
+    d="M18.78 12.653c-2.882 0-5.22 2.336-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.34 5.22-5.22-2.336-5.22-5.22-5.22zm-13.56 0c-2.88 0-5.22 2.337-5.22 5.22s2.338 5.22 5.22 5.22 5.22-2.338 5.22-5.22-2.336-5.22-5.22-5.22zm12-6.525c0 2.883-2.337 5.22-5.22 5.22-2.882 0-5.22-2.337-5.22-5.22 0-2.88 2.338-5.22 5.22-5.22 2.883 0 5.22 2.34 5.22 5.22z"
+  />
   </g>
 </svg>
