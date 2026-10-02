@@ -12,3 +12,8 @@ styled-system/
 .panda/
 playwright-report/
 test-results/
+
+# Nix out-links: `nix build` and my-nix's `nbuild` write ./result in the cwd
+# unless they are given --no-link.
+/result
+/result-*
