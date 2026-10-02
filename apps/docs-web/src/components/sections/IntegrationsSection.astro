@@ -3,8 +3,29 @@ import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import { Badge } from "web-design-system/components";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
-import { integrationCards } from "../../../data/landing";
+import { integrationCards, plannedIntegrations } from "../../../data/landing";
 import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeStyles";
+
+/**
+ * A planned integration: the same card, held right back so the pair above reads
+ * as the one you can turn on today. It drops to the page background with a
+ * fainter border, and its text steps down to the weakest tokens that still
+ * clear AA on the canvas (see tokens/semantic.ts) — dimmer than a shipped card
+ * without falling through the contrast floor the rest of the site holds. A
+ * blanket opacity would look better and fail that floor.
+ */
+const cardPlanned = css({
+  bg: "canvas",
+  borderColor: "border.subtle",
+  "& h3": { color: "fg.muted" },
+  "& p": { color: "fg.subtle" },
+});
+
+/**
+ * Equal rows: a planned card has no link row, so left alone it would come out
+ * shorter than the shipped cards beside it and the grid would read as ragged.
+ */
+const evenGrid = css({ gridAutoRows: "1fr" });
 ---
 
 <HomepageSection index={7} label="integrations">
@@ -15,7 +36,7 @@ import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeSt
         align="left"
       />
 
-      <div class={`${grid} ${css({ mt: { base: "8", md: "12" } })}`}>
+      <div class={`${grid} ${evenGrid} ${css({ mt: { base: "8", md: "12" } })}`}>
         {integrationCards.map((entry) => (
           <div class={card}>
             <div class={cardTitle}>
@@ -28,6 +49,18 @@ import { grid, card, cardTitle, cardHeading, cardBody, cardLink } from "./homeSt
             <a href={entry.href} class={cardLink}>
               {entry.linkLabel} →
             </a>
+          </div>
+        ))}
+
+        {plannedIntegrations.map((entry) => (
+          <div class={`${card} ${cardPlanned}`}>
+            <div class={cardTitle}>
+              <h3 class={cardHeading}>{entry.name}</h3>
+              <Badge tone="neutral" variant="outline">
+                coming soon
+              </Badge>
+            </div>
+            <p class={cardBody}>{entry.body}</p>
           </div>
         ))}
       </div>

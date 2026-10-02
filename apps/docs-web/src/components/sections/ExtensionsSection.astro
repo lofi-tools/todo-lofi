@@ -23,6 +23,19 @@ const examples = [
 /** The sub-section's ordinal, in the same mono voice as the section markers. */
 const ordinal = css({ fontFamily: "mono", fontSize: "2xs", color: "accent.text" });
 
+/**
+ * The sub-grid's items stretch to the row height, which is what keeps the
+ * gutter colour from showing below a short item. That also gives `cardLink`'s
+ * `mt: auto` a free space to claim, and it would spend it on pushing the link —
+ * and the illustration under it — to the bottom of the cell. These sub-sections
+ * stack from the top instead.
+ *
+ * Scoped to the item rather than added to the link: two utility classes on one
+ * element tie on specificity, so it would come down to whichever rule Panda
+ * happens to emit last.
+ */
+const stackedItem = css({ "& a": { mt: "0" } });
+
 /** The nested card under the workflows illustration. */
 const secondary = css({
   display: "flex",
@@ -46,7 +59,7 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
   />
 
   <div class={`${subGrid} ${css({ mt: { base: "8", md: "12" } })}`}>
-    <div class={item}>
+    <div class={`${item} ${stackedItem}`}>
       <div class={cardTitle}>
         <span class={ordinal}>01</span>
         <h3 class={cardHeading}>{miniApps.name}</h3>
@@ -56,7 +69,7 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
       <IllustrationCycle label="Mini-app examples" items={examples} />
     </div>
 
-    <div class={item}>
+    <div class={`${item} ${stackedItem}`}>
       <div class={cardTitle}>
         <span class={ordinal}>02</span>
         <h3 class={cardHeading}>{workflows.name}</h3>

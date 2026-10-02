@@ -61,18 +61,35 @@ const root = css({
   borderWidth: "hairline",
   borderStyle: "solid",
   borderColor: "border.strong",
+  // A desktop-shaped canvas. The ratio is bounded rather than pinned, so the
+  // bounds take over when the tab is narrow (the windows would be squat) or
+  // very wide (the app window would be a letterbox).
+  md: {
+    aspectRatio: "3 / 2",
+    minH: "210px",
+    maxH: "330px",
+  },
 });
 
 /**
  * Both windows sit in one grid cell so they keep a common size; the trailing
  * padding is the room their offsets need to stay inside the illustration.
+ *
+ * From `md` up they float over the app window's right-hand side, the way loose
+ * windows sit on a desktop, instead of being given their own column.
  */
 const windowStack = css({
   display: "grid",
   flexShrink: "0",
-  w: { base: "full", md: "372px" },
+  w: "full",
   pr: `calc(var(--spacing-3) + ${OFFSET}px)`,
   pb: `calc(var(--spacing-3) + ${OFFSET}px)`,
+  md: {
+    position: "absolute",
+    right: "3",
+    bottom: "3",
+    w: "56%",
+  },
 });
 
 const windowSlot = css({ gridColumn: "1", gridRow: "1", display: "flex", minW: "0" });

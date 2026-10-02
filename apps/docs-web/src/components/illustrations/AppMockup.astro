@@ -57,15 +57,19 @@ const window = css({
 
 const windowTitle = css({ ml: "2", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
 
+// The nav column is sized by what it holds rather than pinned to a width: tag
+// names are single lines of mono text, and a fixed track clips the longer ones.
+const navTrack = "minmax(0, auto)";
+
 const windowGrid = css({
   display: "grid",
-  gridTemplateColumns: "minmax(0, 116px) minmax(0, 1fr)",
+  gridTemplateColumns: `${navTrack} minmax(0, 1fr)`,
   flex: "1",
   minH: "40",
 });
 
 const windowGridWithDetails = css({
-  gridTemplateColumns: "minmax(0, 106px) minmax(0, 1fr) minmax(0, 170px)",
+  gridTemplateColumns: `${navTrack} minmax(0, 1fr) minmax(0, 170px)`,
 });
 
 const detailsPane = css({
@@ -84,6 +88,7 @@ const tagsNav = css({
   flexDirection: "column",
   gap: "1",
   p: "2",
+  minW: "0",
   borderRightWidth: "hairline",
   borderRightStyle: "solid",
   borderRightColor: "border.subtle",

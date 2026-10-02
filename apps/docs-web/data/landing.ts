@@ -95,6 +95,11 @@ export const extensionCards: LandingCard[] = [
   },
 ]
 
+export interface PlannedIntegration {
+  name: string
+  body: string
+}
+
 export const integrationCards: LandingCard[] = [
   {
     name: 'Todoist',
@@ -111,6 +116,30 @@ export const integrationCards: LandingCard[] = [
     body: 'Issues and projects map onto your lists through the same sync surface. Expect the mapping to shift while it settles.',
     href: '/docs/sync#github',
     linkLabel: 'Read about GitHub sync',
+  },
+]
+
+/**
+ * Integrations that are planned rather than shipped. They share the grid with
+ * the pair above so the roadmap is visible, but they carry no href and no link
+ * label: there is nothing to read yet, and the card says so.
+ */
+export const plannedIntegrations: PlannedIntegration[] = [
+  {
+    name: 'Google Tasks',
+    body: 'Personal lists and their tasks, over the same two-way surface as Todoist.',
+  },
+  {
+    name: 'Linear',
+    body: 'Issues assigned to you, so an issue becomes a task you can actually work.',
+  },
+  {
+    name: 'Jira',
+    body: 'Issues and their status, for the work that never leaves Jira.',
+  },
+  {
+    name: 'Asana',
+    body: 'Projects and tasks, on the mapping the other syncs already use.',
   },
 ]
 
