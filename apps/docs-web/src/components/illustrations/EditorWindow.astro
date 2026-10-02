@@ -78,7 +78,9 @@ const fileName = css({
 const folderCaret = css({ display: "inline-flex", w: "3", flexShrink: "0", color: "fg.subtle" });
 const fileSpacer = css({ display: "inline-flex", w: "3", flexShrink: "0" });
 
-const stage = css({ display: "flex", minW: "0", p: "3" });
+// The editor fills the pane edge to edge: no padding of its own, so the file's
+// title row and code lines run the full height beside the explorer.
+const stage = css({ display: "flex", minW: "0", flex: "1" });
 ---
 
 <div class={`${root} ${windowSurface}`} data-thread-to={thread}>

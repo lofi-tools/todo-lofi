@@ -9,7 +9,7 @@ const claims = [
     index: "01",
     kicker: "local-first",
     title: "Instant, because it is local",
-    body: "Tasks live in a file on your machine, so there is no server round-trip between a keystroke and the list. It opens immediately and keeps working with no connection.",
+    body: "Tasks live in a file on your machine, so there is no server round-trip between a keystroke and the list. It opens immediately and keeps working with no connection — no account, no telemetry, and no server in the loop. Sync and the agent are opt-in.",
   },
   {
     index: "02",
@@ -69,8 +69,8 @@ const column = css({
   _first: { pt: { base: "0", md: "8" }, borderTopWidth: "0", borderLeftWidth: "0" },
 });
 
-/** The offline card closes the section; the section's own padding resumes under it. */
-const offlineCard = css({ mt: { base: "8", md: "0" }, pb: { base: "0", md: "20" } });
+/** The closing card ends the section; the section's own padding resumes under it. */
+const closingCard = css({ mt: { base: "8", md: "0" }, pb: { base: "0", md: "20" } });
 
 const kicker = css({
   display: "flex",
@@ -94,7 +94,7 @@ const columnTitle = css({
 });
 ---
 
-<HomepageSection bare index={9} label="craft">
+<HomepageSection bare index={8} label="craft">
   <div class={sectionBox}>
     <SectionHeading eyebrow="Performant tech" title="Crafted with care" description="A native, fast, battery-friendly desktop app" align="left" />
 
@@ -111,16 +111,16 @@ const columnTitle = css({
       ))}
     </div>
 
-    <div class={offlineCard}>
+    <div class={closingCard}>
       <div class={band}>
         <div class={bandText}>
-          <span class={css({ fontSize: "xl", fontWeight: "semibold", color: "fg.default" })}>Offline by default</span>
+          <span class={css({ fontSize: "xl", fontWeight: "semibold", color: "fg.default" })}>And more coming soon</span>
           <p class={css({ m: "0", fontSize: "sm", color: "fg.muted", maxW: "640px" })}>
-            No account, no telemetry, and no server in the loop. Sync and the agent are opt-in, and everything else keeps working without a connection.
+            More integrations, third-party extensions, built-in workflows to replace most single-purpose apps, p2p sync server, ... and more features on the horizon
           </p>
         </div>
-        <a href="/docs/sync#offline" class={bandLink}>
-          How sync stays optional
+        <a href="/roadmap" class={bandLink}>
+          See the roadmap
         </a>
       </div>
     </div>

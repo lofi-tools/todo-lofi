@@ -15,7 +15,10 @@ interface Props {
   backdrop?: "soft" | "spotlight";
   /** Direction the illustration fades so it reads as illustration, not content. */
   fade?: IllustrationFade;
-  /** Hue of the accent wash so adjacent stages don't repeat. */
+  /**
+   * Backdrop wash from the catalog in `styles.ts`; pick a different one per
+   * illustration so adjacent stages don't repeat a tone.
+   */
   tone?: StageTone;
   /** One-line note set at the top of the backdrop, before the illustration. */
   note?: string;

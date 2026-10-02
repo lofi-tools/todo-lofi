@@ -1,6 +1,6 @@
 ---
 import { css } from "styled-system/css";
-import { dot, windowBar, windowSurface } from "./styles";
+import { windowBar } from "./styles";
 
 interface Segment {
   /** Bar width, in pixels. */
@@ -28,7 +28,7 @@ const patterns: Segment[][] = [
 
 const rows = Array.from({ length: lines }, (_, index) => patterns[index % patterns.length]);
 
-const fileName = css({ ml: "1", fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
+const fileName = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.subtle" });
 
 const body = css({
   flex: "1",
@@ -67,22 +67,22 @@ const tint = {
   muted: css({ bg: "border.strong" }),
 };
 
-/** The editor window: a title bar with the open file, and a clipped code body. */
+/**
+ * The editor pane: the open file's title over its code. It is not a window of
+ * its own — the editor window around it carries the chrome — so it has no
+ * border or surface, and it fills the pane it is handed.
+ */
 const root = css({
   flex: "1",
   minW: "0",
   display: "flex",
   flexDirection: "column",
-  borderRadius: "md",
-  borderWidth: "hairline",
-  borderStyle: "solid",
   overflow: "hidden",
 });
 ---
 
-<div class={`${root} ${windowSurface}`}>
+<div class={root}>
   <div class={windowBar}>
-    <span class={dot} />
     <span class={fileName}>{name}</span>
   </div>
   <div class={body}>

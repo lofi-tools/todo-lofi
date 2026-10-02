@@ -3,21 +3,6 @@ import { css } from "styled-system/css";
 /** Shared pieces for the homepage feature illustrations. */
 
 /**
- * The ambient backdrop from the reference screens: one diagonal falloff from
- * the accent-tinted corner, through the accent at lower alpha, to a dark floor.
- * A single linear gradient rather than stacked radials, so the wash reads as a
- * smooth ramp with no ring or seam where a radial would end. Used by the outer
- * illustration frames, with the windows and cards layered on top.
- */
-export const backdropSurface = css({
-  // An opaque base under the gradient: the tint stop is translucent, and on its
-  // own would let the page show through the corner.
-  bg: "surface.subtle",
-  backgroundImage:
-    "linear-gradient(140deg, token(colors.accent.subtle) 0%, rgba(94, 106, 210, 0.08) 30%, rgba(94, 106, 210, 0.03) 62%, token(colors.surface.subtle) 100%)",
-});
-
-/**
  * A mock window surface: the panel's three-stop falloff, dark enough to sit a
  * clear step below the page canvas, with a single shiny border and the lift off
  * the backdrop.
@@ -191,49 +176,58 @@ export const paneLabel = css({
 });
 
 /**
- * The shared soft illustration backdrop: container chrome plus a layered
- * gradient (accent wash over surface lifts). One static class per tone, used
- * by `IllustrationStage` and the auto-switch tab pane alike, so the wash
- * never drifts between copies.
- *
- * Static records rather than a function: Panda only emits `css()` calls it
- * can resolve at build time, and an interpolated value would silently drop
- * the whole gradient from the built CSS.
+ * The shared soft illustration backdrop: container chrome plus the tone's
+ * diagonal wash. One static class per tone, used by `IllustrationStage` and the
+ * auto-switch tab pane alike, so the wash never drifts between copies.
  */
 const stageBackdropBase = {
   position: "relative",
   overflow: "hidden",
-  // Opaque base under the gradient for the same reason as `backdropSurface`.
+  // An opaque base under the gradient: the tint stops are translucent, and on
+  // their own would let the page show through the corner.
   bg: "surface.subtle",
 } as const;
 
 /**
- * The three tones vary by hue only — indigo (the accent), purple, and
- * red-purple — holding each source colour's own saturation and lightness, so
- * adjacent stages shift in colour without changing how bright or strong the
- * wash is. The purple and red-purple values are the success and warning
- * accents' HSL with their hue moved onto the accent's arc; the green and
- * yellow themselves never appear in an illustration backdrop.
+ * The backdrop catalog: the washes an illustration stage can take, chosen with
+ * `IllustrationStage`'s `tone`. The hues walk one arc — blue, indigo, violet,
+ * purple, magenta — so adjacent stages shift in colour without leaving the
+ * brand's range; indigo is the accent itself and the rest are its neighbours on
+ * that arc. Pick a tone per illustration so neighbours don't repeat.
  *
  * Every stop keeps the stage's own hue: the two middle stops are the corner
  * colour at a lower alpha, not neutral surfaces, so the wash ramps out of the
  * tinted corner without the grey band a neutral mid colour would put across it.
+ *
+ * Static records rather than a function: Panda only emits `css()` calls it can
+ * resolve at build time, and an interpolated value would silently drop the
+ * whole gradient from the built CSS.
  */
 export const stageBackdrops = {
+  blue: css({
+    ...stageBackdropBase,
+    backgroundImage:
+      "linear-gradient(140deg, rgba(70, 120, 225, 0.16) 0%, rgba(70, 120, 225, 0.08) 30%, rgba(70, 120, 225, 0.03) 62%, token(colors.surface.subtle) 100%)",
+  }),
   indigo: css({
     ...stageBackdropBase,
     backgroundImage:
       "linear-gradient(140deg, token(colors.accent.subtle) 0%, rgba(94, 106, 210, 0.08) 30%, rgba(94, 106, 210, 0.03) 62%, token(colors.surface.subtle) 100%)",
+  }),
+  violet: css({
+    ...stageBackdropBase,
+    backgroundImage:
+      "linear-gradient(140deg, rgba(116, 91, 196, 0.16) 0%, rgba(116, 91, 196, 0.08) 30%, rgba(116, 91, 196, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
   purple: css({
     ...stageBackdropBase,
     backgroundImage:
       "linear-gradient(140deg, rgba(138, 76, 183, 0.16) 0%, rgba(138, 76, 183, 0.08) 30%, rgba(138, 76, 183, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
-  redPurple: css({
+  magenta: css({
     ...stageBackdropBase,
     backgroundImage:
-      "linear-gradient(140deg, rgba(242, 76, 214, 0.16) 0%, rgba(242, 76, 214, 0.08) 30%, rgba(242, 76, 214, 0.03) 62%, token(colors.surface.subtle) 100%)",
+      "linear-gradient(140deg, rgba(205, 88, 230, 0.16) 0%, rgba(205, 88, 230, 0.08) 30%, rgba(205, 88, 230, 0.03) 62%, token(colors.surface.subtle) 100%)",
   }),
 } as const;
 

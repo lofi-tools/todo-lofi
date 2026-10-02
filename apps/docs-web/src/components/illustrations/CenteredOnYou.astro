@@ -52,6 +52,20 @@ const companyList = css({
   borderWidth: "hairline",
   borderStyle: "solid",
 });
+
+/**
+ * The app window is nudged off the side column's edges — right and down a
+ * little — so the blocks read as panels beside each other rather than snapping
+ * to the same grid. A transform, not margins, so the shift does not change the
+ * row's height or the side column's layout; only where they sit in a row, since
+ * stacked the offset would just push the window out of the column.
+ */
+const appOffset = css({
+  flex: "1",
+  minW: "0",
+  display: "flex",
+  transform: { base: "none", md: "translate(10px, 12px)" },
+});
 ---
 
 <div class={root} data-threads>
@@ -69,7 +83,9 @@ const companyList = css({
     </div>
   </div>
 
-  <AppMockup tags={tags} taskRows={4} />
+  <div class={appOffset}>
+    <AppMockup tags={tags} taskRows={4} />
+  </div>
 
   <svg class={threadLayer} data-thread-svg aria-hidden="true">
     <g data-thread="work" data-from="work" data-to="company">

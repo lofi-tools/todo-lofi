@@ -13,7 +13,6 @@ import ExtensionsSection from "../components/sections/ExtensionsSection.astro";
 import ManagedForYouSection from "../components/sections/ManagedForYouSection.astro";
 import EverydaySection from "../components/sections/EverydaySection.astro";
 import IntegrationsSection from "../components/sections/IntegrationsSection.astro";
-import RoadmapSection from "../components/sections/RoadmapSection.astro";
 import CraftSection from "../components/sections/CraftSection.astro";
 import SectionSeparator from "../components/sections/SectionSeparator.astro";
 import DownloadButton from "../components/blocks/DownloadButton.astro";
@@ -78,11 +77,9 @@ import screenshot from "../assets/app.png";
     <SectionSeparator />
     <IntegrationsSection />
     <SectionSeparator />
-    <RoadmapSection />
-    <SectionSeparator />
     <CraftSection />
 
-    <HomepageSection bare index={10} label="get it now">
+    <HomepageSection bare index={9} label="get it now">
       <CTASection title="Get it now" secondaryCta={{ label: "All downloads", href: "/downloads" }}>
         <DownloadButton slot="primary" />
       </CTASection>
