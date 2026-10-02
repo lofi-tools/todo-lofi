@@ -1,0 +1,19 @@
+/*
+ * The shell owns the viewport: the window is fixed height and each pane does
+ * its own scrolling, the way the desktop app's window behaves.
+ */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+}
+
+/* The app paints its own window background; the page never scrolls. */
+#root {
+  display: flex;
+  flex-direction: column;
+}

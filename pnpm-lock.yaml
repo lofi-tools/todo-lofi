@@ -42,6 +42,34 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  apps/taskstream-web:
+    dependencies:
+      '@ark-ui/solid':
+        specifier: ^5.39.2
+        version: 5.39.2(solid-js@1.9.15)
+      solid-js:
+        specifier: ^1.9.15
+        version: 1.9.15
+      web-design-system:
+        specifier: workspace:*
+        version: link:../../libs/web-design-system
+    devDependencies:
+      '@pandacss/dev':
+        specifier: ^1.12.1
+        version: 1.12.1(jsdom@27.4.0)(typescript@5.9.3)
+      '@pandacss/preset-panda':
+        specifier: ^1.12.1
+        version: 1.12.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vite:
+        specifier: ^8.3.0
+        version: 8.3.0(esbuild@0.28.2)(yaml@2.9.1)
+      vite-plugin-solid:
+        specifier: ^2.11.14
+        version: 2.11.14(solid-js@1.9.15)(vite@8.3.0(esbuild@0.28.2)(yaml@2.9.1))
+
   demos/design-system-showcase:
     dependencies:
       '@astrojs/solid-js':

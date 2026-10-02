@@ -1,0 +1,28 @@
+{
+  "name": "taskstream-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Taskstream desktop UI, rebuilt as a web app with Solid, Panda, and Ark UI.",
+  "scripts": {
+    "codegen": "pnpm --filter web-design-system run codegen && panda codegen && panda cssgen --outfile styled-system/styles.css",
+    "predev": "pnpm run codegen",
+    "dev": "vite",
+    "prebuild": "pnpm run codegen",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "pnpm run codegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@ark-ui/solid": "^5.39.2",
+    "solid-js": "^1.9.15",
+    "web-design-system": "workspace:*"
+  },
+  "devDependencies": {
+    "@pandacss/dev": "^1.12.1",
+    "@pandacss/preset-panda": "^1.12.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.0",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}

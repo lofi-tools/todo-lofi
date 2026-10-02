@@ -176,6 +176,9 @@
             # Docs site by default (`pnpm dev`); the design-system showcase is
             # `pnpm dev:ds`.
             web = ''set -e; pnpm install; dev-stop; pnpm dev'';
+
+            # Taskstream web app (`pnpm dev:web` -> Vite in apps/taskstream-web).
+            ts-web = ''set -e; pnpm install; pnpm dev:web'';
           };
 
           env = {
@@ -317,67 +320,67 @@
             {
               taskstream-desktop-linux =
                 let
-              linuxTarget = "x86_64-unknown-linux-gnu";
-              linuxTargetEnv = "x86_64_unknown_linux_gnu";
-              linuxToolchain = config.expose.packages.customRust.override {
-                targets = [ linuxTarget ];
-              };
-              linuxCrane = crane.overrideToolchain (_: linuxToolchain);
-              # `zig cc` takes the target via `-target x86_64-linux-gnu`,
-              # but cc-rs appends cargo's `--target=x86_64-unknown-linux-gnu`
-              # (with the `unknown` vendor), which zig cannot parse, so filter
-              # that flag out here.
-              zigCc = pkgs.writeShellScriptBin "zig-cc-x86_64-linux" ''
-                args=()
-                for a in "$@"; do
-                  case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
-                done
-                exec ${pkgs.zig}/bin/zig cc -target x86_64-linux-gnu "''${args[@]}"
-              '';
-              zigCxx = pkgs.writeShellScriptBin "zig-cxx-x86_64-linux" ''
-                args=()
-                for a in "$@"; do
-                  case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
-                done
-                exec ${pkgs.zig}/bin/zig c++ -target x86_64-linux-gnu "''${args[@]}"
-              '';
-              crossEnv = {
-                CARGO_BUILD_TARGET = linuxTarget;
-                CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${zigCc}/bin/zig-cc-x86_64-linux";
-                "CC_${linuxTargetEnv}" = "${zigCc}/bin/zig-cc-x86_64-linux";
-                "CXX_${linuxTargetEnv}" = "${zigCxx}/bin/zig-cxx-x86_64-linux";
-                "AR_${linuxTargetEnv}" = "${pkgs.llvmPackages.bintools}/bin/llvm-ar";
-              };
-            in
-            # No `buildDepsOnly` layer here: it builds the dependencies of
-            # every workspace member, including demos/desktop-tauri's Linux
-            # gtk stack, which cannot resolve when cross-compiling from macOS.
-            # Building `-p taskstream-desktop` directly only needs its own closure.
-            linuxCrane.buildPackage {
-              src = fullSrc;
-              inherit (config.rust) nativeBuildInputs;
-              buildInputs = config.rust.buildInputs;
-              pname = "taskstream-desktop-linux";
-              inherit version;
-              cargoExtraArgs = "-p taskstream-desktop";
-              doCheck = false;
-              # `zig cc` resolves its cache dir via HOME, which the build env
-              # leaves unset/unwritable; point it at the per-build temp dir.
-              preBuild = ''export HOME="$TMPDIR"'';
-              env = config.rust.buildEnv // crossEnv;
+                  linuxTarget = "x86_64-unknown-linux-gnu";
+                  linuxTargetEnv = "x86_64_unknown_linux_gnu";
+                  linuxToolchain = config.expose.packages.customRust.override {
+                    targets = [ linuxTarget ];
+                  };
+                  linuxCrane = crane.overrideToolchain (_: linuxToolchain);
+                  # `zig cc` takes the target via `-target x86_64-linux-gnu`,
+                  # but cc-rs appends cargo's `--target=x86_64-unknown-linux-gnu`
+                  # (with the `unknown` vendor), which zig cannot parse, so filter
+                  # that flag out here.
+                  zigCc = pkgs.writeShellScriptBin "zig-cc-x86_64-linux" ''
+                    args=()
+                    for a in "$@"; do
+                      case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
+                    done
+                    exec ${pkgs.zig}/bin/zig cc -target x86_64-linux-gnu "''${args[@]}"
+                  '';
+                  zigCxx = pkgs.writeShellScriptBin "zig-cxx-x86_64-linux" ''
+                    args=()
+                    for a in "$@"; do
+                      case "$a" in --target=*) continue ;; *) args+=("$a") ;; esac
+                    done
+                    exec ${pkgs.zig}/bin/zig c++ -target x86_64-linux-gnu "''${args[@]}"
+                  '';
+                  crossEnv = {
+                    CARGO_BUILD_TARGET = linuxTarget;
+                    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${zigCc}/bin/zig-cc-x86_64-linux";
+                    "CC_${linuxTargetEnv}" = "${zigCc}/bin/zig-cc-x86_64-linux";
+                    "CXX_${linuxTargetEnv}" = "${zigCxx}/bin/zig-cxx-x86_64-linux";
+                    "AR_${linuxTargetEnv}" = "${pkgs.llvmPackages.bintools}/bin/llvm-ar";
+                  };
+                in
+                # No `buildDepsOnly` layer here: it builds the dependencies of
+                  # every workspace member, including demos/desktop-tauri's Linux
+                  # gtk stack, which cannot resolve when cross-compiling from macOS.
+                  # Building `-p taskstream-desktop` directly only needs its own closure.
+                linuxCrane.buildPackage {
+                  src = fullSrc;
+                  inherit (config.rust) nativeBuildInputs;
+                  buildInputs = config.rust.buildInputs;
+                  pname = "taskstream-desktop-linux";
+                  inherit version;
+                  cargoExtraArgs = "-p taskstream-desktop";
+                  doCheck = false;
+                  # `zig cc` resolves its cache dir via HOME, which the build env
+                  # leaves unset/unwritable; point it at the per-build temp dir.
+                  preBuild = ''export HOME="$TMPDIR"'';
+                  env = config.rust.buildEnv // crossEnv;
                 };
 
               taskstream-desktop =
                 lib.mkForce (crane.buildPackage {
-              src = fullSrc;
-              cargoArtifacts = fullDeps;
-              inherit (config.rust) nativeBuildInputs;
-              buildInputs = config.rust.buildInputs;
-              pname = "taskstream-desktop";
-              inherit version;
-              cargoExtraArgs = "-p taskstream-desktop";
-              doCheck = false;
-              env = config.rust.buildEnv;
+                  src = fullSrc;
+                  cargoArtifacts = fullDeps;
+                  inherit (config.rust) nativeBuildInputs;
+                  buildInputs = config.rust.buildInputs;
+                  pname = "taskstream-desktop";
+                  inherit version;
+                  cargoExtraArgs = "-p taskstream-desktop";
+                  doCheck = false;
+                  env = config.rust.buildEnv;
                 });
             }
             // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
@@ -446,68 +449,68 @@
               # Linux-only: appimagetool is an x86_64 executable and ldd/dpkg-deb
               # only make sense there.
               taskstream-linux-dist =
-              let
-                # Pinned out-of-store tool, fetched purely by content hash
-                # (same revision the workflow used to curl: 1.9.1).
-                appimagetool = pkgs.fetchurl {
-                  url = "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage";
-                  sha256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0";
-                };
-                # The runtime ELF appimagetool prepends to the AppImage, passed
-                # on as --runtime-file. Left to itself appimagetool downloads it
-                # from type2-runtime's releases, which a sandbox forbids; it is
-                # a tagged release rather than the moving `continuous` tag so
-                # the hash keeps meaning what it says. x86_64 matches the
-                # architecture this derivation packs today.
-                appimageRuntime = pkgs.fetchurl {
-                  url = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64";
-                  sha256 = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d";
-                };
-                packagingSrc = lib.fileset.toSource {
-                  root = (/. + builtins.unsafeDiscardStringContext self.outPath);
-                  fileset = lib.fileset.unions [
-                    (relPath "/scripts/package-linux.sh")
-                    (relPath "/apps/taskstream-desktop/assets")
+                let
+                  # Pinned out-of-store tool, fetched purely by content hash
+                  # (same revision the workflow used to curl: 1.9.1).
+                  appimagetool = pkgs.fetchurl {
+                    url = "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage";
+                    sha256 = "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0";
+                  };
+                  # The runtime ELF appimagetool prepends to the AppImage, passed
+                  # on as --runtime-file. Left to itself appimagetool downloads it
+                  # from type2-runtime's releases, which a sandbox forbids; it is
+                  # a tagged release rather than the moving `continuous` tag so
+                  # the hash keeps meaning what it says. x86_64 matches the
+                  # architecture this derivation packs today.
+                  appimageRuntime = pkgs.fetchurl {
+                    url = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64";
+                    sha256 = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d";
+                  };
+                  packagingSrc = lib.fileset.toSource {
+                    root = (/. + builtins.unsafeDiscardStringContext self.outPath);
+                    fileset = lib.fileset.unions [
+                      (relPath "/scripts/package-linux.sh")
+                      (relPath "/apps/taskstream-desktop/assets")
+                    ];
+                  };
+                in
+                pkgs.stdenv.mkDerivation {
+                  pname = "taskstream-linux-dist";
+                  inherit version;
+                  src = packagingSrc;
+                  # Everything package-linux.sh shells out to: ldd (glibc),
+                  # objdump (binutils), dpkg-deb, rsvg-convert; plus the tools
+                  # appimagetool prefers to have around (desktop-file-validate,
+                  # file for arch sniffing).
+                  nativeBuildInputs = [
+                    pkgs.glibc
+                    pkgs.binutils
+                    pkgs.dpkg
+                    pkgs.librsvg
+                    pkgs.desktop-file-utils
+                    pkgs.file
                   ];
+                  # $out holds archives and an AppImage (whose leading bytes are
+                  # the runtime ELF): stripping would corrupt the AppImage, and
+                  # there is nothing in there with symbols worth stripping.
+                  dontStrip = true;
+                  buildPhase = ''
+                    appimage=$PWD/appimagetool
+                    cp -f ${appimagetool} "$appimage"
+                    chmod +x "$appimage"
+                    PACKAGE_LINUX_SKIP_STORE_CHECK=1 bash scripts/package-linux.sh \
+                      --binary ${config.packages.taskstream-desktop}/bin/taskstream-desktop \
+                      --version ${version} \
+                      --out dist \
+                      --appimagetool "$appimage" \
+                      --appimage-runtime ${appimageRuntime}
+                  '';
+                  installPhase = ''
+                    mkdir -p $out
+                    cp -f dist/* $out/
+                  '';
                 };
-              in
-              pkgs.stdenv.mkDerivation {
-                pname = "taskstream-linux-dist";
-                inherit version;
-                src = packagingSrc;
-                # Everything package-linux.sh shells out to: ldd (glibc),
-                # objdump (binutils), dpkg-deb, rsvg-convert; plus the tools
-                # appimagetool prefers to have around (desktop-file-validate,
-                # file for arch sniffing).
-                nativeBuildInputs = [
-                  pkgs.glibc
-                  pkgs.binutils
-                  pkgs.dpkg
-                  pkgs.librsvg
-                  pkgs.desktop-file-utils
-                  pkgs.file
-                ];
-                # $out holds archives and an AppImage (whose leading bytes are
-                # the runtime ELF): stripping would corrupt the AppImage, and
-                # there is nothing in there with symbols worth stripping.
-                dontStrip = true;
-                buildPhase = ''
-                  appimage=$PWD/appimagetool
-                  cp -f ${appimagetool} "$appimage"
-                  chmod +x "$appimage"
-                  PACKAGE_LINUX_SKIP_STORE_CHECK=1 bash scripts/package-linux.sh \
-                    --binary ${config.packages.taskstream-desktop}/bin/taskstream-desktop \
-                    --version ${version} \
-                    --out dist \
-                    --appimagetool "$appimage" \
-                    --appimage-runtime ${appimageRuntime}
-                '';
-                installPhase = ''
-                  mkdir -p $out
-                  cp -f dist/* $out/
-                '';
-              };
-          };
+            };
         };
     });
 

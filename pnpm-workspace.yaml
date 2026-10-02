@@ -2,6 +2,7 @@ packages:
   - libs/web-design-system
   - demos/design-system-showcase
   - apps/docs-web
+  - apps/taskstream-web
 
 # esbuild's postinstall is required by Vite/Astro; pnpm blocks build scripts
 # by default. pnpm 11 uses the `allowBuilds` map.

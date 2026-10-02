@@ -1,5 +1,5 @@
 {
-  "name": "taskstream-web",
+  "name": "taskstream",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,7 +12,10 @@
     "preview": "pnpm --dir demos/design-system-showcase run preview",
     "build:docs": "pnpm run codegen && pnpm --dir apps/docs-web run build",
     "preview:docs": "pnpm --dir apps/docs-web run preview",
-    "typecheck": "pnpm --dir libs/web-design-system run typecheck && pnpm --dir demos/design-system-showcase run typecheck && pnpm --dir apps/docs-web run typecheck",
+    "dev:web": "pnpm --dir apps/taskstream-web run dev",
+    "build:web": "pnpm run codegen && pnpm --dir apps/taskstream-web run build",
+    "preview:web": "pnpm --dir apps/taskstream-web run preview",
+    "typecheck": "pnpm --dir libs/web-design-system run typecheck && pnpm --dir demos/design-system-showcase run typecheck && pnpm --dir apps/docs-web run typecheck && pnpm --dir apps/taskstream-web run typecheck",
     "test": "pnpm --dir libs/web-design-system run test",
     "test:e2e": "pnpm --dir demos/design-system-showcase run test:e2e",
     "test:e2e:docs": "pnpm --dir apps/docs-web run test:e2e"
