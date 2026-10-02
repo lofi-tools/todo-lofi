@@ -21,7 +21,13 @@ const panel = css({ display: 'flex', flexDirection: 'column', gap: '3', p: '4', 
 
 {
   bare ? (
-    messages.map((message) => <ChatMessageRow message={message} alternate={alternate} />)
+    messages.map((message, index) => (
+      <ChatMessageRow
+        message={message}
+        alternate={alternate}
+        spaced={index < messages.length - 1}
+      />
+    ))
   ) : (
     <div class={panel}>
       {messages.map((message) => (

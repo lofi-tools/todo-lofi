@@ -16,9 +16,21 @@ import { cardBody, cardHeading, cardLink, cardTitle, item, subGrid } from "./hom
 const [miniApps, workflows, coding] = extensionCards;
 
 const examples = [
-  { title: "travel", Illustration: TravelChecklist },
-  { title: "birthdays", Illustration: BirthdayReminders },
-  { title: "jobs", Illustration: JobTracking },
+  {
+    title: "travel",
+    Illustration: TravelChecklist,
+    note: "Give it a trip and it writes the list as ordinary tasks.",
+  },
+  {
+    title: "birthdays",
+    Illustration: BirthdayReminders,
+    note: "A yearly reminder and a gift idea per person, kept as tasks.",
+  },
+  {
+    title: "jobs",
+    Illustration: JobTracking,
+    note: "Each stage is a section, so an application moves like any task.",
+  },
 ];
 
 /** The sub-section's ordinal, in the same mono voice as the section markers. */
@@ -84,7 +96,11 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
       <p class={cardBody}>{workflows.body}</p>
       <a href={workflows.href} class={cardLink}>{workflows.linkLabel} →</a>
       <div class={illustration}>
-        <IllustrationStage fade="none" tone="purple">
+        <IllustrationStage
+          fade="none"
+          tone="purple"
+          note="Rejection does not throw the run away — it reopens the spec, so the next round starts from the objection."
+        >
           <WorkflowDiagram />
         </IllustrationStage>
       </div>

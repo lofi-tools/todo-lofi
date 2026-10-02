@@ -2,7 +2,7 @@
 import { css } from "styled-system/css";
 import { Lock } from "web-design-system/icons";
 import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+import { checkbox, chip, label, mono, row, rowHead } from "./styles";
 
 /** The blocked set is dimmed and dashed, so it reads as set aside, not done. */
 const blockedGroup = css({
@@ -56,6 +56,4 @@ const blockedBy = css({
       <span class={blockedBy}>blocked by “Cut the tag”</span>
     </span>
   </div>
-
-  <p class={caption}>Blocked-by chains stay out of the list until they can start.</p>
 </IllustrationFrame>

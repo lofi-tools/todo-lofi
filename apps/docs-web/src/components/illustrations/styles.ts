@@ -126,6 +126,18 @@ export const mono = css({
 /** A short sentence under an illustration, in normal case. */
 export const caption = css({ fontSize: "xs", color: "fg.muted", lineHeight: "relaxed" });
 
+/**
+ * A one-line note set at the top of an illustration backdrop, before the
+ * illustration: it explains the mock while the mock window itself stays a pure
+ * screen replica.
+ */
+export const stageNote = css({
+  fontSize: "xs",
+  color: "fg.muted",
+  lineHeight: "relaxed",
+  maxW: "68ch",
+});
+
 export const chip = css({
   fontFamily: "mono",
   fontSize: "2xs",
@@ -207,30 +219,18 @@ const stageBackdropBase = {
 export const stageBackdrops = {
   indigo: css({
     ...stageBackdropBase,
-    backgroundImage: [
-      "radial-gradient(110% 90% at 0% 0%, token(colors.accent.subtle) 0%, transparent 55%)",
-      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
-      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
-    ].join(", "),
+    backgroundImage:
+      "linear-gradient(140deg, token(colors.accent.subtle) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
   }),
   purple: css({
     ...stageBackdropBase,
-    backgroundImage: [
-      "radial-gradient(110% 90% at 0% 0%, rgba(138, 76, 183, 0.16) 0%, transparent 55%)",
-      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
-      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
-    ].join(", "),
+    backgroundImage:
+      "linear-gradient(140deg, rgba(138, 76, 183, 0.16) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
   }),
   redPurple: css({
     ...stageBackdropBase,
-    backgroundImage: [
-      "radial-gradient(110% 90% at 0% 0%, rgba(242, 76, 214, 0.16) 0%, transparent 55%)",
-      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
-      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.surface.elevated) 50%, token(colors.surface.subtle) 100%)",
-    ].join(", "),
+    backgroundImage:
+      "linear-gradient(140deg, rgba(242, 76, 214, 0.16) 0%, token(colors.surface.hover) 30%, token(colors.surface.elevated) 62%, token(colors.surface.subtle) 100%)",
   }),
 } as const;
 

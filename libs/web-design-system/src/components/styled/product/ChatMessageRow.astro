@@ -10,9 +10,14 @@ interface Props {
    * as a back-and-forth rather than a stack of identical left-hand rows.
    */
   alternate?: boolean
+  /**
+   * Add a trailing gap to the row. Needed when the row sits directly under the
+   * caller's layout (`bare`) and no parent flex gap separates the messages.
+   */
+  spaced?: boolean
 }
 
-const { message, alternate = false } = Astro.props
+const { message, alternate = false, spaced = false } = Astro.props
 
 const isUser = message.role === 'user'
 const flipped = alternate && isUser
@@ -22,6 +27,7 @@ const row = css({
   gap: '3',
   alignItems: 'flex-start',
   flexDirection: flipped ? 'row-reverse' : 'row',
+  mb: spaced ? '4' : undefined,
 })
 
 const avatar = css({

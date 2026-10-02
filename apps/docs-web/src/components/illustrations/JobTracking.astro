@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+import { checkbox, chip, label, mono, row, rowHead } from "./styles";
 
 const applications = [
   { role: "Northwind · backend", state: "interview" },
@@ -29,6 +29,4 @@ const trailingChip = css({ ml: "auto" });
       </div>
     ))
   }
-
-  <p class={caption}>Each stage is a section, so an application moves like any task.</p>
 </IllustrationFrame>

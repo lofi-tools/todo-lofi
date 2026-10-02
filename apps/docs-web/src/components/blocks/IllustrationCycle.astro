@@ -8,6 +8,8 @@ interface Item {
   title: string;
   /** The illustration, taken as a component. */
   Illustration: any;
+  /** One-line note set at the top of the stage, before the illustration. */
+  note?: string;
 }
 
 interface Props {
@@ -72,7 +74,7 @@ const panel = css({
 
   <div>
     {
-      items.map(({ Illustration }, index) => (
+      items.map(({ Illustration, note }, index) => (
         <div
           role="tabpanel"
           id={`${idBase}-panel-${index}`}
@@ -80,7 +82,7 @@ const panel = css({
           hidden={index !== 0}
           class={panel}
         >
-          <IllustrationStage fade="none" tone="redPurple">
+          <IllustrationStage fade="none" tone="redPurple" note={note}>
             <Illustration />
           </IllustrationStage>
         </div>

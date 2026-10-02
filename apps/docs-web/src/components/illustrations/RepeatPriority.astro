@@ -2,7 +2,7 @@
 import { css } from "styled-system/css";
 import { Flag, Repeat } from "web-design-system/icons";
 import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption, chip, mono, rowHead } from "./styles";
+import { chip, mono, rowHead } from "./styles";
 
 interface Task {
   id: string;
@@ -235,6 +235,4 @@ const chipWithIcon = css({ display: "inline-flex", alignItems: "center", gap: "1
       </div>
     </div>
   </div>
-
-  <p class={caption}>The rule decides when an occurrence becomes doable; the priority score decides where it lands once it is.</p>
 </IllustrationFrame>

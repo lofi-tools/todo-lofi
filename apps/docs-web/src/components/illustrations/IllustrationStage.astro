@@ -1,6 +1,6 @@
 ---
 import { css } from "styled-system/css";
-import { illustrationFades, spotlightBackdrop, stageBackdrops, type IllustrationFade, type StageTone } from "./styles";
+import { illustrationFades, spotlightBackdrop, stageBackdrops, stageNote, type IllustrationFade, type StageTone } from "./styles";
 
 interface Props {
   /** Full-width bleed to create rhythm between sections. */
@@ -17,9 +17,11 @@ interface Props {
   fade?: IllustrationFade;
   /** Hue of the accent wash so adjacent stages don't repeat. */
   tone?: StageTone;
+  /** One-line note set at the top of the backdrop, before the illustration. */
+  note?: string;
 }
 
-const { bleed = false, flush = false, backdrop = "soft", fade = "bottom", tone = "indigo" } = Astro.props;
+const { bleed = false, flush = false, backdrop = "soft", fade = "bottom", tone = "indigo", note } = Astro.props;
 
 const stage = stageBackdrops[tone];
 
@@ -55,6 +57,11 @@ const flushBand = css({
 
 const inner = css({ w: "100%", maxW: "1104px", mx: "auto", position: "relative" });
 
+// The note is the first thing in the backdrop, so it reads as the label for
+// the illustration that follows. The gap under it is its own because the
+// backdrop's inner column is not a flex column.
+const noteStyle = css({ mb: { base: "4", md: "5" } });
+
 // The flush band carries no padding of its own, so its inner keeps the
 // illustration padded away from the section limits on every side.
 const flushInner = css({
@@ -71,6 +78,7 @@ const fadeStyle = illustrationFades[fade];
 
 <div class={`${backdrop === "spotlight" ? spotlightBackdrop : stage} ${flush ? flushBand : bleed ? fullBleed : boxed}`}>
   <div class={flush ? flushInner : inner}>
+    {note && <p class={`${stageNote} ${noteStyle}`}>{note}</p>}
     <div class={fadeStyle}>
       <slot />
     </div>

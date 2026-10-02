@@ -75,7 +75,10 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
       <div class={`spot-row${index === 1 ? " spot-reverse" : ""}`}>
         {[0, 1].map((copy) => (
           <div class="spot-track" aria-hidden={copy === 1 ? "true" : undefined}>
-            {row.map((tile) => (
+            {/* The set twice per track so the track is wider than the panel:
+                with only one set, `space-around` had to spread five tiles
+                across the whole panel, which is what made the gaps huge. */}
+            {[...row, ...row].map((tile) => (
               <div class="spot-tile" style={`--o:${tile.o}`} title={tile.label}>
                 <tile.Icon />
               </div>
@@ -92,7 +95,11 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
 
 <style>
   [data-spotlight] {
-    background: linear-gradient(160deg, rgba(94,106,210,.10) 0%, #1b1b21 30%, #121217 66%, #0b0b0f 100%);
+    background:
+      radial-gradient(900px 620px at 50% 50%, #0e0e11 0%, rgba(10,10,12,0) 72%),
+      radial-gradient(1200px 780px at 62% 40%, #1d1d24 0%, rgba(29,29,36,0) 64%),
+      radial-gradient(820px 520px at 88% 10%, rgba(94,106,210,.10) 0%, rgba(94,106,210,0) 60%),
+      linear-gradient(180deg, #101014 0%, #0e0e12 50%, #0b0b0f 100%);
   }
   .spot-stage {
     position: relative;
@@ -142,7 +149,10 @@ const centerBody = `<defs><linearGradient id="spotCloud" x1="0" y1="0" x2="0" y2
     to { transform: translateX(-100%); }
   }
   .spot-tile {
-    width: clamp(88px, 12%, 150px);
+    /* A fixed-ish size rather than a share of the track: the track is now
+       content-sized to keep the marquee seamless, and a percentage would feed
+       back into that width. */
+    width: clamp(88px, 12vw, 132px);
     flex-shrink: 0;
     aspect-ratio: 1;
     border-radius: 13%;

@@ -1,7 +1,6 @@
 ---
 import { css } from "styled-system/css";
 import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption } from "./styles";
 
 /**
  * The coding workflow as a flowchart: the happy path runs left to right in one
@@ -78,9 +77,4 @@ const feedbackHead = css({ fill: "accent.text", opacity: "0.85" });
     <text class={branchLabel} x="387" y="22" text-anchor="middle">yes</text>
     <text class={branchLabel} x="226" y="70" text-anchor="middle">no · re-spec, re-code</text>
   </svg>
-
-  <p class={caption}>
-    Rejection does not throw the run away — it reopens the spec, so the next round starts from
-    the objection.
-  </p>
 </IllustrationFrame>

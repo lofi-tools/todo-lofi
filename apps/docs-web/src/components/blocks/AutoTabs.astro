@@ -1,6 +1,6 @@
 ---
 import { css } from "styled-system/css";
-import { stageBackdrops } from "../illustrations/styles";
+import { stageBackdrops, stageNote } from "../illustrations/styles";
 import {
   glyph,
   itemHeading,
@@ -26,6 +26,11 @@ interface TabItem {
   Icon?: any;
   /** Panel content; replaces the icon-and-title panel when present. */
   Illustration?: any;
+  /**
+   * One-line note set at the top of the panel, before the illustration, so the
+   * mock window itself stays a pure screen replica.
+   */
+  note?: string;
 }
 
 interface Props {
@@ -103,7 +108,7 @@ const barePanel = css({
 
   <div class={pane}>
     {
-      items.map(({ title, Icon, Illustration }, index) => (
+      items.map(({ title, Icon, Illustration, note }, index) => (
         <div
           role="tabpanel"
           id={`${idBase}-panel-${index}`}
@@ -113,7 +118,10 @@ const barePanel = css({
           class={Illustration ? barePanel : tabPanel}
         >
           {Illustration ? (
-            <Illustration />
+            <>
+              {note && <p class={stageNote}>{note}</p>}
+              <Illustration />
+            </>
           ) : (
             <>
               <span class={glyph}>{Icon && <Icon size={22} />}</span>

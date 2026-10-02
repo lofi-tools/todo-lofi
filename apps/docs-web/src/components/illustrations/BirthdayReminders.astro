@@ -1,7 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import IllustrationFrame from "./IllustrationFrame.astro";
-import { caption, checkbox, chip, label, mono, row, rowHead } from "./styles";
+import { checkbox, chip, label, mono, row, rowHead } from "./styles";
 
 const people = [
   { name: "Amara", when: "12 Mar", note: "in 4 days" },
@@ -31,6 +31,4 @@ const trailingChip = css({ ml: "auto" });
       </div>
     ))
   }
-
-  <p class={caption}>A yearly reminder and a gift idea per person, kept as tasks.</p>
 </IllustrationFrame>
