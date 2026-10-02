@@ -1,0 +1,78 @@
+---
+import { css } from "styled-system/css";
+import { illustrationFades, spotlightBackdrop, stageBackdrops, type IllustrationFade, type StageTone } from "./styles";
+
+interface Props {
+  /** Full-width bleed to create rhythm between sections. */
+  bleed?: boolean;
+  /**
+   * Flush band: no padding or rounding on the backdrop itself, it fills its
+   * strip edge to edge; the illustration inside stays padded in the content
+   * column.
+   */
+  flush?: boolean;
+  /** Backdrop wash: the soft surface lift, or the dark spotlight inverse. */
+  backdrop?: "soft" | "spotlight";
+  /** Direction the illustration fades so it reads as illustration, not content. */
+  fade?: IllustrationFade;
+  /** Hue of the accent wash so adjacent stages don't repeat. */
+  tone?: StageTone;
+}
+
+const { bleed = false, flush = false, backdrop = "soft", fade = "bottom", tone = "indigo" } = Astro.props;
+
+const stage = stageBackdrops[tone];
+
+const boxed = css({ borderRadius: "lg", px: { base: "3", md: "6" }, py: { base: "6", md: "8" } });
+
+// Full-bleed: span the viewport while the page grid keeps the section in the
+// content column. Centers a 100vw band on the stage so edges reach the
+// viewport at every width; vertical hairlines delimit the band.
+const fullBleed = css({
+  w: "100vw",
+  position: "relative",
+  left: "50%",
+  transform: "translateX(-50%)",
+  borderLeftWidth: "0",
+  borderRightWidth: "0",
+  px: { base: "5", md: "8" },
+  py: { base: "10", md: "14" },
+});
+
+// Flush band: full-bleed with no padding or rounding on the backdrop itself —
+// it fills the strip edge to edge. Only a top hairline delimits it.
+const flushBand = css({
+  w: "100vw",
+  position: "relative",
+  left: "50%",
+  transform: "translateX(-50%)",
+  borderWidth: "0",
+  borderTopWidth: "hairline",
+  borderTopStyle: "solid",
+  borderTopColor: "border.subtle",
+  borderRadius: "0",
+});
+
+const inner = css({ w: "100%", maxW: "1104px", mx: "auto", position: "relative" });
+
+// The flush band carries no padding of its own, so its inner keeps the
+// illustration padded away from the section limits on every side.
+const flushInner = css({
+  w: "100%",
+  maxW: "1104px",
+  mx: "auto",
+  position: "relative",
+  px: { base: "5", md: "8" },
+  py: { base: "8", md: "12" },
+});
+
+const fadeStyle = illustrationFades[fade];
+---
+
+<div class={`${backdrop === "spotlight" ? spotlightBackdrop : stage} ${flush ? flushBand : bleed ? fullBleed : boxed}`}>
+  <div class={flush ? flushInner : inner}>
+    <div class={fadeStyle}>
+      <slot />
+    </div>
+  </div>
+</div>

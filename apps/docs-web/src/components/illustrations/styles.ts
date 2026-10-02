@@ -9,11 +9,11 @@ import { css } from "styled-system/css";
  */
 export const backdropSurface = css({
   backgroundImage: [
-    "radial-gradient(130% 100% at 62% 28%, token(colors.surface.hover) 0%, transparent 64%)",
+    "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
     "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
-    "radial-gradient(105% 85% at 12% 22%, token(colors.surface.elevated) 0%, transparent 62%)",
-    "radial-gradient(85% 62% at 90% 8%, token(colors.accent.subtle) 0%, transparent 62%)",
-    "linear-gradient(180deg, token(colors.surface.subtle) 0%, token(colors.canvas) 55%, token(colors.canvas) 100%)",
+    "radial-gradient(105% 85% at 0% 0%, token(colors.surface.elevated) 0%, transparent 62%)",
+    "radial-gradient(85% 62% at 12% 0%, token(colors.accent.subtle) 0%, transparent 62%)",
+    "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 55%, token(colors.canvas) 100%)",
   ].join(", "),
 });
 
@@ -28,6 +28,22 @@ export const windowSurface = css({
     "linear-gradient(170deg, token(colors.surface.elevated) 0%, token(colors.surface.subtle) 45%, token(colors.canvas) 100%)",
   ].join(", "),
   boxShadow: "xl",
+});
+
+/**
+ * The dark spotlight backdrop (also the `IntegrationSpotlight` wash): deep
+ * radial lifts over a near-black falloff. Deliberately the inverse of a mock
+ * window — its linear runs light-at-the-bottom (`0deg`) while windows run
+ * light-at-the-top (`170deg`), so backdrop and window never read as one
+ * surface.
+ */
+export const spotlightBackdrop = css({
+  backgroundImage: [
+    "radial-gradient(900px 620px at 50% 50%, #0e0e11 0%, rgba(10,10,12,0) 72%)",
+    "radial-gradient(1200px 780px at 30% 20%, #1d1d24 0%, rgba(29,29,36,0) 64%)",
+    "radial-gradient(820px 520px at 0% 0%, rgba(94,106,210,.14) 0%, rgba(94,106,210,0) 60%)",
+    "linear-gradient(135deg, #1b1b21 0%, #070708 55%, #040405 100%)",
+  ].join(", "),
 });
 
 /** The inset body of a mock window, a step darker than its chrome. */
@@ -155,3 +171,76 @@ export const paneLabel = css({
   px: "1",
   mb: "0.5",
 });
+
+/**
+ * The shared soft illustration backdrop: container chrome plus a layered
+ * gradient (accent wash over surface lifts). One static class per tone, used
+ * by `IllustrationStage` and the auto-switch tab pane alike, so the wash
+ * never drifts between copies.
+ *
+ * Static records rather than a function: Panda only emits `css()` calls it
+ * can resolve at build time, and an interpolated value would silently drop
+ * the whole gradient from the built CSS.
+ */
+const stageBackdropBase = {
+  position: "relative",
+  overflow: "hidden",
+  borderWidth: "hairline",
+  borderStyle: "solid",
+  borderColor: "border.subtle",
+} as const;
+
+export const stageBackdrops = {
+  indigo: css({
+    ...stageBackdropBase,
+    backgroundImage: [
+      "radial-gradient(110% 90% at 0% 0%, token(colors.accent.subtle) 0%, transparent 55%)",
+      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
+      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+    ].join(", "),
+  }),
+  teal: css({
+    ...stageBackdropBase,
+    backgroundImage: [
+      "radial-gradient(110% 90% at 0% 0%, token(colors.success.subtle) 0%, transparent 55%)",
+      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
+      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+    ].join(", "),
+  }),
+  warm: css({
+    ...stageBackdropBase,
+    backgroundImage: [
+      "radial-gradient(110% 90% at 0% 0%, token(colors.warning.subtle) 0%, transparent 55%)",
+      "radial-gradient(130% 100% at 18% 8%, token(colors.surface.active) 0%, transparent 64%)",
+      "radial-gradient(150% 110% at 50% 118%, token(colors.surface.subtle) 0%, transparent 60%)",
+      "linear-gradient(135deg, token(colors.surface.hover) 0%, token(colors.canvas) 78%, token(colors.canvas) 100%)",
+    ].join(", "),
+  }),
+} as const;
+
+export type StageTone = keyof typeof stageBackdrops;
+
+export type IllustrationFade = "bottom" | "sides" | "edges" | "none";
+
+/**
+ * The shared illustration fade: a mask gradient so the illustration melts
+ * into its backdrop and reads as illustration, not a content card. Static
+ * records for the same build-time reason as `stageBackdrops`.
+ */
+export const illustrationFades: Record<IllustrationFade, string> = {
+  bottom: css({
+    maskImage: "linear-gradient(to bottom, black 52%, black 72%, transparent 98%)",
+    WebkitMaskImage: "linear-gradient(to bottom, black 52%, black 72%, transparent 98%)",
+  }),
+  sides: css({
+    maskImage: "linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%)",
+    WebkitMaskImage: "linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%)",
+  }),
+  edges: css({
+    maskImage: "linear-gradient(to bottom, transparent 0%, black 10%, black 82%, transparent 100%)",
+    WebkitMaskImage: "linear-gradient(to bottom, transparent 0%, black 10%, black 82%, transparent 100%)",
+  }),
+  none: "",
+};

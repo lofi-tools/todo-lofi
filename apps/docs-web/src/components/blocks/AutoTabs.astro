@@ -1,5 +1,6 @@
 ---
 import { css } from "styled-system/css";
+import { stageBackdrops } from "../illustrations/styles";
 import {
   glyph,
   itemHeading,
@@ -37,6 +38,33 @@ const { label, items } = Astro.props;
 
 const idBase = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
+// The right pane is a single backdrop shared by every tab: one gradient
+// wash for the whole pane instead of a stage per illustration. It stretches
+// to the row height and holds a minimum height of its own, so the backdrop
+// stays full-height no matter which illustration is showing or how short it
+// is. Text-only panels keep the card chrome inside it.
+const pane = `${stageBackdrops.indigo} ${css({
+  alignSelf: "stretch",
+  display: "flex",
+  flexDirection: "column",
+  borderRadius: "lg",
+  px: { base: "3", md: "6" },
+  py: { base: "6", md: "8" },
+  minH: { base: "24rem", md: "29rem" },
+})}`;
+
+// Panels holding an illustration drop the card chrome and fill the pane. The
+// illustration stays fully opaque on top of the shared backdrop: no fade mask,
+// so the backdrop never bleeds through the content — the padded frame is what
+// marks it as illustration rather than a content card.
+const barePanel = css({
+  display: "flex",
+  flexDirection: "column",
+  flex: "1",
+  gap: "4",
+  "&[hidden]": { display: "none" },
+});
+
 ---
 
 <div class={tabsLayout} data-auto-tabs>
@@ -73,7 +101,7 @@ const idBase = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^
     </div>
   </div>
 
-  <div>
+  <div class={pane}>
     {
       items.map(({ title, Icon, Illustration }, index) => (
         <div
@@ -82,7 +110,7 @@ const idBase = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^
           aria-labelledby={`${idBase}-tab-${index}`}
           tabindex="0"
           hidden={index !== 0}
-          class={tabPanel}
+          class={Illustration ? barePanel : tabPanel}
         >
           {Illustration ? (
             <Illustration />

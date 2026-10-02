@@ -2,7 +2,7 @@
 import { css } from "styled-system/css";
 import AppMockup from "./AppMockup.astro";
 import { automationRuns } from "../../../data/landing";
-import { backdropSurface, dot, mono, paneLabel, windowBar, windowSurface } from "./styles";
+import { dot, mono, paneLabel, windowBar, windowSurface } from "./styles";
 
 /** The run the strip below shows; the same task is open in the app mockup. */
 const [run] = automationRuns;
@@ -17,11 +17,6 @@ const root = css({
   display: "flex",
   flexDirection: "column",
   gap: "3",
-  p: "3",
-  borderRadius: "lg",
-  borderWidth: "hairline",
-  borderStyle: "solid",
-  borderColor: "border.strong",
 });
 
 const strip = css({
@@ -97,7 +92,7 @@ const detailField = css({
 const detailValue = css({ fontFamily: "mono", fontSize: "2xs", color: "fg.default" });
 ---
 
-<div class={`${root} ${backdropSurface}`}>
+<div class={root}>
   <div class={`${strip} ${windowSurface}`}>
     <div class={windowBar}>
       <span class={dot} />

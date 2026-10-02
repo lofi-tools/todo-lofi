@@ -2,6 +2,8 @@
 import HomepageSection from "./HomepageSection.astro";
 import FeatureSection from "web-design-system/astro/marketing/FeatureSection.astro";
 import ChatThread from "web-design-system/astro/product/ChatThread.astro";
+import IllustrationStage from "../illustrations/IllustrationStage.astro";
+import IllustrationFrame from "../illustrations/IllustrationFrame.astro";
 import { agentThread } from "../../../data/landing";
 ---
 
@@ -14,6 +16,10 @@ import { agentThread } from "../../../data/landing";
     linkLabel="Read about the agent"
     reverse
   >
-    <ChatThread messages={agentThread} />
+    <IllustrationStage fade="none" tone="indigo">
+      <IllustrationFrame title="agent">
+        <ChatThread messages={agentThread} />
+      </IllustrationFrame>
+    </IllustrationStage>
   </FeatureSection>
 </HomepageSection>

@@ -20,7 +20,6 @@ import { blueprintContent, blueprintGrid, blueprintRules } from "../components/s
 import screenshot from "../assets/app.png";
 ---
 
-
 <Base
   title="Taskstream"
   suffix="a local-first task manager"
@@ -32,7 +31,8 @@ import screenshot from "../assets/app.png";
     <div class={blueprintContent}>
       <Hero
         title="An assistant for all your tasks"
-        subtitle="Work and personal tasks in one list you own, with an assistant beside them. It breaks tasks into sub-tasks, sets up repeats, and runs a staged workflow — you watch every step and decide when work is done."
+        subtitle="An AI asistant to organize, detail, break down, and complete your tasks. Puts your most important tasks at the top, hides blocked tasks. "
+        note="Free forever, open-source & private"
         secondaryCta={{ label: "Read the docs", href: "/docs" }}
       >
         <DownloadButton slot="primary" />
@@ -54,8 +54,7 @@ import screenshot from "../assets/app.png";
                 right: "0",
                 bottom: "0",
                 h: "40%",
-                backgroundImage:
-                  "linear-gradient(to bottom, transparent, var(--colors-canvas))",
+                backgroundImage: "linear-gradient(to bottom, transparent, var(--colors-canvas))",
                 pointerEvents: "none",
               })}
             />

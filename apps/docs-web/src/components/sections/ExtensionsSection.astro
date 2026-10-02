@@ -9,6 +9,7 @@ import CodingWorkflow from "../illustrations/CodingWorkflow.astro";
 import JobTracking from "../illustrations/JobTracking.astro";
 import TravelChecklist from "../illustrations/TravelChecklist.astro";
 import WorkflowDiagram from "../illustrations/WorkflowDiagram.astro";
+import IllustrationStage from "../illustrations/IllustrationStage.astro";
 import { extensionCards } from "../../../data/landing";
 import { cardBody, cardHeading, cardLink, cardTitle, item, subGrid } from "./homeStyles";
 
@@ -36,12 +37,16 @@ const ordinal = css({ fontFamily: "mono", fontSize: "2xs", color: "accent.text" 
  */
 const stackedItem = css({ "& a": { mt: "0" } });
 
+/** Breathing room between a block's link and its illustration. */
+const illustration = css({ mt: { base: "6", md: "8" } });
+
 /** The nested card under the workflows illustration. */
 const secondary = css({
   display: "flex",
   flexDirection: "column",
   gap: "3",
-  pt: "4",
+  mt: { base: "8", md: "10" },
+  pt: { base: "6", md: "8" },
   borderTopWidth: "hairline",
   borderTopStyle: "solid",
   borderTopColor: "border.subtle",
@@ -66,7 +71,9 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
       </div>
       <p class={cardBody}>{miniApps.body}</p>
       <a href={miniApps.href} class={cardLink}>{miniApps.linkLabel} →</a>
-      <IllustrationCycle label="Mini-app examples" items={examples} />
+      <div class={illustration}>
+        <IllustrationCycle label="Mini-app examples" items={examples} />
+      </div>
     </div>
 
     <div class={`${item} ${stackedItem}`}>
@@ -76,7 +83,11 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
       </div>
       <p class={cardBody}>{workflows.body}</p>
       <a href={workflows.href} class={cardLink}>{workflows.linkLabel} →</a>
-      <WorkflowDiagram />
+      <div class={illustration}>
+        <IllustrationStage fade="none" tone="teal">
+          <WorkflowDiagram />
+        </IllustrationStage>
+      </div>
 
       <div class={secondary}>
         <div class={cardTitle}>
@@ -85,7 +96,11 @@ const secondaryHeading = css({ fontSize: "lg", fontWeight: "semibold", color: "f
         </div>
         <p class={cardBody}>{coding.body}</p>
         <a href={coding.href} class={cardLink}>{coding.linkLabel} →</a>
-        <CodingWorkflow />
+        <div class={illustration}>
+          <IllustrationStage fade="none" tone="indigo">
+            <CodingWorkflow />
+          </IllustrationStage>
+        </div>
       </div>
     </div>
   </div>

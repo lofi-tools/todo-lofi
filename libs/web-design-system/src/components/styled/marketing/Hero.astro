@@ -4,6 +4,8 @@ import { css } from '../../../../styled-system/css'
 interface Props {
   title: string
   subtitle?: string
+  /** Small reassurance line rendered directly above the buttons. */
+  note?: string
   primaryCta?: { label: string; href: string }
   secondaryCta?: { label: string; href: string }
 }
@@ -11,6 +13,7 @@ interface Props {
 const {
   title,
   subtitle,
+  note,
   primaryCta = { label: 'Get started', href: '/replicas/pricing' },
   secondaryCta = { label: 'Contact sales', href: '/replicas/pricing' },
 } = Astro.props
@@ -106,6 +109,21 @@ const ctaSecondary = css({
           })}
         >
           {subtitle}
+        </p>
+      )
+    }
+    {
+      note && (
+        <p
+          class={css({
+            fontSize: 'sm',
+            fontWeight: 'medium',
+            color: 'accent.text',
+            mt: '6',
+            mb: '-4',
+          })}
+        >
+          {note}
         </p>
       )
     }

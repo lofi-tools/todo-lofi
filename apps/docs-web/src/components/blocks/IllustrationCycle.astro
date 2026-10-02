@@ -1,6 +1,7 @@
 ---
 import { css } from "styled-system/css";
 import { startAutoSwitch } from "./autoSwitch";
+import IllustrationStage from "../illustrations/IllustrationStage.astro";
 
 interface Item {
   /** Chip label for the example. */
@@ -79,7 +80,9 @@ const panel = css({
           hidden={index !== 0}
           class={panel}
         >
-          <Illustration />
+          <IllustrationStage fade="none" tone="warm">
+            <Illustration />
+          </IllustrationStage>
         </div>
       ))
     }

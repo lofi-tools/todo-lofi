@@ -3,10 +3,15 @@ import { css } from "styled-system/css";
 import HomepageSection from "./HomepageSection.astro";
 import SectionHeading from "web-design-system/astro/marketing/SectionHeading.astro";
 import RepeatPriority from "../illustrations/RepeatPriority.astro";
+import IllustrationStage from "../illustrations/IllustrationStage.astro";
 import { grid, card, cardBody, cardLink } from "./homeStyles";
+
+/** Padded top half: heading plus the two explainer cards. */
+const top = css({ px: { base: "5", md: "8" }, pt: { base: "12", md: "20" }, pb: { base: "8", md: "12" } });
 ---
 
-<HomepageSection index={6} label="everyday">
+<HomepageSection bare index={6} label="everyday">
+  <div class={top}>
       <SectionHeading
         eyebrow="Everyday"
         title="What to do next, decided for you"
@@ -36,8 +41,9 @@ import { grid, card, cardBody, cardLink } from "./homeStyles";
           </a>
         </div>
       </div>
+  </div>
 
-      <div class={css({ mt: "4" })}>
-        <RepeatPriority />
-      </div>
-    </HomepageSection>
+  <IllustrationStage flush backdrop="spotlight" fade="none">
+    <RepeatPriority />
+  </IllustrationStage>
+</HomepageSection>
