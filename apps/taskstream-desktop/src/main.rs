@@ -1,6 +1,6 @@
 use gpui::{
-    Anchor, AnyElement, App, AppContext, AsyncApp, Context, ElementId, Entity, InteractiveElement,
-    IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
+    Anchor, AnyElement, AnyWindowHandle, App, AppContext, AsyncApp, Context, ElementId, Entity,
+    InteractiveElement, IntoElement, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render,
     StatefulInteractiveElement, Styled, Subscription, Svg, Transformation, Window, div,
     prelude::FluentBuilder, px, radians, rgb, svg,
 };
@@ -209,6 +209,11 @@ struct Layout {
     /// app run (the listener thread lives until the process exits). Its
     /// per-profile tokens are what each coding run's processes are given.
     coding_mcp: Option<coding_mcp::CodingMcpServer>,
+    /// The window this layout is on screen in. A Dock click after the last
+    /// window was closed opens a new one that adopts this layout, so the
+    /// handle moves with it: notification cards belong in the window the user
+    /// is looking at, not the one this layout was first built for.
+    window_handle: AnyWindowHandle,
 }
 
 impl Layout {
@@ -313,6 +318,15 @@ impl Layout {
         Ok(())
     }
 
+    /// Adopt this layout into the window that is about to show it.
+    ///
+    /// Only the first window is built with a layout of its own; clicking the
+    /// Dock icon after that window was closed opens another one, and that one
+    /// re-parents the layout the app still has.
+    fn on_window_opened(&mut self, window: &mut Window) {
+        self.window_handle = window.window_handle();
+    }
+
     fn new(
         input: Entity<InputState>,
         store: Store,
@@ -322,29 +336,27 @@ impl Layout {
     ) -> Self {
         // The notification feed reaches here from `main`: every recorded
         // notification is listed in the pane, and an error or warning also
-        // pops up as a card. The window handle lets a failure logged on a
-        // background thread raise its card too.
-        let window_handle = window.window_handle();
+        // pops up as a card. The window handle is read back per notice rather
+        // than captured, because a reopened window replaces it.
         cx.spawn(async move |this, cx| {
             let mut notices = notices;
             while let Some(notice) = notices.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        this.log_notice(notice.level, notice.message.clone(), cx)
-                    })
-                    .is_err()
-                {
+                let handle = this.update(cx, |this, cx| {
+                    this.log_notice(notice.level, notice.message.clone(), cx);
+                    this.window_handle
+                });
+                let Ok(handle) = handle else {
                     // The layout is gone; nothing is left to notify.
                     return;
-                }
+                };
                 // Errors and warnings pop up; informational messages stay in
                 // the pane and the footer's indicator. A repeat refreshes the
                 // card it already raised, because a card is keyed by its message.
                 if let Some(toast) = notice.toast() {
                     // A closed window has nowhere to show the card; the entry
                     // stays in the pane either way.
-                    if let Err(error) = window_handle
-                        .update(cx, |_, window, cx| window.push_notification(toast, cx))
+                    if let Err(error) =
+                        handle.update(cx, |_, window, cx| window.push_notification(toast, cx))
                     {
                         tracing::debug!("toast dropped: {error}");
                     }
@@ -999,6 +1011,7 @@ impl Layout {
             _toast_layer_refresh: None,
             _escape_observer: escape_observer,
             coding_mcp: coding_endpoint,
+            window_handle: window.window_handle(),
         }
     }
 
@@ -2603,6 +2616,25 @@ fn history_arrow(enabled: bool, cx: &App) -> Svg {
         })
 }
 
+/// Put a window on screen for `layout`.
+///
+/// The closure builds the layout when there is not one yet (a layout needs a
+/// window to be built with), and the Dock-click path hands over the layout the
+/// app already has.
+fn open_layout_window(
+    layout: impl FnOnce(&mut Window, &mut App) -> Entity<Layout>,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    cx.open_window(TitleBar::window_options(), |window, cx| {
+        Theme::change(ThemeMode::Dark, Some(window), cx);
+        configure_notifications(cx);
+        let layout = layout(window, cx);
+        layout.update(cx, |layout, _cx| layout.on_window_opened(window));
+        cx.new(|cx| gpui_component::Root::new(layout, window, cx).bg(rgb(APP_BG)))
+    })?;
+    Ok(())
+}
+
 fn main() {
     // `--version`/`-V` reports the build and exits before a window or a store
     // is set up, so it works in a terminal and inside a packaging script.
@@ -2616,6 +2648,28 @@ fn main() {
     init_logging(notices.sink());
 
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+
+    // Clicking the Dock icon while no window is open asks the app to reopen a
+    // window; macOS only sends that in that state, which is where closing the
+    // window leaves the app: still running, with its layout, notice feed and
+    // coding MCP endpoint intact. The new window adopts that layout instead of
+    // building a second one. The slot is filled by the first window's builder,
+    // because a layout needs a window to be built with.
+    let layout_slot: std::rc::Rc<std::cell::RefCell<Option<Entity<Layout>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    app.on_reopen({
+        let layout_slot = layout_slot.clone();
+        move |cx| {
+            let layout = layout_slot.borrow().clone();
+            let Some(layout) = layout else {
+                tracing::debug!("Dock click ignored: no window has been built yet");
+                return;
+            };
+            if let Err(error) = open_layout_window(move |_, _| layout, cx) {
+                tracing::error!("Failed to reopen the window: {error}");
+            }
+        }
+    });
 
     app.run(move |cx| {
         // Every view reaches the notification log through this global.
@@ -2682,34 +2736,42 @@ fn main() {
             async move {
                 match init_store.await {
                     Ok((store, tasks)) => {
-                        cx.open_window(TitleBar::window_options(), |window, cx| {
-                            Theme::change(ThemeMode::Dark, Some(window), cx);
-                            configure_notifications(cx);
-
-                            let input = cx.new(|cx| {
-                                let mut input_state = InputState::new(window, cx);
-                                input_state.set_placeholder("New task...", window, cx);
-                                input_state
-                            });
-
-                            let mini = cx.new(|cx| Layout::new(input, store, notices, window, cx));
-
-                            let entity = mini.clone();
-                            cx.spawn(move |cx: &mut AsyncApp| {
-                                let mut cx = cx.clone();
-                                let entity = entity.clone();
-                                async move {
-                                    entity.update(&mut cx, |mini, cx| {
-                                        mini.task_list
-                                            .update(cx, |list, cx| list.set_tasks(tasks, cx));
+                        cx.update(|cx| {
+                            open_layout_window(
+                                |window, cx| {
+                                    let input = cx.new(|cx| {
+                                        let mut input_state = InputState::new(window, cx);
+                                        input_state.set_placeholder("New task...", window, cx);
+                                        input_state
                                     });
-                                }
-                            })
-                            .detach();
 
-                            cx.new(|cx| {
-                                gpui_component::Root::new(mini, window, cx).bg(rgb(APP_BG))
-                            })
+                                    let mini = cx
+                                        .new(|cx| Layout::new(input, store, notices, window, cx));
+
+                                    // Handed to the Dock-click path, which
+                                    // adopts it rather than building a second
+                                    // layout (and so a second notice feed and
+                                    // coding MCP endpoint).
+                                    *layout_slot.borrow_mut() = Some(mini.clone());
+
+                                    let entity = mini.clone();
+                                    cx.spawn(move |cx: &mut AsyncApp| {
+                                        let mut cx = cx.clone();
+                                        let entity = entity.clone();
+                                        async move {
+                                            entity.update(&mut cx, |mini, cx| {
+                                                mini.task_list.update(cx, |list, cx| {
+                                                    list.set_tasks(tasks, cx)
+                                                });
+                                            });
+                                        }
+                                    })
+                                    .detach();
+
+                                    mini
+                                },
+                                cx,
+                            )
                         })
                         .expect("Failed to open window");
                     }
