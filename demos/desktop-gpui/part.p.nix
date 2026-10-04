@@ -75,8 +75,5 @@
       #   export TOOLCHAINS=default
       # '';
     };
-    # adding rust from rust-overlay auto-patches CC, makes xcodebuild/metal fail:
-    # solution: devShells.default = pkgs.mkShell.override { stdenv = customStdenv; }
-    myDevShell.overrides.stdenv = pkgs.stdenvNoCC;
   };
 }

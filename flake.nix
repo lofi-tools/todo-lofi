@@ -254,6 +254,7 @@
           #   targets = [ ];
           # });
           myDevShell.env = env;
+          myDevShell.overrides.stdenv = pkgs.stdenvNoCC;
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
