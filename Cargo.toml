@@ -7,7 +7,7 @@ members = ["apps/*", "libs/*", "demos/*"]
 # The web design system, its showcase, and the docs website are pnpm/Astro
 # packages. Excluded explicitly so `cargo check --workspace` never
 # walks their trees.
-exclude = ["libs/web-design-system", "demos/design-system-showcase", "apps/docs-web"]
+exclude = ["libs/web-design-system", "demos/design-system-showcase", "apps/docs-web", "apps/taskstream-web"]
 
 
 [workspace.dependencies]
