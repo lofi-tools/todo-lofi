@@ -1679,8 +1679,11 @@ impl TaskDetails {
             state.set_value(initial, window, cx);
             state
         });
-        let subscription = cx.subscribe(&input, move |this, _, event, cx| {
-            if matches!(event, InputEvent::Blur) {
+        // A blur is only the user leaving the field while the window still
+        // has their attention. Switching to another app blurs the focused
+        // input too, and that must not save-and-close the editor.
+        let subscription = cx.subscribe_in(&input, window, move |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Blur) && window.is_window_active() {
                 match field {
                     EditedField::Title => this.commit_title_edit(cx),
                     EditedField::Description => this.commit_description_edit(cx),
@@ -1954,10 +1957,12 @@ impl TaskDetails {
             state.set_placeholder("Add tags…", window, cx);
             state
         });
-        let subscription = cx.subscribe(&input, |this, _, event, cx| match event {
+        // As with the title and description editors, a blur caused by leaving
+        // the window is not the user leaving the tags field.
+        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
             InputEvent::PressEnter { .. } => this.on_tag_input_enter(cx),
             InputEvent::Change => this.on_tag_input_change(cx),
-            InputEvent::Blur => this.commit_tags_edit(cx),
+            InputEvent::Blur if window.is_window_active() => this.commit_tags_edit(cx),
             _ => {}
         });
         self.tags_input = Some(input.clone());
@@ -7262,6 +7267,125 @@ mod coding_tests {
                     .and_then(|task| task.task.description.as_deref()),
                 Some(edited),
                 "what was typed is saved, newline and all"
+            );
+        });
+    }
+
+    /// Open the description editor with `typed` in it, on the window that is
+    /// active, and draw one frame so the editor is laid out and focused.
+    fn begin_description_edit_with(
+        cx: &mut gpui::VisualTestContext,
+        details: &gpui::Entity<TaskDetails>,
+        task: TaskWithMeta,
+        typed: &str,
+    ) {
+        cx.update(|window, cx| {
+            details.update(cx, |details, cx| {
+                details.selected = Some(task);
+                details.begin_description_edit(window, cx);
+                let input = details
+                    .text_input(EditedField::Description)
+                    .expect("the description editor opens");
+                input.update(cx, |state, cx| {
+                    state.set_value(typed, window, cx);
+                    state.focus(window, cx);
+                });
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// Bring the test window to the front. A fresh test window starts
+    /// inactive, so the "in front" cases have to say so explicitly.
+    fn activate_window(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert!(window.is_window_active(), "the window came to the front");
+        });
+    }
+
+    /// Emit the blur GPUI raises when the window loses focus to another app,
+    /// from the description input itself.
+    fn blur_description_input(details: &gpui::Entity<TaskDetails>, cx: &mut gpui::App) {
+        let input = details
+            .read(cx)
+            .text_input(EditedField::Description)
+            .expect("the description editor is open");
+        input.update(cx, |_, cx| cx.emit(InputEvent::Blur));
+    }
+
+    /// Switching to another app and back is not leaving the field: the
+    /// deactivation blur lands while the window is inactive, so the editor
+    /// stays open, text and all, and switching back resumes editing.
+    #[gpui::test]
+    fn switching_windows_keeps_the_description_editor_open(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (store, _runtime, task) =
+            store_with_task(cx, Some("Sign in with Google."), None);
+        let (details, mut cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
+        let typed = "Sign in with Google.\nAnd with GitHub.";
+        activate_window(&mut cx);
+        begin_description_edit_with(&mut cx, &details, task, typed);
+
+        // ⌘-Tab away: the window is deactivated while the editor holds focus,
+        // which the platform reports as a blur on that input.
+        cx.deactivate_window();
+        cx.update(|window, cx| {
+            assert!(
+                !window.is_window_active(),
+                "the window is deactivated before the blur lands"
+            );
+            blur_description_input(&details, cx);
+        });
+
+        cx.update(|_, cx| {
+            let details = details.read(cx);
+            assert!(
+                details.editing_description,
+                "switching windows must not close the description editor"
+            );
+            let input = details
+                .text_input(EditedField::Description)
+                .expect("the editor is still open");
+            assert_eq!(
+                input.read(cx).text(),
+                typed,
+                "what was typed is still in the editor"
+            );
+        });
+    }
+
+    /// The converse: a blur with the window still in front is the user leaving
+    /// the field, and it saves and closes as before.
+    #[gpui::test]
+    fn a_blur_in_front_still_saves_the_description(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (store, _runtime, task) =
+            store_with_task(cx, Some("Sign in with Google."), None);
+        let (details, mut cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
+        let typed = "Sign in with Google.\nAnd with GitHub.";
+        activate_window(&mut cx);
+        begin_description_edit_with(&mut cx, &details, task, typed);
+
+        cx.update(|window, cx| {
+            assert!(window.is_window_active(), "the window is in front");
+            blur_description_input(&details, cx);
+        });
+
+        cx.update(|_, cx| {
+            let details = details.read(cx);
+            assert!(
+                !details.editing_description,
+                "leaving the field with the window in front still saves"
+            );
+            assert_eq!(
+                details
+                    .selected
+                    .as_ref()
+                    .and_then(|task| task.task.description.as_deref()),
+                Some(typed),
+                "what was typed is saved"
             );
         });
     }
