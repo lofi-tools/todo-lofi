@@ -2512,6 +2512,7 @@ fn resolve_params(recipe: &Recipe, provided: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NewRunWorktree;
 
     async fn make_recipe(store: &mut TodoStore, json: Value) -> u64 {
         store
@@ -3415,6 +3416,51 @@ mod tests {
         let (_other_feature, other) = start_coding_run(&mut store, "Add SSO").await?;
         store.cancel_run(other.id).await?;
         assert!(store.workflow_run_view(other.id).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_managed_branches_name_the_run_that_owns_them() -> anyhow::Result<()> {
+        let mut store = TodoStore::for_test().await?;
+        let (_feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
+        store
+            .set_run_branch(run.id, "feature/12-add-oauth", Some("main"))
+            .await?;
+        let worktree = store
+            .insert_run_worktree(&NewRunWorktree {
+                run_id: run.id,
+                repo_dir: "/repos/api".to_string(),
+                worktree_path: "/repos/api/worktrees/12-add-oauth".to_string(),
+                branch: "feature/12-add-oauth".to_string(),
+                base_branch: "main".to_string(),
+                remote: "github".to_string(),
+            })
+            .await?;
+
+        let branches = store.managed_branches().await?;
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].run_id, run.id);
+        assert_eq!(branches[0].branch, "feature/12-add-oauth");
+        assert_eq!(branches[0].base_branch, "main");
+        assert_eq!(branches[0].run_status, "active");
+        assert_eq!(branches[0].branch_status, "active");
+        assert!(branches[0].worktree_removed_at.is_none());
+
+        // The branch stays owned after the checkout is gone and the run is
+        // over: that is what keeps it rebaseable/cleanable rather than orphaned
+        // the moment a run finishes.
+        store.mark_run_worktree_removed(worktree).await?;
+        store.mark_branch_merged(run.id).await?;
+        let branches = store.managed_branches().await?;
+        assert_eq!(branches.len(), 1);
+        assert!(branches[0].worktree_removed_at.is_some());
+        assert_eq!(branches[0].branch_status, "merged");
+
+        // A run that never cut a branch owns nothing.
+        let (_other_feature, other) = start_coding_run(&mut store, "Add SSO").await?;
+        store.cancel_run(other.id).await?;
+        let branches = store.managed_branches().await?;
+        assert_eq!(branches.len(), 1, "only the run with a worktree has a branch");
         Ok(())
     }
 

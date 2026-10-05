@@ -342,6 +342,28 @@ pub struct RunWorktree {
     pub removed_at: Option<jiff::Timestamp>,
 }
 
+/// A branch the app created for a run, together with the run that owns it:
+/// the answer to "which branches are taskstream's?". It outlives the worktree
+/// (`worktree_removed_at` marks a checkout the app deleted, while the branch is
+/// deliberately kept for the cleanup list), which is what makes it the list the
+/// rebase pass is allowed to work from — a branch this table does not name is
+/// never rewritten.
+#[derive(Debug, Clone)]
+pub struct ManagedBranch {
+    pub run_id: u64,
+    pub repo_dir: String,
+    pub branch: String,
+    pub base_branch: String,
+    /// The remote `resolve_remote` picked, or empty when none reaches GitHub.
+    pub remote: String,
+    pub worktree_path: String,
+    pub worktree_removed_at: Option<jiff::Timestamp>,
+    /// The run's `active` | `completed` | `cancelled`.
+    pub run_status: String,
+    /// The run's `proposed` | `active` | `merged` | `abandoned` | `deleted`.
+    pub branch_status: String,
+}
+
 /// The parts of a worktree row the caller knows at creation time.
 #[derive(Debug, Clone)]
 pub struct NewRunWorktree {
@@ -693,6 +715,32 @@ impl TodoStore {
         self.last_insert_id().await
     }
 
+    /// Every branch the app has created across every run, newest run first.
+    /// Read per run rather than in one join: the set is bounded by the runs the
+    /// app has ever started, and one query per run keeps this beside the
+    /// worktree reader it is built from.
+    pub async fn managed_branches(&mut self) -> QueryResult<Vec<ManagedBranch>> {
+        let runs = self.list_workflow_runs().await?;
+        let mut branches = Vec::new();
+        for run in runs {
+            let branch_status = run.branch_status.clone().unwrap_or_default();
+            for worktree in self.run_worktrees(run.id).await? {
+                branches.push(ManagedBranch {
+                    run_id: run.id,
+                    repo_dir: worktree.repo_dir,
+                    branch: worktree.branch,
+                    base_branch: worktree.base_branch,
+                    remote: worktree.remote,
+                    worktree_path: worktree.worktree_path,
+                    worktree_removed_at: worktree.removed_at,
+                    run_status: run.status.clone(),
+                    branch_status: branch_status.clone(),
+                });
+            }
+        }
+        Ok(branches)
+    }
+
     /// A run's worktrees; `removed_at` is set once the checkout is gone but
     /// the row is kept so the run still shows where it worked.
     pub async fn run_worktrees(&mut self, run_id: u64) -> QueryResult<Vec<RunWorktree>> {
@@ -1030,6 +1078,39 @@ impl std::fmt::Display for DirtyWorktrees {
 }
 
 impl std::error::Error for DirtyWorktrees {}
+
+/// One worktree whose branch could not be brought up to date with its base,
+/// because both sides changed the same files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseConflict {
+    pub worktree_path: String,
+    pub base_branch: String,
+    /// The paths both sides touched, as git listed them. Empty when the
+    /// conflict could not be listed, in which case `reason` is all there is.
+    pub paths: Vec<String>,
+    /// Git's own message for the failed rebase.
+    pub reason: String,
+}
+
+/// The PR step could not push because a branch was not up to date with its
+/// base. Like [`DirtyWorktrees`] this is a state rather than a failure: the
+/// rebase was aborted, so the worktree is exactly as the user left it, and the
+/// step explains that the branch has to come up to date by hand — the agent
+/// pane, in the checkout it is already pointed at. Nothing is force-pushed and
+/// nothing is guessed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebaseConflicts {
+    /// One entry per worktree that could not be rebased.
+    pub worktrees: Vec<RebaseConflict>,
+}
+
+impl std::fmt::Display for RebaseConflicts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the run's branch is not up to date with its base branch")
+    }
+}
+
+impl std::error::Error for RebaseConflicts {}
 
 /// 401, 404 and 422 need the user; 403/429 and 5xx are worth retrying. A 403
 /// without a rate-limit hint is a permanent permission problem.

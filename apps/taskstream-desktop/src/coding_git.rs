@@ -24,22 +24,35 @@ pub struct RemoteRef {
 /// The entry `ensure_excluded` appends, exactly as git spells it.
 const WORKTREE_IGNORE_ENTRY: &str = "worktrees/";
 
-/// Run `git <args>` in `dir`, returning trimmed stdout. Failures carry the
-/// captured stderr (falling back to stdout when git wrote nothing to stderr)
-/// so the message the user sees is the one git produced.
-fn run_git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+/// Run `git <args>` in `dir`, keeping the exit status separate from the output.
+/// Only the callers that have to read a *failure* as a result need this —
+/// `merge-tree` reports conflicts through a non-zero exit — so everything else
+/// goes through [`run_git`] and never sees a status at all.
+fn run_git_status(dir: &Path, args: &[&str]) -> anyhow::Result<(bool, String, String)> {
     let output = Command::new("git")
         .current_dir(dir)
         .args(args)
         .output()
         .map_err(|e| anyhow::anyhow!("could not run git: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+    ))
+}
+
+/// Run `git <args>` in `dir`, returning trimmed stdout. Failures carry the
+/// captured stderr (falling back to stdout when git wrote nothing to stderr)
+/// so the message the user sees is the one git produced.
+fn run_git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let (succeeded, stdout, stderr) = run_git_status(dir, args)?;
+    if !succeeded {
+        let stderr = stderr.trim();
+        let stdout = stdout.trim();
         let detail = if stderr.is_empty() { stdout } else { stderr };
         anyhow::bail!("git {} failed: {detail}", args.join(" "));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(stdout.trim().to_string())
 }
 
 /// Whether `dir` is inside a git working tree.
@@ -113,6 +126,99 @@ fn config_value(dir: &Path, key: &str) -> Option<String> {
     run_git(dir, &["config", "--get", key])
         .ok()
         .filter(|value| !value.is_empty())
+}
+
+/// The repo config key recording which run owns a branch. Branch ownership is
+/// written into the repo rather than only into the database because the
+/// question "is this branch mine to rewrite?" is asked *of a checkout* — the
+/// same repo on another machine, or a copy of it, still has to answer, and the
+/// rebase pass must never touch a branch this app did not create. The trade,
+/// stated: the key is the branch name, so renaming a branch outside the app
+/// orphans the claim, and an orphaned claim reads as "not ours", which fails
+/// safe (nothing is rebased) rather than dangerous.
+fn managed_branch_key(branch: &str) -> String {
+    format!("branch.{branch}.taskstream-run")
+}
+
+/// Claim `branch` for `run_id`, so a later rebase pass knows the branch is the
+/// app's to rewrite.
+pub fn mark_branch_managed(repo_dir: &Path, branch: &str, run_id: u64) -> anyhow::Result<()> {
+    run_git(
+        repo_dir,
+        &["config", &managed_branch_key(branch), &run_id.to_string()],
+    )
+    .map(|_| ())
+}
+
+/// The run that claims `branch`, or `None` when the repo does not record one.
+pub fn managed_run_id(repo_dir: &Path, branch: &str) -> Option<u64> {
+    config_value(repo_dir, &managed_branch_key(branch))?
+        .parse()
+        .ok()
+}
+
+/// Drop the claim once the branch is deleted, so a later branch created under
+/// the same name is not mistaken for the deleted run's.
+pub fn unmark_branch_managed(repo_dir: &Path, branch: &str) -> anyhow::Result<()> {
+    let key = managed_branch_key(branch);
+    // An absent key is the state this call wants; only `git config --unset`
+    // would fail over it.
+    if config_value(repo_dir, &key).is_none() {
+        return Ok(());
+    }
+    run_git(repo_dir, &["config", "--unset", &key]).map(|_| ())
+}
+
+/// Rebase the branch checked out in `dir` onto `base`. `base` is the local ref
+/// the branch was cut from, so this never fetches: pulling remote work into the
+/// rebase would rewrite the branch onto commits the user has not seen, and
+/// would turn "bring my branch up to date" into "someone else's work appeared in
+/// my diff".
+pub fn rebase_onto(dir: &Path, base: &str) -> anyhow::Result<()> {
+    run_git(dir, &["rebase", base]).map(|_| ())
+}
+
+/// Abort an in-progress rebase. Every failing rebase is followed by this: a
+/// branch left mid-rebase is detached and half-applied, which changes how every
+/// later git command behaves (a `git status`, a push, and the agent pane's own
+/// commands all read that state), so leaving one behind would corrupt the rest
+/// of the run rather than just failing the step.
+pub fn rebase_abort(dir: &Path) -> anyhow::Result<()> {
+    run_git(dir, &["rebase", "--abort"]).map(|_| ())
+}
+
+/// The paths that would conflict if `from` were merged into `into`, computed
+/// without touching either the worktree or the index. `git merge-tree
+/// --write-tree` answers through its exit status — a non-zero one *is* the
+/// conflict report — so this is the one caller that reads a failure as a
+/// result. An empty vector means the merge would be clean.
+pub fn merge_tree_conflicts(dir: &Path, into: &str, from: &str) -> anyhow::Result<Vec<String>> {
+    let (succeeded, stdout, stderr) = run_git_status(
+        dir,
+        &["merge-tree", "--write-tree", "--no-messages", into, from],
+    )?;
+    if succeeded {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<String> = Vec::new();
+    // Line 0 is the merged tree's object id; each conflict line is
+    // `<mode> <object> <stage>\t<path>`.
+    for line in stdout.lines().skip(1) {
+        let Some((_, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let path = path.trim();
+        if !path.is_empty() && !paths.iter().any(|seen| seen == path) {
+            paths.push(path.to_string());
+        }
+    }
+    if paths.is_empty() {
+        // No conflict listing means the command itself did not work (an
+        // unknown ref, unrelated histories, a git too old for `--write-tree`).
+        // Reporting that as "no conflicts" would be a silent lie.
+        anyhow::bail!("git merge-tree failed: {}", stderr.trim());
+    }
+    Ok(paths)
 }
 
 /// Parse `owner/repo` out of a github.com remote URL. Handles the scp-like
@@ -572,5 +678,107 @@ mod tests {
         worktree_prune(&repo.dir).unwrap();
         let listed = repo.git(&["worktree", "list", "--porcelain"]);
         assert!(!listed.contains(&worktree.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn rebases_a_branch_onto_a_moved_base() {
+        let repo = TempRepo::new("rebase");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/x"]);
+        repo.write("feature.txt", "work");
+        repo.commit("work");
+        // Base moves on while the branch is being worked on.
+        repo.git(&["switch", "main"]);
+        repo.write("main.txt", "elsewhere");
+        repo.commit("elsewhere");
+        repo.git(&["switch", "feature/x"]);
+
+        rebase_onto(&repo.dir, "main").expect("rebase");
+        // The branch sits *on top of* the moved base: its parent commit is the
+        // base's tip, and the base's own work is now in the branch's tree.
+        assert_eq!(
+            repo.git(&["rev-parse", "HEAD~1"]),
+            repo.git(&["rev-parse", "main"])
+        );
+        assert!(repo.dir.join("main.txt").exists());
+        assert!(repo.dir.join("feature.txt").exists());
+        assert!(changed_paths(&repo.dir).unwrap().is_empty());
+    }
+
+    #[test]
+    fn aborts_a_conflicting_rebase_and_leaves_the_branch_where_it_was() {
+        let repo = TempRepo::new("rebase-conflict");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/x"]);
+        repo.write("shared.txt", "feature");
+        repo.commit("feature");
+        let before = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "main"]);
+        repo.write("shared.txt", "main");
+        repo.commit("main");
+        repo.git(&["switch", "feature/x"]);
+
+        assert!(rebase_onto(&repo.dir, "main").is_err());
+        rebase_abort(&repo.dir).expect("abort");
+        // Aborting restores the branch exactly: same head and a clean tree,
+        // with no conflict markers left for the agent pane to trip over.
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
+        assert!(changed_paths(&repo.dir).unwrap().is_empty());
+        assert!(!repo.git(&["status", "--porcelain"]).contains("rebase"));
+    }
+
+    #[test]
+    fn predicts_a_conflict_without_touching_the_worktree() {
+        let repo = TempRepo::new("merge-tree");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/x"]);
+        repo.write("shared.txt", "feature");
+        repo.commit("feature");
+        repo.git(&["switch", "main"]);
+        repo.write("shared.txt", "main");
+        repo.commit("main");
+
+        // Both sides changed the same file: named, and nothing was applied —
+        // the preview is a read, so it is safe to run while an agent works.
+        let paths = merge_tree_conflicts(&repo.dir, "main", "feature/x").unwrap();
+        assert_eq!(paths, vec!["shared.txt".to_string()]);
+        assert_eq!(current_branch(&repo.dir).unwrap(), "main");
+        assert!(changed_paths(&repo.dir).unwrap().is_empty());
+
+        // A branch that only adds a file would merge cleanly.
+        repo.git(&["switch", "-c", "feature/clean", "main"]);
+        repo.write("clean.txt", "new");
+        repo.commit("new");
+        assert!(
+            merge_tree_conflicts(&repo.dir, "main", "feature/clean")
+                .unwrap()
+                .is_empty()
+        );
+
+        // A ref that does not exist is an error, never a silent "no
+        // conflicts": reporting a clean merge for a typo would be a lie.
+        assert!(merge_tree_conflicts(&repo.dir, "main", "feature/absent").is_err());
+    }
+
+    #[test]
+    fn records_the_run_that_owns_a_branch_in_the_repo() {
+        let repo = TempRepo::new("managed");
+        repo.git(&["switch", "-c", "feature/x"]);
+        assert_eq!(managed_run_id(&repo.dir, "feature/x"), None);
+
+        mark_branch_managed(&repo.dir, "feature/x", 42).expect("mark");
+        assert_eq!(managed_run_id(&repo.dir, "feature/x"), Some(42));
+        // The claim belongs to the repo, not to the checked-out branch.
+        repo.git(&["switch", "main"]);
+        assert_eq!(managed_run_id(&repo.dir, "feature/x"), Some(42));
+        assert_eq!(managed_run_id(&repo.dir, "main"), None);
+
+        // Clearing is idempotent, so deleting an unclaimed branch is fine.
+        unmark_branch_managed(&repo.dir, "feature/x").expect("unmark");
+        unmark_branch_managed(&repo.dir, "feature/x").expect("unmark twice");
+        assert_eq!(managed_run_id(&repo.dir, "feature/x"), None);
     }
 }

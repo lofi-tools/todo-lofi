@@ -2157,6 +2157,9 @@ impl Store {
     }
 
     /// Delete a run's branch with `git branch -D` and detach it from the run.
+    /// Every branch the run created is deleted, not just the primary repo's:
+    /// a multi-repo run cut one in each (decision 21), and each of them also
+    /// drops the claim that marks it as the app's to rewrite.
     pub fn delete_coding_branch(
         &self,
         run_id: u64,
@@ -2169,18 +2172,41 @@ impl Store {
             let Some(branch) = run.branch.clone() else {
                 return Ok(());
             };
-            // The run's base branch is where a merge left us; a root task is
-            // enough to resolve the directory either way.
-            if let Some(root) = run.root_task_id
-                && let Some(dir) = Self::project_dir(&mut s, root).await?
-            {
-                let dir_for_git = dir.clone();
-                let branch_for_git = branch.clone();
-                tokio::task::spawn_blocking(move || {
-                    coding_git::delete_branch(&dir_for_git, &branch_for_git)
-                })
-                .await??;
-            }
+            let worktrees = s.run_worktrees(run_id).await?;
+            let targets: Vec<(std::path::PathBuf, String)> = if worktrees.is_empty() {
+                // A run that predates worktrees cut its branch in the user's
+                // own checkout; a root task is enough to find it.
+                match run.root_task_id {
+                    Some(root) => Self::project_dir(&mut s, root)
+                        .await?
+                        .map(|dir| vec![(dir, branch.clone())])
+                        .unwrap_or_default(),
+                    None => Vec::new(),
+                }
+            } else {
+                worktrees
+                    .iter()
+                    .map(|worktree| {
+                        (
+                            std::path::PathBuf::from(&worktree.repo_dir),
+                            worktree.branch.clone(),
+                        )
+                    })
+                    .collect()
+            };
+            tokio::task::spawn_blocking(move || {
+                for (dir, branch) in &targets {
+                    // A branch removed by hand is not a failure: the point of
+                    // the action is that it is gone, and saying so in the DB
+                    // matters more than the git error that says it already was.
+                    if coding_git::branch_exists(dir, branch) {
+                        coding_git::delete_branch(dir, branch)?;
+                    }
+                    coding_git::unmark_branch_managed(dir, branch)?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })
+            .await??;
             s.clear_run_branch(run_id).await?;
             Ok(())
         })
@@ -2223,7 +2249,21 @@ impl Store {
             if worktree_path.exists() {
                 anyhow::bail!("{} already exists; remove it first", worktree_path.display());
             }
-            coding_git::worktree_add(repo_dir, &worktree_path, &branch, &base_branch)?;
+            // The claim goes on first: git records it for a branch that does
+            // not exist yet, so a repo whose config cannot be written fails
+            // here rather than leaving a checkout nothing tracks.
+            coding_git::mark_branch_managed(repo_dir, &branch, run_id)?;
+            if let Err(error) =
+                coding_git::worktree_add(repo_dir, &worktree_path, &branch, &base_branch)
+            {
+                if let Err(cleanup) = coding_git::unmark_branch_managed(repo_dir, &branch) {
+                    tracing::error!(
+                        ?cleanup,
+                        "could not clear the branch claim after a failed worktree add"
+                    );
+                }
+                return Err(error);
+            }
             let remote = coding_git::resolve_remote(repo_dir)
                 .map(|remote| remote.name)
                 .unwrap_or_default();
@@ -2875,6 +2915,113 @@ impl Store {
         })
     }
 
+    /// Bring each of the run's branches up to date with its base, returning the
+    /// ones that could not be. Called before anything is pushed, so a failure
+    /// costs nothing but the step (§6.5).
+    ///
+    /// Two cases are skipped rather than reported, because neither is a clash
+    /// the user can settle: a base branch that is gone locally leaves nothing to
+    /// rebase onto, and a branch the run does not still claim in the repo's own
+    /// config is not the app's to move.
+    fn rebase_run_worktrees(
+        branches: Vec<(std::path::PathBuf, String, String)>,
+        run_id: u64,
+    ) -> anyhow::Result<Vec<storage::RebaseConflict>> {
+        let mut conflicts = Vec::new();
+        for (worktree_path, base, branch) in branches {
+            if !coding_git::branch_exists(&worktree_path, &base) {
+                continue;
+            }
+            if coding_git::managed_run_id(&worktree_path, &branch) != Some(run_id) {
+                continue;
+            }
+            let Err(reason) = coding_git::rebase_onto(&worktree_path, &base) else {
+                continue;
+            };
+            // A branch left mid-rebase reads differently to every later git
+            // command, so the abort is not optional cleanup: failing to undo
+            // the rebase is a hard error, not a conflict to report.
+            if let Err(abort) = coding_git::rebase_abort(&worktree_path) {
+                return Err(anyhow::anyhow!(
+                    "{} could not be brought up to date with {base}: {reason} \
+                     (and the rebase could not be aborted: {abort})",
+                    worktree_path.display()
+                ));
+            }
+            let paths = coding_git::merge_tree_conflicts(&worktree_path, &base, &branch)
+                .unwrap_or_else(|error| {
+                    // The conflict is already reported; only its path list is
+                    // lost, which is worth saying rather than hiding.
+                    tracing::warn!(?error, "could not list the paths the rebase conflicted on");
+                    Vec::new()
+                });
+            conflicts.push(storage::RebaseConflict {
+                worktree_path: worktree_path.display().to_string(),
+                base_branch: base,
+                paths,
+                reason: reason.to_string(),
+            });
+        }
+        Ok(conflicts)
+    }
+
+    /// The taskstream-managed branches in the same repo that would collide with
+    /// `branch`, as `(their branch, their run id, the conflicting paths)`.
+    ///
+    /// Advisory, and deliberately not an action: the app never rebases another
+    /// run's branch, because that branch's worktree is a checkout an agent may
+    /// be working in right now and rewriting it underneath would invalidate
+    /// work in flight. Each run brings *itself* up to date when it reaches its
+    /// own PR step, which is a quiescent moment; this is what tells the user
+    /// early which other run is in the way. Only branches this app created are
+    /// considered, and only ones still being worked on. Read-only, so it is
+    /// safe to run while an agent works in either checkout.
+    async fn branch_collisions(
+        store: &mut TodoStore,
+        run_id: u64,
+        repo_dir: &std::path::Path,
+        branch: &str,
+    ) -> anyhow::Result<Vec<(String, u64, Vec<String>)>> {
+        let repo = repo_dir.to_string_lossy().to_string();
+        let others: Vec<(String, u64)> = store
+            .managed_branches()
+            .await?
+            .into_iter()
+            .filter(|other| {
+                other.run_id != run_id
+                    && other.branch != branch
+                    && other.repo_dir == repo
+                    // A merged or abandoned branch is either already in the
+                    // base or not coming, so it cannot collide with this one.
+                    && other.run_status == "active"
+                    && other.branch_status == "active"
+            })
+            .map(|other| (other.branch, other.run_id))
+            .collect();
+        if others.is_empty() {
+            return Ok(Vec::new());
+        }
+        let repo_dir = repo_dir.to_path_buf();
+        let branch = branch.to_string();
+        let collisions = tokio::task::spawn_blocking(move || {
+            others
+                .into_iter()
+                .filter_map(|(other_branch, other_run)| {
+                    let paths = coding_git::merge_tree_conflicts(&repo_dir, &branch, &other_branch)
+                        .unwrap_or_else(|error| {
+                            // A preview that cannot run is not a problem with
+                            // the run: only the warning is lost.
+                            tracing::warn!(?error, "could not preview a branch collision");
+                            Vec::new()
+                        });
+                    (!paths.is_empty()).then_some((other_branch, other_run, paths))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await?;
+        Ok(collisions)
+    }
+
     /// Worktrees holding uncommitted work, with their changed paths. Non-empty
     /// is what makes the PR step refuse with "Commit and continue" (§6.7).
     async fn dirty_worktrees_of(
@@ -3002,6 +3149,70 @@ impl Store {
                     return Err(storage::DirtyWorktrees { worktrees: dirty }.into());
                 }
             }
+
+            // Say which other managed runs are touching the same files before
+            // the branches move, so a collision is something the user reads
+            // while they can still do something about it.
+            for worktree in &worktrees {
+                let repo_dir = std::path::PathBuf::from(&worktree.repo_dir);
+                let collisions =
+                    Self::branch_collisions(&mut s, run_id, &repo_dir, &worktree.branch).await?;
+                if collisions.is_empty() {
+                    continue;
+                }
+                let listed: Vec<String> = collisions
+                    .iter()
+                    .map(|(branch, other_run, paths)| {
+                        format!("{branch} (run {other_run}): {}", paths.join(", "))
+                    })
+                    .collect();
+                s.append_run_note(
+                    run_id,
+                    "annotation",
+                    "merge",
+                    "merge",
+                    &format!("Also in flight on the same files — {}", listed.join("; ")),
+                )
+                .await?;
+            }
+
+            // Bring each branch up to date with its base before anything is
+            // pushed: this is the moment a rewrite is safe, because the branch
+            // has not left the machine. A branch that already has a pull
+            // request is skipped — it is on the remote, so rebasing it would
+            // rewrite published commits and need a force push, which this app
+            // never does (decision 28 leaves remote branches alone).
+            let pushed: Vec<String> = s
+                .run_pull_requests(run_id)
+                .await?
+                .into_iter()
+                .map(|pull_request| pull_request.head_branch)
+                .collect();
+            let rebases: Vec<(std::path::PathBuf, String, String)> = worktrees
+                .iter()
+                .filter(|worktree| !pushed.contains(&worktree.branch))
+                .filter(|worktree| std::path::Path::new(&worktree.worktree_path).is_dir())
+                .map(|worktree| {
+                    (
+                        std::path::PathBuf::from(&worktree.worktree_path),
+                        worktree.base_branch.clone(),
+                        worktree.branch.clone(),
+                    )
+                })
+                .collect();
+            if !rebases.is_empty() {
+                let conflicts = tokio::task::spawn_blocking(move || {
+                    Self::rebase_run_worktrees(rebases, run_id)
+                })
+                .await??;
+                if !conflicts.is_empty() {
+                    return Err(storage::RebaseConflicts {
+                        worktrees: conflicts,
+                    }
+                    .into());
+                }
+            }
+
             let integration_id = s
                 .list_integrations()
                 .await?
@@ -3444,5 +3655,169 @@ mod tests {
         assert!(!Store::is_github_unauthorized(&permanent(404)));
         assert!(!Store::is_github_unauthorized(&permanent(500)));
         assert!(!Store::is_github_unauthorized(&anyhow::anyhow!("boom")));
+    }
+
+    /// A throwaway repo with one commit on `main`, cleaned up on drop. The
+    /// rebase pass is the one piece of the PR step that touches real git, so it
+    /// is driven against real repositories rather than a stub.
+    struct TempRepo {
+        dir: std::path::PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("todo2-store-rebase-{name}-{}", std::process::id()));
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).expect("clean temp dir");
+            }
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            let repo = TempRepo { dir };
+            repo.git(&["init", "-q", "-b", "main"]);
+            repo.git(&["config", "user.email", "t@t"]);
+            repo.git(&["config", "user.name", "t"]);
+            repo.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+            repo
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(&self.dir)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+
+        fn write(&self, name: &str, contents: &str) {
+            std::fs::write(self.dir.join(name), contents).expect("write file");
+        }
+
+        fn commit(&self, message: &str) {
+            self.git(&["add", "."]);
+            self.git(&["commit", "-q", "--allow-empty", "-m", message]);
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The branch is rebased onto its moved base before the push, and the
+    /// rewritten branch is the one that gets pushed.
+    #[test]
+    fn brings_a_claimed_branch_up_to_date_with_its_base() {
+        let repo = TempRepo::new("clean");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/1-add-login"]);
+        repo.write("feature.txt", "work");
+        repo.commit("work");
+        // Base moves on after the branch was cut.
+        repo.git(&["switch", "main"]);
+        repo.write("main.txt", "elsewhere");
+        repo.commit("elsewhere");
+        repo.git(&["switch", "feature/1-add-login"]);
+        coding_git::mark_branch_managed(&repo.dir, "feature/1-add-login", 7).expect("mark");
+
+        let conflicts = Store::rebase_run_worktrees(
+            vec![(
+                repo.dir.clone(),
+                "main".to_string(),
+                "feature/1-add-login".to_string(),
+            )],
+            7,
+        )
+        .expect("rebase pass");
+
+        assert!(conflicts.is_empty(), "a clean rebase is not a conflict");
+        assert_eq!(
+            repo.git(&["rev-parse", "HEAD~1"]),
+            repo.git(&["rev-parse", "main"]),
+            "the branch now sits on top of the moved base"
+        );
+    }
+
+    /// A clash is reported with the paths that clashed, and the branch is left
+    /// exactly where it was: the rebase is aborted, never half-applied.
+    #[test]
+    fn reports_a_clash_and_leaves_the_branch_untouched() {
+        let repo = TempRepo::new("clash");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/1-add-login"]);
+        repo.write("shared.txt", "feature");
+        repo.commit("feature");
+        let before = repo.git(&["rev-parse", "HEAD"]);
+        repo.git(&["switch", "main"]);
+        repo.write("shared.txt", "main");
+        repo.commit("main");
+        repo.git(&["switch", "feature/1-add-login"]);
+        coding_git::mark_branch_managed(&repo.dir, "feature/1-add-login", 7).expect("mark");
+
+        let conflicts = Store::rebase_run_worktrees(
+            vec![(
+                repo.dir.clone(),
+                "main".to_string(),
+                "feature/1-add-login".to_string(),
+            )],
+            7,
+        )
+        .expect("rebase pass");
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].base_branch, "main");
+        assert_eq!(conflicts[0].paths, vec!["shared.txt".to_string()]);
+        assert!(!conflicts[0].reason.is_empty(), "git's own message is kept");
+        // The abort is what makes this a state rather than a broken checkout.
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
+        assert!(
+            coding_git::changed_paths(&repo.dir)
+                .expect("status")
+                .is_empty(),
+            "no conflict markers are left behind for the agent to trip over"
+        );
+    }
+
+    /// Only what the run claims, against a base that exists: a branch the repo
+    /// does not attribute to this run is never rewritten, and a vanished base
+    /// branch is nothing to bring the branch up to date with.
+    #[test]
+    fn leaves_unclaimed_branches_and_missing_bases_alone() {
+        let repo = TempRepo::new("unclaimed");
+        repo.write("shared.txt", "base");
+        repo.commit("base");
+        repo.git(&["switch", "-c", "feature/1-add-login"]);
+        repo.write("shared.txt", "feature");
+        repo.commit("feature");
+        repo.git(&["switch", "main"]);
+        repo.write("shared.txt", "main");
+        repo.commit("main");
+        repo.git(&["switch", "feature/1-add-login"]);
+        let before = repo.git(&["rev-parse", "HEAD"]);
+        let branch = "feature/1-add-login".to_string();
+
+        // Claimed by another run: this run must not move the branch.
+        coding_git::mark_branch_managed(&repo.dir, &branch, 99).expect("mark");
+        let conflicts = Store::rebase_run_worktrees(
+            vec![(repo.dir.clone(), "main".to_string(), branch.clone())],
+            7,
+        )
+        .expect("rebase pass");
+        assert!(conflicts.is_empty());
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
+
+        // Claimed by this run, but the base branch is gone.
+        coding_git::mark_branch_managed(&repo.dir, &branch, 7).expect("remark");
+        let conflicts = Store::rebase_run_worktrees(
+            vec![(repo.dir.clone(), "release".to_string(), branch.clone())],
+            7,
+        )
+        .expect("rebase pass");
+        assert!(conflicts.is_empty());
+        assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
     }
 }

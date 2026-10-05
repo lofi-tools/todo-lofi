@@ -102,6 +102,18 @@ fn refused_worktrees(failure: Option<&anyhow::Error>) -> Option<Vec<(String, Vec
         .map(|dirty| dirty.worktrees.clone())
 }
 
+/// A branch that could not be brought up to date with its base is the same kind
+/// of state: the rebase was aborted, so nothing is half-applied, and the panel
+/// names the paths that clashed rather than showing a bare error. There is no
+/// button for it on purpose — the conflict is the user's (or their agent's) to
+/// settle in the checkout the pane is already pointed at, and the app's job is
+/// to say where and what.
+fn blocked_rebases(failure: Option<&anyhow::Error>) -> Option<Vec<storage::RebaseConflict>> {
+    failure
+        .and_then(|error| error.downcast_ref::<storage::RebaseConflicts>())
+        .map(|conflicts| conflicts.worktrees.clone())
+}
+
 /// Whether a run's merge step acts as the PR step: one of its worktrees pushes
 /// to a github.com remote (decision 17 selects the local merge only where no
 /// such remote exists, and decision 35 forbids both at once).
@@ -682,6 +694,10 @@ pub struct TaskDetails {
     /// Worktrees the PR step refused over: uncommitted work, with its changed
     /// paths, which the panel offers to commit and continue past (§6.7).
     coding_dirty: Vec<(String, Vec<String>)>,
+    /// Branches the PR step could not bring up to date with their base, with
+    /// the paths that clashed. The rebase was aborted, so the panel names what
+    /// clashed and sends the user to the agent to settle it by hand.
+    coding_rebase_conflicts: Vec<storage::RebaseConflict>,
     _coding_fetch: Option<gpui::Task<()>>,
     /// Inline reason a coding action could not run (missing directory, dirty
     /// tree, merge conflict, …).
@@ -829,6 +845,7 @@ impl TaskDetails {
             run_worktrees: Vec::new(),
             run_pull_requests: Vec::new(),
             coding_dirty: Vec::new(),
+            coding_rebase_conflicts: Vec::new(),
             _coding_fetch: None,
             coding_error: None,
             coding_directory_backed: false,
@@ -887,6 +904,7 @@ impl TaskDetails {
         self.run_worktrees = Vec::new();
         self.run_pull_requests = Vec::new();
         self.coding_dirty = Vec::new();
+        self.coding_rebase_conflicts = Vec::new();
         self.coding_error = None;
         self.coding_directory_backed = false;
         self.coding_spec_expanded = false;
@@ -4113,7 +4131,8 @@ impl TaskDetails {
         self._coding_fetch = Some(cx.spawn(async move |this, cx| {
             let failure = action.await.err();
             let refused = refused_worktrees(failure.as_ref());
-            let error = if refused.is_some() {
+            let blocked = blocked_rebases(failure.as_ref());
+            let error = if refused.is_some() || blocked.is_some() {
                 None
             } else {
                 failure.map(|error| error.to_string())
@@ -4168,6 +4187,7 @@ impl TaskDetails {
                 this.run_worktrees = run_worktrees;
                 this.run_pull_requests = run_pull_requests;
                 this.coding_dirty = refused.unwrap_or_default();
+                this.coding_rebase_conflicts = blocked.unwrap_or_default();
                 this.coding_error = error;
                 this._coding_fetch = None;
                 this.coding_rewind_confirm = false;
@@ -4334,6 +4354,7 @@ impl TaskDetails {
                 this.run_worktrees = run_worktrees;
                 this.run_pull_requests = run_pull_requests;
                 this.coding_dirty = Vec::new();
+                this.coding_rebase_conflicts = Vec::new();
                 this._coding_fetch = None;
                 this.coding_error = None;
                 this.coding_directory_backed = true;
@@ -5210,6 +5231,31 @@ impl TaskDetails {
                                 this.open_pull_request_step(run_id, true, cx);
                             })),
                     );
+                }
+                // The branch could not be brought up to date with its base:
+                // name the clash, and leave settling it to the checkout the
+                // agent pane is already pointed at.
+                if open_subtasks.is_empty() && !self.coding_rebase_conflicts.is_empty() {
+                    let mut block = div().v_flex().gap_1().w_full().child(
+                        div().text_xs().text_color(rgb(0xfbbf24)).child(
+                            "Resolve the branch's clash with its base in the agent pane, \
+                             then open the pull request again:",
+                        ),
+                    );
+                    for conflict in &self.coding_rebase_conflicts {
+                        let clashed = if conflict.paths.is_empty() {
+                            conflict.reason.clone()
+                        } else {
+                            conflict.paths.join(", ")
+                        };
+                        block = block.child(
+                            div().text_xs().text_color(rgb(0x737373)).child(format!(
+                                "{} onto {} — {clashed}",
+                                conflict.worktree_path, conflict.base_branch
+                            )),
+                        );
+                    }
+                    actions = actions.child(block);
                 }
                 // A multi-repo run can give up on the repos still pending, so
                 // one unwanted repo does not hold the run open (decision 25).
@@ -7039,6 +7085,34 @@ mod coding_tests {
         let failure = anyhow::anyhow!("failed to push some refs to 'github'");
         assert!(refused_worktrees(Some(&failure)).is_none());
         assert!(refused_worktrees(None).is_none());
+    }
+
+    /// A branch that could not be brought up to date is its own state: the
+    /// panel names the clash and points at the agent pane instead of showing a
+    /// bare error, and it is not mistaken for the dirty-worktree refusal.
+    #[test]
+    fn a_blocked_rebase_is_a_state_and_other_failures_are_reasons() {
+        let blocked: anyhow::Error = storage::RebaseConflicts {
+            worktrees: vec![storage::RebaseConflict {
+                worktree_path: "/repo/worktrees/1-add-login".to_string(),
+                base_branch: "main".to_string(),
+                paths: vec!["src/store.rs".to_string()],
+                reason: "CONFLICT (content): Merge conflict in src/store.rs".to_string(),
+            }],
+        }
+        .into();
+
+        let conflicts = blocked_rebases(Some(&blocked)).expect("a state");
+        assert_eq!(conflicts[0].base_branch, "main");
+        assert_eq!(conflicts[0].paths, vec!["src/store.rs".to_string()]);
+        // It is not the dirty-worktree refusal, which offers a button; and it
+        // is not a bare reason either.
+        assert!(refused_worktrees(Some(&blocked)).is_none());
+        assert!(blocked_rebases(None).is_none());
+        assert!(
+            blocked_rebases(Some(&anyhow::anyhow!("failed to push"))).is_none(),
+            "a push failure stays an inline reason"
+        );
     }
 
     /// The step picks the pull request action exactly when one of the run's
