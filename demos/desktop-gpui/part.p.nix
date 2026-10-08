@@ -8,7 +8,7 @@
       # pkgs.apple-sdk_26
       # TODO try symlinkJoin of xcode and exo.metal-toolchain
       # pkgs.own.install-xcode-global
-    ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+    ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
       /*  pkgs.webkitgtk */
       /*  pkgs.gtk3 */
       /*  pkgs.cairo */

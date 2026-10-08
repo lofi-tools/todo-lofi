@@ -5,8 +5,8 @@
       pkgs.llvm
       # Use unwrapped clang to avoid cc-wrapper conflicts
       pkgs.llvmPackages_22.clang-unwrapped
-    ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-    ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+    ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+    ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     ];
     runtimeDeps = [
     ];
@@ -23,7 +23,7 @@
     # cc-rs from adding one of its own. `rust.buildEnv` is workspace-wide, so
     # unconditional values would make every crate build for darwin on any host —
     # which is exactly what a Linux CI runner must not do.
-    env = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+    env = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
       CC = "${pkgs.llvmPackages_22.clang-unwrapped}/bin/clang";
       CXX = "${pkgs.llvmPackages_22.clang-unwrapped}/bin/clang++";
       CARGO_BUILD_TARGET = "aarch64-apple-darwin";

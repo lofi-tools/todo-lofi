@@ -31,7 +31,7 @@
           # tao use the system frameworks there.
           buildDeps = [
             pkgs.pkg-config
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.glib
             pkgs.gtk3
             pkgs.gdk-pixbuf

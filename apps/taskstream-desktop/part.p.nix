@@ -9,7 +9,7 @@
     # first, the .deb step fails without the second.
     myDevShell.buildInputs =
       [ pkgs.opencode ]
-      ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+      ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
         pkgs.binutils
         pkgs.dpkg
         pkgs.librsvg
