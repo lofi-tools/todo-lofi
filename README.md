@@ -2,6 +2,8 @@
 
 A local-first task manager for macOS and Linux, built on [GPUI](https://github.com/nmrshll/gpui). Nested tags, an embedded AI agent pane, Todoist sync, and a keyboard-first workflow—all running offline.
 
+[Landing page](https://get-taskstream.netlify.app/) · [Documentation](https://get-taskstream.netlify.app/docs)
+
 ![Screenshot](docs/img/Screenshot%202026-09-19%20at%2021.20.15.png)
 
 ## Features
@@ -103,7 +105,8 @@ What the app does, how to run it, how the workspace is put together, and the
 integrations it talks to — built with the in-repo web design system. Run it with
 `pnpm dev`: `/` is the landing page, and every page of documentation lives under
 `/docs`, split into a user guide (`/docs`) and a contributor guide
-(`/docs/contributor`). The
+(`/docs/contributor`). Read the
+[documentation online](https://get-taskstream.netlify.app/docs). The
 [deepwiki mirror](https://deepwiki.com/lofi-tools/taskstream) remains available as
 a temporary fallback.
 
