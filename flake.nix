@@ -15,7 +15,7 @@
     with builtins; {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       imports = lib.flatten [
-        (attrValues inputs.my-nix.flakeModules.essentials)
+        (attrValues inputs.my-nix.flakeModuleGroups.essentials)
         inputs.my-nix.flakeModules.rust
         (inputs.my-nix.lib.findFlakePartFilesRec ./.)
       ];
