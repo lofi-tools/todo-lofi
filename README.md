@@ -119,3 +119,17 @@ Contributions welcome. Please open an issue first to discuss any non-trivial cha
 ### License
 
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+## Nix development environment
+
+The root flake pins upstream `NixOS/nixpkgs` at `c7def046b9a883d46974757852106483d741586f`, replacing `cachix/devenv-nixpkgs` at its existing upstream base rather than updating package versions. Other locked inputs and local override behavior are unchanged.
+
+On 2026-10-27, macOS arm64 shell evaluation with import-from-derivation disabled passed with the existing local `my-nix` override. The committed `my-nix` pin lacks `flakeModuleGroups`; that error also reproduces with the former Devenv input and is separate from this switch.
+
+```sh
+nix eval .#devShells.aarch64-darwin.default.drvPath --raw --impure \
+  --no-write-lock-file --option allow-import-from-derivation false \
+  --override-input my-nix "path:$HOME/src/scripts/my-nix"
+```
+
+These checks evaluate the shell; they do not build the application or every package.

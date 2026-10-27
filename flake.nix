@@ -1,6 +1,6 @@
 {
   # inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f";
   inputs.parts.url = "github:hercules-ci/flake-parts";
   inputs.my-nix = { url = "github:nmrshll/nix-utils"; inputs.nixpkgs.follows = "nixpkgs"; inputs.fp.follows = "parts"; };
   # inputs.exo.url = "github:exo-explore/exo";
