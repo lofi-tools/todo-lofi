@@ -52,8 +52,60 @@
           # signing, archives) lives in scripts/package-macos.sh, so the dev
           # bundle and the CI artifact are produced by one implementation.
 
+          referenceRepos = [
+            { name = "pandacode"; url = "https://github.com/aicodeking/pandacode"; }
+            { name = "herdr"; url = "https://github.com/herdrdev/herdr"; }
+            { name = "herdr-core"; url = "https://github.com/herdrdev/herdr-core"; }
+            { name = "herdr-app"; url = "https://github.com/herdrdev/herdr-app"; }
+            { name = "pi"; url = "https://github.com/earendil-works/pi"; }
+          ];
+
           bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs pkgs.writeShellScriptBin {
+            checkout-references = with bash; ''
+              set -euo pipefail
+              repositories=(${lib.escapeShellArgs (map (repo: "${repo.name}|${repo.url}") referenceRepos)})
+              if [ "''${1:-}" = "--list" ]; then
+                printf '%s\n' "''${repositories[@]}"
+                exit 0
+              fi
+
+              for requested in "$@"; do
+                found=false
+                for repository in "''${repositories[@]}"; do
+                  if [ "$requested" = "''${repository%%|*}" ]; then found=true; break; fi
+                done
+                if [ "$found" = false ]; then
+                  echo "Unknown reference: $requested (use checkout-references --list)" >&2
+                  exit 1
+                fi
+              done
+
+              checkout_root="${wd}/.cache/checkout"
+              mkdir -p "$checkout_root"
+              for repository in "''${repositories[@]}"; do
+                name="''${repository%%|*}"
+                url="''${repository#*|}"
+                if [ "$#" -gt 0 ]; then
+                  selected=false
+                  for requested in "$@"; do
+                    if [ "$requested" = "$name" ]; then selected=true; break; fi
+                  done
+                  if [ "$selected" = false ]; then continue; fi
+                fi
+                destination="$checkout_root/$name"
+                if [ -e "$destination" ]; then
+                  if [ ! -d "$destination/.git" ] || \
+                     [ "$(${pkgs.git}/bin/git -C "$destination" remote get-url origin)" != "$url" ]; then
+                    echo "Refusing to overwrite unexpected checkout: $destination" >&2
+                    exit 1
+                  fi
+                  printf 'Keeping existing checkout: %s\n' "$destination"
+                else
+                  ${pkgs.git}/bin/git clone --depth 1 -- "$url" "$destination"
+                fi
+              done
+            '';
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
             dt = ''set -e;  cd demos/desktop-tauri; cargo tauri dev '';
             ccheck = ''set -ex;

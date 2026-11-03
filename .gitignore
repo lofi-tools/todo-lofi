@@ -17,3 +17,6 @@ test-results/
 # unless they are given --no-link.
 /result
 /result-*
+
+# Local reference repository checkouts
+/.cache/checkout/

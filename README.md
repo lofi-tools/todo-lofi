@@ -42,6 +42,19 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 #### Launching
 - `cargo run -p taskstream-desktop` — run the desktop app
 - `t2` — run the desktop app with auto-rebuilds. It watches taskstream-desktop's own sources and its in-workspace dependencies, so editing the web packages does not restart the Rust build (see `flake.nix` for the watched paths)
+#### Shepherd and reference repositories
+- `cargo run -p shepherd` — run the Shepherd Rust app scaffold (`apps/shepherd`, included by the workspace's `apps/*` member glob)
+- `checkout-references` — shallow-clone all configured reference repositories into `.cache/checkout/<name>`
+- `checkout-references herdr-core pi` — download selected references by name
+- `checkout-references --list` — list configured names and URLs
+- `skills` — install local agent skills, including `reference-repos`, from `docs/agent_skills`
+
+The reference list lives in `flake.nix` as `referenceRepos`: `pandacode`, `herdr`,
+`herdr-core`, `herdr-app`, and `pi`. Run checkout commands inside the Nix dev shell
+(or use `nix develop -c checkout-references`). Existing checkouts are preserved;
+the command does not refresh or reset them. The local skill lets agents inspect
+these checkouts by name.
+
 #### Testing
 - `ccheck` — cargo check all workspace packages (taskstream-desktop, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)

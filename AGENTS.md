@@ -200,3 +200,9 @@ Release Notes:
 # Crash Investigation
 
  <!--TODO-->
+
+# Reference repositories
+
+For named reference repositories, use
+[reference-repos](docs/agent_skills/reference-repos.md). Run `skills` in the Nix
+dev shell to install repository skills under `.agents/skills`.
