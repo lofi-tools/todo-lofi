@@ -33,12 +33,12 @@ and merge it without leaving Shepherd?”
 | Area | Current state |
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
-| `apps/shepherd` | Placeholder binary: `src/main.rs` prints `Shepherd`. No Tauri shell, no `src-tauri/`, no `ui/`. |
+| `apps/shepherd` | Tauri 2 shell scaffolded: `src-tauri/` (window, generated desktop icons, default capability) and `ui/` (SolidJS + TypeScript + Vite). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. The command bridge and fixed regions are not wired yet. |
 | `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 19 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 9 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
-| Frontend | No Shepherd UI package. Root uses `pnpm` 11.25; `pnpm-workspace.yaml` must gain the UI package when it exists. |
+| Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
 | Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 18. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
@@ -160,9 +160,9 @@ fake task, read the stream and use one terminal.
 
 ### Build
 
-- [ ] Scaffold `apps/shepherd/src-tauri/` for Tauri 2, and `apps/shepherd/ui/`
+- [x] Scaffold `apps/shepherd/src-tauri/` for Tauri 2, and `apps/shepherd/ui/`
   for SolidJS + TypeScript + Vite.
-- [ ] Add the UI package to `pnpm-workspace.yaml`; document one command that
+- [x] Add the UI package to `pnpm-workspace.yaml`; document one command that
   starts the app.
 - [ ] Wire one `#[tauri::command]` per core command and one Tauri channel for
   events. Use typed snapshots; do not build a second frontend model.

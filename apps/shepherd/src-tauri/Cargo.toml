@@ -1,0 +1,19 @@
+[package]
+name = "shepherd"
+version.workspace = true
+edition.workspace = true
+description = "Shepherd desktop shell: Tauri window, invoke commands and the event bridge."
+
+[lib]
+name = "shepherd_shell"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shepherd"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

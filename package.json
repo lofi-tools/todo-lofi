@@ -13,6 +13,7 @@
     "build:docs": "pnpm run codegen && pnpm --dir apps/docs-web run build",
     "preview:docs": "pnpm --dir apps/docs-web run preview",
     "dev:web": "pnpm --dir apps/taskstream-web run dev",
+    "dev:shepherd": "pnpm --dir apps/shepherd run dev",
     "build:web": "pnpm run codegen && pnpm --dir apps/taskstream-web run build",
     "preview:web": "pnpm --dir apps/taskstream-web run preview",
     "typecheck": "pnpm --dir libs/web-design-system run typecheck && pnpm --dir demos/design-system-showcase run typecheck && pnpm --dir apps/docs-web run typecheck && pnpm --dir apps/taskstream-web run typecheck",

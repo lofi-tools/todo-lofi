@@ -1,0 +1,14 @@
+{
+  "name": "shepherd-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shepherd shell: Tauri window over the UI package in ui/.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.4"
+  }
+}
