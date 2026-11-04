@@ -169,7 +169,7 @@ fake task, read the stream and use one terminal.
 - [x] Build the fixed shell: sidebar, required chat, always-on inspector, status
   bar. The inspector has tabs, but only Terminals is enabled; Preview, Review,
   Git and Files are named placeholders.
-- [ ] Implement project add/list, draft creation, send prompt, task select and
+- [x] Implement project add/list, draft creation, send prompt, task select and
   quit.
 - [ ] Add `0002_workspace.sql` for terminals, project terminal layouts and task
   workspace layouts; the one terminal must survive an app restart as an ended
