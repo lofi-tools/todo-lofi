@@ -15,8 +15,8 @@ pub mod store;
 pub mod tasks;
 pub mod terminal;
 
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

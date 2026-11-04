@@ -7,10 +7,14 @@ description = "Headless Shepherd core: commands, events, snapshots, task lifecyc
 [lib]
 path = "src/shepherd_core.rs"
 
+[features]
+test-support = ["dep:tempfile"]
+
 [dependencies]
 agent-harness = { path = "../agent-harness" }
 async-trait.workspace = true
 sha2.workspace = true
+tempfile = { version = "3", optional = true }
 thiserror.workspace = true
 toasty = { version = "0.7", features = ["turso"] }
 toasty-driver-turso = "0.7"

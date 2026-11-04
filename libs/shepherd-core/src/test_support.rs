@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::git::{GitError, GitRepository, GitService, run_git};
+use crate::{Command, CommandResult, Core, CoreError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FixtureError {
@@ -83,6 +84,70 @@ impl TestRepository {
     }
 }
 
+/// A core wrapper that records every command, result and emitted event. If a
+/// test panics while the scenario is alive, `Drop` prints the trace so the
+/// failure includes the order that produced it.
+pub struct TestCore {
+    core: Core,
+    trace: Vec<String>,
+}
+
+impl TestCore {
+    pub fn new() -> Self {
+        Self::with_core(Core::new())
+    }
+
+    pub fn with_core(core: Core) -> Self {
+        Self {
+            core,
+            trace: Vec::new(),
+        }
+    }
+
+    pub fn core(&self) -> &Core {
+        &self.core
+    }
+
+    pub fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+
+    pub async fn execute(&mut self, command: Command) -> Result<CommandResult, CoreError> {
+        self.trace.push(format!("command: {command:?}"));
+        let result = self.core.execute(command).await;
+        match &result {
+            Ok(result) => self.trace.push(format!("result: {result:?}")),
+            Err(error) => self.trace.push(format!("error: {error:?}")),
+        }
+        for event in self.core.drain_events() {
+            self.trace.push(format!("event: {event:?}"));
+        }
+        result
+    }
+
+    pub fn trace(&self) -> String {
+        self.trace
+            .iter()
+            .enumerate()
+            .map(|(index, step)| format!("{index}: {step}\n"))
+            .collect()
+    }
+}
+
+impl Default for TestCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TestCore {
+    fn drop(&mut self) {
+        if std::thread::panicking() && !self.trace.is_empty() {
+            eprintln!("Shepherd scenario trace:\n{}", self.trace());
+        }
+    }
+}
+
 pub struct TestDatabase {
     directory: TestDirectory,
 }
@@ -100,5 +165,30 @@ impl TestDatabase {
 
     pub fn uri(&self) -> String {
         format!("turso:{}", self.directory.join("shepherd.db").display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_scenario_trace_records_commands_results_and_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let mut scenario = TestCore::new();
+
+        scenario
+            .execute(Command::AddProject {
+                path: directory.path().to_path_buf(),
+            })
+            .await?;
+
+        let trace = scenario.trace();
+        assert!(trace.contains("command: AddProject"));
+        assert!(trace.contains("result: ProjectList"));
+        assert!(trace.contains("event: ProjectListChanged"));
+        assert!(trace.contains("event: TaskListChanged"));
+        Ok(())
     }
 }
