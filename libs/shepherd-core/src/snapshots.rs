@@ -1,5 +1,7 @@
 //! Snapshots returned by commands and included in change events.
 
+use agent_harness::Entry;
+
 use crate::projects::{ProjectId, ProjectSnapshot};
 use crate::tasks::{TaskDetail, TaskSummary};
 
@@ -14,8 +16,9 @@ pub struct TaskList {
     pub tasks: Vec<TaskSummary>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TaskWorkspace {
     pub project: ProjectSnapshot,
     pub task: TaskDetail,
+    pub transcript: Vec<Entry>,
 }

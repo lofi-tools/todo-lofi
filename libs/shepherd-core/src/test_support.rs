@@ -1,9 +1,15 @@
 //! Test-only directories and repositories. Every helper owns a temporary path,
 //! so a test can never write into the real application data directory.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use agent_harness::AgentHarness;
+use agent_harness::fake_harness::{FakeHarness, FakeTurn};
 
 use crate::git::{GitError, GitRepository, GitService, run_git};
+use crate::harness::HarnessFactory;
 use crate::{Command, CommandResult, Core, CoreError};
 
 #[derive(Debug, thiserror::Error)]
@@ -145,6 +151,33 @@ impl Drop for TestCore {
         if std::thread::panicking() && !self.trace.is_empty() {
             eprintln!("Shepherd scenario trace:\n{}", self.trace());
         }
+    }
+}
+
+/// A queue of fake scripts. Each created harness consumes the next script, so
+/// a test can model a fresh adapter process after a restart.
+pub struct FakeHarnessFactory {
+    scripts: Mutex<VecDeque<Vec<FakeTurn>>>,
+}
+
+impl FakeHarnessFactory {
+    pub fn new(scripts: Vec<Vec<FakeTurn>>) -> Self {
+        Self {
+            scripts: Mutex::new(scripts.into()),
+        }
+    }
+}
+
+impl HarnessFactory for FakeHarnessFactory {
+    fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+        let script = match self.scripts.lock() {
+            Ok(mut scripts) => scripts.pop_front().unwrap_or_default(),
+            Err(poisoned) => {
+                let mut scripts = poisoned.into_inner();
+                scripts.pop_front().unwrap_or_default()
+            }
+        };
+        Ok(Box::new(FakeHarness::new(script)))
     }
 }
 

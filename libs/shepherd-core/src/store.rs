@@ -37,6 +37,7 @@ pub trait Store: Send + Sync {
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
+    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
 }
 
 struct Migration {
@@ -184,6 +185,15 @@ impl Store for TursoStore {
         .bind(task.updated_at as i64)
         .exec(&mut *db)
         .await?;
+        Ok(())
+    }
+
+    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM tasks WHERE id = ?1")
+            .bind(task_id.as_str())
+            .exec(&mut *db)
+            .await?;
         Ok(())
     }
 }
@@ -374,6 +384,12 @@ impl Store for MemoryStore {
     async fn save_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.id.as_str().to_string(), task.clone());
+        Ok(())
+    }
+
+    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
+        let mut tasks = self.tasks.write().await;
+        tasks.remove(task_id.as_str());
         Ok(())
     }
 }

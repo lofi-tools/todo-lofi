@@ -114,7 +114,7 @@ impl TaskState {
             (Starting, Ready | Failed | Cancelled | Interrupted) => true,
             (Ready, Starting | Working | Cancelled | Interrupted) => true,
             (Working, Waiting | Review | Ready | Failed | Cancelled | Interrupted) => true,
-            (Waiting, Working | Review | Failed | Cancelled | Interrupted) => true,
+            (Waiting, Ready | Working | Review | Failed | Cancelled | Interrupted) => true,
             (Queued, Working | Cancelled | Interrupted) => true,
             (Review, Working | Done | Failed | Interrupted) => true,
             (Done, Review) => true,

@@ -21,6 +21,7 @@ pub mod test_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use agent_harness::{HarnessEvent, SpawnSpec, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary};
@@ -29,6 +30,10 @@ pub use input::{Focus, InputMode};
 pub use projects::{Project, ProjectId, ProjectSnapshot};
 pub use snapshots::{ProjectList, TaskList, TaskWorkspace};
 pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
+
+use crate::git::{GitError, GitService};
+use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
+use crate::store::{MemoryStore, Store, StoreError};
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -46,8 +51,24 @@ pub enum CoreError {
     TaskNotFound { id: String },
     #[error("task title cannot be empty")]
     EmptyTitle,
+    #[error("the prompt is empty")]
+    EmptyPrompt,
     #[error("task {id} is not a draft")]
     NotADraft { id: String },
+    #[error("task {id} is {state}; it cannot accept a prompt")]
+    TaskNotReady { id: String, state: &'static str },
+    #[error("task {id} is {state}; it has nothing to resume")]
+    TaskNotResumable { id: String, state: &'static str },
+    #[error("task {id} is {state}; it cannot be cancelled")]
+    TaskNotCancellable { id: String, state: &'static str },
+    #[error("task {id} has no pending approval")]
+    NoPendingApproval { id: String },
+    #[error("approval mismatch for task {id}: expected {expected}, got {actual}")]
+    ApprovalMismatch {
+        id: String,
+        expected: String,
+        actual: String,
+    },
     #[error("cannot transition task {id} from {from} to {to}")]
     InvalidTransition {
         id: String,
@@ -58,12 +79,20 @@ pub enum CoreError {
     QuitConfirmationRequired { live_tasks: usize },
     #[error("the core is not running; shutdown state is {state:?}")]
     NotRunning { state: ShutdownState },
+    #[error("the core was built without an agent harness")]
+    HarnessUnavailable,
+    #[error("no agent session is open for task {id}")]
+    SessionMissing { id: String },
     #[error("filesystem error at {path}: {source}")]
     Io {
         path: String,
         #[source]
         source: std::io::Error,
     },
+    #[error("store error: {0}")]
+    Store(#[from] StoreError),
+    #[error("Git error: {0}")]
+    Git(#[from] GitError),
     #[error("agent harness error: {0}")]
     Harness(#[from] agent_harness::HarnessError),
 }
@@ -73,6 +102,9 @@ pub struct Core {
     projects: BTreeMap<ProjectId, Project>,
     project_order: Vec<ProjectId>,
     tasks: BTreeMap<TaskId, Task>,
+    sessions: BTreeMap<TaskId, HarnessSession>,
+    store: Box<dyn Store>,
+    harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
     events: mpsc::UnboundedSender<Event>,
     event_receiver: mpsc::UnboundedReceiver<Event>,
@@ -85,17 +117,69 @@ impl Default for Core {
 }
 
 impl Core {
-    /// Create an in-memory core. Persistence is layered on in the store slice.
+    /// A core with in-memory persistence and no agent adapter. Project and draft
+    /// commands work; send and resume report [`CoreError::HarnessUnavailable`].
     pub fn new() -> Self {
+        Self::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(UnavailableHarnessFactory),
+        )
+    }
+
+    /// A core bound to a durable store and an adapter factory. Callers that want
+    /// to continue a previous run should use [`Core::load`] instead.
+    pub fn with_services(store: Box<dyn Store>, harness_factory: Box<dyn HarnessFactory>) -> Self {
         let (events, event_receiver) = mpsc::unbounded_channel();
         Self {
             projects: BTreeMap::new(),
             project_order: Vec::new(),
             tasks: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            store,
+            harness_factory,
             shutdown: ShutdownState::Running,
             events,
             event_receiver,
         }
+    }
+
+    /// Open a core from durable records. No agent process survives a restart, so
+    /// every task that was live when the previous run ended is loaded as
+    /// `interrupted`: resuming starts a new session rather than pretending the
+    /// old one is still attached.
+    pub async fn load(
+        store: Box<dyn Store>,
+        harness_factory: Box<dyn HarnessFactory>,
+    ) -> Result<Self, CoreError> {
+        let mut core = Self::with_services(store, harness_factory);
+
+        let mut projects = core.store.load_projects().await?;
+        projects.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        for project in projects {
+            core.project_order.push(project.id.clone());
+            core.projects.insert(project.id.clone(), project);
+        }
+
+        for task in core.store.load_tasks().await? {
+            core.tasks.insert(task.id.clone(), task);
+        }
+
+        let live_tasks: Vec<TaskId> = core
+            .tasks
+            .values()
+            .filter(|task| task.state.is_live())
+            .map(|task| task.id.clone())
+            .collect();
+        for task_id in live_tasks {
+            core.set_task_state(&task_id, TaskState::Interrupted)?;
+            core.save_task(&task_id).await?;
+        }
+
+        Ok(core)
     }
 
     pub fn shutdown_state(&self) -> ShutdownState {
@@ -112,10 +196,20 @@ impl Core {
         }
 
         match command {
-            Command::AddProject { path } => self.add_project(path),
-            Command::CreateDraft { project_id, title } => self.create_draft(&project_id, title),
-            Command::DiscardDraft { task_id } => self.discard_draft(&task_id),
-            Command::Quit { force } => self.quit(force),
+            Command::AddProject { path } => self.add_project(path).await,
+            Command::CreateDraft { project_id, title } => {
+                self.create_draft(&project_id, title).await
+            }
+            Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
+            Command::SendPrompt { task_id, text } => self.send_prompt(&task_id, text).await,
+            Command::ResolveApproval {
+                task_id,
+                approval_id,
+                decision,
+            } => self.resolve_approval(&task_id, approval_id, decision).await,
+            Command::CancelTask { task_id } => self.cancel_task(&task_id).await,
+            Command::ResumeTask { task_id } => self.resume_task(&task_id).await,
+            Command::Quit { force } => self.quit(force).await,
         }
     }
 
@@ -176,10 +270,15 @@ impl Core {
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
+            transcript: self
+                .sessions
+                .get(task_id)
+                .map(|session| session.transcript().entries().to_vec())
+                .unwrap_or_default(),
         })
     }
 
-    fn add_project(&mut self, path: PathBuf) -> Result<CommandResult, CoreError> {
+    async fn add_project(&mut self, path: PathBuf) -> Result<CommandResult, CoreError> {
         if path.as_os_str().is_empty() {
             return Err(CoreError::EmptyProjectPath);
         }
@@ -195,6 +294,7 @@ impl Core {
         }
 
         let project = Project::new(normalized);
+        self.store.save_project(&project).await?;
         let project_id = project.id.clone();
         self.projects.insert(project_id.clone(), project);
         self.project_order.push(project_id.clone());
@@ -208,7 +308,7 @@ impl Core {
         Ok(CommandResult::ProjectList(projects))
     }
 
-    fn create_draft(
+    async fn create_draft(
         &mut self,
         project_id: &ProjectId,
         title: String,
@@ -231,9 +331,13 @@ impl Core {
 
         let task = Task::draft(project_id.clone(), &title, &project.path);
         let task_id = task.id.clone();
-        if let Some(project) = self.projects.get_mut(project_id) {
-            project.last_task_id = Some(task_id.clone());
-        }
+        let mut updated_project = project.clone();
+        updated_project.last_task_id = Some(task_id.clone());
+
+        self.store.save_project(&updated_project).await?;
+        self.store.save_task(&task).await?;
+
+        self.projects.insert(project_id.clone(), updated_project);
         self.tasks.insert(task_id.clone(), task);
 
         let workspace = self.task_workspace(&task_id)?;
@@ -243,7 +347,7 @@ impl Core {
         Ok(CommandResult::TaskWorkspace(workspace))
     }
 
-    fn discard_draft(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+    async fn discard_draft(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
         let task = self.task(task_id)?;
         if task.state != TaskState::Draft {
             return Err(CoreError::NotADraft {
@@ -251,11 +355,19 @@ impl Core {
             });
         }
         let project_id = task.project_id.clone();
+        self.store.delete_task(task_id).await?;
         self.tasks.remove(task_id);
+        self.sessions.remove(task_id);
+
+        let mut updated_project = None;
         if let Some(project) = self.projects.get_mut(&project_id)
             && project.last_task_id.as_ref() == Some(task_id)
         {
             project.last_task_id = None;
+            updated_project = Some(project.clone());
+        }
+        if let Some(project) = updated_project {
+            self.store.save_project(&project).await?;
         }
 
         self.emit(Event::TaskListChanged(self.task_list(&project_id)?));
@@ -263,38 +375,336 @@ impl Core {
         Ok(CommandResult::Ack)
     }
 
-    fn quit(&mut self, force: bool) -> Result<CommandResult, CoreError> {
-        let live_tasks = self
+    /// The first prompt creates the worktree and the agent session; later
+    /// prompts reuse both.
+    async fn send_prompt(
+        &mut self,
+        task_id: &TaskId,
+        text: String,
+    ) -> Result<CommandResult, CoreError> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err(CoreError::EmptyPrompt);
+        }
+
+        match self.task(task_id)?.state {
+            TaskState::Draft => self.create_worktree(task_id).await?,
+            TaskState::Ready | TaskState::Review => {}
+            state => {
+                return Err(CoreError::TaskNotReady {
+                    id: task_id.as_str().to_string(),
+                    state: state.as_str(),
+                });
+            }
+        }
+
+        self.set_task_state(task_id, TaskState::Working)?;
+        self.ensure_session(task_id).await?;
+
+        let events = {
+            let session =
+                self.sessions
+                    .get_mut(task_id)
+                    .ok_or_else(|| CoreError::SessionMissing {
+                        id: task_id.as_str().to_string(),
+                    })?;
+            session.prompt(text).await?
+        };
+
+        self.apply_events(task_id, &events)?;
+        self.save_task(task_id).await?;
+        let workspace = self.publish_task(task_id)?;
+        Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn resolve_approval(
+        &mut self,
+        task_id: &TaskId,
+        approval_id: agent_harness::ApprovalId,
+        decision: agent_harness::Decision,
+    ) -> Result<CommandResult, CoreError> {
+        let events = {
+            let session =
+                self.sessions
+                    .get_mut(task_id)
+                    .ok_or_else(|| CoreError::SessionMissing {
+                        id: task_id.as_str().to_string(),
+                    })?;
+            let pending = session.pending_approval().cloned().ok_or_else(|| {
+                CoreError::NoPendingApproval {
+                    id: task_id.as_str().to_string(),
+                }
+            })?;
+            if pending != approval_id {
+                return Err(CoreError::ApprovalMismatch {
+                    id: task_id.as_str().to_string(),
+                    expected: pending.as_str().to_string(),
+                    actual: approval_id.as_str().to_string(),
+                });
+            }
+            session.respond(approval_id, decision).await?
+        };
+
+        self.apply_events(task_id, &events)?;
+        self.save_task(task_id).await?;
+        let workspace = self.publish_task(task_id)?;
+        Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    /// Cancel stops the current turn but keeps the session and the worktree:
+    /// the user can send a new prompt without paying for a fresh worktree.
+    async fn cancel_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+        let state = self.task(task_id)?.state;
+        if !state.is_live() && state != TaskState::Review {
+            return Err(CoreError::TaskNotCancellable {
+                id: task_id.as_str().to_string(),
+                state: state.as_str(),
+            });
+        }
+
+        let events = match self.sessions.get_mut(task_id) {
+            Some(session) => session.cancel().await?,
+            None => Vec::new(),
+        };
+        self.apply_events(task_id, &events)?;
+
+        let state = self.task(task_id)?.state;
+        if state.is_live() {
+            self.set_task_state(task_id, TaskState::Ready)?;
+        }
+        self.save_task(task_id).await?;
+        let workspace = self.publish_task(task_id)?;
+        Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    /// Resume an interrupted task with a new agent session. The transcript says
+    /// plainly that the previous process is gone.
+    async fn resume_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+        let state = self.task(task_id)?.state;
+        if state != TaskState::Interrupted {
+            return Err(CoreError::TaskNotResumable {
+                id: task_id.as_str().to_string(),
+                state: state.as_str(),
+            });
+        }
+
+        self.set_task_state(task_id, TaskState::Starting)?;
+        self.sessions.remove(task_id);
+        self.ensure_session(task_id).await?;
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            session.note(
+                "the previous agent process did not survive shutdown; started a new session",
+                false,
+            );
+        }
+        self.set_task_state(task_id, TaskState::Ready)?;
+        self.save_task(task_id).await?;
+        let workspace = self.publish_task(task_id)?;
+        Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn create_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let task = self.task(task_id)?.clone();
+        let project_path = self.project_path(&task.project_id)?;
+        if task.proposed_worktree_path.exists() {
+            return Err(CoreError::Io {
+                path: task.proposed_worktree_path.display().to_string(),
+                source: std::io::Error::other("task worktree path already exists"),
+            });
+        }
+
+        let repository = GitService::discover(&project_path)?;
+        self.set_task_state(task_id, TaskState::Starting)?;
+        if let Err(error) = GitService.create_worktree(
+            &repository,
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            &repository.default_branch,
+        ) {
+            self.fail_task(task_id, error.to_string()).await?;
+            return Err(CoreError::Git(error));
+        }
+
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::TaskNotFound {
+                id: task_id.as_str().to_string(),
+            })?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.base_branch = Some(repository.default_branch);
+        task.set_state(TaskState::Ready)?;
+        self.save_task(task_id).await
+    }
+
+    async fn ensure_session(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        if self.sessions.contains_key(task_id) {
+            return Ok(());
+        }
+
+        let task = self.task(task_id)?.clone();
+        let cwd = match task.worktree_path.clone() {
+            Some(worktree_path) => worktree_path,
+            None => self.project_path(&task.project_id)?,
+        };
+        let harness = self.harness_factory.create()?;
+        let mut session = HarnessSession::new(harness);
+        session
+            .start(SpawnSpec {
+                program: "shepherd-agent".to_string(),
+                cwd,
+                ..SpawnSpec::default()
+            })
+            .await?;
+        session.open_session(None).await?;
+        self.sessions.insert(task_id.clone(), session);
+        Ok(())
+    }
+
+    /// Fold adapter activity into the task state. The transcript itself is
+    /// updated by [`HarnessSession`] as it pumps the same events.
+    fn apply_events(&mut self, task_id: &TaskId, events: &[HarnessEvent]) -> Result<(), CoreError> {
+        let mut next_state = None;
+        let mut task_error = None;
+
+        for event in events {
+            match event {
+                HarnessEvent::ApprovalRequested { .. } => {
+                    next_state = Some(TaskState::Waiting);
+                }
+                HarnessEvent::TurnFinished { reason } => match reason {
+                    TurnFinishReason::Completed => {
+                        next_state = Some(self.state_after_completed_turn(task_id)?);
+                    }
+                    TurnFinishReason::Cancelled => next_state = Some(TaskState::Ready),
+                    TurnFinishReason::Failed => {
+                        next_state = Some(TaskState::Failed);
+                        task_error
+                            .get_or_insert_with(|| "the agent reported a failed turn".to_string());
+                    }
+                    TurnFinishReason::Interrupted => {
+                        next_state = Some(TaskState::Interrupted);
+                    }
+                },
+                HarnessEvent::Exited { code, stderr } => {
+                    if *code != Some(0) {
+                        next_state = Some(TaskState::Failed);
+                        task_error = Some(format!("the agent exited with code {code:?}: {stderr}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(state) = next_state {
+            let task = self
+                .tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CoreError::TaskNotFound {
+                    id: task_id.as_str().to_string(),
+                })?;
+            if task.state != state {
+                task.set_state(state)?;
+            }
+            if let Some(message) = task_error {
+                task.error = Some(message);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// A completed turn with real changes enters review; a chat-only turn goes
+    /// back to ready. S3 replaces the worktree check with the turn baseline.
+    fn state_after_completed_turn(&self, task_id: &TaskId) -> Result<TaskState, CoreError> {
+        let task = self.task(task_id)?;
+        let Some(worktree_path) = task.worktree_path.as_ref() else {
+            return Ok(TaskState::Ready);
+        };
+        if !worktree_path.exists() {
+            return Ok(TaskState::Ready);
+        }
+        if GitService.has_changes(worktree_path)? {
+            Ok(TaskState::Review)
+        } else {
+            Ok(TaskState::Ready)
+        }
+    }
+
+    async fn fail_task(&mut self, task_id: &TaskId, message: String) -> Result<(), CoreError> {
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::TaskNotFound {
+                id: task_id.as_str().to_string(),
+            })?;
+        task.error = Some(message);
+        if task.set_state(TaskState::Failed).is_err() {
+            tracing::error!(
+                task_id = task_id.as_str(),
+                state = task.state.as_str(),
+                "could not mark the task failed"
+            );
+        }
+        self.save_task(task_id).await
+    }
+
+    async fn quit(&mut self, force: bool) -> Result<CommandResult, CoreError> {
+        let live_tasks: Vec<TaskId> = self
             .tasks
             .values()
             .filter(|task| task.state.is_live())
-            .count();
-        if live_tasks > 0 && !force {
-            return Err(CoreError::QuitConfirmationRequired { live_tasks });
+            .map(|task| task.id.clone())
+            .collect();
+        if !live_tasks.is_empty() && !force {
+            return Err(CoreError::QuitConfirmationRequired {
+                live_tasks: live_tasks.len(),
+            });
         }
 
         self.set_shutdown(ShutdownState::Draining);
+
+        let session_tasks: Vec<TaskId> = self.sessions.keys().cloned().collect();
+        for task_id in session_tasks {
+            let Some(mut session) = self.sessions.remove(&task_id) else {
+                continue;
+            };
+            if let Err(error) = session.shutdown().await {
+                tracing::error!(
+                    task_id = task_id.as_str(),
+                    %error,
+                    "failed to stop the agent session during shutdown"
+                );
+            }
+        }
+
         let mut interrupted_tasks = 0;
         let mut affected_projects = Vec::new();
-        let mut changed_tasks = Vec::new();
-        for task in self.tasks.values_mut() {
-            if task.state.is_live() {
+        for task_id in live_tasks {
+            let (project_id, summary) = {
+                let task = self
+                    .tasks
+                    .get_mut(&task_id)
+                    .ok_or_else(|| CoreError::TaskNotFound {
+                        id: task_id.as_str().to_string(),
+                    })?;
                 if let Err(error) = task.set_state(TaskState::Interrupted) {
                     tracing::error!(
-                        task_id = task.id.as_str(),
+                        task_id = task_id.as_str(),
                         %error,
                         "failed to mark live task interrupted during shutdown"
                     );
                     continue;
                 }
-                interrupted_tasks += 1;
-                if !affected_projects.contains(&task.project_id) {
-                    affected_projects.push(task.project_id.clone());
-                }
-                changed_tasks.push(TaskSummary::from(&*task));
+                (task.project_id.clone(), TaskSummary::from(&*task))
+            };
+
+            self.save_task(&task_id).await?;
+            interrupted_tasks += 1;
+            if !affected_projects.contains(&project_id) {
+                affected_projects.push(project_id);
             }
-        }
-        for summary in changed_tasks {
             self.emit(Event::TaskChanged(summary));
         }
 
@@ -324,6 +734,43 @@ impl Core {
             .ok_or_else(|| CoreError::TaskNotFound {
                 id: task_id.as_str().to_string(),
             })
+    }
+
+    fn project_path(&self, project_id: &ProjectId) -> Result<PathBuf, CoreError> {
+        self.projects
+            .get(project_id)
+            .map(|project| project.path.clone())
+            .ok_or_else(|| CoreError::ProjectNotFound {
+                id: project_id.as_str().to_string(),
+            })
+    }
+
+    fn set_task_state(&mut self, task_id: &TaskId, state: TaskState) -> Result<(), CoreError> {
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::TaskNotFound {
+                id: task_id.as_str().to_string(),
+            })?;
+        task.set_state(state)
+    }
+
+    async fn save_task(&self, task_id: &TaskId) -> Result<(), CoreError> {
+        let task = self.task(task_id)?.clone();
+        self.store.save_task(&task).await?;
+        Ok(())
+    }
+
+    /// Emit the task row, the task workspace and the project's task list after
+    /// any state or transcript change.
+    fn publish_task(&mut self, task_id: &TaskId) -> Result<TaskWorkspace, CoreError> {
+        let task = self.task(task_id)?.clone();
+        let workspace = self.task_workspace(task_id)?;
+        let tasks = self.task_list(&task.project_id)?;
+        self.emit(Event::TaskChanged(TaskSummary::from(&task)));
+        self.emit(Event::TaskWorkspaceChanged(workspace.clone()));
+        self.emit(Event::TaskListChanged(tasks));
+        Ok(workspace)
     }
 
     fn project_snapshot(&self, project: &Project) -> ProjectSnapshot {
@@ -384,8 +831,16 @@ fn normalize_project_path(path: &Path) -> Result<PathBuf, CoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use agent_harness::fake_harness::{FakeStep, FakeTurn};
+    use agent_harness::{ApprovalId, Decision, Entry};
+
     use super::*;
-    use crate::test_support::TestDirectory;
+    use crate::store::TursoStore;
+    use crate::test_support::{
+        FakeHarnessFactory, TestCore, TestDatabase, TestDirectory, TestRepository,
+    };
 
     async fn add_project(
         core: &mut Core,
@@ -400,6 +855,17 @@ mod tests {
             .first()
             .ok_or("the project list should contain the added project")?;
         Ok(ProjectId::new(project.id.clone()))
+    }
+
+    fn workspace_of(result: CommandResult) -> TaskWorkspace {
+        match result {
+            CommandResult::TaskWorkspace(workspace) => workspace,
+            other => panic!("expected a task workspace, got {other:?}"),
+        }
+    }
+
+    fn summaries(workspace: &TaskWorkspace) -> Vec<String> {
+        workspace.transcript.iter().map(Entry::summary).collect()
     }
 
     #[tokio::test]
@@ -463,6 +929,7 @@ mod tests {
         assert_eq!(workspace.task.state, TaskState::Draft);
         assert!(workspace.task.worktree_path.is_none());
         assert!(workspace.task.branch.is_none());
+        assert!(workspace.transcript.is_empty());
         assert_eq!(workspace.task.proposed_branch, "shepherd/fix-the-parser");
 
         let tasks = core.task_list(&project_id).expect("task list");
@@ -509,6 +976,9 @@ mod tests {
 
         assert!(task.set_state(TaskState::Working).is_err());
         assert!(task.set_state(TaskState::Starting).is_ok());
+        assert!(task.set_state(TaskState::Ready).is_ok());
+        assert!(task.set_state(TaskState::Working).is_ok());
+        assert!(task.set_state(TaskState::Waiting).is_ok());
         assert!(task.set_state(TaskState::Ready).is_ok());
         assert!(task.set_state(TaskState::Working).is_ok());
         assert!(task.set_state(TaskState::Waiting).is_ok());
@@ -583,5 +1053,270 @@ mod tests {
         };
         assert_eq!(summary.interrupted_tasks, 0);
         assert_eq!(core.shutdown_state(), ShutdownState::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_fake_task_runs_through_approval_quit_and_resume()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+
+        let first_run = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            // One session script with two turns: the second prompt reuses the
+            // same worktree and agent session as the first.
+            Box::new(FakeHarnessFactory::new(vec![vec![
+                FakeTurn::new(vec![
+                    FakeStep::Message("working on it".to_string()),
+                    FakeStep::approval("approval-1", "Run tests"),
+                    FakeStep::Message("all done".to_string()),
+                ]),
+                FakeTurn::new(vec![FakeStep::approval("approval-2", "Write the file")]),
+            ]])),
+        );
+        let mut scenario = TestCore::with_core(first_run);
+
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id: project_id.clone(),
+                    title: "Fix the parser".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(draft.task.state, TaskState::Draft);
+        assert!(draft.task.worktree_path.is_none());
+        let worktree_path = PathBuf::from(&draft.task.proposed_worktree_path);
+        assert!(!worktree_path.exists());
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: "fix it".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+        assert_eq!(
+            workspace.task.branch.as_deref(),
+            Some("shepherd/fix-the-parser")
+        );
+        assert_eq!(workspace.task.base_branch.as_deref(), Some("main"));
+        assert!(worktree_path.join("README.md").is_file());
+        assert_eq!(
+            summaries(&workspace),
+            vec![
+                "you: fix it".to_string(),
+                "agent: working on it".to_string(),
+                "approval: Run tests (pending)".to_string(),
+            ]
+        );
+        assert_eq!(
+            workspace
+                .transcript
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(workspace.transcript[0].id, "entry-0");
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::ResolveApproval {
+                    task_id: task_id.clone(),
+                    approval_id: ApprovalId::new("approval-1"),
+                    decision: Decision::Allow,
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(
+            summaries(&workspace),
+            vec![
+                "you: fix it".to_string(),
+                "agent: working on it".to_string(),
+                "approval: Run tests (Allow)".to_string(),
+                "agent: all done".to_string(),
+            ]
+        );
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: "go again".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+
+        let refused = scenario.execute(Command::Quit { force: false }).await;
+        assert!(matches!(
+            refused,
+            Err(CoreError::QuitConfirmationRequired { live_tasks: 1 })
+        ));
+        let result = scenario.execute(Command::Quit { force: true }).await?;
+        let CommandResult::Quit(summary) = result else {
+            panic!("expected a quit result");
+        };
+        assert_eq!(summary.interrupted_tasks, 1);
+        drop(scenario);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("resumed answer".to_string()),
+            ])]])),
+        )
+        .await?;
+        let mut scenario = TestCore::with_core(reopened);
+
+        let workspace = scenario.core().task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Interrupted);
+        assert!(workspace.transcript.is_empty());
+        assert!(worktree_path.join("README.md").is_file());
+        assert_eq!(workspace.project.unfinished_task_count, 1);
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::ResumeTask {
+                    task_id: task_id.clone(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(workspace.transcript.len(), 1);
+        assert!(
+            workspace.transcript[0]
+                .summary()
+                .contains("did not survive")
+        );
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: "continue".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(
+            workspace.transcript.last().map(Entry::summary),
+            Some("agent: resumed answer".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_keeps_the_worktree_and_the_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![
+                FakeTurn::new(vec![FakeStep::approval("approval-1", "Run tests")]),
+                FakeTurn::new(vec![FakeStep::Message("after cancel".to_string())]),
+            ]])),
+        );
+
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Cancel me".to_string(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+        let worktree_path = PathBuf::from(
+            workspace
+                .task
+                .worktree_path
+                .clone()
+                .expect("the first send should create a worktree"),
+        );
+
+        let workspace = workspace_of(
+            core.execute(Command::CancelTask {
+                task_id: task_id.clone(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(workspace.task.worktree_path.is_some());
+        assert!(worktree_path.is_dir());
+        assert!(summaries(&workspace).contains(&"approval: Run tests (Deny)".to_string()));
+
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "try again".to_string(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(
+            workspace.transcript.last().map(Entry::summary),
+            Some("agent: after cancel".to_string())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_completed_turn_with_changes_enters_review() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::WriteFile {
+                    path: PathBuf::from("notes.txt"),
+                    contents: "hello\n".to_string(),
+                },
+            ])]])),
+        );
+
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Change a file".to_string(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id,
+                text: "write it".to_string(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Review);
+        let worktree_path = PathBuf::from(
+            workspace
+                .task
+                .worktree_path
+                .expect("a changed turn needs a worktree"),
+        );
+        assert!(worktree_path.join("notes.txt").is_file());
+        assert!(!repository.path().join("notes.txt").exists());
+        Ok(())
     }
 }

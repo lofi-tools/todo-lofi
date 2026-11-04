@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use agent_harness::{ApprovalId, Decision};
+
 use crate::projects::ProjectId;
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
 use crate::tasks::TaskId;
@@ -16,6 +18,21 @@ pub enum Command {
         title: String,
     },
     DiscardDraft {
+        task_id: TaskId,
+    },
+    SendPrompt {
+        task_id: TaskId,
+        text: String,
+    },
+    ResolveApproval {
+        task_id: TaskId,
+        approval_id: ApprovalId,
+        decision: Decision,
+    },
+    CancelTask {
+        task_id: TaskId,
+    },
+    ResumeTask {
         task_id: TaskId,
     },
     Quit {

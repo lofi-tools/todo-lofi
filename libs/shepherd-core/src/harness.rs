@@ -11,6 +11,22 @@ use agent_harness::{
 
 use crate::CoreError;
 
+/// Creates one adapter instance for a task. The shell or test supplies the
+/// implementation; the core never chooses a concrete CLI here.
+pub trait HarnessFactory: Send + Sync {
+    fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
+}
+
+/// The factory a core built without an adapter gets. Agent work fails with a
+/// clear error instead of appearing to start and then doing nothing.
+pub struct UnavailableHarnessFactory;
+
+impl HarnessFactory for UnavailableHarnessFactory {
+    fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+        Err(CoreError::HarnessUnavailable)
+    }
+}
+
 /// One live adapter session with its core-owned transcript.
 pub struct HarnessSession {
     harness: Box<dyn AgentHarness>,
@@ -98,6 +114,12 @@ impl HarnessSession {
 
     pub fn transcript(&self) -> &Transcript {
         &self.transcript
+    }
+
+    /// Record a core-owned observation. Used when the core has to tell the user
+    /// something the adapter cannot report, such as a lost session.
+    pub fn note(&mut self, text: impl Into<String>, is_error: bool) {
+        self.transcript.push_notice(text, is_error);
     }
 
     pub fn capabilities(&self) -> &Capabilities {

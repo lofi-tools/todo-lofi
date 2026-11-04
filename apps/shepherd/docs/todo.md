@@ -34,12 +34,12 @@ and merge it without leaving Shepherd?”
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Placeholder binary: `src/main.rs` prints `Shepherd`. No Tauri shell, no `src-tauri/`, no `ui/`. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 15 focused tests pass. Core still opens in-memory; restart wiring is pending. |
-| `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 8 focused tests pass. |
+| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 19 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
+| `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 9 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | No Shepherd UI package. Root uses `pnpm` 11.25; `pnpm-workspace.yaml` must gain the UI package when it exists. |
-| Tests | `agent-harness` has 8 focused tests; `shepherd-core` has 15. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 18. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -127,16 +127,16 @@ direnv exec . ./scripts/check-shepherd-boundary.sh
 
 The core scenarios must cover:
 
-- [ ] add project, duplicate path rejected, missing path marked;
-- [ ] new draft appears as a task, creates no worktree and no branch;
-- [ ] first send creates the worktree and starts the task;
-- [ ] fake stream assembles into transcript entries with stable IDs and order;
-- [ ] approval moves the task to `waiting`, and a decision resumes it;
-- [ ] cancel keeps the session and worktree;
-- [ ] quit with a live fake agent marks the task `interrupted`;
-- [ ] restart offers resume and does not claim the process survived;
-- [ ] a chat-only turn returns to `ready`;
-- [ ] the state machine can enter `review` from a completed changed turn (the
+- [x] add project, duplicate path rejected, missing path marked;
+- [x] new draft appears as a task, creates no worktree and no branch;
+- [x] first send creates the worktree and starts the task;
+- [x] fake stream assembles into transcript entries with stable IDs and order;
+- [x] approval moves the task to `waiting`, and a decision resumes it;
+- [x] cancel keeps the session and worktree;
+- [x] quit with a live fake agent marks the task `interrupted`;
+- [x] restart offers resume and does not claim the process survived;
+- [x] a chat-only turn returns to `ready`;
+- [x] the state machine can enter `review` from a completed changed turn (the
   real diff-based trigger is tested in S3).
 
 ### Gate
@@ -558,7 +558,7 @@ Record every gate result here. Do not silently mark a gate passed.
 
 | Date | Slice | Result | Evidence / decision |
 | --- | --- | --- | --- |
-|  | S0 |  |  |
+| 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shepherd-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
 |  | S1 |  |  |
 |  | S2 |  |  |
 |  | S3 |  |  |

@@ -326,7 +326,7 @@ pub enum HarnessEvent {
 }
 
 /// One settled or streaming transcript row.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     /// Canonical row ID assigned by the transcript, never by the adapter.
     pub id: String,
@@ -335,7 +335,7 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EntryKind {
     UserMessage {
         text: String,

@@ -80,6 +80,9 @@ impl Default for FakeTurn {
 struct PendingApproval {
     request: ApprovalRequest,
     remaining: Vec<FakeStep>,
+    /// The scripted offset of the first remaining step, so post-approval steps
+    /// keep distinct item IDs from the steps before the approval.
+    next_offset: usize,
     finish: TurnFinishReason,
 }
 
@@ -124,8 +127,14 @@ impl FakeHarness {
             .map_err(|_| HarnessError::ChannelClosed)
     }
 
-    fn emit_steps(&mut self, steps: &[FakeStep], finish: TurnFinishReason) -> HarnessResult<()> {
+    fn emit_steps(
+        &mut self,
+        steps: &[FakeStep],
+        offset_base: usize,
+        finish: TurnFinishReason,
+    ) -> HarnessResult<()> {
         for (offset, step) in steps.iter().enumerate() {
+            let offset = offset_base + offset;
             match step {
                 FakeStep::Message(text) => {
                     self.send(HarnessEvent::Delta {
@@ -165,7 +174,8 @@ impl FakeHarness {
                     })?;
                     self.pending = Some(PendingApproval {
                         request: request.clone(),
-                        remaining: steps[offset + 1..].to_vec(),
+                        remaining: steps[offset - offset_base + 1..].to_vec(),
+                        next_offset: offset + 1,
                         finish,
                     });
                     return Ok(());
@@ -260,14 +270,21 @@ impl AgentHarness for FakeHarness {
         })?;
         // The core records the user's prompt itself. An adapter echo would
         // duplicate it, so the fake does not send one.
-        self.emit_steps(&turn.steps, turn.finish)
+        self.emit_steps(&turn.steps, 0, turn.finish)
     }
 
     async fn cancel(&mut self) -> HarnessResult<()> {
         if !self.turn_active {
             return Ok(());
         }
-        self.pending = None;
+        if let Some(pending) = self.pending.take() {
+            // A cancelled turn cannot leave an approval pending, so report the
+            // implicit refusal the adapter would really send.
+            self.send(HarnessEvent::ApprovalResolved {
+                approval_id: pending.request.approval_id,
+                decision: Decision::Deny,
+            })?;
+        }
         self.finish_turn(TurnFinishReason::Cancelled)
     }
 
@@ -282,7 +299,9 @@ impl AgentHarness for FakeHarness {
             decision,
         })?;
         match decision {
-            Decision::Allow => self.emit_steps(&pending.remaining, pending.finish),
+            Decision::Allow => {
+                self.emit_steps(&pending.remaining, pending.next_offset, pending.finish)
+            }
             Decision::Deny => self.finish_turn(TurnFinishReason::Cancelled),
         }
     }
@@ -411,6 +430,36 @@ mod tests {
                 reason: TurnFinishReason::Completed
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn multiple_approvals_preserve_remaining_steps() -> Result<(), crate::HarnessError> {
+        let mut harness = started_harness(vec![FakeTurn::new(vec![
+            FakeStep::approval("first", "First approval"),
+            FakeStep::Message("before".to_string()),
+            FakeStep::approval("second", "Second approval"),
+            FakeStep::Message("after".to_string()),
+        ])])
+        .await;
+        harness.prompt(PromptInput::default()).await?;
+        harness
+            .respond(ApprovalId::new("first"), Decision::Allow)
+            .await?;
+        harness
+            .respond(ApprovalId::new("second"), Decision::Allow)
+            .await?;
+        let mut transcript = Transcript::default();
+        for event in drain_events(&mut harness) {
+            transcript.apply(&event);
+        }
+        let summaries: Vec<_> = transcript
+            .entries()
+            .iter()
+            .map(crate::Entry::summary)
+            .collect();
+        assert!(summaries.contains(&"agent: before".to_string()));
+        assert!(summaries.contains(&"agent: after".to_string()));
+        Ok(())
     }
 
     #[tokio::test]
