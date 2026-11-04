@@ -166,7 +166,7 @@ fake task, read the stream and use one terminal.
   starts the app.
 - [x] Wire one `#[tauri::command]` per core command and one Tauri channel for
   events. Use typed snapshots; do not build a second frontend model.
-- [ ] Build the fixed shell: sidebar, required chat, always-on inspector, status
+- [x] Build the fixed shell: sidebar, required chat, always-on inspector, status
   bar. The inspector has tabs, but only Terminals is enabled; Preview, Review,
   Git and Files are named placeholders.
 - [ ] Implement project add/list, draft creation, send prompt, task select and
