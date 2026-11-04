@@ -175,6 +175,20 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 # Build guidelines
 
+Run workspace commands through the repository's Nix direnv environment, not
+the ambient shell:
+
+```sh
+direnv exec . cargo fmt --check
+direnv exec . cargo test -p agent-harness
+direnv exec . cargo clippy --workspace -- -D warnings
+```
+
+The bare shell may expose a different Rust toolchain and does not have
+`cargo fmt`. If direnv reports that `.envrc` is blocked, run `direnv allow .`
+once from the repository root. In a non-interactive runner without direnv, use
+`nix develop -c <command>` instead.
+
 <!--# Pull request hygiene
 
 When an agent opens or updates a pull request, it must:
