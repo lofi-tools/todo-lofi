@@ -45,10 +45,16 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    name: "0001_init.sql",
-    sql: include_str!("../toasty/migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "0001_init.sql",
+        sql: include_str!("../toasty/migrations/0001_init.sql"),
+    },
+    Migration {
+        name: "0002_workspace.sql",
+        sql: include_str!("../toasty/migrations/0002_workspace.sql"),
+    },
+];
 
 /// The durable store used by the application. The database handle is guarded
 /// because Toasty's raw SQL API needs exclusive access for each statement.
@@ -487,6 +493,65 @@ mod tests {
 
         assert_eq!(store.load_projects().await?.len(), 1);
         assert!(spaced.join("shepherd.db").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_existing_database_gains_the_workspace_migration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let driver = Turso::new("turso::memory:")?;
+        let mut db = toasty::Db::builder().build(driver).await?;
+        let first = &MIGRATIONS[0];
+        let expected = checksum(first.sql);
+
+        toasty::sql::statement(
+            "CREATE TABLE _migrations_history (\
+                name TEXT NOT NULL PRIMARY KEY, \
+                checksum TEXT NOT NULL\
+            )",
+        )
+        .exec(&mut db)
+        .await?;
+        for statement in split_sql(first.sql) {
+            toasty::sql::statement(statement).exec(&mut db).await?;
+        }
+        toasty::sql::statement("INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)")
+            .bind(first.name)
+            .bind(&expected)
+            .exec(&mut db)
+            .await?;
+
+        apply_migrations(&mut db).await?;
+
+        let history = toasty::sql::query("SELECT name FROM _migrations_history ORDER BY name")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert_eq!(
+            history.len(),
+            2,
+            "the workspace migration should be recorded"
+        );
+
+        toasty::sql::query("SELECT id FROM terminals")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_workspace_migration_creates_its_tables() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let store = TursoStore::open("turso::memory:").await?;
+        let tables = table_names(&store).await?;
+
+        for expected in ["terminals", "terminal_layouts", "layouts"] {
+            assert!(
+                tables.iter().any(|name| name == expected),
+                "the workspace migration should create {expected}"
+            );
+        }
         Ok(())
     }
 

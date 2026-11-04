@@ -34,12 +34,12 @@ and merge it without leaving Shepherd?”
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Tauri 2 shell: `src-tauri/` (window, generated desktop icons, default capability, command bridge, single event channel, durable core in the app data dir) and `ui/` (SolidJS + TypeScript + Vite, typed client in `src/bridge.ts`). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. A scripted adapter stands in for the agent until S2. The fixed regions are not built yet. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 19 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
+| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded migrations (`0001_init.sql`, `0002_workspace.sql`), a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 21 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 9 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 19; the Tauri shell has 4 bridge tests (commands, snapshot serialization, durable load). The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 21; the Tauri shell has 4 bridge tests (commands, snapshot serialization, durable load). The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -171,9 +171,9 @@ fake task, read the stream and use one terminal.
   Git and Files are named placeholders.
 - [x] Implement project add/list, draft creation, send prompt, task select and
   quit.
-- [ ] Add `0002_workspace.sql` for terminals, project terminal layouts and task
+- [x] Add `0002_workspace.sql` for terminals, project terminal layouts and task
   workspace layouts; the one terminal must survive an app restart as an ended
-  terminal.
+  terminal. (The restart clause is proven by the terminal spike below.)
 - [ ] Implement the first terminal spike: `TerminalEngine` boundary,
   `portable-pty`, one PTY and a canvas. Do not build splits or the project
   terminal layout yet.
