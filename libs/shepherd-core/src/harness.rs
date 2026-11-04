@@ -119,11 +119,12 @@ mod tests {
     use agent_harness::{ApprovalId, Decision, FileDiff, ToolStatus};
 
     use super::*;
+    use crate::test_support::TestDirectory;
 
     #[tokio::test]
     async fn a_session_folds_streamed_events_into_one_transcript()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
+        let directory = TestDirectory::new()?;
         let turn = FakeTurn::new(vec![
             FakeStep::Message("hello".to_string()),
             FakeStep::ToolCall {
@@ -163,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn an_approval_is_pending_until_the_decision_resumes_it()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
+        let directory = TestDirectory::new()?;
         let turn = FakeTurn::new(vec![
             FakeStep::approval("approval-1", "Run tests"),
             FakeStep::Message("done".to_string()),

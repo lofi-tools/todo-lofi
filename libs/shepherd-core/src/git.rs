@@ -91,7 +91,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf, GitError> {
         .map_err(|source| GitError::Io { source })
 }
 
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -110,40 +110,15 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-
-    fn git(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .status()
-            .expect("git should run");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    fn repository() -> tempfile::TempDir {
-        let directory = tempfile::tempdir().expect("temp directory");
-        git(directory.path(), &["init", "-b", "main"]);
-        git(directory.path(), &["config", "user.name", "Shepherd Test"]);
-        git(
-            directory.path(),
-            &["config", "user.email", "shepherd@example.com"],
-        );
-        fs::write(directory.path().join("README.md"), "initial\n").expect("write fixture");
-        git(directory.path(), &["add", "README.md"]);
-        git(directory.path(), &["commit", "-m", "initial"]);
-        directory
-    }
+    use crate::test_support::{TestDirectory, TestRepository};
 
     #[test]
     fn discovers_the_repository_and_creates_a_worktree_under_the_git_dir() {
-        let directory = repository();
-        let repository = GitService::discover(directory.path()).expect("repository");
+        let fixture = TestRepository::new().expect("repository fixture");
+        let repository = fixture.repository();
         assert_eq!(repository.default_branch, "main");
-        let expected_git_dir = directory
+        let expected_git_dir = fixture
             .path()
             .canonicalize()
             .expect("canonical repository path")
@@ -156,26 +131,28 @@ mod tests {
             .join("worktrees")
             .join("task-1");
         GitService
-            .create_worktree(&repository, &worktree, "shepherd/task-1", "main")
+            .create_worktree(repository, &worktree, "shepherd/task-1", "main")
             .expect("worktree should be created");
 
         assert!(worktree.join("README.md").is_file());
         let list =
-            run_git(directory.path(), &["worktree", "list", "--porcelain"]).expect("worktree list");
+            run_git(fixture.path(), &["worktree", "list", "--porcelain"]).expect("worktree list");
         assert!(list.contains(&worktree.display().to_string()));
     }
 
     #[test]
     fn a_clean_worktree_has_no_changes_until_a_file_is_written() {
-        let directory = repository();
-        let repository = GitService::discover(directory.path()).expect("repository");
+        let fixture = TestRepository::new().expect("repository fixture");
+        let repository = fixture.repository();
         assert!(
             !GitService
                 .has_changes(&repository.root)
                 .expect("status should run")
         );
 
-        fs::write(repository.root.join("README.md"), "changed\n").expect("write change");
+        fixture
+            .write_file("README.md", "changed\n")
+            .expect("write change");
         assert!(
             GitService
                 .has_changes(&repository.root)
@@ -185,7 +162,7 @@ mod tests {
 
     #[test]
     fn a_non_repository_is_reported() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");
         assert!(matches!(error, GitError::CommandFailed { .. }));
     }

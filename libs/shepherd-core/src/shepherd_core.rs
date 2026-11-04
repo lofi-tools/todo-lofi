@@ -15,6 +15,9 @@ pub mod store;
 pub mod tasks;
 pub mod terminal;
 
+#[cfg(test)]
+mod test_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -382,6 +385,7 @@ fn normalize_project_path(path: &Path) -> Result<PathBuf, CoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestDirectory;
 
     async fn add_project(
         core: &mut Core,
@@ -400,8 +404,8 @@ mod tests {
 
     #[tokio::test]
     async fn adding_a_project_marks_a_missing_path() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let missing = directory.path().join("not-there");
+        let directory = TestDirectory::new().expect("temp directory");
+        let missing = directory.join("not-there");
         let mut core = Core::new();
 
         let result = core
@@ -420,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_project_paths_are_rejected() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let mut core = Core::new();
         let first = core
             .execute(Command::AddProject {
@@ -439,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_draft_has_no_worktree_or_branch() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let mut core = Core::new();
         let project_id = add_project(&mut core, directory.path().to_path_buf())
             .await
@@ -468,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn discarding_a_draft_removes_it_without_git_state() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let mut core = Core::new();
         let project_id = add_project(&mut core, directory.path().to_path_buf())
             .await
@@ -500,7 +504,7 @@ mod tests {
 
     #[test]
     fn the_task_state_machine_rejects_skipping_states() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let mut task = Task::draft(ProjectId::new("project-1"), "Title", directory.path());
 
         assert!(task.set_state(TaskState::Working).is_err());
@@ -515,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn quitting_with_live_work_requires_confirmation_then_interrupts() {
-        let directory = tempfile::tempdir().expect("temp directory");
+        let directory = TestDirectory::new().expect("temp directory");
         let mut core = Core::new();
         let project_id = add_project(&mut core, directory.path().to_path_buf())
             .await

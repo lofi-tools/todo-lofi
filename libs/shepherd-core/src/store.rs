@@ -383,6 +383,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::test_support::{TestDatabase, TestDirectory};
 
     async fn table_names(store: &TursoStore) -> Result<Vec<String>, StoreError> {
         let mut db = store.db.lock().await;
@@ -406,14 +407,13 @@ mod tests {
     #[tokio::test]
     async fn turso_schema_migrates_and_persists_across_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let database = directory.path().join("shepherd.db");
-        let uri = format!("turso:{}", database.display());
-        let mut project = Project::new(directory.path().to_path_buf());
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut project = Project::new(database.path().to_path_buf());
         let task = Task::draft(
             project.id.clone(),
             "Persist across restart",
-            directory.path(),
+            database.path(),
         );
         project.last_task_id = Some(task.id.clone());
 
@@ -449,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn the_memory_store_round_trips_projects_and_tasks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
+        let directory = TestDirectory::new()?;
         let store = MemoryStore::new();
         let project = Project::new(directory.path().to_path_buf());
         store.save_project(&project).await?;
