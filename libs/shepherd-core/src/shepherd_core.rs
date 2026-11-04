@@ -6,10 +6,14 @@
 
 pub mod commands;
 pub mod events;
+pub mod git;
+pub mod harness;
 pub mod input;
 pub mod projects;
 pub mod snapshots;
+pub mod store;
 pub mod tasks;
+pub mod terminal;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -57,6 +61,8 @@ pub enum CoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("agent harness error: {0}")]
+    Harness(#[from] agent_harness::HarnessError),
 }
 
 /// The core owns all mutable state. It is a library, not a daemon.

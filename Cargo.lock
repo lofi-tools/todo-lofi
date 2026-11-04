@@ -9997,6 +9997,7 @@ name = "shepherd-core"
 version = "0.1.0"
 dependencies = [
  "agent-harness",
+ "async-trait",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

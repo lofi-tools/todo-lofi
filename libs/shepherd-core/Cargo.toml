@@ -9,6 +9,7 @@ path = "src/shepherd_core.rs"
 
 [dependencies]
 agent-harness = { path = "../agent-harness" }
+async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
