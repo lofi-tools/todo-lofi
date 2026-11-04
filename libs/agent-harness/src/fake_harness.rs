@@ -1,0 +1,486 @@
+//! A deterministic adapter used by the core's lifecycle tests.
+//!
+//! It has no child process and no sleeps. A scripted turn emits events
+//! synchronously when `prompt` is called, so a failed test shows the exact
+//! command/event order rather than timing noise.
+
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use serde_json::Value;
+use tokio::sync::mpsc;
+
+use crate::{
+    AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, FileDiff,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
+    SessionRoots, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
+};
+
+/// One scripted step inside a turn.
+#[derive(Clone, Debug)]
+pub enum FakeStep {
+    Message(String),
+    Thought(String),
+    ToolCall {
+        tool_call_id: String,
+        title: String,
+        kind: String,
+        status: ToolStatus,
+        output: Option<String>,
+        diffs: Vec<FileDiff>,
+    },
+    Approval(ApprovalRequest),
+    Plan(Vec<PlanRow>),
+    Usage {
+        used: u64,
+        size: u64,
+        cost: Option<f64>,
+    },
+    WriteFile {
+        path: PathBuf,
+        contents: String,
+    },
+}
+
+impl FakeStep {
+    pub fn approval(id: &str, title: &str) -> Self {
+        Self::Approval(ApprovalRequest {
+            approval_id: ApprovalId::new(id),
+            tool_call_id: ToolCallId::new(format!("tool-{id}")),
+            title: title.to_string(),
+            arguments: Value::Null,
+            paths: Vec::new(),
+            patch: None,
+        })
+    }
+}
+
+/// One scripted turn and how it ends.
+#[derive(Clone, Debug)]
+pub struct FakeTurn {
+    pub steps: Vec<FakeStep>,
+    pub finish: TurnFinishReason,
+}
+
+impl FakeTurn {
+    pub fn new(steps: Vec<FakeStep>) -> Self {
+        Self {
+            steps,
+            finish: TurnFinishReason::Completed,
+        }
+    }
+}
+
+impl Default for FakeTurn {
+    fn default() -> Self {
+        Self::new(vec![FakeStep::Message("fake answer".to_string())])
+    }
+}
+
+struct PendingApproval {
+    request: ApprovalRequest,
+    remaining: Vec<FakeStep>,
+    finish: TurnFinishReason,
+}
+
+/// A scripted adapter. Start it, open a session, then prompt it.
+pub struct FakeHarness {
+    turns: Vec<FakeTurn>,
+    turn_index: usize,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    cwd: Option<PathBuf>,
+    session_id: Option<SessionId>,
+    next_turn: u64,
+    started: bool,
+    turn_active: bool,
+    pending: Option<PendingApproval>,
+}
+
+impl FakeHarness {
+    pub fn new(turns: Vec<FakeTurn>) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            turns,
+            turn_index: 0,
+            sender,
+            receiver,
+            cwd: None,
+            session_id: None,
+            next_turn: 1,
+            started: false,
+            turn_active: false,
+            pending: None,
+        }
+    }
+
+    pub fn one_turn(turn: FakeTurn) -> Self {
+        Self::new(vec![turn])
+    }
+
+    fn send(&self, event: HarnessEvent) -> HarnessResult<()> {
+        self.sender
+            .send(event)
+            .map_err(|_| HarnessError::ChannelClosed)
+    }
+
+    fn emit_steps(&mut self, steps: &[FakeStep], finish: TurnFinishReason) -> HarnessResult<()> {
+        for (offset, step) in steps.iter().enumerate() {
+            match step {
+                FakeStep::Message(text) => {
+                    self.send(HarnessEvent::Delta {
+                        item_id: ItemId::new(format!("message-{}-{offset}", self.next_turn)),
+                        kind: DeltaKind::Message,
+                        text: text.clone(),
+                    })?;
+                }
+                FakeStep::Thought(text) => {
+                    self.send(HarnessEvent::Delta {
+                        item_id: ItemId::new(format!("thought-{}-{offset}", self.next_turn)),
+                        kind: DeltaKind::Thought,
+                        text: text.clone(),
+                    })?;
+                }
+                FakeStep::ToolCall {
+                    tool_call_id,
+                    title,
+                    kind,
+                    status,
+                    output,
+                    diffs,
+                } => {
+                    self.send(HarnessEvent::ToolCall {
+                        tool_call_id: ToolCallId::new(tool_call_id.clone()),
+                        title: title.clone(),
+                        kind: kind.clone(),
+                        status: *status,
+                        output: output.clone(),
+                        diffs: diffs.clone(),
+                        terminal_id: None,
+                    })?;
+                }
+                FakeStep::Approval(request) => {
+                    self.send(HarnessEvent::ApprovalRequested {
+                        request: request.clone(),
+                    })?;
+                    self.pending = Some(PendingApproval {
+                        request: request.clone(),
+                        remaining: steps[offset + 1..].to_vec(),
+                        finish,
+                    });
+                    return Ok(());
+                }
+                FakeStep::Plan(rows) => {
+                    self.send(HarnessEvent::Plan { rows: rows.clone() })?;
+                }
+                FakeStep::Usage { used, size, cost } => {
+                    self.send(HarnessEvent::Usage {
+                        used: *used,
+                        size: *size,
+                        cost: *cost,
+                    })?;
+                }
+                FakeStep::WriteFile { path, contents } => {
+                    let cwd = self.cwd.as_ref().ok_or(HarnessError::NotStarted)?;
+                    let target = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        cwd.join(path)
+                    };
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent).map_err(|source| {
+                            HarnessError::WriteFile {
+                                path: parent.display().to_string(),
+                                source,
+                            }
+                        })?;
+                    }
+                    std::fs::write(&target, contents).map_err(|source| {
+                        HarnessError::WriteFile {
+                            path: target.display().to_string(),
+                            source,
+                        }
+                    })?;
+                }
+            }
+        }
+
+        self.finish_turn(finish)
+    }
+
+    fn finish_turn(&mut self, reason: TurnFinishReason) -> HarnessResult<()> {
+        self.turn_active = false;
+        self.send(HarnessEvent::TurnFinished { reason })
+    }
+}
+
+#[async_trait]
+impl AgentHarness for FakeHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.receiver
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        self.cwd = Some(spec.cwd);
+        self.started = true;
+        self.send(HarnessEvent::SessionState {
+            state: crate::SessionState::Ready,
+        })?;
+        Ok(Capabilities::fake())
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if !self.started {
+            return Err(HarnessError::NotStarted);
+        }
+        let session_id = resume.unwrap_or_else(|| SessionId::new("fake-session-1"));
+        self.session_id = Some(session_id.clone());
+        Ok(session_id)
+    }
+
+    async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+        if !self.started || self.session_id.is_none() {
+            return Err(HarnessError::SessionMissing);
+        }
+        if self.pending.is_some() {
+            return Err(HarnessError::ApprovalPending);
+        }
+
+        let turn = self
+            .turns
+            .get(self.turn_index)
+            .cloned()
+            .ok_or(HarnessError::ScriptExhausted)?;
+        self.turn_index += 1;
+        let turn_id = self.next_turn;
+        self.next_turn += 1;
+        self.turn_active = true;
+        self.send(HarnessEvent::TurnStarted {
+            turn_id: TurnId::new(format!("turn-{turn_id}")),
+        })?;
+        // The core records the user's prompt itself. An adapter echo would
+        // duplicate it, so the fake does not send one.
+        self.emit_steps(&turn.steps, turn.finish)
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        if !self.turn_active {
+            return Ok(());
+        }
+        self.pending = None;
+        self.finish_turn(TurnFinishReason::Cancelled)
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        let pending = self.pending.take().ok_or(HarnessError::NoPendingApproval)?;
+        if pending.request.approval_id != approval_id {
+            self.pending = Some(pending);
+            return Err(HarnessError::NoPendingApproval);
+        }
+        self.send(HarnessEvent::ApprovalResolved {
+            approval_id,
+            decision,
+        })?;
+        match decision {
+            Decision::Allow => self.emit_steps(&pending.remaining, pending.finish),
+            Decision::Deny => self.finish_turn(TurnFinishReason::Cancelled),
+        }
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        if !self.started {
+            return Ok(());
+        }
+        self.started = false;
+        self.turn_active = false;
+        self.pending = None;
+        self.send(HarnessEvent::Exited {
+            code: Some(0),
+            stderr: String::new(),
+        })
+    }
+}
+
+/// Drain every event already sent by a fake harness.
+pub fn drain_events(harness: &mut FakeHarness) -> Vec<HarnessEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) = harness.events().try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// A convenience constructor for tests that only need a session root.
+pub fn roots_for(path: impl Into<PathBuf>) -> SessionRoots {
+    SessionRoots::new([path.into()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Transcript;
+
+    async fn started_harness(turns: Vec<FakeTurn>) -> FakeHarness {
+        let mut harness = FakeHarness::new(turns);
+        let result = harness
+            .start(SpawnSpec {
+                program: "fake".to_string(),
+                cwd: PathBuf::from("."),
+                ..SpawnSpec::default()
+            })
+            .await;
+        assert!(result.is_ok());
+        let session = harness.open_session(None).await;
+        assert!(session.is_ok());
+        drain_events(&mut harness);
+        harness
+    }
+
+    #[tokio::test]
+    async fn a_scripted_turn_emits_message_and_finishes() {
+        let mut harness = started_harness(vec![FakeTurn::new(vec![
+            FakeStep::Message("hello".to_string()),
+            FakeStep::ToolCall {
+                tool_call_id: "tool-1".to_string(),
+                title: "Read file".to_string(),
+                kind: "read".to_string(),
+                status: ToolStatus::Completed,
+                output: None,
+                diffs: Vec::new(),
+            },
+        ])])
+        .await;
+
+        let result = harness
+            .prompt(PromptInput {
+                text: "hi".to_string(),
+            })
+            .await;
+        assert!(result.is_ok());
+        let events = drain_events(&mut harness);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        );
+
+        let mut transcript = Transcript::default();
+        for event in &events {
+            transcript.apply(event);
+        }
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            transcript.entry(0).map(|entry| entry.summary()),
+            Some("agent: hello".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_approval_pauses_and_allow_resumes() {
+        let mut harness = started_harness(vec![FakeTurn::new(vec![
+            FakeStep::approval("approval-1", "Run tests"),
+            FakeStep::Message("done".to_string()),
+        ])])
+        .await;
+
+        assert!(
+            harness
+                .prompt(PromptInput {
+                    text: "go".to_string()
+                })
+                .await
+                .is_ok()
+        );
+        let events = drain_events(&mut harness);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. }))
+        );
+
+        assert!(
+            harness
+                .respond(ApprovalId::new("approval-1"), Decision::Allow)
+                .await
+                .is_ok()
+        );
+        let events = drain_events(&mut harness);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn deny_ends_the_turn_as_cancelled() {
+        let mut harness = started_harness(vec![FakeTurn::new(vec![
+            FakeStep::approval("approval-1", "Run tests"),
+            FakeStep::Message("done".to_string()),
+        ])])
+        .await;
+
+        assert!(
+            harness
+                .prompt(PromptInput {
+                    text: "go".to_string()
+                })
+                .await
+                .is_ok()
+        );
+        drain_events(&mut harness);
+        assert!(
+            harness
+                .respond(ApprovalId::new("approval-1"), Decision::Deny)
+                .await
+                .is_ok()
+        );
+        let events = drain_events(&mut harness);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Cancelled
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn cancel_ends_an_active_turn() {
+        // A turn with no approval finishes in `prompt`, so start one that waits.
+        let mut waiting = started_harness(vec![FakeTurn::new(vec![FakeStep::approval(
+            "approval-1",
+            "Run tests",
+        )])])
+        .await;
+        assert!(
+            waiting
+                .prompt(PromptInput {
+                    text: "go".to_string()
+                })
+                .await
+                .is_ok()
+        );
+        drain_events(&mut waiting);
+        assert!(waiting.cancel().await.is_ok());
+        let events = drain_events(&mut waiting);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Cancelled
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_exit() {
+        let mut harness = started_harness(Vec::new()).await;
+        assert!(harness.shutdown().await.is_ok());
+        let events = drain_events(&mut harness);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::Exited { code: Some(0), .. }))
+        );
+    }
+}

@@ -35,11 +35,11 @@ and merge it without leaving Shepherd?”
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Placeholder binary: `src/main.rs` prints `Shepherd`. No Tauri shell, no `src-tauri/`, no `ui/`. |
 | `libs/shepherd-core` | Does not exist. |
-| `libs/agent-harness` | Does not exist. |
+| `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 8 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | No Shepherd UI package. Root uses `pnpm` 11.25; `pnpm-workspace.yaml` must gain the UI package when it exists. |
-| Tests | No Shepherd tests yet. Existing ACP tests are the closest harness. |
+| Tests | `agent-harness` has 8 focused tests. `shepherd-core` has none yet; the existing ACP tests are the closest harness. |
 
 ### Toolchain check (2026-11-04)
 
@@ -93,7 +93,7 @@ restarted and resumed entirely in tests.
 
 ### Build
 
-- [ ] Create `libs/agent-harness` with `[lib] path = "src/agent_harness.rs"`:
+- [x] Create `libs/agent-harness` with `[lib] path = "src/agent_harness.rs"`:
   `AgentHarness`, `HarnessEvent`, capabilities, transcript entry types.
 - [ ] Create `libs/shepherd-core` with `[lib] path = "src/shepherd_core.rs"`:
   `Core`, `Command`, `Event`, snapshots, lifecycle and shutdown state.
