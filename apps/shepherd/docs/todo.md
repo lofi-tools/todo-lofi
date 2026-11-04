@@ -34,12 +34,12 @@ and merge it without leaving Shepherd?”
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Placeholder binary: `src/main.rs` prints `Shepherd`. No Tauri shell, no `src-tauri/`, no `ui/`. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures and a `test-support` scenario trace. 15 focused tests pass. Core still opens in-memory; restart wiring is pending. |
+| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 15 focused tests pass. Core still opens in-memory; restart wiring is pending. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 8 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | No Shepherd UI package. Root uses `pnpm` 11.25; `pnpm-workspace.yaml` must gain the UI package when it exists. |
-| Tests | `agent-harness` has 8 focused tests; `shepherd-core` has 15. The existing ACP tests remain the closest adapter harness. |
+| Tests | `agent-harness` has 8 focused tests; `shepherd-core` has 15. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -110,7 +110,7 @@ restarted and resumed entirely in tests.
   into its own data directory; no test writes to the real app data directory.
 - [x] Add a test-support feature for scenario traces so a failed test prints the
   command/event order, not just an assertion.
-- [ ] Add the boundary check: `cargo tree -p shepherd-core` must not contain
+- [x] Add the boundary check: `cargo tree -p shepherd-core` must not contain
   `tauri`, `gpui` or a webview crate.
 
 ### Proof
@@ -122,7 +122,7 @@ cargo fmt --check
 cargo test -p agent-harness
 cargo test -p shepherd-core
 cargo test -p acp-client --features test-support
-cargo tree -p shepherd-core
+direnv exec . ./scripts/check-shepherd-boundary.sh
 ```
 
 The core scenarios must cover:
