@@ -44,6 +44,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - `t2` — run the desktop app with auto-rebuilds. It watches taskstream-desktop's own sources and its in-workspace dependencies, so editing the web packages does not restart the Rust build (see `flake.nix` for the watched paths)
 #### Shepherd and reference repositories
 - `cargo run -p shepherd` — run the Shepherd Rust app scaffold (`apps/shepherd`, included by the workspace's `apps/*` member glob)
+- Shepherd's [goal](apps/shepherd/docs/spec/goal.md), [master spec](apps/shepherd/docs/spec/master-spec.md), [stack](apps/shepherd/docs/spec/stack.md), and [implementation plan](apps/shepherd/docs/todo.md) describe the planned app; the binary is still a scaffold.
 - `checkout-references` — shallow-clone all configured reference repositories into `.cache/checkout/<name>`
 - `checkout-references herdr-core pi` — download selected references by name
 - `checkout-references --list` — list configured names and URLs
