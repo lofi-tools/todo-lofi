@@ -9,17 +9,25 @@
 //! core-side event stream, which the Codex slice adds; until then every state
 //! change in the skeleton is command-driven.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_harness::Decision;
 use serde::Serialize;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
+use shepherd_core::terminal::{
+    TerminalEvent, TerminalId, TerminalRecord, TerminalService, TerminalSnapshot, TerminalSpec,
+};
 use shepherd_core::{
     Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary, TaskId,
     TaskList, TaskWorkspace,
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
+
+use crate::pty_terminal::PtyTerminals;
+use crate::terminal_screen::{Screen, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -47,18 +55,28 @@ fn unexpected(result: &CommandResult) -> BridgeError {
     BridgeError::new("bridge", format!("unexpected command result: {result:?}"))
 }
 
-/// The state Tauri manages for the window: one core, one event broadcaster.
+struct ScreenSlot {
+    screen: Screen,
+    frames: broadcast::Sender<TerminalFrame>,
+}
+
+/// The state Tauri manages for the window: one core, one event broadcaster, the
+/// PTY engine and one parsed screen per live terminal.
 pub struct ShellState {
-    core: Mutex<Core>,
+    core: Arc<Mutex<Core>>,
     events: broadcast::Sender<Event>,
+    engine: Mutex<PtyTerminals>,
+    screens: Arc<Mutex<BTreeMap<String, ScreenSlot>>>,
 }
 
 impl ShellState {
     pub fn new(core: Core) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
-            core: Mutex::new(core),
+            core: Arc::new(Mutex::new(core)),
             events,
+            engine: Mutex::new(PtyTerminals::new()),
+            screens: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -218,6 +236,185 @@ impl ShellState {
             .task_workspace(&TaskId::new(task_id))
             .map_err(BridgeError::from)
     }
+
+    pub async fn terminal_list(&self, project_id: String) -> Vec<TerminalSnapshot> {
+        self.core
+            .lock()
+            .await
+            .terminals_for(&ProjectId::new(project_id))
+    }
+
+    /// Spawn one PTY in the project's directory, record it, and start parsing
+    /// its output. The returned list includes the new live terminal.
+    pub async fn start_terminal(
+        &self,
+        project_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        let project_id = ProjectId::new(project_id);
+        let project = {
+            let core = self.core.lock().await;
+            core.project_list()
+                .projects
+                .into_iter()
+                .find(|project| project.id == project_id.as_str())
+        }
+        .ok_or_else(|| BridgeError::new("project", "project not found"))?;
+
+        let cwd = PathBuf::from(&project.path);
+        let command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let (output, mut receiver) = mpsc::unbounded_channel();
+        let terminal_id = self
+            .engine
+            .lock()
+            .await
+            .spawn(
+                TerminalSpec {
+                    cwd: cwd.clone(),
+                    command: command.clone(),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                },
+                output,
+            )
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+
+        let title = {
+            let core = self.core.lock().await;
+            format!("Terminal {}", core.terminals_for(&project_id).len() + 1)
+        };
+        let record = TerminalRecord::project_shared(
+            terminal_id.clone(),
+            project_id.clone(),
+            title,
+            cwd,
+            command,
+            now_millis(),
+        );
+        {
+            let mut core = self.core.lock().await;
+            core.record_terminal(&record)
+                .await
+                .map_err(BridgeError::from)?;
+        }
+
+        let (frames, _) = broadcast::channel(64);
+        self.screens.lock().await.insert(
+            terminal_id.as_str().to_string(),
+            ScreenSlot {
+                screen: Screen::new(usize::from(columns), usize::from(rows)),
+                frames: frames.clone(),
+            },
+        );
+
+        let screens = Arc::clone(&self.screens);
+        let core = Arc::clone(&self.core);
+        let id = terminal_id.as_str().to_string();
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    TerminalEvent::Output(bytes) => {
+                        let mut screens = screens.lock().await;
+                        if let Some(slot) = screens.get_mut(&id) {
+                            slot.screen.process(&bytes);
+                            let frame = slot.screen.frame();
+                            if let Err(error) = slot.frames.send(frame) {
+                                tracing::debug!(%error, "no terminal view is attached");
+                            }
+                        }
+                    }
+                    TerminalEvent::Exited { exit_code } => {
+                        screens.lock().await.remove(&id);
+                        let mut core = core.lock().await;
+                        if let Err(error) = core
+                            .end_terminal(&TerminalId::new(id.clone()), exit_code)
+                            .await
+                        {
+                            tracing::warn!(%error, "could not mark the terminal ended");
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(self.core.lock().await.terminals_for(&project_id))
+    }
+
+    pub async fn terminal_write(
+        &self,
+        terminal_id: String,
+        data: String,
+    ) -> Result<(), BridgeError> {
+        self.engine
+            .lock()
+            .await
+            .write(&TerminalId::new(terminal_id), data.as_bytes())
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))
+    }
+
+    pub async fn terminal_resize(
+        &self,
+        terminal_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), BridgeError> {
+        self.engine
+            .lock()
+            .await
+            .resize(&TerminalId::new(terminal_id.clone()), columns, rows)
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+
+        let mut screens = self.screens.lock().await;
+        if let Some(slot) = screens.get_mut(&terminal_id) {
+            slot.screen.resize(usize::from(columns), usize::from(rows));
+            let frame = slot.screen.frame();
+            if let Err(error) = slot.frames.send(frame) {
+                tracing::debug!(%error, "no terminal view is attached");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn close_terminal(&self, terminal_id: String) -> Result<(), BridgeError> {
+        self.engine
+            .lock()
+            .await
+            .close(&TerminalId::new(terminal_id.clone()))
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))
+    }
+
+    pub fn subscribe_terminal(
+        &self,
+        terminal_id: &str,
+    ) -> Result<broadcast::Receiver<TerminalFrame>, BridgeError> {
+        let screens = self
+            .screens
+            .try_lock()
+            .map_err(|_| BridgeError::new("terminal", "the terminal table is busy; retry"))?;
+        screens
+            .get(terminal_id)
+            .map(|slot| slot.frames.subscribe())
+            .ok_or_else(|| BridgeError::new("terminal", format!("no live terminal {terminal_id}")))
+    }
+
+    /// A snapshot of the visible grid, so a fresh view paints before the next
+    /// output arrives.
+    pub async fn terminal_frame(&self, terminal_id: &str) -> Option<TerminalFrame> {
+        self.screens
+            .lock()
+            .await
+            .get(terminal_id)
+            .map(|slot| slot.screen.frame())
+    }
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The invoke commands. Each one delegates to [`ShellState`] so the behaviour is
@@ -317,6 +514,91 @@ pub mod commands {
         task_id: String,
     ) -> Result<TaskWorkspace, BridgeError> {
         state.inner().task_workspace(task_id).await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_list(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        Ok(state.inner().terminal_list(project_id).await)
+    }
+
+    #[tauri::command]
+    pub async fn start_terminal(
+        state: State<'_, ShellState>,
+        project_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        state
+            .inner()
+            .start_terminal(project_id, columns, rows)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_write(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        data: String,
+    ) -> Result<(), BridgeError> {
+        state.inner().terminal_write(terminal_id, data).await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_resize(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), BridgeError> {
+        state
+            .inner()
+            .terminal_resize(terminal_id, columns, rows)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn close_terminal(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+    ) -> Result<(), BridgeError> {
+        state.inner().close_terminal(terminal_id).await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_frame(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+    ) -> Result<Option<TerminalFrame>, BridgeError> {
+        Ok(state.inner().terminal_frame(&terminal_id).await)
+    }
+
+    #[tauri::command]
+    pub async fn subscribe_terminal(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        channel: tauri::ipc::Channel<TerminalFrame>,
+    ) -> Result<(), BridgeError> {
+        let mut receiver = state.inner().subscribe_terminal(&terminal_id)?;
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(frame) => {
+                        if let Err(error) = channel.send(frame) {
+                            tracing::debug!(%error, "the terminal view closed");
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "the terminal view missed frames");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        Ok(())
     }
 
     /// The window's single event stream. The channel stays open for the life of

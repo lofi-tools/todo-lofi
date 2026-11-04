@@ -34,6 +34,7 @@ pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 use crate::git::{GitError, GitService};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
 use crate::store::{MemoryStore, Store, StoreError};
+use crate::terminal::{TerminalId, TerminalRecord, TerminalSnapshot};
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -49,6 +50,8 @@ pub enum CoreError {
     ProjectPathMissing { path: String },
     #[error("task not found: {id}")]
     TaskNotFound { id: String },
+    #[error("terminal not found: {id}")]
+    TerminalNotFound { id: String },
     #[error("task title cannot be empty")]
     EmptyTitle,
     #[error("the prompt is empty")]
@@ -103,6 +106,7 @@ pub struct Core {
     project_order: Vec<ProjectId>,
     tasks: BTreeMap<TaskId, Task>,
     sessions: BTreeMap<TaskId, HarnessSession>,
+    terminals: BTreeMap<TerminalId, TerminalRecord>,
     store: Box<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
@@ -135,6 +139,7 @@ impl Core {
             project_order: Vec::new(),
             tasks: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            terminals: BTreeMap::new(),
             store,
             harness_factory,
             shutdown: ShutdownState::Running,
@@ -179,7 +184,73 @@ impl Core {
             core.save_task(&task_id).await?;
         }
 
+        for mut terminal in core.store.load_terminals().await? {
+            // No PTY outlives the process, so a record without an end time is
+            // loaded as ended instead of being shown as still running.
+            if terminal.ended_at.is_none() {
+                terminal.ended_at = Some(crate::projects::now_millis());
+                core.store.save_terminal(&terminal).await?;
+            }
+            core.terminals.insert(terminal.id.clone(), terminal);
+        }
+
         Ok(core)
+    }
+
+    /// Terminal records for one project, oldest first. An ended terminal stays
+    /// listed so the shell can show it as ended with its exit code.
+    pub fn terminals_for(&self, project_id: &ProjectId) -> Vec<TerminalSnapshot> {
+        let mut terminals: Vec<&TerminalRecord> = self
+            .terminals
+            .values()
+            .filter(|terminal| &terminal.project_id == project_id)
+            .collect();
+        terminals.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        terminals
+            .into_iter()
+            .map(TerminalRecord::snapshot)
+            .collect()
+    }
+
+    pub async fn record_terminal(&mut self, terminal: &TerminalRecord) -> Result<(), CoreError> {
+        self.store.save_terminal(terminal).await?;
+        self.terminals.insert(terminal.id.clone(), terminal.clone());
+        self.emit(Event::TerminalListChanged {
+            project_id: terminal.project_id.clone(),
+            terminals: self.terminals_for(&terminal.project_id),
+        });
+        Ok(())
+    }
+
+    pub async fn end_terminal(
+        &mut self,
+        terminal_id: &TerminalId,
+        exit_code: Option<i32>,
+    ) -> Result<(), CoreError> {
+        let Some(seen) = self.terminals.get(terminal_id) else {
+            return Err(CoreError::TerminalNotFound {
+                id: terminal_id.as_str().to_string(),
+            });
+        };
+        if seen.ended_at.is_some() {
+            return Ok(());
+        }
+
+        let mut terminal = seen.clone();
+        terminal.ended_at = Some(crate::projects::now_millis());
+        terminal.exit_code = exit_code;
+        self.store.save_terminal(&terminal).await?;
+        let project_id = terminal.project_id.clone();
+        self.terminals.insert(terminal_id.clone(), terminal);
+        self.emit(Event::TerminalListChanged {
+            project_id: project_id.clone(),
+            terminals: self.terminals_for(&project_id),
+        });
+        Ok(())
     }
 
     pub fn shutdown_state(&self) -> ShutdownState {
@@ -1320,6 +1391,35 @@ mod tests {
         );
         assert!(worktree_path.join("notes.txt").is_file());
         assert!(!repository.path().join("notes.txt").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_terminal_record_is_ended_after_a_restart() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = TestDirectory::new()?;
+        let database = directory.join("shepherd.db");
+        let store = crate::store::TursoStore::open_at(&database).await?;
+        let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
+        let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
+
+        let terminal = TerminalRecord::project_shared(
+            TerminalId::new("terminal-1"),
+            project_id.clone(),
+            "Terminal 1".to_string(),
+            directory.path().to_path_buf(),
+            "/bin/zsh".to_string(),
+            1_000,
+        );
+        core.record_terminal(&terminal).await?;
+        drop(core);
+
+        let store = crate::store::TursoStore::open_at(&database).await?;
+        let reloaded = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        let terminals = reloaded.terminals_for(&project_id);
+        assert_eq!(terminals.len(), 1);
+        assert!(terminals[0].ended_at.is_some());
+        assert_eq!(terminals[0].exit_code, None);
         Ok(())
     }
 }

@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
 use crate::tasks::TaskSummary;
+use crate::terminal::TerminalSnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -32,5 +33,9 @@ pub enum Event {
     Error {
         task_id: Option<String>,
         message: String,
+    },
+    TerminalListChanged {
+        project_id: crate::projects::ProjectId,
+        terminals: Vec<TerminalSnapshot>,
     },
 }

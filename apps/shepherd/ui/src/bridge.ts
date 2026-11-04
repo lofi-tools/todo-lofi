@@ -127,8 +127,38 @@ export interface QuitSummary {
   liveTerminals: number
 }
 
+export interface TerminalSnapshot {
+  id: string
+  projectId: string
+  taskId: string | null
+  scope: 'project' | 'task'
+  title: string
+  cwd: string
+  command: string
+  createdAt: number
+  endedAt: number | null
+  exitCode: number | null
+}
+
+export interface FrameCell {
+  text: string
+  foreground: number
+  background: number
+  bold: boolean
+  italic: boolean
+}
+
+export interface TerminalFrame {
+  columns: number
+  rows: number
+  cursorColumn: number
+  cursorRow: number
+  cells: FrameCell[]
+}
+
 export type Event =
   | { type: 'projectListChanged'; data: ProjectList }
+  | { type: 'terminalListChanged'; data: { projectId: string; terminals: TerminalSnapshot[] } }
   | { type: 'taskListChanged'; data: TaskList }
   | { type: 'taskChanged'; data: TaskSummary }
   | { type: 'taskWorkspaceChanged'; data: TaskWorkspace }
@@ -186,6 +216,48 @@ export function taskList(projectId: string): Promise<TaskList> {
 
 export function taskWorkspace(taskId: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('task_workspace', { taskId })
+}
+
+export function terminalList(projectId: string): Promise<TerminalSnapshot[]> {
+  return invoke<TerminalSnapshot[]>('terminal_list', { projectId })
+}
+
+export function startTerminal(
+  projectId: string,
+  columns: number,
+  rows: number,
+): Promise<TerminalSnapshot[]> {
+  return invoke<TerminalSnapshot[]>('start_terminal', { projectId, columns, rows })
+}
+
+export function terminalWrite(terminalId: string, data: string): Promise<void> {
+  return invoke<void>('terminal_write', { terminalId, data })
+}
+
+export function terminalResize(
+  terminalId: string,
+  columns: number,
+  rows: number,
+): Promise<void> {
+  return invoke<void>('terminal_resize', { terminalId, columns, rows })
+}
+
+export function closeTerminal(terminalId: string): Promise<void> {
+  return invoke<void>('close_terminal', { terminalId })
+}
+
+export function terminalFrame(terminalId: string): Promise<TerminalFrame | null> {
+  return invoke<TerminalFrame | null>('terminal_frame', { terminalId })
+}
+
+export async function subscribeTerminal(
+  terminalId: string,
+  handler: (frame: TerminalFrame) => void,
+): Promise<Channel<TerminalFrame>> {
+  const channel = new Channel<TerminalFrame>()
+  channel.onmessage = handler
+  await invoke('subscribe_terminal', { terminalId, channel })
+  return channel
 }
 
 /** Subscribe the window to the core's single event stream. */

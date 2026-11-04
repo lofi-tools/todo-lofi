@@ -6,6 +6,8 @@
 
 mod bridge;
 mod dev_harness;
+mod pty_terminal;
+mod terminal_screen;
 
 use tauri::Manager;
 
@@ -34,6 +36,13 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_list,
             bridge::commands::task_list,
             bridge::commands::task_workspace,
+            bridge::commands::terminal_list,
+            bridge::commands::start_terminal,
+            bridge::commands::terminal_write,
+            bridge::commands::terminal_resize,
+            bridge::commands::close_terminal,
+            bridge::commands::terminal_frame,
+            bridge::commands::subscribe_terminal,
             bridge::commands::subscribe,
         ])
         .run(tauri::generate_context!())

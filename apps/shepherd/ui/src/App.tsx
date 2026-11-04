@@ -8,6 +8,7 @@ import { For, Show, createSignal, onMount } from 'solid-js'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
 
@@ -346,7 +347,12 @@ export function App() {
             role="tabpanel"
             aria-labelledby="inspector-tab-terminals"
           >
-            <p class="empty">No terminals yet.</p>
+            <Show
+              when={selectedProjectId()}
+              fallback={<p class="empty">No terminals yet.</p>}
+            >
+              {(projectId) => <TerminalPane projectId={projectId()} />}
+            </Show>
           </div>
         </aside>
       </div>

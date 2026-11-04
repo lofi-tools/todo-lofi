@@ -174,7 +174,7 @@ fake task, read the stream and use one terminal.
 - [x] Add `0002_workspace.sql` for terminals, project terminal layouts and task
   workspace layouts; the one terminal must survive an app restart as an ended
   terminal. (The restart clause is proven by the terminal spike below.)
-- [ ] Implement the first terminal spike: `TerminalEngine` boundary,
+- [x] Implement the first terminal spike: `TerminalEngine` boundary,
   `portable-pty`, one PTY and a canvas. Do not build splits or the project
   terminal layout yet.
 - [ ] Enforce draft rules: the draft appears immediately, shows its proposed
@@ -187,6 +187,10 @@ fake task, read the stream and use one terminal.
 is treated as done. If the pinned Zig build blocks on this machine, record the
 reason and use `alacritty_terminal` behind `TerminalEngine` for the slice; that is
 a validated fallback, not a silent swap.
+
+**Recorded fallback:** `zig` is not installed on this machine (`zig version` is
+not found), so the spike is built on `alacritty_terminal 0.26` behind the core's
+`TerminalService` boundary, with `portable-pty` for the PTY.
 
 ### Proof
 

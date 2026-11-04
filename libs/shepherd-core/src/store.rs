@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::projects::{Project, ProjectId};
 use crate::tasks::{AgentTier, Task, TaskId, TaskState};
+use crate::terminal::{TerminalId, TerminalRecord, TerminalScope};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -38,6 +39,8 @@ pub trait Store: Send + Sync {
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
+    async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
+    async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
 }
 
 struct Migration {
@@ -215,6 +218,73 @@ impl Store for TursoStore {
             .await?;
         Ok(())
     }
+
+    async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, project_id, task_id, scope, title, cwd, command, \
+                    created_at, ended_at, exit_code \
+             FROM terminals ORDER BY created_at, id",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+        ])
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_terminal).collect()
+    }
+
+    async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        let task_id = terminal
+            .task_id
+            .as_ref()
+            .map(|task_id| task_id.as_str())
+            .unwrap_or_default();
+        // `-1` is the absent marker: timestamps are positive and an exit code of
+        // `-1` cannot come from a process this app spawned.
+        let ended_at = terminal.ended_at.map(|value| value as i64).unwrap_or(-1);
+        let exit_code = terminal.exit_code.map(i64::from).unwrap_or(-1);
+        toasty::sql::statement(
+            "INSERT INTO terminals (\
+                id, project_id, task_id, scope, title, cwd, command, \
+                created_at, ended_at, exit_code\
+             ) VALUES (\
+                ?1, ?2, NULLIF(?3, ''), ?4, ?5, ?6, ?7, ?8, NULLIF(?9, -1), NULLIF(?10, -1)\
+             ) ON CONFLICT (id) DO UPDATE SET \
+                project_id = excluded.project_id, \
+                task_id = excluded.task_id, \
+                scope = excluded.scope, \
+                title = excluded.title, \
+                cwd = excluded.cwd, \
+                command = excluded.command, \
+                created_at = excluded.created_at, \
+                ended_at = excluded.ended_at, \
+                exit_code = excluded.exit_code",
+        )
+        .bind(terminal.id.as_str())
+        .bind(terminal.project_id.as_str())
+        .bind(task_id)
+        .bind(terminal.scope.as_str())
+        .bind(&terminal.title)
+        .bind(terminal.cwd.to_string_lossy().as_ref())
+        .bind(&terminal.command)
+        .bind(terminal.created_at as i64)
+        .bind(ended_at)
+        .bind(exit_code)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
 }
 
 async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
@@ -324,6 +394,40 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
     })
 }
 
+fn parse_terminal(value: Value) -> Result<TerminalRecord, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a terminal record".to_string(),
+        ));
+    };
+    let scope_name = required_string(record.get(3))?;
+    let scope = TerminalScope::parse(&scope_name)
+        .ok_or_else(|| StoreError::InvalidRow(format!("unknown terminal scope: {scope_name}")))?;
+    Ok(TerminalRecord {
+        id: TerminalId::new(required_string(record.first())?),
+        project_id: ProjectId::new(required_string(record.get(1))?),
+        task_id: optional_string(record.get(2))?.map(TaskId::new),
+        scope,
+        title: required_string(record.get(4))?,
+        cwd: PathBuf::from(required_string(record.get(5))?),
+        command: required_string(record.get(6))?,
+        created_at: required_u64(record.get(7))?,
+        ended_at: optional_i64(record.get(8))?.map(|value| value as u64),
+        exit_code: optional_i64(record.get(9))?.map(|value| value as i32),
+    })
+}
+
+fn optional_i64(value: Option<&Value>) -> Result<Option<i64>, StoreError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::I64(value)) if *value == -1 => Ok(None),
+        Some(Value::I64(value)) => Ok(Some(*value)),
+        _ => Err(StoreError::InvalidRow(
+            "expected a nullable integer column".to_string(),
+        )),
+    }
+}
+
 fn required_string(value: Option<&Value>) -> Result<String, StoreError> {
     match value {
         Some(Value::String(value)) => Ok(value.clone()),
@@ -374,6 +478,7 @@ fn optional_path(path: Option<&PathBuf>) -> String {
 pub struct MemoryStore {
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
+    terminals: RwLock<BTreeMap<String, TerminalRecord>>,
 }
 
 impl MemoryStore {
@@ -409,6 +514,17 @@ impl Store for MemoryStore {
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
         tasks.remove(task_id.as_str());
+        Ok(())
+    }
+
+    async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError> {
+        let terminals = self.terminals.read().await;
+        Ok(terminals.values().cloned().collect())
+    }
+
+    async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError> {
+        let mut terminals = self.terminals.write().await;
+        terminals.insert(terminal.id.as_str().to_string(), terminal.clone());
         Ok(())
     }
 }

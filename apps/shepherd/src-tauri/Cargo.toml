@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 agent-harness = { path = "../../../libs/agent-harness" }
+alacritty_terminal = "0.26.0"
+portable-pty = "0.9.0"
 serde.workspace = true
 serde_json.workspace = true
 shepherd-core = { path = "../../../libs/shepherd-core" }
@@ -24,6 +26,7 @@ tauri = { version = "2", features = [] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 shepherd-core = { path = "../../../libs/shepherd-core", features = ["test-support"] }
