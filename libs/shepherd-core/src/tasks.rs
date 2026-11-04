@@ -35,6 +35,16 @@ pub enum AgentTier {
 }
 
 impl AgentTier {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "native" => Some(Self::Native),
+            "acp" => Some(Self::Acp),
+            "terminal-wrapper" => Some(Self::TerminalWrapper),
+            "plain-pane" => Some(Self::PlainPane),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -61,6 +71,23 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "draft" => Some(Self::Draft),
+            "starting" => Some(Self::Starting),
+            "ready" => Some(Self::Ready),
+            "working" => Some(Self::Working),
+            "waiting" => Some(Self::Waiting),
+            "queued" => Some(Self::Queued),
+            "review" => Some(Self::Review),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            "interrupted" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Draft => "draft",

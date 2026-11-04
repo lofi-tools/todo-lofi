@@ -34,12 +34,12 @@ and merge it without leaving Shepherd?”
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Placeholder binary: `src/main.rs` prints `Shepherd`. No Tauri shell, no `src-tauri/`, no `ui/`. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, in-memory store and terminal trait boundaries. 13 focused tests pass. Turso persistence is still pending. |
+| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql` and a durable `TursoStore`. 14 focused tests pass. Core still opens in-memory; restart wiring is pending. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 8 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | No Shepherd UI package. Root uses `pnpm` 11.25; `pnpm-workspace.yaml` must gain the UI package when it exists. |
-| Tests | `agent-harness` has 8 focused tests; `shepherd-core` has 13. The existing ACP tests remain the closest adapter harness. |
+| Tests | `agent-harness` has 8 focused tests; `shepherd-core` has 14. The existing ACP tests remain the closest adapter harness. |
 
 ### Toolchain check (2026-11-04)
 
@@ -101,7 +101,7 @@ restarted and resumed entirely in tests.
   boundaries. Keep terminal behind a trait; do not build the full terminal UI.
 - [x] Implement the task state machine: `draft → starting → ready → working ⇄
   waiting → review → done | failed | cancelled | interrupted`.
-- [ ] Add `0001_init.sql` for projects, tasks, sessions, entries and indexes.
+- [x] Add `0001_init.sql` for projects, tasks, sessions, entries and indexes.
   Add the workspace/terminal tables in S1, when the first terminal is persisted.
   S4 extends that layout; it does not invent a second persistence model.
 - [x] Add a deterministic fake harness that can emit `TurnStarted`, deltas, a
