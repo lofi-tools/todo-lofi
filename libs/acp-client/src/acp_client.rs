@@ -18,15 +18,14 @@ pub mod session_store;
 pub mod terminal;
 pub mod thread;
 
-#[cfg(test)]
-mod fake_agent;
-
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake_agent;
 
 pub use acp::schema::v1 as schema;
 
 use agent_client_protocol as acp;
 
-pub use agent::{AgentServer, OpencodeVersion, OpenCodeAgent, SpawnSpec, detect_opencode_version};
+pub use agent::{AgentServer, OpenCodeAgent, OpencodeVersion, SpawnSpec, detect_opencode_version};
 pub use connection::{AcpConnection, AgentInfo, ConnectOptions, Requester, connect};
 pub use fs::SessionRoots;
 pub use permissions::{
@@ -102,20 +101,29 @@ pub enum AcpEvent {
 impl std::fmt::Debug for AcpEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SessionUpdate(notification) => {
-                f.debug_tuple("SessionUpdate").field(&notification.update).finish()
-            }
-            Self::PermissionRequested { tool_call, options, .. } => f
+            Self::SessionUpdate(notification) => f
+                .debug_tuple("SessionUpdate")
+                .field(&notification.update)
+                .finish(),
+            Self::PermissionRequested {
+                tool_call, options, ..
+            } => f
                 .debug_struct("PermissionRequested")
                 .field("tool_call", tool_call)
                 .field("options", options)
                 .finish(),
-            Self::TerminalOutput { terminal_id, chunk, .. } => f
+            Self::TerminalOutput {
+                terminal_id, chunk, ..
+            } => f
                 .debug_struct("TerminalOutput")
                 .field("terminal_id", terminal_id)
                 .field("bytes", &chunk.len())
                 .finish(),
-            Self::TerminalExited { terminal_id, exit_code, .. } => f
+            Self::TerminalExited {
+                terminal_id,
+                exit_code,
+                ..
+            } => f
                 .debug_struct("TerminalExited")
                 .field("terminal_id", terminal_id)
                 .field("exit_code", exit_code)

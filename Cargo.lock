@@ -101,8 +101,6 @@ dependencies = [
  "async-process",
  "dirs 6.0.0",
  "futures",
- "gpui-pre",
- "gpui_tokio",
  "regex",
  "serde",
  "serde_json",
