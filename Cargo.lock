@@ -9992,8 +9992,15 @@ dependencies = [
 name = "shepherd"
 version = "0.1.0"
 dependencies = [
+ "agent-harness",
+ "serde",
+ "serde_json",
+ "shepherd-core",
  "tauri",
  "tauri-build",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -10002,6 +10009,7 @@ version = "0.1.0"
 dependencies = [
  "agent-harness",
  "async-trait",
+ "serde",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 1.0.69",

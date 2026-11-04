@@ -3,9 +3,10 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use serde::Serialize;
 use uuid::Uuid;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ProjectId(String);
 
 impl ProjectId {
@@ -55,7 +56,8 @@ impl Project {
 
 /// The project row a shell paints. Task counts exclude `done` and `cancelled`,
 /// matching the sidebar's unfinished count.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectSnapshot {
     pub id: String,
     pub path: String,

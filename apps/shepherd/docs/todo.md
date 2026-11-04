@@ -33,13 +33,13 @@ and merge it without leaving Shepherd?”
 | Area | Current state |
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
-| `apps/shepherd` | Tauri 2 shell scaffolded: `src-tauri/` (window, generated desktop icons, default capability) and `ui/` (SolidJS + TypeScript + Vite). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. The command bridge and fixed regions are not wired yet. |
+| `apps/shepherd` | Tauri 2 shell: `src-tauri/` (window, generated desktop icons, default capability, command bridge, single event channel, durable core in the app data dir) and `ui/` (SolidJS + TypeScript + Vite, typed client in `src/bridge.ts`). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. A scripted adapter stands in for the agent until S2. The fixed regions are not built yet. |
 | `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded `0001_init.sql`, a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 19 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 9 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 18. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 19; the Tauri shell has 4 bridge tests (commands, snapshot serialization, durable load). The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -164,7 +164,7 @@ fake task, read the stream and use one terminal.
   for SolidJS + TypeScript + Vite.
 - [x] Add the UI package to `pnpm-workspace.yaml`; document one command that
   starts the app.
-- [ ] Wire one `#[tauri::command]` per core command and one Tauri channel for
+- [x] Wire one `#[tauri::command]` per core command and one Tauri channel for
   events. Use typed snapshots; do not build a second frontend model.
 - [ ] Build the fixed shell: sidebar, required chat, always-on inspector, status
   bar. The inspector has tabs, but only Terminals is enabled; Preview, Review,

@@ -18,4 +18,14 @@ pnpm dev:shepherd
 dev server in `ui/` on port 1420 and then opens the desktop window. Non-interactive
 runners need the wrapper: `direnv exec . pnpm dev:shepherd`.
 
+Until the Codex adapter lands in S2, the shell runs a scripted adapter
+(`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
+real agent.
+
+## Bridge
+
+Every core command has one `#[tauri::command]`, and the window receives core
+events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
+the snapshots come from `shepherd-core`, never from a second frontend model.
+
 Design and build order: [docs/todo.md](./docs/todo.md).

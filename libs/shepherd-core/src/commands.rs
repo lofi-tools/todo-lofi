@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use agent_harness::{ApprovalId, Decision};
+use serde::Serialize;
 
 use crate::projects::ProjectId;
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
@@ -49,7 +50,8 @@ pub enum CommandResult {
     Ack,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuitSummary {
     pub interrupted_tasks: usize,
     pub live_terminals: usize,

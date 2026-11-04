@@ -12,6 +12,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -206,7 +207,8 @@ pub struct PromptInput {
 }
 
 /// A user or policy decision on an approval request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Decision {
     Allow,
     Deny,
@@ -239,7 +241,8 @@ pub enum DeltaKind {
     Thought,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ToolStatus {
     #[default]
     Pending,
@@ -249,7 +252,8 @@ pub enum ToolStatus {
 }
 
 /// A file change reported by a tool call or an approval request.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileDiff {
     pub path: String,
     pub old_text: Option<String>,
@@ -257,7 +261,8 @@ pub struct FileDiff {
 }
 
 /// One row of an agent plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanRow {
     pub text: String,
     pub status: String,
@@ -326,7 +331,8 @@ pub enum HarnessEvent {
 }
 
 /// One settled or streaming transcript row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Entry {
     /// Canonical row ID assigned by the transcript, never by the adapter.
     pub id: String,
@@ -335,7 +341,13 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum EntryKind {
     UserMessage {
         text: String,

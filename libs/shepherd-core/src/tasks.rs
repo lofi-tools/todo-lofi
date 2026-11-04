@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::projects::{ProjectId, now_millis};
@@ -26,7 +27,8 @@ impl fmt::Display for TaskId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentTier {
     Native,
     Acp,
@@ -55,7 +57,8 @@ impl AgentTier {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum TaskState {
     Draft,
     Starting,
@@ -192,7 +195,8 @@ impl Task {
 }
 
 /// A compact row for the flat sidebar task list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskSummary {
     pub id: String,
     pub project_id: String,
@@ -225,7 +229,8 @@ impl From<&Task> for TaskSummary {
 }
 
 /// The fuller task record for the fixed task workspace.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskDetail {
     pub id: String,
     pub project_id: String,

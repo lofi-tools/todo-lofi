@@ -4,7 +4,7 @@
 //! applies the embedded schema, then stores projects and tasks as typed values.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -58,7 +58,20 @@ pub struct TursoStore {
 
 impl TursoStore {
     pub async fn open(db_uri: &str) -> Result<Self, StoreError> {
-        let driver = Turso::new(db_uri)?;
+        Self::open_driver(Turso::new(db_uri)?).await
+    }
+
+    /// Open (or create) the database at a filesystem path.
+    ///
+    /// This bypasses URI parsing on purpose: the driver parses `turso:<value>`
+    /// as a URL and reads back the encoded path, so a real data directory such
+    /// as the macOS `Application Support` one resolves to a literal
+    /// `Application%20Support` file that does not exist.
+    pub async fn open_at(path: &Path) -> Result<Self, StoreError> {
+        Self::open_driver(Turso::file(path)).await
+    }
+
+    async fn open_driver(driver: Turso) -> Result<Self, StoreError> {
         let mut db = toasty::Db::builder().build(driver).await?;
         apply_migrations(&mut db).await?;
         Ok(Self { db: Mutex::new(db) })
@@ -459,6 +472,21 @@ mod tests {
         assert_eq!(tasks[0].tier, AgentTier::Native);
         assert_eq!(tasks[0].proposed_branch, task.proposed_branch);
         assert!(tasks[0].worktree_path.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_database_path_containing_a_space_opens() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let spaced = directory.join("Application Support");
+        std::fs::create_dir_all(&spaced)?;
+
+        let store = TursoStore::open_at(&spaced.join("shepherd.db")).await?;
+        let project = Project::new(spaced.clone());
+        store.save_project(&project).await?;
+
+        assert_eq!(store.load_projects().await?.len(), 1);
+        assert!(spaced.join("shepherd.db").is_file());
         Ok(())
     }
 

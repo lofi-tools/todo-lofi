@@ -755,7 +755,10 @@ impl Core {
         task.set_state(state)
     }
 
-    async fn save_task(&self, task_id: &TaskId) -> Result<(), CoreError> {
+    /// Takes `&mut self` so the future holds an exclusive borrow rather than
+    /// `&Core`. A shared borrow would demand `Core: Sync`, which agent adapters
+    /// (only required to be `Send`) cannot promise.
+    async fn save_task(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?.clone();
         self.store.save_task(&task).await?;
         Ok(())

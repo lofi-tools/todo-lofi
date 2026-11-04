@@ -13,6 +13,7 @@ test-support = ["dep:tempfile"]
 [dependencies]
 agent-harness = { path = "../agent-harness" }
 async-trait.workspace = true
+serde.workspace = true
 sha2.workspace = true
 tempfile = { version = "3", optional = true }
 thiserror.workspace = true
