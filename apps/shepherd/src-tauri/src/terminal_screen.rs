@@ -653,6 +653,25 @@ mod tests {
     }
 
     #[test]
+    fn resizing_reflows_a_wrapped_line_with_a_wide_glyph() {
+        let mut screen = Screen::new(12, 4);
+        screen.process("abc界defghij".as_bytes());
+        screen.resize(6, 4);
+        screen.scroll(1);
+        let narrow = screen.frame();
+        assert_eq!(row(&narrow, 0), "abc界d");
+        assert!(row(&narrow, 1).starts_with("efghij"));
+        assert_eq!(narrow.cells.get(3).map(|cell| cell.width), Some(2));
+        assert_eq!(narrow.cells.get(4).map(|cell| cell.width), Some(0));
+
+        screen.follow_output();
+        screen.resize(12, 4);
+        screen.scroll(1);
+        let wide = screen.frame();
+        assert!((0..wide.rows).any(|index| row(&wide, index) == "abc界defghij"));
+    }
+
+    #[test]
     fn resizing_rebuilds_the_frame_at_the_new_size() {
         let mut screen = Screen::new(4, 2);
         screen.process(b"abcdef");
