@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use shepherd_core::terminal::{
-    TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec,
+    TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec, validate_size,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -54,23 +54,25 @@ impl TerminalService for PtyTerminals {
         spec: TerminalSpec,
         events: UnboundedSender<TerminalEvent>,
     ) -> Result<TerminalId, TerminalError> {
+        validate_size(spec.columns, spec.rows)?;
+        let terminal_id = spec.id;
+        if self.sessions()?.contains_key(terminal_id.as_str()) {
+            return Err(TerminalError::Backend("terminal is already running".into()));
+        }
         let system = native_pty_system();
         let pair = system
-            .openpty(Self::size(80, 24))
+            .openpty(Self::size(spec.columns, spec.rows))
             .map_err(|error| TerminalError::Backend(format!("openpty failed: {error}")))?;
 
         let mut command = CommandBuilder::new(&spec.command);
         command.args(&spec.args);
         command.cwd(&spec.cwd);
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.env("SHEPHERD_TERMINAL_ID", terminal_id.as_str());
         for (key, value) in &spec.environment {
             command.env(key, value);
         }
-
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| TerminalError::Backend(format!("spawn failed: {error}")))?;
-        drop(pair.slave);
 
         let mut reader = pair
             .master
@@ -81,7 +83,11 @@ impl TerminalService for PtyTerminals {
             .take_writer()
             .map_err(|error| TerminalError::Backend(format!("writer failed: {error}")))?;
 
-        let terminal_id = TerminalId::new(uuid::Uuid::new_v4().to_string());
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| TerminalError::Backend(format!("spawn failed: {error}")))?;
+        drop(pair.slave);
 
         let output_events = events.clone();
         std::thread::spawn(move || {
@@ -147,6 +153,7 @@ impl TerminalService for PtyTerminals {
         columns: u16,
         rows: u16,
     ) -> Result<(), TerminalError> {
+        validate_size(columns, rows)?;
         let sessions = self.sessions()?;
         let session = sessions.get(terminal_id.as_str()).ok_or_else(|| {
             TerminalError::Backend(format!("no terminal {}", terminal_id.as_str()))
@@ -182,6 +189,9 @@ mod tests {
         let terminal_id = engine
             .spawn(
                 TerminalSpec {
+                    id: TerminalId::new("test-terminal"),
+                    columns: 80,
+                    rows: 24,
                     cwd: std::env::temp_dir(),
                     command: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), "printf hello".to_string()],
@@ -215,6 +225,9 @@ mod tests {
         let terminal_id = engine
             .spawn(
                 TerminalSpec {
+                    id: TerminalId::new("test-terminal"),
+                    columns: 80,
+                    rows: 24,
                     cwd: std::env::temp_dir(),
                     command: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), "sleep 30".to_string()],

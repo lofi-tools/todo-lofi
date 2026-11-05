@@ -120,6 +120,9 @@ pub struct TerminalSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct TerminalSpec {
+    pub id: TerminalId,
+    pub columns: u16,
+    pub rows: u16,
     pub cwd: PathBuf,
     pub command: String,
     pub args: Vec<String>,
@@ -130,6 +133,15 @@ pub struct TerminalSpec {
 pub enum TerminalError {
     #[error("terminal service error: {0}")]
     Backend(String),
+}
+
+pub fn validate_size(columns: u16, rows: u16) -> Result<(), TerminalError> {
+    if !(2..=512).contains(&columns) || !(1..=256).contains(&rows) {
+        return Err(TerminalError::Backend(format!(
+            "invalid terminal size {columns}×{rows}"
+        )));
+    }
+    Ok(())
 }
 
 /// What a running terminal reports back. Output is raw PTY bytes; the shell

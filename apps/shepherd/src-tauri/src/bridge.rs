@@ -341,6 +341,9 @@ impl ShellState {
             .await
             .spawn(
                 TerminalSpec {
+                    id: TerminalId::new(uuid::Uuid::new_v4().to_string()),
+                    columns,
+                    rows,
                     cwd: cwd.clone(),
                     command: command.clone(),
                     args: Vec::new(),
@@ -362,21 +365,23 @@ impl ShellState {
             command,
             now_millis(),
         );
-        {
-            let mut core = self.core.lock().await;
-            core.record_terminal(&record)
-                .await
-                .map_err(BridgeError::from)?;
-        }
-
         let (frames, _) = broadcast::channel(64);
         self.screens.lock().await.insert(
             terminal_id.as_str().to_string(),
             ScreenSlot {
                 screen: Screen::new(usize::from(columns), usize::from(rows)),
-                frames: frames.clone(),
+                frames,
             },
         );
+
+        let saved = self.core.lock().await.record_terminal(&record).await;
+        if let Err(error) = saved {
+            self.screens.lock().await.remove(terminal_id.as_str());
+            if let Err(close_error) = self.engine.lock().await.close(&terminal_id) {
+                tracing::warn!(%close_error, "could not roll back terminal spawn");
+            }
+            return Err(error.into());
+        }
 
         let screens = Arc::clone(&self.screens);
         let core = Arc::clone(&self.core);
