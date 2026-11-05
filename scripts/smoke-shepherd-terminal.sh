@@ -3,6 +3,12 @@ set -euo pipefail
 
 command -v vim less python3 >/dev/null
 
+port=${SHEPHERD_DESKTOP_SMOKE_PORT:-1432}
+if [[ ! $port =~ ^[1-9][0-9]{3,4}$ ]] || (( port < 1024 || port > 65535 )); then
+  printf '%s\n' 'SHEPHERD_DESKTOP_SMOKE_PORT must be between 1024 and 65535' >&2
+  exit 2
+fi
+
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT
@@ -25,11 +31,11 @@ export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
 
 cd "$repo"
-for phase in prepare restore; do
-  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri dev --no-watch --config '{
+config=$(cat <<EOF
+{
   "build": {
-    "beforeDevCommand": "pnpm --dir ui run dev --port 1432",
-    "devUrl": "http://localhost:1432"
+    "beforeDevCommand": "pnpm --dir ui run dev --port $port",
+    "devUrl": "http://localhost:$port"
   },
   "app": {
     "windows": [{
@@ -39,6 +45,10 @@ for phase in prepare restore; do
       "height": 820
     }]
   }
-}' 2>&1 | tee "$fixture/$phase.log"
+}
+EOF
+)
+for phase in prepare restore; do
+  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri dev --no-watch --config "$config" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
 done
