@@ -65,7 +65,9 @@ export function App() {
 
   async function selectTask(taskId: string) {
     setSelectedTaskId(taskId)
-    setWorkspace(await bridge.taskWorkspace(taskId))
+    setWorkspace(null)
+    const next = await bridge.taskWorkspace(taskId)
+    if (selectedTaskId() === taskId) setWorkspace(next)
   }
 
   async function selectProject(project: bridge.ProjectSnapshot) {
@@ -458,7 +460,7 @@ export function App() {
           >
             <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} />}
+                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} />}
               </Show>
             </div>
             <Show when={inspectorTab() === 'review'}>
