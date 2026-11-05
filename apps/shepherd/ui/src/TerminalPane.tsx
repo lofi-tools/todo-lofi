@@ -97,6 +97,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (event?.projectId === props.projectId) setTerminals(event.terminals)
   })
 
+  function splitActive(axis: bridge.SplitAxis) {
+    const id = active()
+    const entry = id && terminal(id)
+    if (entry) start(entry.taskId, axis)
+  }
+
   onMount(() => {
     let disposed = false
     const initialEvent = props.listEvent
@@ -114,8 +120,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       <div class="terminal-pane__bar">
         <button type="button" onClick={() => start(null, 'vertical')} disabled={pending()}>New shared terminal</button>
         <button type="button" onClick={() => start(props.taskId, 'vertical')} disabled={pending() || !props.taskHasWorktree}>New task terminal</button>
-        <button type="button" onClick={() => start(props.taskId && props.taskHasWorktree ? props.taskId : null, 'horizontal')} disabled={pending() || !active()}>Split right</button>
-        <button type="button" onClick={() => start(props.taskId && props.taskHasWorktree ? props.taskId : null, 'vertical')} disabled={pending() || !active()}>Split down</button>
+        <button type="button" onClick={() => splitActive('horizontal')} disabled={pending() || !active()}>Split right</button>
+        <button type="button" onClick={() => splitActive('vertical')} disabled={pending() || !active()}>Split down</button>
         <Show when={paneIds(root()).length > 1}>
           <button type="button" onClick={() => arrange('horizontal')} disabled={pending()}>Side by side</button>
           <button type="button" onClick={() => arrange('vertical')} disabled={pending()}>Stack</button>
