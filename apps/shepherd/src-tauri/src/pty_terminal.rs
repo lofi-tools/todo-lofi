@@ -31,6 +31,32 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
 }
 
+impl Session {
+    fn hangup(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(group) = self
+            .master
+            .process_group_leader()
+            .filter(|group| *group > 1)
+        {
+            // The master identifies the foreground group on this PTY. Exclude
+            // Shepherd's own group before signaling a negative process ID.
+            let own_group = unsafe { libc::getpgrp() };
+            if group != own_group && unsafe { libc::killpg(group, libc::SIGHUP) } == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    tracing::warn!(%error, group, "could not hang up terminal foreground group");
+                }
+            }
+        }
+        match self.killer.kill() {
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+            result => result,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PtyTerminals {
     sessions: Arc<Mutex<BTreeMap<String, Session>>>,
@@ -59,7 +85,7 @@ impl PtyTerminals {
             }
         };
         for (terminal_id, mut session) in sessions {
-            if let Err(error) = session.killer.kill() {
+            if let Err(error) = session.hangup() {
                 tracing::warn!(%terminal_id, %error, "could not stop terminal process");
             }
         }
@@ -307,8 +333,7 @@ impl TerminalService for PtyTerminals {
             return Ok(());
         };
         session
-            .killer
-            .kill()
+            .hangup()
             .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
         session.closing = true;
         Ok(())
