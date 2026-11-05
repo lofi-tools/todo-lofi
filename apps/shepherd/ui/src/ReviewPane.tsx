@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
 
-export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewAction) => Promise<void> }) {
+export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; onAction: (action: ReviewAction) => Promise<void> }) {
   const [review, { refetch }] = createResource(
     () => props.task.worktreePath ? [props.task.id, props.task.updatedAt] as const : false,
     ([taskId]) => reviewSnapshot(taskId),
@@ -19,6 +19,7 @@ export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewA
 
   const [note, setNote] = createSignal('')
   const [pending, setPending] = createSignal(false)
+  const running = () => ['starting', 'working', 'waiting', 'queued'].includes(props.task.state)
   const [error, setError] = createSignal('')
 
   async function apply(action: ReviewAction) {
@@ -45,15 +46,33 @@ export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewA
           <button type="button" disabled={pending()} onClick={() => void apply({ type: 'reopen' })}>Reopen</button>
         </div>
       </Show>
-      <Show when={props.task.state === 'review'}>
+      <Show when={props.queuedNote}>
+        {(queued) => (
+          <div class="git-pane">
+            <p class="empty">Queued review note</p>
+            <pre class="git-pane__diff">{queued()}</pre>
+            <div class="terminal-pane__bar">
+              <Show when={props.task.state === 'ready' || props.task.state === 'review'}>
+                <button type="button" disabled={pending()} onClick={() => void apply({ type: 'sendQueuedNote' })}>Send now</button>
+              </Show>
+              <button type="button" disabled={pending()} onClick={() => void apply({ type: 'removeQueuedNote' })}>Remove from queue</button>
+            </div>
+          </div>
+        )}
+      </Show>
+      <Show when={!props.queuedNote && (running() || props.task.state === 'review')}>
         <form class="git-pane" onSubmit={(event) => {
           event.preventDefault()
           if (note().trim()) void apply({ type: 'sendNote', text: note() })
         }}>
           <textarea class="composer__input" aria-label="Review note" placeholder="Review note" value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
-          <button class="composer__send" type="submit" disabled={pending() || !note().trim()}>Send review note</button>
-          <button class="composer__send" type="button" disabled={pending()} onClick={() => void apply({ type: 'archive' })}>Mark reviewed and archive</button>
+          <button class="composer__send" type="submit" disabled={pending() || !note().trim()}>{running() ? 'Queue review note' : 'Send review note'}</button>
         </form>
+      </Show>
+      <Show when={props.task.state === 'review'}>
+        <div class="terminal-pane__bar">
+          <button type="button" disabled={pending()} onClick={() => void apply({ type: 'archive' })}>Mark reviewed and archive</button>
+        </div>
       </Show>
       <Show when={error()}>{(failure) => <p role="alert">{failure()}</p>}</Show>
       <Show when={review.loading}><p class="empty" role="status">Loading changes…</p></Show>

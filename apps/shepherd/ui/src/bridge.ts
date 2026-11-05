@@ -148,6 +148,7 @@ export interface AgentDiagnostics {
 }
 
 export interface TaskWorkspace {
+  queuedReviewNote?: string
   project: ProjectSnapshot
   task: TaskDetail
   transcript: Entry[]
@@ -366,7 +367,12 @@ export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSna
   return invoke('mutate_git', { taskId, mutation })
 }
 
-export type ReviewAction = { type: 'archive' } | { type: 'reopen' } | { type: 'sendNote'; text: string }
+export type ReviewAction =
+  | { type: 'archive' }
+  | { type: 'reopen' }
+  | { type: 'sendNote'; text: string }
+  | { type: 'sendQueuedNote' }
+  | { type: 'removeQueuedNote' }
 
 export function reviewTask(taskId: string, action: ReviewAction): Promise<TaskWorkspace> {
   return invoke('review_task', { taskId, action })

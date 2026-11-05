@@ -76,6 +76,10 @@ pub enum CoreError {
         expected: String,
         actual: String,
     },
+    #[error("task {id} already has a queued review note")]
+    ReviewNoteAlreadyQueued { id: String },
+    #[error("task {id} has no queued review note")]
+    ReviewNoteNotQueued { id: String },
     #[error("cannot transition task {id} from {from} to {to}")]
     InvalidTransition {
         id: String,
@@ -114,6 +118,11 @@ enum SessionOpened {
     ResumeFailed(String),
 }
 
+struct QueuedReviewNote {
+    text: String,
+    ready: bool,
+}
+
 /// The core owns all mutable state. It is a library, not a daemon.
 pub struct Core {
     projects: BTreeMap<ProjectId, Project>,
@@ -121,6 +130,7 @@ pub struct Core {
     tasks: BTreeMap<TaskId, Task>,
     sessions: BTreeMap<TaskId, HarnessSession>,
     turn_baselines: BTreeMap<TaskId, TurnBaseline>,
+    review_notes: BTreeMap<TaskId, QueuedReviewNote>,
     /// The newest durable session per task, kept across restarts so resume can
     /// ask the adapter for the thread the previous process opened.
     session_records: BTreeMap<TaskId, SessionRecord>,
@@ -158,6 +168,7 @@ impl Core {
             tasks: BTreeMap::new(),
             sessions: BTreeMap::new(),
             turn_baselines: BTreeMap::new(),
+            review_notes: BTreeMap::new(),
             session_records: BTreeMap::new(),
             terminals: BTreeMap::new(),
             store,
@@ -414,6 +425,28 @@ impl Core {
             self.publish_task(&task_id)?;
             changed = true;
         }
+        if self.shutdown == ShutdownState::Running {
+            let ready_notes: Vec<TaskId> = self
+                .review_notes
+                .iter()
+                .filter(|(id, note)| {
+                    note.ready
+                        && self.tasks.get(*id).is_some_and(|task| {
+                            matches!(task.state, TaskState::Ready | TaskState::Review)
+                        })
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for task_id in ready_notes {
+                if let Err(error) = self.send_queued_review_note(&task_id).await {
+                    self.emit(Event::Error {
+                        task_id: Some(task_id.to_string()),
+                        message: format!("Could not send queued review note: {error}"),
+                    });
+                }
+                changed = true;
+            }
+        }
         Ok(changed)
     }
 
@@ -578,6 +611,7 @@ impl Core {
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
+            queued_review_note: self.review_notes.get(task_id).map(|note| note.text.clone()),
             transcript: self
                 .sessions
                 .get(task_id)
@@ -729,32 +763,85 @@ impl Core {
                 if text.trim().is_empty() {
                     return Err(CoreError::EmptyPrompt);
                 }
+                if self.review_notes.contains_key(task_id) {
+                    return Err(CoreError::ReviewNoteAlreadyQueued {
+                        id: task_id.to_string(),
+                    });
+                }
+                if task.state.is_live() {
+                    self.review_notes
+                        .insert(task_id.clone(), QueuedReviewNote { text, ready: false });
+                    return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
+                }
                 if task.state != TaskState::Review {
                     return Err(CoreError::TaskNotReady {
                         id: task_id.to_string(),
                         state: task.state.as_str(),
                     });
                 }
-                let review = self.review_snapshot(task_id)?;
-                let paths = review
-                    .files
-                    .into_iter()
-                    .map(|file| file.path)
-                    .collect::<Vec<_>>();
-                let prompt = if paths.is_empty() {
-                    text
-                } else {
-                    format!(
-                        "{text}\n\nChanged files under review:\n{}",
-                        paths.join("\n")
-                    )
-                };
-                return self.send_prompt(task_id, prompt).await;
+                return self.send_review_note(task_id, text).await;
+            }
+            ReviewAction::SendQueuedNote => return self.send_queued_review_note(task_id).await,
+            ReviewAction::RemoveQueuedNote => {
+                self.review_notes.remove(task_id);
+                return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
             }
         }
         self.store.save_task(&task).await?;
+        if task.state == TaskState::Done {
+            self.review_notes.remove(task_id);
+        }
         self.tasks.insert(task_id.clone(), task);
         Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
+    async fn send_queued_review_note(
+        &mut self,
+        task_id: &TaskId,
+    ) -> Result<CommandResult, CoreError> {
+        let state = self.task(task_id)?.state;
+        if !matches!(state, TaskState::Ready | TaskState::Review) {
+            return Err(CoreError::TaskNotReady {
+                id: task_id.to_string(),
+                state: state.as_str(),
+            });
+        }
+        let mut note =
+            self.review_notes
+                .remove(task_id)
+                .ok_or_else(|| CoreError::ReviewNoteNotQueued {
+                    id: task_id.to_string(),
+                })?;
+        let outcome = self.send_review_note(task_id, note.text.clone()).await;
+        if outcome.is_err() {
+            note.ready = false;
+            self.review_notes.insert(task_id.clone(), note);
+            self.publish_task(task_id)?;
+        }
+        outcome
+    }
+
+    async fn send_review_note(
+        &mut self,
+        task_id: &TaskId,
+        text: String,
+    ) -> Result<CommandResult, CoreError> {
+        self.repair_worktree(task_id).await?;
+        let paths = self
+            .review_snapshot(task_id)?
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>();
+        let prompt = if paths.is_empty() {
+            text
+        } else {
+            format!(
+                "{text}\n\nChanged files under review:\n{}",
+                paths.join("\n")
+            )
+        };
+        self.send_prompt(task_id, prompt).await
     }
 
     async fn send_prompt(
@@ -1111,6 +1198,7 @@ impl Core {
     fn apply_events(&mut self, task_id: &TaskId, events: &[HarnessEvent]) -> Result<(), CoreError> {
         let started_live = self.task(task_id)?.state.is_live();
         let mut next_state = None;
+        let mut turn_completed = false;
         let mut task_error = None;
         let mut failure = None;
 
@@ -1121,7 +1209,10 @@ impl Core {
                 }
                 HarnessEvent::TurnFinished { reason } => match reason {
                     TurnFinishReason::Completed => match self.state_after_completed_turn(task_id) {
-                        Ok(state) => next_state = Some(state),
+                        Ok(state) => {
+                            turn_completed = true;
+                            next_state = Some(state);
+                        }
                         Err(error) => {
                             next_state = Some(TaskState::Failed);
                             task_error = Some(format!("could not compare turn changes: {error}"));
@@ -1164,6 +1255,10 @@ impl Core {
         }
 
         if let Some(state) = next_state {
+            if let Some(note) = self.review_notes.get_mut(task_id) {
+                note.ready =
+                    turn_completed && matches!(state, TaskState::Ready | TaskState::Review);
+            }
             if !state.is_live() {
                 self.turn_baselines.remove(task_id);
             }
@@ -2598,6 +2693,76 @@ mod tests {
             );
             assert_eq!(workspace.task.state, expected, "{text}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_queued_review_note_waits_for_the_current_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![
+                FakeTurn::new(vec![
+                    FakeStep::approval("permission", "Edit the readme"),
+                    FakeStep::WriteFile {
+                        path: "README.md".into(),
+                        contents: "first pass\n".into(),
+                    },
+                ]),
+                FakeTurn::new(vec![]),
+            ]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Review notes".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let waiting = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "Edit the readme".into(),
+            })
+            .await?,
+        );
+        assert_eq!(waiting.task.state, TaskState::Waiting);
+
+        let queued = workspace_of(
+            core.execute(Command::ReviewTask {
+                task_id: task_id.clone(),
+                action: ReviewAction::SendNote {
+                    text: "Explain the changes".into(),
+                },
+            })
+            .await?,
+        );
+        assert_eq!(
+            queued.queued_review_note.as_deref(),
+            Some("Explain the changes")
+        );
+        assert_eq!(queued.task.state, TaskState::Waiting);
+        core.pump().await?;
+        assert!(core.task_workspace(&task_id)?.queued_review_note.is_some());
+
+        core.execute(Command::ResolveApproval {
+            task_id: task_id.clone(),
+            approval_id: ApprovalId::new("permission"),
+            decision: Decision::Allow,
+        })
+        .await?;
+        core.pump().await?;
+        let finished = core.task_workspace(&task_id)?;
+        assert!(finished.queued_review_note.is_none());
+        assert_eq!(finished.task.state, TaskState::Ready);
+        assert!(
+            summaries(&finished).iter().any(|entry| {
+                entry.contains("Explain the changes") && entry.contains("README.md")
+            })
+        );
         Ok(())
     }
 

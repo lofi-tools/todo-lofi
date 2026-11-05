@@ -25,6 +25,8 @@ pub struct TaskWorkspace {
     pub project: ProjectSnapshot,
     pub task: TaskDetail,
     pub transcript: Vec<Entry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_review_note: Option<String>,
     /// What the adapter launched and speaks, once a session exists.
     pub diagnostics: Option<AgentDiagnostics>,
 }

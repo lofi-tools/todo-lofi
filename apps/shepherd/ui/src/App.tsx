@@ -440,6 +440,7 @@ export function App() {
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
                 {(taskId) => <ReviewPane
                   task={workspace()!.task}
+                  queuedNote={workspace()?.queuedReviewNote}
                   onAction={async (action) => {
                     const updated = await bridge.reviewTask(taskId, action)
                     if (selectedTaskId() === taskId) setWorkspace(updated)

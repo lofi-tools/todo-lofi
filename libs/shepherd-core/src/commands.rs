@@ -51,6 +51,8 @@ pub enum ReviewAction {
     Archive,
     Reopen,
     SendNote { text: String },
+    SendQueuedNote,
+    RemoveQueuedNote,
 }
 
 #[derive(Clone, Debug)]
