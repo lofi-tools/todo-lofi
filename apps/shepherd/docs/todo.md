@@ -405,7 +405,8 @@ task-scoped, persistent and fast enough.
   ended-terminal restart and close/reopen.
 - [x] Make the inspector tab project-level so shared terminals stay in view
   across task switches.
-- [ ] Add attention dots. Pane focus and application keyboard modes are wired.
+- [x] Route terminal focus and keyboard input. Show bell attention on the
+  Terminals tab and on the owning task for task-scoped terminals.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
 - [ ] Measure frame throughput before considering WebGL; keep the 1 MB burst
   budget and dirty-row coalescing.

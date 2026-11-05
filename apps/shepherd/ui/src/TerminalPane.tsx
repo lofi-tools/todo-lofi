@@ -12,6 +12,8 @@ interface TerminalPaneProps {
   projectId: string
   taskId: string | null
   taskHasWorktree: boolean
+  attention: string[]
+  onTerminalFocus: (id: string | null) => void
   listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
 }
 
@@ -138,6 +140,9 @@ export function TerminalPane(props: TerminalPaneProps) {
                 aria-current={entry.id === active() ? 'true' : undefined}
                 disabled={pending()} onClick={() => void run(() => show(entry.id))}>
                 <span>{entry.title}</span>
+                <Show when={props.attention.includes(entry.id)}>
+                  <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
+                </Show>
                 <span class="terminal-list__state">{entry.scope === 'project' ? 'shared' : 'task'} · {entry.endedAt === null ? 'live' : 'ended'}{contains(root(), entry.id) ? '' : ' · hidden'}</span>
               </button>
             </li>
@@ -146,7 +151,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         </ul>
       </details>
       <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
-        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId} focusRequest={focusRequest()}
+        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
@@ -217,6 +222,7 @@ interface TerminalTreeProps {
   terminal: TerminalLookup
   active: string | null
   select: (id: string) => void
+  onTerminalFocus: (id: string | null) => void
   focusRequest: { id: string } | undefined
   restart: (id: string) => void
   stop: (id: string) => void
@@ -259,7 +265,7 @@ function TerminalTree(props: TerminalTreeProps) {
               </div>
             }>
               <Show when={entry().id} keyed>
-                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} />}
+                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} />}
               </Show>
             </Show>
           </section>
@@ -332,7 +338,7 @@ const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
-function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined }) {
+function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -711,6 +717,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
     onCleanup(() => {
       detached = true
+      if (input === document.activeElement) props.onFocus(null)
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
 
@@ -762,8 +769,14 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         autocomplete="off"
         spellcheck={false}
         onKeyDown={onKeyDown}
-        onFocus={() => { if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I') }}
-        onBlur={() => { if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O') }}
+        onFocus={() => {
+          props.onFocus(props.terminalId)
+          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I')
+        }}
+        onBlur={() => {
+          props.onFocus(null)
+          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O')
+        }}
         onPaste={onPaste}
         onCopy={onCopy}
         onCompositionStart={() => { composing = true }}

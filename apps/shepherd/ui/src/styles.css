@@ -805,6 +805,15 @@ textarea {
   color: var(--text);
 }
 
+.terminal-attention {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--attention, #e5b66e);
+}
+
 .terminal-list__state {
   color: var(--text-disabled);
 }

@@ -14,6 +14,7 @@ import { ReviewPane } from './ReviewPane'
 import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
+type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 
@@ -27,6 +28,15 @@ export function App() {
   const visibleTasks = () => tasks().filter((task) => showArchived() || task.state !== 'done')
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
+  const [terminalAttention, setTerminalAttention] = createSignal<TerminalBell[]>([])
+  const [focusedTerminal, setFocusedTerminal] = createSignal<string | null>(null)
+  const projectAttention = () => terminalAttention().filter((bell) => bell.projectId === selectedProjectId())
+  const tabAttention = () => projectAttention().some((bell) => bell.taskId === null || bell.taskId === selectedTaskId())
+
+  function focusTerminal(id: string | null) {
+    setFocusedTerminal(id)
+    if (id) setTerminalAttention((bells) => bells.filter((bell) => bell.terminalId !== id))
+  }
   const [prompt, setPrompt] = createSignal('')
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
@@ -103,6 +113,10 @@ export function App() {
         }
         break
       }
+      case 'terminalBell':
+        if (event.data.terminalId === focusedTerminal() && inspectorTab() === 'terminals' && document.hasFocus()) break
+        setTerminalAttention((bells) => bells.some((bell) => bell.terminalId === event.data.terminalId) ? bells : [...bells, event.data])
+        break
       case 'terminalListChanged':
         if (event.data.projectId === selectedProjectId()) setTerminalListEvent(event.data)
         break
@@ -304,6 +318,9 @@ export function App() {
                               >
                                 <span class="task__state" aria-hidden="true" />
                                 <span class="task__title">{task.title}</span>
+                                <Show when={projectAttention().some((bell) => bell.taskId === task.id)}>
+                                  <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
+                                </Show>
                                 <Show when={task.state === 'review'} fallback={<span class="task__state-label">{task.state}</span>}>
                                   <ReviewBadge />
                                 </Show>
@@ -445,6 +462,9 @@ export function App() {
                   title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
                 >
                   {tab.label}
+                  <Show when={tab.id === 'terminals' && tabAttention()}>
+                    <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
+                  </Show>
                   <Show when={tab.id === 'review' && workspace()?.task.state === 'review'}>
                     <ReviewBadge />
                   </Show>
@@ -460,7 +480,7 @@ export function App() {
           >
             <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} />}
+                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal} />}
               </Show>
             </div>
             <Show when={inspectorTab() === 'review'}>
