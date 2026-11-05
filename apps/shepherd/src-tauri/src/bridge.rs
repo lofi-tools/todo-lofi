@@ -385,6 +385,7 @@ impl ShellState {
 
         let screens = Arc::clone(&self.screens);
         let core = Arc::clone(&self.core);
+        let shell_events = self.events.clone();
         let id = terminal_id.as_str().to_string();
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
@@ -407,6 +408,11 @@ impl ShellState {
                             .await
                         {
                             tracing::warn!(%error, "could not mark the terminal ended");
+                        }
+                        for event in core.drain_events() {
+                            if let Err(error) = shell_events.send(event) {
+                                tracing::debug!(%error, "no shell is subscribed to terminal events");
+                            }
                         }
                         break;
                     }

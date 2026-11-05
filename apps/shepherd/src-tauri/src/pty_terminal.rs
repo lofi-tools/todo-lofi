@@ -5,7 +5,8 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use shepherd_core::terminal::{
@@ -22,7 +23,7 @@ struct Session {
 
 #[derive(Default)]
 pub struct PtyTerminals {
-    sessions: Mutex<BTreeMap<String, Session>>,
+    sessions: Arc<Mutex<BTreeMap<String, Session>>>,
 }
 
 impl PtyTerminals {
@@ -89,6 +90,7 @@ impl TerminalService for PtyTerminals {
             .map_err(|error| TerminalError::Backend(format!("spawn failed: {error}")))?;
         drop(pair.slave);
 
+        let (reader_finished, reader_status) = std::sync::mpsc::sync_channel(1);
         let output_events = events.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
@@ -109,20 +111,12 @@ impl TerminalService for PtyTerminals {
                     }
                 }
             }
+            if reader_finished.send(()).is_err() {
+                tracing::debug!("terminal waiter stopped");
+            }
         });
 
         let killer = child.clone_killer();
-        std::thread::spawn(move || {
-            let exit_code = match child.wait() {
-                Ok(status) => Some(status.exit_code() as i32),
-                Err(error) => {
-                    tracing::debug!(%error, "waiting for the terminal child failed");
-                    None
-                }
-            };
-            let _ = events.send(TerminalEvent::Exited { exit_code });
-        });
-
         self.sessions()?.insert(
             terminal_id.as_str().to_string(),
             Session {
@@ -131,6 +125,30 @@ impl TerminalService for PtyTerminals {
                 master: pair.master,
             },
         );
+
+        let sessions = Arc::clone(&self.sessions);
+        let id = terminal_id.as_str().to_string();
+        std::thread::spawn(move || {
+            let exit_code = match child.wait() {
+                Ok(status) => Some(status.exit_code() as i32),
+                Err(error) => {
+                    tracing::debug!(%error, "waiting for the terminal child failed");
+                    None
+                }
+            };
+            match sessions.lock() {
+                Ok(mut sessions) => {
+                    sessions.remove(&id);
+                }
+                Err(error) => tracing::error!(%error, "could not release terminal descriptors"),
+            }
+            if let Err(error) = reader_status.recv_timeout(Duration::from_millis(150)) {
+                tracing::debug!(%error, "terminal output did not drain before exit");
+            }
+            if events.send(TerminalEvent::Exited { exit_code }).is_err() {
+                tracing::debug!("terminal event receiver closed");
+            }
+        });
 
         Ok(terminal_id)
     }
@@ -178,7 +196,7 @@ impl TerminalService for PtyTerminals {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::*;
 
@@ -186,7 +204,7 @@ mod tests {
     fn a_pty_reports_its_output_and_exit_code() {
         let mut engine = PtyTerminals::new();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let terminal_id = engine
+        engine
             .spawn(
                 TerminalSpec {
                     id: TerminalId::new("test-terminal"),
