@@ -68,6 +68,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::terminal_list,
             bridge::commands::start_terminal,
             bridge::commands::restart_terminal,
+            bridge::commands::search_terminal,
             bridge::commands::terminal_scroll,
             bridge::commands::terminal_write,
             bridge::commands::terminal_resize,

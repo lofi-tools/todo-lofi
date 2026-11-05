@@ -316,6 +316,12 @@ const BRACKETED_PASTE = 1 << 4
 function TerminalCanvas(props: { terminalId: string }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
+  const [finding, setFinding] = createSignal(false)
+  const [searching, setSearching] = createSignal(false)
+  const [noMatch, setNoMatch] = createSignal(false)
+  let match: bridge.TerminalMatch | null = null
+  let searchInput: HTMLInputElement | undefined
+  let searchGeneration = 0
   let composing = false
   let canvas: HTMLCanvasElement | undefined
   let container: HTMLDivElement | undefined
@@ -351,6 +357,14 @@ function TerminalCanvas(props: { terminalId: string }) {
       context.fillStyle = hex(cell.background)
       context.fillRect(x, y, cellWidth, LINE_HEIGHT)
     })
+    if (match) {
+      const first = (match.start.line + current.displayOffset) * current.columns + match.start.column
+      const last = (match.end.line + current.displayOffset) * current.columns + match.end.column
+      context.fillStyle = 'rgba(217, 176, 106, 0.45)'
+      for (let index = Math.max(0, first); index <= Math.min(last, current.cells.length - 1); index++) {
+        context.fillRect((index % current.columns) * cellWidth, Math.floor(index / current.columns) * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+      }
+    }
     if (selection && selection.start !== selection.end) {
       const [start, end] = selectionRange(current, selection)
       context.fillStyle = 'rgba(111, 143, 220, 0.5)'
@@ -479,8 +493,46 @@ function TerminalCanvas(props: { terminalId: string }) {
     void bridge.terminalWrite(props.terminalId, data).catch((failure) => setError(describe(failure)))
   }
 
+  function resetSearch() {
+    searchGeneration++
+    setSearching(false)
+    setNoMatch(false)
+    match = null
+    draw()
+  }
+
+  function closeSearch() {
+    resetSearch()
+    setFinding(false)
+    input?.focus({ preventScroll: true })
+  }
+
+  async function find(query: string) {
+    if (!query || searching()) return
+    const generation = ++searchGeneration
+    setSearching(true)
+    setError(null)
+    try {
+      const found = await bridge.searchTerminal(props.terminalId, query, match?.start ?? null)
+      if (generation !== searchGeneration) return
+      match = found
+      setNoMatch(!found)
+      draw()
+    } catch (failure) {
+      if (generation === searchGeneration) setError(describe(failure))
+    } finally {
+      if (generation === searchGeneration) setSearching(false)
+    }
+  }
+
   function onKeyDown(event: KeyboardEvent) {
     if (composing || event.isComposing || event.keyCode === 229) return
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault()
+      setFinding(true)
+      searchInput?.focus()
+      return
+    }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'c') {
       const text = selectedText()
       if (text) {
@@ -588,6 +640,17 @@ function TerminalCanvas(props: { terminalId: string }) {
           event.currentTarget.value = ''
         }}
       />
+      <Show when={finding()}>
+        <form class="terminal-view__find" onSubmit={(event) => {
+          event.preventDefault()
+          void find(searchInput?.value ?? '')
+        }} onKeyDown={(event) => { if (event.key === 'Escape') closeSearch() }}>
+          <input ref={searchInput} type="search" aria-label="Find in terminal" placeholder="Find in terminal" onInput={resetSearch} />
+          <button type="submit" disabled={searching()}>Find previous</button>
+          <button type="button" onClick={closeSearch}>Close find</button>
+          <Show when={noMatch()}><span role="status">No matches</span></Show>
+        </form>
+      </Show>
       <Show when={error()}>{(message) => <p class="error terminal-view__error" role="alert">{message()}</p>}</Show>
     </div>
   )

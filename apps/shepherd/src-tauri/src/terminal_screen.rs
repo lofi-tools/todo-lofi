@@ -7,10 +7,12 @@
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{BuildError, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +36,27 @@ pub struct FrameCell {
     pub background: u32,
     pub bold: bool,
     pub italic: bool,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+pub struct SearchPoint {
+    line: i32,
+    column: usize,
+}
+
+impl From<Point> for SearchPoint {
+    fn from(point: Point) -> Self {
+        Self {
+            line: point.line.0,
+            column: point.column.0,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SearchMatch {
+    start: SearchPoint,
+    end: SearchPoint,
 }
 
 struct ScreenSize {
@@ -86,6 +109,50 @@ impl Screen {
     pub fn scroll(&mut self, lines: i32) {
         self.term
             .scroll_display(Scroll::Delta(lines.clamp(-120, 120)));
+    }
+
+    pub fn search(
+        &mut self,
+        query: &str,
+        before: Option<SearchPoint>,
+    ) -> Result<Option<SearchMatch>, Box<BuildError>> {
+        if query.is_empty() {
+            return Ok(None);
+        }
+        let mut pattern = String::new();
+        for character in query.chars() {
+            if r"\.^$|?*+()[]{}".contains(character) {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+        let mut regex = RegexSearch::new(&pattern)?;
+        let grid = self.term.grid();
+        let origin = before.map_or_else(
+            || Point::new(grid.bottommost_line(), grid.last_column()),
+            |point| {
+                Point::new(
+                    Line(point.line),
+                    Column(point.column.min(grid.last_column().0)),
+                )
+                .grid_clamp(grid, Boundary::Grid)
+                .sub(grid, Boundary::None, 1)
+            },
+        );
+        let Some(found) =
+            self.term
+                .search_next(&mut regex, origin, Direction::Left, Side::Left, None)
+        else {
+            return Ok(None);
+        };
+        let offset = grid.display_offset() as i32;
+        let desired_offset = (-found.start().line.0).max(0);
+        self.term
+            .scroll_display(Scroll::Delta(desired_offset - offset));
+        Ok(Some(SearchMatch {
+            start: (*found.start()).into(),
+            end: (*found.end()).into(),
+        }))
     }
 
     pub fn follow_output(&mut self) -> bool {

@@ -293,6 +293,20 @@ export function restartTerminal(terminalId: string, columns: number, rows: numbe
   return invoke('restart_terminal', { terminalId, columns, rows })
 }
 
+interface SearchPoint {
+  line: number
+  column: number
+}
+
+export interface TerminalMatch {
+  start: SearchPoint
+  end: SearchPoint
+}
+
+export function searchTerminal(terminalId: string, query: string, before: SearchPoint | null): Promise<TerminalMatch | null> {
+  return invoke('search_terminal', { terminalId, query, before })
+}
+
 export function terminalScroll(terminalId: string, lines: number): Promise<void> {
   return invoke('terminal_scroll', { terminalId, lines })
 }

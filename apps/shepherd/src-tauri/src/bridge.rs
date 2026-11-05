@@ -28,7 +28,7 @@ use shepherd_core::{
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::pty_terminal::PtyTerminals;
-use crate::terminal_screen::{Screen, TerminalFrame};
+use crate::terminal_screen::{Screen, SearchMatch, SearchPoint, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -463,6 +463,32 @@ impl ShellState {
         Ok(self.core.lock().await.terminals_for(&project_id))
     }
 
+    pub async fn search_terminal(
+        &self,
+        terminal_id: &str,
+        query: &str,
+        before: Option<SearchPoint>,
+    ) -> Result<Option<SearchMatch>, BridgeError> {
+        if query.len() > 1024 {
+            return Err(BridgeError::new(
+                "terminal",
+                "search is limited to 1024 bytes",
+            ));
+        }
+        let mut screens = self.screens.lock().await;
+        let slot = screens
+            .get_mut(terminal_id)
+            .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
+        let found = slot
+            .screen
+            .search(query, before)
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        if found.is_some() {
+            slot.frames.send_replace(slot.screen.frame());
+        }
+        Ok(found)
+    }
+
     pub async fn terminal_scroll(&self, terminal_id: &str, lines: i32) -> Result<(), BridgeError> {
         let mut screens = self.screens.lock().await;
         let slot = screens
@@ -820,6 +846,19 @@ pub mod commands {
         state
             .inner()
             .restart_terminal(terminal_id, columns, rows)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn search_terminal(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        query: String,
+        before: Option<SearchPoint>,
+    ) -> Result<Option<SearchMatch>, BridgeError> {
+        state
+            .inner()
+            .search_terminal(&terminal_id, &query, before)
             .await
     }
 

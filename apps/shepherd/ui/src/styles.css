@@ -848,6 +848,17 @@ textarea {
   opacity: 0;
 }
 
+.terminal-view__find {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+}
+
 .terminal-view__error {
   position: absolute;
   right: 8px;
