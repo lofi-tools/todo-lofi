@@ -176,3 +176,52 @@ fn named_color(color: NamedColor) -> u32 {
         NamedColor::DimForeground => 0xa5a5ad,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(frame: &TerminalFrame, row: usize) -> String {
+        let start = row * frame.columns;
+        frame.cells[start..start + frame.columns]
+            .iter()
+            .map(|cell| cell.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn text_lands_in_the_grid_and_moves_the_cursor() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"hello\r\nworld");
+
+        let frame = screen.frame();
+        assert_eq!(row(&frame, 0), "hello     ");
+        assert_eq!(row(&frame, 1), "world     ");
+        assert_eq!((frame.cursor_row, frame.cursor_column), (1, 5));
+    }
+
+    #[test]
+    fn sgr_attributes_reach_the_frame() {
+        let mut screen = Screen::new(20, 2);
+        screen.process(b"\x1b[1;31mred");
+
+        let frame = screen.frame();
+        assert_eq!(frame.cells[0].text, "r");
+        assert!(frame.cells[0].bold);
+        assert_eq!(frame.cells[0].foreground, 0xe06a6a);
+        assert!(!frame.cells[0].italic);
+    }
+
+    #[test]
+    fn resizing_rebuilds_the_frame_at_the_new_size() {
+        let mut screen = Screen::new(4, 2);
+        screen.process(b"abcdef");
+
+        screen.resize(8, 3);
+        let frame = screen.frame();
+        assert_eq!((frame.columns, frame.rows), (8, 3));
+        assert_eq!(frame.cells.len(), 24);
+        assert!(frame.cursor_column < 8);
+        assert!(frame.cursor_row < 3);
+    }
+}

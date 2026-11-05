@@ -72,6 +72,9 @@ test.beforeEach(async ({ page }) => {
       },
     ]
 
+    // Every byte the shell writes to the PTY, in order.
+    const writes = []
+
     function entry(id, sequence, kind) {
       return { id, sequence, kind }
     }
@@ -155,6 +158,9 @@ test.beforeEach(async ({ page }) => {
             return [...terminals]
           case 'terminal_frame':
             return null
+          case 'terminal_write':
+            writes.push(args.data)
+            return null
           case 'quit':
             return { interruptedTasks: 0, liveTerminals: 0 }
           default:
@@ -162,6 +168,8 @@ test.beforeEach(async ({ page }) => {
         }
       },
     }
+
+    window.__writes = writes
   })
 })
 
@@ -185,6 +193,25 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('encodes typed keys into terminal input', async ({ page }) => {
+  await page.goto('/')
+
+  const canvas = page.getByLabel('Terminal', { exact: true })
+  await expect(canvas).toBeVisible()
+  await canvas.click()
+
+  await canvas.press('a')
+  await canvas.press('Control+c')
+  await canvas.press('Enter')
+  await canvas.press('ArrowUp')
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
+    )
+    .toEqual(['a', '\u0003', '\r', '\u001b[A'])
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {
