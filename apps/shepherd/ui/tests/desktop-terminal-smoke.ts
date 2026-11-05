@@ -181,6 +181,24 @@ async function exerciseSearch(terminalId: string) {
   }
 }
 
+async function selectTask(title: string) {
+  const task = await waitFor(title, () => Array.from(document.querySelectorAll<HTMLButtonElement>('.task'))
+    .find((entry) => entry.querySelector('.task__title')?.textContent === title))
+  task.click()
+}
+
+async function prepareTask(projectId: string) {
+  const draft = await bridge.createDraft(projectId, 'Terminal scope')
+  const waiting = await bridge.sendPrompt(draft.task.id, 'Prepare the disposable terminal worktree')
+  if (waiting.task.state !== 'waiting' || !waiting.task.worktreePath) {
+    throw new Error('The scripted task should have a worktree and await approval')
+  }
+  const ready = await bridge.resolveApproval(draft.task.id, 'approval-1', 'allow')
+  if (ready.task.state !== 'ready') throw new Error('The scripted task should finish after approval')
+  await selectTask(ready.task.title)
+  return { id: ready.task.id, title: ready.task.title, worktree: waiting.task.worktreePath }
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -211,7 +229,9 @@ async function smoke() {
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
-  return { ok: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  await prepareTask(project.id)
+  await waitFor('task terminal action for the worktree', () => button('New task terminal')?.disabled === false)
+  return { ok: true, worktreeReady: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 async function restore() {
