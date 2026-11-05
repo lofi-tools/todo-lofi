@@ -158,12 +158,22 @@ impl Drop for TestCore {
 /// a test can model a fresh adapter process after a restart.
 pub struct FakeHarnessFactory {
     scripts: Mutex<VecDeque<Vec<FakeTurn>>>,
+    resume: bool,
 }
 
 impl FakeHarnessFactory {
     pub fn new(scripts: Vec<Vec<FakeTurn>>) -> Self {
         Self {
             scripts: Mutex::new(scripts.into()),
+            resume: true,
+        }
+    }
+
+    /// A factory whose harnesses advertise no resume, for the fallback path.
+    pub fn refusing_resume(scripts: Vec<Vec<FakeTurn>>) -> Self {
+        Self {
+            scripts: Mutex::new(scripts.into()),
+            resume: false,
         }
     }
 }
@@ -177,7 +187,12 @@ impl HarnessFactory for FakeHarnessFactory {
                 scripts.pop_front().unwrap_or_default()
             }
         };
-        Ok(Box::new(FakeHarness::new(script)))
+        let harness = FakeHarness::new(script);
+        if self.resume {
+            Ok(Box::new(harness))
+        } else {
+            Ok(Box::new(harness.without_resume()))
+        }
     }
 }
 

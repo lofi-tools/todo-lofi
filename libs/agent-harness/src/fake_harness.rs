@@ -98,6 +98,7 @@ pub struct FakeHarness {
     started: bool,
     turn_active: bool,
     pending: Option<PendingApproval>,
+    capabilities: Capabilities,
 }
 
 impl FakeHarness {
@@ -114,11 +115,19 @@ impl FakeHarness {
             started: false,
             turn_active: false,
             pending: None,
+            capabilities: Capabilities::fake(),
         }
     }
 
     pub fn one_turn(turn: FakeTurn) -> Self {
         Self::new(vec![turn])
+    }
+
+    /// The same script without resume, to model an adapter that cannot reattach
+    /// a stored thread.
+    pub fn without_resume(mut self) -> Self {
+        self.capabilities.resume = false;
+        self
     }
 
     fn send(&self, event: HarnessEvent) -> HarnessResult<()> {
@@ -236,7 +245,7 @@ impl AgentHarness for FakeHarness {
         self.send(HarnessEvent::SessionState {
             state: crate::SessionState::Ready,
         })?;
-        Ok(Capabilities::fake())
+        Ok(self.capabilities.clone())
     }
 
     async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {

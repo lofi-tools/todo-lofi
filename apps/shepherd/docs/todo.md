@@ -34,12 +34,12 @@ and merge it without leaving Shepherd?”
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Tauri 2 shell: `src-tauri/` (window, generated desktop icons, default capability, command bridge, single event channel, durable core in the app data dir) and `ui/` (SolidJS + TypeScript + Vite, typed client in `src/bridge.ts`). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. A scripted adapter stands in for the agent until S2. The fixed regions are not built yet. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded migrations (`0001_init.sql`, `0002_workspace.sql`), a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 21 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records and marks every live task `interrupted`; session and transcript persistence are still pending. |
+| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded migrations (`0001_init.sql`, `0002_workspace.sql`, `0003_sessions.sql`), a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 30 focused tests pass, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records, marks every live task `interrupted`, and keeps the newest agent session per task so resume asks the adapter for the thread the previous run opened; transcript rows are still not reloaded. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 9 focused tests pass. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 29 focused tests (20 of them drive the Codex adapter through stub binaries: probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip including a file-change diff, an interrupt, resume, and the `exec --json` fallback with its stream mapping and cancel); `shepherd-core` has 28 (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 5 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 29 focused tests (20 of them drive the Codex adapter through stub binaries: probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip including a file-change diff, an interrupt, resume, and the `exec --json` fallback with its stream mapping and cancel); `shepherd-core` has 30 (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders; two more cover resuming the stored session after a restart and the explicit fallback when the adapter cannot resume it); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 5 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -134,7 +134,7 @@ The core scenarios must cover:
 - [x] approval moves the task to `waiting`, and a decision resumes it;
 - [x] cancel keeps the session and worktree;
 - [x] quit with a live fake agent marks the task `interrupted`;
-- [x] restart offers resume and does not claim the process survived;
+- [x] restart resumes the stored agent session and says plainly when it is gone;
 - [x] a chat-only turn returns to `ready`;
 - [x] the state machine can enter `review` from a completed changed turn (the
   real diff-based trigger is tested in S3).
@@ -264,7 +264,7 @@ an approval, a cancel and a resume inside Shepherd.
   reconnect.
 - [x] Render approval cards with tool, arguments and a diff when the adapter or
   worktree provides one.
-- [ ] Persist the session/thread ID; resume on restart; show an explicit
+- [x] Persist the session/thread ID; resume on restart; show an explicit
   fallback when the session is gone.
 - [ ] Implement failure rows for missing binary, unsupported version, auth
   required, protocol error and mid-turn exit.

@@ -13,6 +13,7 @@ use toasty_driver_turso::Turso;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::projects::{Project, ProjectId};
+use crate::session::SessionRecord;
 use crate::tasks::{AgentTier, Task, TaskId, TaskState};
 use crate::terminal::{TerminalId, TerminalRecord, TerminalScope};
 
@@ -41,6 +42,8 @@ pub trait Store: Send + Sync {
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
+    async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
+    async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
 }
 
 struct Migration {
@@ -56,6 +59,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0002_workspace.sql",
         sql: include_str!("../toasty/migrations/0002_workspace.sql"),
+    },
+    Migration {
+        name: "0003_sessions.sql",
+        sql: include_str!("../toasty/migrations/0003_sessions.sql"),
     },
 ];
 
@@ -285,6 +292,74 @@ impl Store for TursoStore {
         .await?;
         Ok(())
     }
+
+    async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        self.select_sessions().await
+    }
+
+    async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        let adapter_session_id = session.adapter_session_id.as_deref().unwrap_or_default();
+        // The column predates resumable sessions; the value only has to be
+        // stable, and an end time is what actually distinguishes the two states.
+        let state = if session.is_ended() { "ended" } else { "live" };
+        let ended_at = session.ended_at.map(|value| value as i64).unwrap_or(-1);
+        let exit_code = session.exit_code.map(i64::from).unwrap_or(-1);
+        let stderr = session.stderr.as_deref().unwrap_or_default();
+        toasty::sql::statement(
+            "INSERT INTO sessions (\
+                id, task_id, adapter, state, adapter_session_id, started_at, \
+                ended_at, exit_code, stderr\
+             ) VALUES (\
+                ?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, \
+                NULLIF(?7, -1), NULLIF(?8, -1), NULLIF(?9, '')\
+             ) ON CONFLICT (id) DO UPDATE SET \
+                task_id = excluded.task_id, \
+                adapter = excluded.adapter, \
+                state = excluded.state, \
+                adapter_session_id = excluded.adapter_session_id, \
+                started_at = excluded.started_at, \
+                ended_at = excluded.ended_at, \
+                exit_code = excluded.exit_code, \
+                stderr = excluded.stderr",
+        )
+        .bind(session.id.as_str())
+        .bind(session.task_id.as_str())
+        .bind(&session.adapter)
+        .bind(state)
+        .bind(adapter_session_id)
+        .bind(session.started_at as i64)
+        .bind(ended_at)
+        .bind(exit_code)
+        .bind(stderr)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+}
+
+impl TursoStore {
+    async fn select_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, task_id, adapter, adapter_session_id, started_at, ended_at, \
+                    exit_code, stderr \
+             FROM sessions ORDER BY started_at, rowid",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+            Type::String,
+        ])
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_session).collect()
+    }
 }
 
 async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
@@ -394,6 +469,24 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
     })
 }
 
+fn parse_session(value: Value) -> Result<SessionRecord, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a session record".to_string(),
+        ));
+    };
+    Ok(SessionRecord {
+        id: required_string(record.first())?,
+        task_id: TaskId::new(required_string(record.get(1))?),
+        adapter: required_string(record.get(2))?,
+        adapter_session_id: optional_string(record.get(3))?,
+        started_at: required_u64(record.get(4))?,
+        ended_at: optional_i64(record.get(5))?.map(|value| value as u64),
+        exit_code: optional_i64(record.get(6))?.map(|value| value as i32),
+        stderr: optional_string(record.get(7))?,
+    })
+}
+
 fn parse_terminal(value: Value) -> Result<TerminalRecord, StoreError> {
     let Value::Record(record) = value else {
         return Err(StoreError::InvalidRow(
@@ -479,6 +572,7 @@ pub struct MemoryStore {
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
+    sessions: RwLock<Vec<SessionRecord>>,
 }
 
 impl MemoryStore {
@@ -525,6 +619,22 @@ impl Store for MemoryStore {
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError> {
         let mut terminals = self.terminals.write().await;
         terminals.insert(terminal.id.as_str().to_string(), terminal.clone());
+        Ok(())
+    }
+
+    async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        let sessions = self.sessions.read().await;
+        let mut sessions = sessions.clone();
+        // Stable, so sessions started in the same millisecond keep insertion order
+        // and the last record stays the newest.
+        sessions.sort_by_key(|session| session.started_at);
+        Ok(sessions)
+    }
+
+    async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError> {
+        let mut sessions = self.sessions.write().await;
+        sessions.retain(|seen| seen.id != session.id);
+        sessions.push(session.clone());
         Ok(())
     }
 }
@@ -645,8 +755,8 @@ mod tests {
             .await?;
         assert_eq!(
             history.len(),
-            2,
-            "the workspace migration should be recorded"
+            MIGRATIONS.len(),
+            "every pending migration should be recorded"
         );
 
         toasty::sql::query("SELECT id FROM terminals")

@@ -11,6 +11,7 @@ pub mod harness;
 pub mod input;
 pub mod project_scan;
 pub mod projects;
+pub mod session;
 pub mod snapshots;
 pub mod store;
 pub mod tasks;
@@ -22,7 +23,7 @@ pub mod test_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_harness::{HarnessEvent, SpawnSpec, TurnFinishReason};
+use agent_harness::{HarnessEvent, SessionId, SpawnSpec, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary};
@@ -35,6 +36,7 @@ pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
 use crate::git::{GitError, GitService};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
+use crate::session::SessionRecord;
 use crate::store::{MemoryStore, Store, StoreError};
 use crate::terminal::{TerminalId, TerminalRecord, TerminalSnapshot};
 
@@ -102,12 +104,23 @@ pub enum CoreError {
     Harness(#[from] agent_harness::HarnessError),
 }
 
+/// What opening an agent session actually did. Resume reports this to the user
+/// instead of pretending a stored thread was picked up.
+enum SessionOpened {
+    Fresh,
+    Resumed(String),
+    ResumeFailed(String),
+}
+
 /// The core owns all mutable state. It is a library, not a daemon.
 pub struct Core {
     projects: BTreeMap<ProjectId, Project>,
     project_order: Vec<ProjectId>,
     tasks: BTreeMap<TaskId, Task>,
     sessions: BTreeMap<TaskId, HarnessSession>,
+    /// The newest durable session per task, kept across restarts so resume can
+    /// ask the adapter for the thread the previous process opened.
+    session_records: BTreeMap<TaskId, SessionRecord>,
     terminals: BTreeMap<TerminalId, TerminalRecord>,
     store: Box<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
@@ -141,6 +154,7 @@ impl Core {
             project_order: Vec::new(),
             tasks: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            session_records: BTreeMap::new(),
             terminals: BTreeMap::new(),
             store,
             harness_factory,
@@ -173,6 +187,22 @@ impl Core {
 
         for task in core.store.load_tasks().await? {
             core.tasks.insert(task.id.clone(), task);
+        }
+
+        for mut record in core.store.load_sessions().await? {
+            // The process that owned this session is gone, so mark it ended while
+            // keeping the adapter handle a later resume needs.
+            if !record.is_ended() {
+                record.end(None, None);
+                core.store.save_session(&record).await?;
+            }
+            let replace = core
+                .session_records
+                .get(&record.task_id)
+                .is_none_or(|seen| seen.started_at <= record.started_at);
+            if replace {
+                core.session_records.insert(record.task_id.clone(), record);
+            }
         }
 
         let live_tasks: Vec<TaskId> = core
@@ -472,7 +502,7 @@ impl Core {
         }
 
         self.set_task_state(task_id, TaskState::Working)?;
-        self.ensure_session(task_id).await?;
+        self.ensure_session(task_id, None).await?;
 
         let events = {
             let session =
@@ -550,8 +580,8 @@ impl Core {
         Ok(CommandResult::TaskWorkspace(workspace))
     }
 
-    /// Resume an interrupted task with a new agent session. The transcript says
-    /// plainly that the previous process is gone.
+    /// Resume an interrupted task with the agent session the previous process
+    /// left behind, and say plainly when that session is gone.
     async fn resume_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
         let state = self.task(task_id)?.state;
         if state != TaskState::Interrupted {
@@ -563,12 +593,26 @@ impl Core {
 
         self.set_task_state(task_id, TaskState::Starting)?;
         self.sessions.remove(task_id);
-        self.ensure_session(task_id).await?;
+        let stored_session_id = self
+            .session_records
+            .get(task_id)
+            .and_then(|record| record.adapter_session_id.clone())
+            .map(SessionId::new);
+        let opened = self.ensure_session(task_id, stored_session_id).await?;
         if let Some(session) = self.sessions.get_mut(task_id) {
-            session.note(
-                "the previous agent process did not survive shutdown; started a new session",
-                false,
-            );
+            match opened {
+                SessionOpened::Resumed(session_id) => session.note(
+                    format!("resumed the previous agent session {session_id}"),
+                    false,
+                ),
+                SessionOpened::ResumeFailed(error) => session.note(
+                    format!(
+                        "the previous agent session is gone (the adapter cannot resume it: {error}); started a new session"
+                    ),
+                    true,
+                ),
+                SessionOpened::Fresh => session.note("started a new agent session", false),
+            }
         }
         self.set_task_state(task_id, TaskState::Ready)?;
         self.save_task(task_id).await?;
@@ -611,9 +655,15 @@ impl Core {
         self.save_task(task_id).await
     }
 
-    async fn ensure_session(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+    /// Open an adapter session and record it durably. A resume that the adapter
+    /// cannot honour falls back to a fresh session, and the caller reports it.
+    async fn ensure_session(
+        &mut self,
+        task_id: &TaskId,
+        resume: Option<SessionId>,
+    ) -> Result<SessionOpened, CoreError> {
         if self.sessions.contains_key(task_id) {
-            return Ok(());
+            return Ok(SessionOpened::Fresh);
         }
 
         let task = self.task(task_id)?.clone();
@@ -623,16 +673,51 @@ impl Core {
         };
         let harness = self.harness_factory.create()?;
         let mut session = HarnessSession::new(harness);
-        session
+        let capabilities = session
             .start(SpawnSpec {
                 program: "shepherd-agent".to_string(),
                 cwd,
                 ..SpawnSpec::default()
             })
             .await?;
-        session.open_session(None).await?;
+        let (opened, session_id) = match resume {
+            Some(requested) if capabilities.resume => {
+                match session.open_session(Some(requested)).await {
+                    Ok(session_id) => {
+                        let handle = session_id.as_str().to_string();
+                        (SessionOpened::Resumed(handle), session_id)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            task_id = task_id.as_str(),
+                            %error,
+                            "the adapter could not resume the stored session"
+                        );
+                        let session_id = session.open_session(None).await?;
+                        (SessionOpened::ResumeFailed(error.to_string()), session_id)
+                    }
+                }
+            }
+            Some(requested) => {
+                let session_id = session.open_session(None).await?;
+                let reason = format!("this adapter cannot resume session {}", requested.as_str());
+                (SessionOpened::ResumeFailed(reason), session_id)
+            }
+            None => {
+                let session_id = session.open_session(None).await?;
+                (SessionOpened::Fresh, session_id)
+            }
+        };
+
+        let record = SessionRecord::started(
+            task_id.clone(),
+            task.tier.as_str(),
+            Some(session_id.as_str().to_string()),
+        );
+        self.store.save_session(&record).await?;
+        self.session_records.insert(task_id.clone(), record);
         self.sessions.insert(task_id.clone(), session);
-        Ok(())
+        Ok(opened)
     }
 
     /// Fold adapter activity into the task state. The transcript itself is
@@ -723,6 +808,30 @@ impl Core {
         self.save_task(task_id).await
     }
 
+    /// Close the durable record so the next run can tell this process ended
+    /// cleanly rather than still holding the session.
+    async fn end_session_record(
+        &mut self,
+        task_id: &TaskId,
+        events: &[HarnessEvent],
+    ) -> Result<(), CoreError> {
+        let Some(mut record) = self.session_records.remove(task_id) else {
+            return Ok(());
+        };
+        let mut exit_code = None;
+        let mut stderr = None;
+        for event in events {
+            if let HarnessEvent::Exited { code, stderr: tail } = event {
+                exit_code = *code;
+                stderr = Some(tail.clone());
+            }
+        }
+        record.end(exit_code, stderr);
+        self.store.save_session(&record).await?;
+        self.session_records.insert(task_id.clone(), record);
+        Ok(())
+    }
+
     async fn quit(&mut self, force: bool) -> Result<CommandResult, CoreError> {
         let live_tasks: Vec<TaskId> = self
             .tasks
@@ -743,13 +852,18 @@ impl Core {
             let Some(mut session) = self.sessions.remove(&task_id) else {
                 continue;
             };
-            if let Err(error) = session.shutdown().await {
-                tracing::error!(
-                    task_id = task_id.as_str(),
-                    %error,
-                    "failed to stop the agent session during shutdown"
-                );
-            }
+            let events = match session.shutdown().await {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::error!(
+                        task_id = task_id.as_str(),
+                        %error,
+                        "failed to stop the agent session during shutdown"
+                    );
+                    Vec::new()
+                }
+            };
+            self.end_session_record(&task_id, &events).await?;
         }
 
         let mut interrupted_tasks = 0;
@@ -1363,7 +1477,7 @@ mod tests {
         assert!(
             workspace.transcript[0]
                 .summary()
-                .contains("did not survive")
+                .contains("resumed the previous agent session")
         );
 
         let workspace = workspace_of(
@@ -1603,7 +1717,7 @@ mod tests {
         assert!(
             workspace.transcript[0]
                 .summary()
-                .contains("did not survive"),
+                .contains("resumed the previous agent session"),
             "unexpected resume note: {:?}",
             workspace.transcript[0].summary()
         );
@@ -1636,6 +1750,134 @@ mod tests {
         assert_eq!(terminals.len(), 1);
         assert!(terminals[0].ended_at.is_some());
         assert_eq!(terminals[0].exit_code, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_agent_session_survives_a_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+
+        let first_run = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            // A turn waiting on approval stays live, so quitting interrupts it
+            // and the restart has something to resume.
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::approval("approval-1", "Run tests"),
+            ])]])),
+        );
+        let mut scenario = TestCore::with_core(first_run);
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Resume me".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        scenario
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await?;
+        scenario.execute(Command::Quit { force: true }).await?;
+        drop(scenario);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("second answer".to_string()),
+            ])]])),
+        )
+        .await?;
+        let mut scenario = TestCore::with_core(reopened);
+
+        let workspace = scenario.core().task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Interrupted);
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::ResumeTask {
+                    task_id: task_id.clone(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(
+            workspace.transcript[0]
+                .summary()
+                .contains("resumed the previous agent session fake-session-1"),
+            "unexpected resume note: {:?}",
+            workspace.transcript[0].summary()
+        );
+
+        let sessions = TursoStore::open(&uri).await?.load_sessions().await?;
+        assert_eq!(sessions.len(), 2, "each session start writes its own row");
+        assert!(sessions.iter().all(|session| {
+            session.task_id == task_id
+                && session.adapter_session_id.as_deref() == Some("fake-session-1")
+        }));
+        assert!(sessions[0].is_ended(), "quit should end the first record");
+        assert!(!sessions[1].is_ended(), "the resumed session is still live");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_gone_agent_session_falls_back_with_a_clear_note()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+
+        let first_run = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            // A turn waiting on approval stays live, so quitting interrupts it
+            // and the restart has something to resume.
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::approval("approval-1", "Run tests"),
+            ])]])),
+        );
+        let mut scenario = TestCore::with_core(first_run);
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Resume me".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        scenario
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await?;
+        scenario.execute(Command::Quit { force: true }).await?;
+        drop(scenario);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::refusing_resume(vec![vec![
+                FakeTurn::new(vec![FakeStep::Message("second answer".to_string())]),
+            ]])),
+        )
+        .await?;
+        let mut scenario = TestCore::with_core(reopened);
+
+        let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        let note = workspace.transcript[0].summary();
+        assert!(note.contains("cannot resume"), "unexpected note: {note}");
+        assert!(
+            note.contains("started a new session"),
+            "unexpected note: {note}"
+        );
         Ok(())
     }
 }
