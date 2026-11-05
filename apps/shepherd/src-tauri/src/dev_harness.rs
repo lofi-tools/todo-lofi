@@ -49,6 +49,11 @@ fn codex_smoke_factory(
         "approval-replay" => "network-approval",
         "approval-cancel" => "desktop-approval-cancel",
         "worktree-edit" => "desktop-worktree-edit",
+        "restart" => match std::env::var("SHEPHERD_DESKTOP_SMOKE_PHASE").as_deref() {
+            Ok("codex-before-restart") => "desktop-before-restart",
+            Ok("codex-after-restart") => "desktop-after-restart",
+            _ => return Err(std::io::Error::other("Unknown Codex restart phase")),
+        },
         _ => return Err(std::io::Error::other("Unknown Codex smoke mode")),
     };
     let (run, session) = if mode == "approval-replay" {

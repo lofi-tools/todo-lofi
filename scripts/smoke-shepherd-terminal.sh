@@ -25,8 +25,13 @@ case "${1:-}" in
     phases=(codex-edit)
     export SHEPHERD_DEV_CODEX_SMOKE=worktree-edit
     ;;
+  --codex-restart)
+    command -v python3 >/dev/null
+    phases=(codex-before-restart codex-after-restart)
+    export SHEPHERD_DEV_CODEX_SMOKE=restart
+    ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit]" >&2
+    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart]" >&2
     exit 2
     ;;
 esac

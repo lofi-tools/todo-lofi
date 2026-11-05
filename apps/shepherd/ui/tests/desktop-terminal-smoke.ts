@@ -413,6 +413,13 @@ async function replayCodexApproval() {
   return { ok: true, codexApprovalReplay: true }
 }
 
+async function startCodexSleep() {
+  await sendPrompt('Run the shell command `sleep 25` and wait for it to finish.')
+  await waitFor('running sleep tool', () => Array.from(document.querySelectorAll('.entry__tool')).some((entry) =>
+    entry.querySelector('.entry__tool-title')?.textContent?.includes('sleep 25') &&
+    entry.querySelector('.entry__tool-status')?.textContent === 'running'), CODEX_WAIT)
+}
+
 async function exerciseLiveCodex() {
   await openFixtureProject()
   await sendPrompt(NETWORK_PROMPT)
@@ -424,10 +431,7 @@ async function exerciseLiveCodex() {
     document.querySelector('.entry__permission-decision')?.textContent === 'allow' &&
     document.querySelector('.entry__agent')?.textContent, CODEX_WAIT)
 
-  await sendPrompt('Run the shell command `sleep 25` and wait for it to finish.')
-  await waitFor('running sleep tool', () => Array.from(document.querySelectorAll('.entry__tool')).some((entry) =>
-    entry.querySelector('.entry__tool-title')?.textContent?.includes('sleep 25') &&
-    entry.querySelector('.entry__tool-status')?.textContent === 'running'), CODEX_WAIT)
+  await startCodexSleep()
   const cancel = await enabledButton('Cancel turn')
   cancel.click()
   await waitFor('interrupted turn settles', () => chatState() === 'ready')
@@ -459,6 +463,47 @@ async function exerciseCodexEdit() {
   })
   const replay = await invoke<boolean>('finish_codex_smoke', { worktreePatch: patch })
   return { ok: true, streamedText: true, toolRow: true, reviewedWorktreeEdit: true, replay }
+}
+
+async function requestQuitWithLiveTask() {
+  await enabledButton('Add project')
+  await getCurrentWindow().close()
+  const confirm = await enabledButton('Quit anyway')
+  if (!confirm.closest('.banner')?.textContent?.includes('Quit will stop 1 live task')) {
+    throw new Error('The quit warning should count one live task')
+  }
+}
+
+async function quitDuringCodexTurn() {
+  await openFixtureProject()
+  await startCodexSleep()
+  await requestQuitWithLiveTask()
+  const replay = await invoke<boolean>('finish_codex_smoke')
+  return { ok: true, quitWithLiveCodex: true, replay }
+}
+
+async function resumeCodexAfterRestart() {
+  await waitFor('interrupted Codex task in the restored conversation', () => chatState() === 'interrupted')
+  const { projects } = await bridge.projectList()
+  const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
+  if (!project) throw new Error('The Codex fixture project was not restored')
+  const [interrupted] = (await bridge.taskList(project.id)).tasks
+  if (interrupted?.state !== 'interrupted' || !interrupted.worktreePath || !interrupted.branch) {
+    throw new Error('The interrupted task and worktree were not restored')
+  }
+  const resume = await enabledButton('Resume')
+  resume.click()
+  await waitFor('resumed Codex thread', () => chatState() === 'ready' &&
+    document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'), CODEX_WAIT)
+  await sendPrompt('Reply with the single word: resumed.')
+  await waitFor('Codex reply after restart', () => chatState() === 'ready' &&
+    document.querySelector('.entry__agent')?.textContent?.trim() === 'resumed', CODEX_WAIT)
+  const { task } = await bridge.taskWorkspace(interrupted.id)
+  if (task.worktreePath !== interrupted.worktreePath || task.branch !== interrupted.branch) {
+    throw new Error('Resuming the Codex thread replaced the original worktree')
+  }
+  const replay = await invoke<boolean>('finish_codex_smoke')
+  return { ok: true, resumedCodexAfterRestart: true, retainedWorktree: true, replay }
 }
 
 async function smoke() {
@@ -498,12 +543,7 @@ async function smoke() {
   await selectTask(INTERRUPTED_TASK)
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
-  await enabledButton('Add project')
-  await getCurrentWindow().close()
-  const confirm = await enabledButton('Quit anyway')
-  if (!confirm.closest('.banner')?.textContent?.includes('Quit will stop 1 live task')) {
-    throw new Error('The quit warning should count the waiting task')
-  }
+  await requestQuitWithLiveTask()
   return { ok: true, quitWarning: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
@@ -576,6 +616,12 @@ void (async () => {
         break
       case 'codex-edit':
         result = await exerciseCodexEdit()
+        break
+      case 'codex-before-restart':
+        result = await quitDuringCodexTurn()
+        break
+      case 'codex-after-restart':
+        result = await resumeCodexAfterRestart()
         break
       default:
         result = await smoke()
