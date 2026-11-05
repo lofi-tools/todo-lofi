@@ -103,7 +103,7 @@ pub struct ShellState {
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
     terminal_lifecycle: Mutex<()>,
     engine: Arc<Mutex<PtyTerminals>>,
-    screens: Arc<Mutex<BTreeMap<String, ScreenSlot>>>,
+    screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
 }
 
@@ -447,10 +447,11 @@ impl ShellState {
 
         let screen = Screen::new(usize::from(columns), usize::from(rows));
         let (frames, _) = watch::channel(Arc::new(screen.frame()));
-        self.screens.lock().await.insert(
-            terminal_id.as_str().to_string(),
-            ScreenSlot { screen, frames },
-        );
+        let slot = Arc::new(Mutex::new(ScreenSlot { screen, frames }));
+        self.screens
+            .lock()
+            .await
+            .insert(terminal_id.as_str().to_string(), Arc::clone(&slot));
 
         let saved = self.core.lock().await.record_terminal(&record).await;
         if let Err(error) = saved {
@@ -503,10 +504,7 @@ impl ShellState {
                     }
                 };
                 let (replies, bell) = {
-                    let mut screens = screens.lock().await;
-                    let Some(slot) = screens.get_mut(&id) else {
-                        continue;
-                    };
+                    let mut slot = slot.lock().await;
                     if let Some(bytes) = output {
                         slot.screen.process(&bytes);
                         for _ in 0..31 {
@@ -546,6 +544,15 @@ impl ShellState {
         Ok(self.core.lock().await.terminals_for(&project_id))
     }
 
+    async fn screen_slot(&self, terminal_id: &str) -> Result<Arc<Mutex<ScreenSlot>>, BridgeError> {
+        self.screens
+            .lock()
+            .await
+            .get(terminal_id)
+            .cloned()
+            .ok_or_else(|| BridgeError::new("terminal", format!("no live terminal {terminal_id}")))
+    }
+
     pub async fn search_terminal(
         &self,
         terminal_id: &str,
@@ -558,10 +565,8 @@ impl ShellState {
                 "search is limited to 1024 bytes",
             ));
         }
-        let mut screens = self.screens.lock().await;
-        let slot = screens
-            .get_mut(terminal_id)
-            .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
+        let slot = self.screen_slot(terminal_id).await?;
+        let mut slot = slot.lock().await;
         let found = slot
             .screen
             .search(query, before)
@@ -573,10 +578,8 @@ impl ShellState {
     }
 
     pub async fn terminal_scroll(&self, terminal_id: &str, lines: i32) -> Result<(), BridgeError> {
-        let mut screens = self.screens.lock().await;
-        let slot = screens
-            .get_mut(terminal_id)
-            .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
+        let slot = self.screen_slot(terminal_id).await?;
+        let mut slot = slot.lock().await;
         slot.screen.scroll(lines);
         slot.publish();
         Ok(())
@@ -597,10 +600,11 @@ impl ShellState {
             .await
             .map_err(|_| BridgeError::new("terminal", "the terminal writer stopped"))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        if let Some(slot) = self.screens.lock().await.get_mut(&terminal_id)
-            && slot.screen.follow_output()
-        {
-            slot.publish();
+        if let Ok(slot) = self.screen_slot(&terminal_id).await {
+            let mut slot = slot.lock().await;
+            if slot.screen.follow_output() {
+                slot.publish();
+            }
         }
         Ok(())
     }
@@ -611,12 +615,12 @@ impl ShellState {
         row: usize,
         column: usize,
     ) -> Result<(), BridgeError> {
-        let link = self
-            .screens
+        let slot = self.screen_slot(terminal_id).await?;
+        let link = slot
             .lock()
             .await
-            .get(terminal_id)
-            .and_then(|slot| slot.screen.link(row, column))
+            .screen
+            .link(row, column)
             .ok_or_else(|| BridgeError::new("terminal", "no link at this position"))?;
         let url = tauri::Url::parse(&link)
             .ok()
@@ -656,17 +660,16 @@ impl ShellState {
         columns: u16,
         rows: u16,
     ) -> Result<(), BridgeError> {
+        let slot = self.screen_slot(&terminal_id).await?;
+        let mut slot = slot.lock().await;
         self.engine
             .lock()
             .await
             .resize(&TerminalId::new(terminal_id.clone()), columns, rows)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
 
-        let mut screens = self.screens.lock().await;
-        if let Some(slot) = screens.get_mut(&terminal_id) {
-            slot.screen.resize(usize::from(columns), usize::from(rows));
-            slot.publish();
-        }
+        slot.screen.resize(usize::from(columns), usize::from(rows));
+        slot.publish();
         Ok(())
     }
 
@@ -683,15 +686,8 @@ impl ShellState {
         terminal_id: &str,
         channel: tauri::ipc::Channel<tauri::ipc::Response>,
     ) -> Result<String, BridgeError> {
-        let mut receiver = self
-            .screens
-            .lock()
-            .await
-            .get(terminal_id)
-            .map(ScreenSlot::subscribe)
-            .ok_or_else(|| {
-                BridgeError::new("terminal", format!("no live terminal {terminal_id}"))
-            })?;
+        let slot = self.screen_slot(terminal_id).await?;
+        let mut receiver = slot.lock().await.subscribe();
         let (cancel, mut cancelled) = oneshot::channel();
         let subscription_id = uuid::Uuid::new_v4().to_string();
         self.terminal_subscriptions
