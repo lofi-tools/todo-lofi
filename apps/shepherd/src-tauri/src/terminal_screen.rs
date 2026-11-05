@@ -41,6 +41,7 @@ pub struct FrameCell {
     pub bold: bool,
     pub italic: bool,
     pub linked: bool,
+    pub wraps: bool,
 }
 
 impl TerminalFrame {
@@ -81,7 +82,8 @@ impl TerminalFrame {
                 let flags = cell.width
                     | (u8::from(cell.bold) << 2)
                     | (u8::from(cell.italic) << 3)
-                    | (u8::from(cell.linked) << 4);
+                    | (u8::from(cell.linked) << 4)
+                    | (u8::from(cell.wraps) << 5);
                 bytes.push(flags);
                 bytes.extend(cell.foreground.to_le_bytes());
                 bytes.extend(cell.background.to_le_bytes());
@@ -421,6 +423,7 @@ impl Screen {
                 bold: cell.flags.contains(Flags::BOLD),
                 italic: cell.flags.contains(Flags::ITALIC),
                 linked: cell.hyperlink().is_some(),
+                wraps: cell.flags.contains(Flags::WRAPLINE),
             });
         }
 
@@ -698,6 +701,7 @@ mod tests {
         assert!(row(&narrow, 1).starts_with("efghij"));
         assert_eq!(narrow.cells.get(3).map(|cell| cell.width), Some(2));
         assert_eq!(narrow.cells.get(4).map(|cell| cell.width), Some(0));
+        assert!(narrow.cells.get(5).is_some_and(|cell| cell.wraps));
 
         screen.follow_output();
         screen.resize(12, 4);

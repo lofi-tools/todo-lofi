@@ -536,25 +536,13 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   }
 
   function viewportText(current: bridge.TerminalFrame): string {
-    const lines = []
-    for (let start = 0; start < current.cells.length; start += current.columns) {
-      const text = current.cells.slice(start, start + current.columns).map((cell) => cell.text).join('')
-      lines.push(text.trimEnd())
-    }
-    return lines.join('\n').trimEnd()
+    return readCells(current, 0, current.cells.length - 1).trimEnd()
   }
 
   function selectedText(): string {
     if (!frame || !selection || selection.start === selection.end) return ''
     const [start, end] = selectionRange(frame, selection)
-    const lines = []
-    for (let first = start; first <= end;) {
-      const after = Math.min(first - first % frame.columns + frame.columns, end + 1)
-      const text = frame.cells.slice(first, after).map((cell) => cell.text).join('')
-      lines.push(after % frame.columns === 0 ? text.trimEnd() : text)
-      first = after
-    }
-    return lines.join('\n')
+    return readCells(frame, start, end)
   }
 
   function onCopy(event: ClipboardEvent) {
@@ -841,6 +829,20 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       <Show when={error()}>{(message) => <p class="error terminal-view__error" role="alert">{message()}</p>}</Show>
     </div>
   )
+}
+
+function readCells(frame: bridge.TerminalFrame, start: number, end: number): string {
+  let text = ''
+  for (let first = start; first <= end;) {
+    const rowEnd = first - first % frame.columns + frame.columns
+    const after = Math.min(rowEnd, end + 1)
+    const part = frame.cells.slice(first, after).map((cell) => cell.text).join('')
+    const hardBreak = after === rowEnd && !frame.cells[after - 1]?.wraps
+    text += hardBreak ? part.trimEnd() : part
+    if (hardBreak && after <= end) text += '\n'
+    first = after
+  }
+  return text
 }
 
 function selectionRange(frame: bridge.TerminalFrame, selection: { start: number; end: number }): [number, number] {
