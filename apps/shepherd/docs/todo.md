@@ -379,7 +379,8 @@ review and merge gate is tracked separately.
   fixture also checks that the untracked file survives the refusal.
 - [x] Squash-merge reports conflict paths. The Git fixture checks the unresolved
   path and verifies the base tip stays in place.
-- [ ] missing and dirty worktrees are not silently removed.
+- [x] Missing worktrees can be repaired without dropping other registrations.
+  Dirty worktrees refuse removal, including when the only change is an untracked file.
 
 Manual script on a throwaway repository:
 
