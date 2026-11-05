@@ -7,6 +7,7 @@
 //! into [`HarnessEvent`]s and never writes to the store itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -273,6 +274,209 @@ fn advertised_methods(result: &Value) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect(),
     )
+}
+
+/// How a Codex executable was located. The kind is provenance, not capability:
+/// the verified tier always comes from the probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexInstallKind {
+    /// An explicit path from the profile or settings.
+    ProfilePath,
+    /// A `codex` entry on `PATH`.
+    Path,
+    /// The macOS app bundle (`com.openai.codex`), in either packaged layout.
+    AppBundle,
+}
+
+impl CodexInstallKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CodexInstallKind::ProfilePath => "configured path",
+            CodexInstallKind::Path => "PATH",
+            CodexInstallKind::AppBundle => "app bundle",
+        }
+    }
+}
+
+/// A location that verified by answering `--version` and the handshake.
+#[derive(Clone, Debug)]
+pub struct CodexInstall {
+    pub program: PathBuf,
+    pub kind: CodexInstallKind,
+    pub probe: CodexProbe,
+}
+
+/// A location that was tried and did not verify, with the reason to show.
+#[derive(Clone, Debug)]
+pub struct CodexAttempt {
+    pub program: PathBuf,
+    pub kind: CodexInstallKind,
+    pub reason: String,
+}
+
+/// What detection found. `install` is `None` when Codex is not usable here;
+/// `attempts` then names every path that was tried and why it failed, so
+/// "not installed" is a report rather than a guess.
+#[derive(Clone, Debug)]
+pub struct CodexDetection {
+    pub install: Option<CodexInstall>,
+    pub attempts: Vec<CodexAttempt>,
+}
+
+impl CodexDetection {
+    /// One line for diagnostics.
+    pub fn summary(&self) -> String {
+        match &self.install {
+            Some(install) => {
+                let version = install
+                    .probe
+                    .version
+                    .as_deref()
+                    .unwrap_or("version unknown");
+                format!(
+                    "codex found at {} ({}, {version}, {} tier)",
+                    install.program.display(),
+                    install.kind.label(),
+                    tier_label(install.probe.tier),
+                )
+            }
+            None => {
+                if self.attempts.is_empty() {
+                    "codex is not installed: no configured path, no `codex` on PATH, and no app bundle".to_string()
+                } else {
+                    let tried = self
+                        .attempts
+                        .iter()
+                        .map(|attempt| {
+                            format!("{} ({})", attempt.program.display(), attempt.reason)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("codex is not installed; tried {tried}")
+                }
+            }
+        }
+    }
+}
+
+fn tier_label(tier: CodexTier) -> &'static str {
+    match tier {
+        CodexTier::AppServer => "app-server",
+        CodexTier::Exec => "exec",
+    }
+}
+
+/// Current and older packaged layouts of the CLI inside the macOS app bundle.
+const APP_BUNDLE_APPS: [&str; 2] = ["ChatGPT.app", "Codex.app"];
+const APP_BUNDLE_LAYOUTS: [&str; 2] = [
+    "Contents/Resources/codex-cli/bin/codex",
+    "Contents/Resources/codex",
+];
+
+/// Find Codex where it is actually installed. The desktop app does not put
+/// `codex` on `PATH`, so an app-bundled binary is a normal installation, and
+/// "not installed" is a result rather than an error.
+pub async fn detect(profile_path: Option<&Path>, cwd: &Path) -> CodexDetection {
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    let application_roots = [PathBuf::from("/Applications")];
+    detect_in(profile_path, cwd, &path_env, &application_roots).await
+}
+
+async fn detect_in(
+    profile_path: Option<&Path>,
+    cwd: &Path,
+    path_env: &OsStr,
+    application_roots: &[PathBuf],
+) -> CodexDetection {
+    let mut attempts = Vec::new();
+    for (program, kind) in codex_candidates(profile_path, path_env, application_roots) {
+        if !program.exists() {
+            if kind == CodexInstallKind::ProfilePath {
+                attempts.push(CodexAttempt {
+                    program,
+                    kind,
+                    reason: "not found".to_string(),
+                });
+            }
+            continue;
+        }
+        if !is_executable(&program) {
+            attempts.push(CodexAttempt {
+                program,
+                kind,
+                reason: "not executable".to_string(),
+            });
+            continue;
+        }
+        match probe(&program.to_string_lossy(), cwd).await {
+            Ok(probe) => {
+                return CodexDetection {
+                    install: Some(CodexInstall {
+                        program,
+                        kind,
+                        probe,
+                    }),
+                    attempts,
+                };
+            }
+            Err(error) => attempts.push(CodexAttempt {
+                program,
+                kind,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    CodexDetection {
+        install: None,
+        attempts,
+    }
+}
+
+fn codex_candidates(
+    profile_path: Option<&Path>,
+    path_env: &OsStr,
+    application_roots: &[PathBuf],
+) -> Vec<(PathBuf, CodexInstallKind)> {
+    let mut candidates = Vec::new();
+    if let Some(profile_path) = profile_path {
+        candidates.push((profile_path.to_path_buf(), CodexInstallKind::ProfilePath));
+    }
+    if let Some(found) = find_on_path("codex", path_env) {
+        candidates.push((found, CodexInstallKind::Path));
+    }
+    for root in application_roots {
+        for app in APP_BUNDLE_APPS {
+            for layout in APP_BUNDLE_LAYOUTS {
+                candidates.push((root.join(app).join(layout), CodexInstallKind::AppBundle));
+            }
+        }
+    }
+    candidates
+}
+
+fn find_on_path(program: &str, path_env: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_env)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.permissions().mode() & 0o111 != 0,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "could not read the codex candidate's permissions");
+            false
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
 }
 
 #[derive(Default)]
@@ -1772,10 +1976,14 @@ done
 
     fn write_stub(directory: &TempDir, name: &str, contents: &str) -> String {
         let path = directory.path().join(name);
-        std::fs::write(&path, contents).expect("the stub is writable");
-        let permissions = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&path, permissions).expect("the stub is executable");
+        write_executable(&path, contents);
         path.to_string_lossy().into_owned()
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        std::fs::write(path, contents).expect("the stub is writable");
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("the stub is executable");
     }
 
     fn spec(program: &str, cwd: &Path) -> SpawnSpec {
@@ -2197,5 +2405,112 @@ sleep 30
             })
         ));
         harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn detection_prefers_the_configured_path_and_reports_its_kind() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex.sh", PROTOCOL_STUB);
+
+        let detection = detect_in(
+            Some(Path::new(&stub)),
+            directory.path(),
+            OsStr::new(""),
+            &[],
+        )
+        .await;
+
+        let install = detection
+            .install
+            .as_ref()
+            .expect("the configured path verifies");
+        assert_eq!(install.kind, CodexInstallKind::ProfilePath);
+        assert_eq!(install.probe.tier, CodexTier::AppServer);
+        assert_eq!(install.probe.version.as_deref(), Some("codex-cli 9.9.9"));
+        let summary = detection.summary();
+        assert!(summary.contains("configured path"), "summary: {summary}");
+        assert!(summary.contains("app-server"), "summary: {summary}");
+    }
+
+    #[tokio::test]
+    async fn detection_falls_back_to_path_and_records_the_miss() {
+        let directory = TempDir::new().expect("temp dir");
+        write_stub(&directory, "codex", PROTOCOL_STUB);
+        let missing = Path::new("/nonexistent/codex-for-shepherd");
+
+        let detection = detect_in(
+            Some(missing),
+            directory.path(),
+            directory.path().as_os_str(),
+            &[],
+        )
+        .await;
+
+        let install = detection.install.as_ref().expect("the PATH entry verifies");
+        assert_eq!(install.kind, CodexInstallKind::Path);
+        assert_eq!(detection.attempts.len(), 1);
+        assert_eq!(detection.attempts[0].program, missing);
+        assert!(
+            detection.attempts[0].reason.contains("not found"),
+            "reason: {}",
+            detection.attempts[0].reason
+        );
+    }
+
+    #[tokio::test]
+    async fn detection_verifies_the_app_bundle_layout() {
+        let directory = TempDir::new().expect("temp dir");
+        let bundle_binary = directory
+            .path()
+            .join("ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
+        let bundle_directory = bundle_binary
+            .parent()
+            .expect("the bundle path has a parent");
+        std::fs::create_dir_all(bundle_directory).expect("the bundle directories are creatable");
+        write_executable(&bundle_binary, PROTOCOL_STUB);
+        let roots = [directory.path().to_path_buf()];
+
+        let detection = detect_in(None, directory.path(), OsStr::new(""), &roots).await;
+
+        let install = detection
+            .install
+            .as_ref()
+            .expect("the bundle candidate verifies");
+        assert_eq!(install.kind, CodexInstallKind::AppBundle);
+        assert_eq!(install.program, bundle_binary);
+    }
+
+    #[tokio::test]
+    async fn detection_reports_when_codex_is_not_installed() {
+        let directory = TempDir::new().expect("temp dir");
+
+        let detection = detect_in(None, directory.path(), OsStr::new(""), &[]).await;
+
+        assert!(detection.install.is_none());
+        assert!(detection.attempts.is_empty());
+        let summary = detection.summary();
+        assert!(summary.contains("not installed"), "summary: {summary}");
+    }
+
+    #[tokio::test]
+    async fn detection_reports_the_exec_tier_for_an_old_build() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-old.sh", UNSUPPORTED_STUB);
+
+        let detection = detect_in(
+            Some(Path::new(&stub)),
+            directory.path(),
+            OsStr::new(""),
+            &[],
+        )
+        .await;
+
+        let install = detection
+            .install
+            .as_ref()
+            .expect("an old build is still an install");
+        assert_eq!(install.probe.tier, CodexTier::Exec);
+        let summary = detection.summary();
+        assert!(summary.contains("exec"), "summary: {summary}");
     }
 }
