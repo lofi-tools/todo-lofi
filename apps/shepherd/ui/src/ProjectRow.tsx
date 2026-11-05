@@ -6,6 +6,7 @@ interface ProjectRowProps {
   project: ProjectSnapshot
   homeDirectory?: string
   selected: boolean
+  expanded: boolean
   pending: boolean
   showArchived: boolean
   menuOpen: boolean
@@ -31,7 +32,7 @@ export function ProjectRow(props: ProjectRowProps) {
   )
   let row: HTMLDivElement | undefined
   let menu: HTMLDivElement | undefined
-  let menuButton: HTMLButtonElement | undefined
+  let projectButton: HTMLButtonElement | undefined
   let archiveButton: HTMLButtonElement | undefined
   let settingsButton: HTMLButtonElement | undefined
 
@@ -59,7 +60,7 @@ export function ProjectRow(props: ProjectRowProps) {
 
   function closeMenu(restoreFocus = false) {
     props.onMenuOpenChange(false)
-    if (restoreFocus) menuButton?.focus({ preventScroll: true })
+    if (restoreFocus) projectButton?.focus({ preventScroll: true })
   }
 
   createEffect(() => {
@@ -99,10 +100,17 @@ export function ProjectRow(props: ProjectRowProps) {
       }}
     >
       <button
+        ref={projectButton}
         type="button"
         class="project nav-item"
-        aria-expanded={props.selected}
+        aria-expanded={props.expanded}
         aria-current={props.selected ? 'true' : undefined}
+        aria-keyshortcuts="Shift+F10"
+        onKeyDown={(event) => {
+          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+          event.preventDefault()
+          openMenu(true)
+        }}
         onClick={() => {
           closeMenu()
           props.onSelect()
@@ -119,27 +127,6 @@ export function ProjectRow(props: ProjectRowProps) {
           </Show>
         </span>
         <span class="project__name">{props.project.name}</span>
-      </button>
-      <button
-        ref={menuButton}
-        type="button"
-        class="project-row__action"
-        aria-label={`Project menu for ${props.project.name}`}
-        title="Project menu"
-        aria-haspopup="menu"
-        aria-expanded={props.menuOpen}
-        onClick={() => openMenu(true)}
-        onKeyDown={(event) => {
-          if (event.key !== 'ArrowDown') return
-          event.preventDefault()
-          openMenu(true)
-        }}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <circle cx="5" cy="12" r="2" />
-          <circle cx="12" cy="12" r="2" />
-          <circle cx="19" cy="12" r="2" />
-        </svg>
       </button>
       <button
         type="button"

@@ -270,9 +270,12 @@ async function exerciseSearch(terminalId: string) {
 }
 
 async function selectTask(title: string) {
-  const task = await waitFor(title, () => Array.from(document.querySelectorAll<HTMLButtonElement>('.task'))
-    .find((entry) => entry.querySelector('.task__title')?.textContent === title))
-  task.click()
+  const task = await waitFor(title, () => {
+    if (document.querySelector('.chat__title')?.textContent === title) return true
+    return Array.from(document.querySelectorAll<HTMLButtonElement>('.task'))
+      .find((entry) => entry.querySelector('.task__title')?.textContent === title)
+  })
+  if (task !== true) task.click()
 }
 
 async function prepareTask(projectId: string) {

@@ -378,9 +378,17 @@ textarea {
   content: '';
 }
 
-.project-menu .nav-item {
+.project-menu .nav-item,
+.project-menu__details p {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  margin: 0;
   padding: 4px 8px;
+  border: 1px solid transparent;
   font-size: 12px;
+  line-height: 18px;
   white-space: nowrap;
 }
 
@@ -389,39 +397,18 @@ textarea {
 }
 
 .project-menu__details {
-  display: grid;
-  gap: 4px;
-  padding: 5px 8px 6px;
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.project-menu__details p {
-  margin: 0;
-}
-
-.project-menu__details > p:not(.project-menu__remote) {
-  max-width: 244px;
-}
-
-.project-menu__location,
-.project-menu__remote {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .project-menu__location svg {
   flex: none;
 }
 
+.project-menu__location span,
 .project-menu__remote span {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .project-menu__icon {
@@ -923,7 +910,6 @@ textarea {
   gap: 8px;
   align-items: end;
   padding: 12px;
-  border-top: 1px solid var(--border);
 }
 
 .composer__input {

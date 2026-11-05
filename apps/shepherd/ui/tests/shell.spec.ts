@@ -350,7 +350,6 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
 test('shows an approval with its tool, arguments and diff', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('button', { name: /Ship it/ }).click()
 
   const withDiff = page.locator('.entry__permission').filter({ hasText: 'Run tests' })
   await expect(withDiff).toContainText('cargo test')
@@ -363,6 +362,24 @@ test('shows an approval with its tool, arguments and diff', async ({ page }) => 
     .locator('.entry__permission')
     .filter({ hasText: 'Delete scratch file' })
   await expect(withoutDiff).toContainText('diff not available')
+})
+
+test('composes the first chat in an empty project and hides its sole task row', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const directory = page.getByRole('button', { name: 'notes', exact: true })
+  await directory.click()
+  const prompt = page.getByLabel('Prompt')
+  await expect(prompt).toBeEnabled()
+  await expect(prompt).toBeFocused()
+  await expect(page.locator('.task-list')).toHaveCount(0)
+  await prompt.fill('First prompt')
+  await expect(page.getByText('Proposed branch')).toBeVisible()
+  await expect(prompt).toHaveValue('First prompt')
+  await prompt.press('Enter')
+  await expect(page.locator('.transcript')).toContainText('First prompt')
+  await expect(page.locator('.task-list')).toHaveCount(0)
+  await directory.click()
+  await expect(page.locator('.transcript')).toContainText('First prompt')
 })
 
 test('encodes typed keys into terminal input', async ({ page }) => {
@@ -445,6 +462,12 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(card.getByText('/tmp/demo', { exact: true })).toBeVisible()
   await expect(card.getByText('example/demo')).toBeVisible()
   await expect(card.getByRole('img', { name: 'GitHub' })).toBeVisible()
+  const rowMetrics = await card.locator('p, button').evaluateAll((rows) => rows.map((row) => {
+    const style = getComputedStyle(row)
+    return [style.fontSize, style.padding, row.getBoundingClientRect().height]
+  }))
+  expect(rowMetrics).toHaveLength(4)
+  expect(rowMetrics.every((metrics) => metrics.join() === rowMetrics[0].join())).toBe(true)
   const rowBounds = await repository.locator('..').boundingBox()
   const cardBounds = await card.boundingBox()
   if (!rowBounds || !cardBounds) throw new Error('The project row and context card should be visible')
@@ -464,7 +487,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(page.locator('.tasks')).toHaveCount(0)
   await repository.click()
 
-  await page.getByRole('button', { name: 'Project menu for notes' }).press('ArrowDown')
+  await directory.press('Shift+F10')
   await expect(archive).toBeFocused()
   await archive.press('ArrowDown')
   const projectSettings = page.getByRole('menuitem', { name: 'Project settings' })
@@ -482,7 +505,8 @@ test('shows project icons, opens archive controls on hover, and composes in anot
 
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
-  await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
+  await expect(page.locator('.chat__title')).toHaveText('New task')
+  await expect(page.locator('.task-list')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
 })
 
@@ -523,7 +547,6 @@ test('batch imports local Codex projects from the empty Projects list', async ({
 test('opens settings in the task pane and returns to the current chat', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Quit', exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: /Ship it/ }).click()
   await page.getByLabel('Prompt').fill('keep this draft')
 
   const settings = page.getByRole('button', { name: 'Settings' })
@@ -541,7 +564,7 @@ test('opens settings in the task pane and returns to the current chat', async ({
 
   await expect(chat).toBeVisible()
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
-  await page.getByRole('button', { name: 'Project menu for demo' }).press('ArrowDown')
+  await page.getByRole('button', { name: 'demo', exact: true }).press('Shift+F10')
   await expect(page.getByRole('menuitemcheckbox', { name: 'Show archived' })).toHaveAttribute('aria-checked', 'true')
 })
 

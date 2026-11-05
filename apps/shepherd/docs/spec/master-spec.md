@@ -122,11 +122,12 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The sidebar shows a flat list of tasks for the selected project. A project
-  with no visible tasks has an empty list. Each project row has a folder icon
+- The sidebar shows task rows for the selected project when it has more than
+  one visible task. A sole visible task opens directly in the chat pane.
+  Each project row has a folder icon
   with a branch badge for Git working trees. Its compose button opens a draft
   in that project. Hovering over a project highlights the row and opens a
-  context card directly to its right. The row's three-dot button opens the same
+  context card directly to its right. Right-click or Shift+F10 opens the same
   menu. The card shows the folder path with the home directory abbreviated as
   `~/`. It also shows the Git remote when available. The **Show archived**
   switch includes that project's `done` tasks.
@@ -134,9 +135,9 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
   Task rows show state and attention using icons and badges for working
   (spinner), waiting (ring and dot), review (badge), failed (cross), interrupted
   (pause), draft (outline), ready (dim).
-- Centre: the fixed chat region. Transcript and composer are always visible and
-  cannot be closed; the chat takes the remaining width after the sidebar and
-  inspector.
+- The chat takes the remaining width between the sidebar and inspector. In a
+  project with no visible tasks, typing a prompt creates a draft. Sending the
+  prompt starts the agent.
 - Right: the always-on inspector with a thin vertical tab strip. Tabs are
   **Terminals**, **Preview**, **Review**, **Git** and **Files**. The Terminals tab
   contains the project's saved terminal arrangement; shared terminals keep their
@@ -689,10 +690,11 @@ offers transcript replay with a new session instead of pretending to continue.
 
 ### 7.2 Creating a task
 
-1. Pick project (default: active) and agent profile; a draft task workspace opens
-   with its chat and inspector, and the tier and capabilities are shown before
-   sending. The draft appears in the sidebar immediately; shared terminals from
-   the project layout are available from the start.
+1. Open a draft from the project's compose button or type into an empty
+   project's chat. The draft opens with its chat and inspector. Pick an agent
+   profile and review its tier and capabilities before sending. Shared terminals
+   from the project layout are available from the start. The draft also appears
+   in the sidebar when the project has multiple visible tasks.
 2. Show the proposed worktree path and branch; neither exists yet.
 3. Optionally pick model/mode if the adapter advertises them.
 4. Send the first prompt. Creating the worktree, branch and task starts on send;
@@ -1140,8 +1142,8 @@ all UI follow-up answers are recorded here for traceability.
 - **Density:** dense shell chrome with a readable transcript measure (§2.1).
 - **Landing:** restore the last project and last task; if that task is gone, open
   a new draft, never an older task (§2.2).
-- **New task:** a draft appears in the sidebar and opens its workspace; no
-  worktree exists until the first send (§7.2).
+- **New task:** a draft opens in its workspace. Its worktree is created on the
+  first send (§7.2).
 
 Earlier resolutions — attachment cap 50 MB, the default FTS tokenizer with prefix
 queries, core-assigned event ordering and item IDs, and `libs/shepherd-core` as

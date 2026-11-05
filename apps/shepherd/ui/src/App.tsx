@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -29,6 +29,7 @@ export function App() {
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
+  const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [showArchived, setShowArchived] = createSignal(false)
@@ -56,6 +57,8 @@ export function App() {
     if (id) setTerminalAttention((bells) => bells.filter((bell) => bell.terminalId !== id))
   }
   const [prompt, setPrompt] = createSignal('')
+  let promptInput: HTMLTextAreaElement | undefined
+  const firstDrafts = new Map<string, Promise<bridge.TaskWorkspace>>()
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
   const [scanning, setScanning] = createSignal(false)
@@ -69,9 +72,15 @@ export function App() {
 
   const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
   const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
+  const canStartTask = () => {
+    const project = projects().find((entry) => entry.id === selectedProjectId())
+    return !!project && !project.missing && loadedTasksFor() === project.id
+      && !selectedTaskId() && visibleTasks().length === 0
+  }
   const canCompose = () => {
     const state = workspace()?.task.state
-    return state === 'draft' || state === 'ready'
+    return state === 'draft' || state === 'ready' || canStartTask()
+      || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
 
   async function run(action: () => Promise<void>) {
@@ -88,7 +97,10 @@ export function App() {
 
   async function loadTasks(projectId: string) {
     const list = await bridge.taskList(projectId)
-    if (selectedProjectId() === projectId) setTasks(list.tasks)
+    if (selectedProjectId() === projectId) {
+      setTasks(list.tasks)
+      setLoadedTasksFor(projectId)
+    }
     return list.tasks
   }
 
@@ -100,18 +112,36 @@ export function App() {
   }
 
   async function selectProject(project: bridge.ProjectSnapshot) {
+    if (selectedProjectId() !== project.id) setPrompt('')
     setTerminalListEvent(undefined)
     setSelectedProjectId(project.id)
     setSelectedTaskId(null)
     setWorkspace(null)
     setTasks([])
+    setLoadedTasksFor(undefined)
     const listed = await loadTasks(project.id)
     if (selectedProjectId() !== project.id) return
-    const lastTask = project.lastTaskId
-      ? listed.find((task) => task.id === project.lastTaskId)
-      : undefined
-    if (lastTask && (showsArchived(project.id) || lastTask.state !== 'done')) await selectTask(lastTask.id)
+    const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
+    const task = visible.find((entry) => entry.id === project.lastTaskId)
+      ?? (visible.length === 1 ? visible[0] : undefined)
+    if (task) await selectTask(task.id)
   }
+
+  function openProject(project: bridge.ProjectSnapshot) {
+    setSettingsOpen(false)
+    void run(() => selectProject(project)).then(() => {
+      if (selectedProjectId() === project.id && canStartTask()) promptInput?.focus()
+    })
+  }
+
+  createEffect(() => {
+    if (pending() || firstDrafts.has(selectedProjectId() ?? '')) return
+    const visible = visibleTasks()
+    const [only] = visible
+    if (visible.length === 1 && only && only.id !== selectedTaskId()) {
+      void run(() => selectTask(only.id))
+    }
+  })
 
   function handleEvent(event: CoreEvent) {
     switch (event.type) {
@@ -239,14 +269,39 @@ export function App() {
     setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task')
+      setPrompt('')
       if (selectedProjectId() !== projectId) {
         setTerminalListEvent(undefined)
         setSelectedProjectId(projectId)
         setTasks([])
+        setLoadedTasksFor(undefined)
       }
       setSelectedTaskId(draft.task.id)
       setWorkspace(draft)
       await loadTasks(projectId)
+    })
+  }
+
+  function firstDraft(projectId: string) {
+    const inFlight = firstDrafts.get(projectId)
+    if (inFlight) return inFlight
+    const request = bridge.createDraft(projectId, 'New task').then((draft) => {
+      if (selectedProjectId() === projectId && !selectedTaskId()) {
+        setSelectedTaskId(draft.task.id)
+        setWorkspace(draft)
+      }
+      return draft
+    }).finally(() => firstDrafts.delete(projectId))
+    firstDrafts.set(projectId, request)
+    return request
+  }
+
+  function updatePrompt(text: string) {
+    setPrompt(text)
+    const projectId = selectedProjectId()
+    if (!projectId || !text.trim() || pending() || !canStartTask() || firstDrafts.has(projectId)) return
+    void firstDraft(projectId).then(() => loadTasks(projectId)).catch((failure) => {
+      if (selectedProjectId() === projectId) setError(describe(failure))
     })
   }
 
@@ -263,14 +318,18 @@ export function App() {
   }
 
   function sendPrompt() {
+    const projectId = selectedProjectId()
     const current = workspace()
     const text = prompt().trim()
-    if (!current || !text || !canCompose()) return
-    setPrompt('')
+    if (!projectId || !text || !canCompose() || pending()) return
     void run(async () => {
-      setWorkspace(await bridge.sendPrompt(current.task.id, text))
-      const projectId = selectedProjectId()
-      if (projectId) await loadTasks(projectId)
+      const task = current?.task ?? (await firstDraft(projectId)).task
+      const updated = await bridge.sendPrompt(task.id, text)
+      if (selectedTaskId() === task.id) {
+        setPrompt((value) => value.trim() === text ? '' : value)
+        setWorkspace(updated)
+      }
+      await loadTasks(projectId)
     })
   }
 
@@ -351,13 +410,11 @@ export function App() {
                     project={project}
                     homeDirectory={homeDirectory()}
                     selected={project.id === selectedProjectId()}
+                    expanded={project.id === selectedProjectId() && visibleTasks().length > 1}
                     pending={pending()}
                     showArchived={showsArchived(project.id)}
                     menuOpen={projectMenuId() === project.id}
-                    onSelect={() => {
-                      setSettingsOpen(false)
-                      void run(() => selectProject(project))
-                    }}
+                    onSelect={() => openProject(project)}
                     onCompose={() => newTask(project.id)}
                     onMenuOpenChange={(open) => {
                       if (open) setProjectMenuId(project.id)
@@ -373,7 +430,7 @@ export function App() {
                     <p class="project__missing">path is missing</p>
                   </Show>
 
-                  <Show when={project.id === selectedProjectId() && visibleTasks().length > 0}>
+                  <Show when={project.id === selectedProjectId() && visibleTasks().length > 1}>
                     <div class="tasks">
                       <ul class="task-list">
                         <For each={visibleTasks()}>
@@ -499,7 +556,7 @@ export function App() {
           <div class="chat__transcript">
             <Show
               when={workspace()}
-              fallback={<p class="empty">Select a task to read its transcript.</p>}
+              fallback={<p class="empty">{canStartTask() ? 'Type a prompt to start a chat.' : 'Select a task to read its transcript.'}</p>}
             >
               {(current) => (
                 <Show
@@ -518,15 +575,21 @@ export function App() {
 
           <div class="composer">
             <textarea
+              ref={promptInput}
               class="composer__input"
               aria-label="Prompt"
               placeholder={canCompose() ? 'Send a prompt' : 'Select a draft or ready task'}
               rows={2}
               value={prompt()}
               disabled={!canCompose() || pending()}
-              onInput={(event) => setPrompt(event.currentTarget.value)}
+              onInput={(event) => {
+                const text = event.currentTarget.value
+                if (event.isComposing) setPrompt(text)
+                else updatePrompt(text)
+              }}
+              onCompositionEnd={(event) => updatePrompt(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
+                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
                   event.preventDefault()
                   sendPrompt()
                 }
