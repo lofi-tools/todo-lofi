@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+command -v vim less >/dev/null
+
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT

@@ -41,6 +41,32 @@ async function measureBurst(terminalId: string): Promise<number> {
   }
 }
 
+function press(input: HTMLTextAreaElement, key: string) {
+  input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+}
+
+async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaElement) {
+  await bridge.terminalWrite(terminalId, "vim -Nu NONE -n -i NONE -c 'call setline(1, \"S4_\" . \"VIM\")' -c 'set nomodified'\r")
+  await waitFor('Vim alternate screen', () => terminalOutput().includes('S4_VIM') && !terminalOutput().includes('S4_READY'))
+  for (const key of ['Escape', ':', 'q', 'Enter']) press(input, key)
+  await waitFor('main screen restored after Vim', () => terminalOutput().includes('S4_READY') && !terminalOutput().includes('S4_VIM'))
+
+  await bridge.terminalWrite(terminalId, "printf 'S4_%s\\n' LESS | LESS= less -R\r")
+  await waitFor('less alternate screen', () => terminalOutput().includes('S4_LESS') && !terminalOutput().includes('S4_READY'))
+  press(input, 'q')
+  await waitFor('main screen restored after less', () => terminalOutput().includes('S4_READY') && !terminalOutput().includes('S4_LESS'))
+}
+
+async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {
+  await bridge.terminalWrite(terminalId, "IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
+  input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'かな' }))
+  input.value = 'かな'
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'かな', inputType: 'insertText' }))
+  press(input, 'Enter')
+  await waitFor('composed text delivered once', () => terminalOutput().split('\n').some((line) => line.trim() === 'S4_IME:かな'))
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -64,8 +90,10 @@ async function smoke() {
   input.focus()
   await bridge.terminalWrite(terminal.id, "printf '\nS4_%s\n' READY\r")
   await waitFor('PTY output in the webview', () => terminalOutput().includes('S4_READY'))
+  await exerciseAlternateScreen(terminal.id, input)
+  await exerciseComposition(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
-  return { ok: true, roundTrip: true, burstPaintMs }
+  return { ok: true, roundTrip: true, alternateScreen: true, compositionEvents: true, burstPaintMs }
 }
 
 void (async () => {
