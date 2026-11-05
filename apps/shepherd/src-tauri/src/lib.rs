@@ -19,7 +19,14 @@ use tauri::Manager;
 pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .setup(|app| {
-            let data_directory = app.path().app_data_dir()?;
+            let data_directory = match cfg!(debug_assertions)
+                .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))
+                .flatten()
+                .filter(|path| !path.is_empty())
+            {
+                Some(path) => path.into(),
+                None => app.path().app_data_dir()?,
+            };
             let probe_directory =
                 std::env::current_dir().unwrap_or_else(|_| data_directory.clone());
             let detection = tauri::async_runtime::block_on(agent_harness::codex::detect(
