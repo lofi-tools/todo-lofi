@@ -5,8 +5,8 @@
 //! shutdown. It does not know which CLI is underneath.
 
 use agent_harness::{
-    AgentHarness, ApprovalId, Capabilities, Decision, HarnessEvent, PromptInput, SessionId,
-    SpawnSpec, Transcript,
+    AgentHarness, ApprovalId, Capabilities, Decision, Entry, FailureKind, HarnessEvent,
+    PromptInput, SessionId, SpawnSpec, Transcript,
 };
 
 use crate::CoreError;
@@ -34,6 +34,7 @@ pub struct HarnessSession {
     session_id: Option<SessionId>,
     transcript: Transcript,
     pending_approval: Option<ApprovalId>,
+    failed: bool,
 }
 
 impl HarnessSession {
@@ -44,6 +45,7 @@ impl HarnessSession {
             session_id: None,
             transcript: Transcript::default(),
             pending_approval: None,
+            failed: false,
         }
     }
 
@@ -70,6 +72,9 @@ impl HarnessSession {
     }
 
     pub async fn cancel(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {
+        if self.failed {
+            return Ok(Vec::new());
+        }
         self.harness.cancel().await?;
         self.pending_approval = None;
         Ok(self.pump())
@@ -120,6 +125,28 @@ impl HarnessSession {
     /// something the adapter cannot report, such as a lost session.
     pub fn note(&mut self, text: impl Into<String>, is_error: bool) {
         self.transcript.push_notice(text, is_error);
+    }
+
+    /// Replace the transcript, e.g. with rows carried over from a session that
+    /// never started, so its failure row stays visible.
+    pub fn restore_transcript(&mut self, entries: impl IntoIterator<Item = Entry>) {
+        self.transcript.restore(entries);
+    }
+
+    /// Record a failure row and mark the session unusable: the next prompt opens
+    /// a fresh adapter process while the row stays in the transcript.
+    pub fn push_failure(
+        &mut self,
+        kind: FailureKind,
+        text: impl Into<String>,
+        detail: Option<String>,
+    ) {
+        self.failed = true;
+        self.transcript.push_failure(kind, text, detail);
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.failed
     }
 
     pub fn capabilities(&self) -> &Capabilities {

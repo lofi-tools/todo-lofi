@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use agent_harness::AgentHarness;
-use agent_harness::fake_harness::{FakeHarness, FakeTurn};
+use agent_harness::fake_harness::{FakeFailure, FakeHarness, FakeTurn};
 
 use crate::git::{GitError, GitRepository, GitService, run_git};
 use crate::harness::HarnessFactory;
@@ -159,6 +159,8 @@ impl Drop for TestCore {
 pub struct FakeHarnessFactory {
     scripts: Mutex<VecDeque<Vec<FakeTurn>>>,
     resume: bool,
+    start_failure: Option<FakeFailure>,
+    prompt_failure: Option<FakeFailure>,
 }
 
 impl FakeHarnessFactory {
@@ -166,6 +168,8 @@ impl FakeHarnessFactory {
         Self {
             scripts: Mutex::new(scripts.into()),
             resume: true,
+            start_failure: None,
+            prompt_failure: None,
         }
     }
 
@@ -174,6 +178,27 @@ impl FakeHarnessFactory {
         Self {
             scripts: Mutex::new(scripts.into()),
             resume: false,
+            start_failure: None,
+            prompt_failure: None,
+        }
+    }
+
+    /// A factory whose sessions cannot start, for the failure-row paths.
+    pub fn failing_start(failure: FakeFailure) -> Self {
+        Self::failing(Some(failure), None)
+    }
+
+    /// A factory whose prompts are rejected, the way an expired sign-in is.
+    pub fn failing_prompt(failure: FakeFailure) -> Self {
+        Self::failing(None, Some(failure))
+    }
+
+    fn failing(start_failure: Option<FakeFailure>, prompt_failure: Option<FakeFailure>) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::new()),
+            resume: true,
+            start_failure,
+            prompt_failure,
         }
     }
 }
@@ -187,7 +212,13 @@ impl HarnessFactory for FakeHarnessFactory {
                 scripts.pop_front().unwrap_or_default()
             }
         };
-        let harness = FakeHarness::new(script);
+        let mut harness = FakeHarness::new(script);
+        if let Some(failure) = self.start_failure {
+            harness = harness.failing_start(failure);
+        }
+        if let Some(failure) = self.prompt_failure {
+            harness = harness.failing_prompt(failure);
+        }
         if self.resume {
             Ok(Box::new(harness))
         } else {

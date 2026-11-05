@@ -586,6 +586,34 @@ textarea {
   font-size: 12px;
 }
 
+.entry__failure {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #6b3f3f;
+  border-radius: 6px;
+  background: rgba(224, 138, 138, 0.08);
+}
+
+.entry__failure-title {
+  margin: 0 0 4px;
+  color: #e08a8a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.entry__failure-text {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.entry__failure-detail {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 .entry__usage {
   margin: 0;
   color: var(--text-disabled);

@@ -116,6 +116,13 @@ export interface PermissionEntry {
   decision: Decision | null
 }
 
+export type FailureKind =
+  | 'missingBinary'
+  | 'unsupportedVersion'
+  | 'authRequired'
+  | 'protocol'
+  | 'midTurnExit'
+
 export type EntryKind =
   | { type: 'userMessage'; data: { text: string } }
   | { type: 'agentText'; data: { text: string } }
@@ -124,6 +131,7 @@ export type EntryKind =
   | { type: 'plan'; data: { rows: PlanRow[] } }
   | { type: 'permission'; data: PermissionEntry }
   | { type: 'notice'; data: { text: string; isError: boolean } }
+  | { type: 'failure'; data: { kind: FailureKind; text: string; detail: string | null } }
   | { type: 'usage'; data: { used: number; size: number; cost: number | null } }
 
 export interface Entry {

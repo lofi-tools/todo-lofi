@@ -23,7 +23,7 @@ pub mod test_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_harness::{HarnessEvent, SessionId, SpawnSpec, TurnFinishReason};
+use agent_harness::{FailureKind, HarnessEvent, SessionId, SpawnSpec, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary};
@@ -502,16 +502,35 @@ impl Core {
         }
 
         self.set_task_state(task_id, TaskState::Working)?;
-        self.ensure_session(task_id, None).await?;
+        if let Err(error) = self.ensure_session(task_id, None).await {
+            // A session that never started leaves the task ready to retry; the
+            // failure row is already in its transcript.
+            self.set_task_state(task_id, TaskState::Ready)?;
+            self.save_task(task_id).await?;
+            self.publish_task(task_id)?;
+            return Err(error);
+        }
 
-        let events = {
+        let outcome = {
             let session =
                 self.sessions
                     .get_mut(task_id)
                     .ok_or_else(|| CoreError::SessionMissing {
                         id: task_id.as_str().to_string(),
                     })?;
-            session.prompt(text).await?
+            session.prompt(text).await
+        };
+        let events = match outcome {
+            Ok(events) => events,
+            Err(error) => {
+                self.record_failure(task_id, &error);
+                // A rejected prompt ends the turn but keeps the session, so the
+                // user can sign in and send another prompt.
+                self.set_task_state(task_id, TaskState::Ready)?;
+                self.save_task(task_id).await?;
+                self.publish_task(task_id)?;
+                return Err(error);
+            }
         };
 
         self.apply_events(task_id, &events)?;
@@ -545,7 +564,17 @@ impl Core {
                     actual: approval_id.as_str().to_string(),
                 });
             }
-            session.respond(approval_id, decision).await?
+            session.respond(approval_id, decision).await
+        };
+        let events = match events {
+            Ok(events) => events,
+            Err(error) => {
+                self.record_failure(task_id, &error);
+                self.set_task_state(task_id, TaskState::Ready)?;
+                self.save_task(task_id).await?;
+                self.publish_task(task_id)?;
+                return Err(error);
+            }
         };
 
         self.apply_events(task_id, &events)?;
@@ -598,7 +627,17 @@ impl Core {
             .get(task_id)
             .and_then(|record| record.adapter_session_id.clone())
             .map(SessionId::new);
-        let opened = self.ensure_session(task_id, stored_session_id).await?;
+        let opened = match self.ensure_session(task_id, stored_session_id).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                // Stay resumable: the user can install or update the agent and
+                // try again.
+                self.set_task_state(task_id, TaskState::Interrupted)?;
+                self.save_task(task_id).await?;
+                self.publish_task(task_id)?;
+                return Err(error);
+            }
+        };
         if let Some(session) = self.sessions.get_mut(task_id) {
             match opened {
                 SessionOpened::Resumed(session_id) => session.note(
@@ -662,9 +701,15 @@ impl Core {
         task_id: &TaskId,
         resume: Option<SessionId>,
     ) -> Result<SessionOpened, CoreError> {
-        if self.sessions.contains_key(task_id) {
-            return Ok(SessionOpened::Fresh);
-        }
+        let carried = match self.sessions.get(task_id) {
+            Some(session) if !session.has_failed() => return Ok(SessionOpened::Fresh),
+            Some(_) => self
+                .sessions
+                .remove(task_id)
+                .map(|session| session.transcript().entries().to_vec())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
 
         let task = self.task(task_id)?.clone();
         let cwd = match task.worktree_path.clone() {
@@ -673,19 +718,24 @@ impl Core {
         };
         let harness = self.harness_factory.create()?;
         let mut session = HarnessSession::new(harness);
-        let capabilities = session
+        session.restore_transcript(carried);
+        let capabilities = match session
             .start(SpawnSpec {
                 program: "shepherd-agent".to_string(),
                 cwd,
                 ..SpawnSpec::default()
             })
-            .await?;
-        let (opened, session_id) = match resume {
+            .await
+        {
+            Ok(capabilities) => capabilities,
+            Err(error) => return Err(self.fail_session_start(task_id, session, error)),
+        };
+        let opened_session = match resume {
             Some(requested) if capabilities.resume => {
                 match session.open_session(Some(requested)).await {
                     Ok(session_id) => {
                         let handle = session_id.as_str().to_string();
-                        (SessionOpened::Resumed(handle), session_id)
+                        Ok((SessionOpened::Resumed(handle), session_id))
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -693,20 +743,29 @@ impl Core {
                             %error,
                             "the adapter could not resume the stored session"
                         );
-                        let session_id = session.open_session(None).await?;
-                        (SessionOpened::ResumeFailed(error.to_string()), session_id)
+                        // The stored thread is gone; a fresh session is still
+                        // better than no session, but the caller reports it.
+                        session.open_session(None).await.map(|session_id| {
+                            (SessionOpened::ResumeFailed(error.to_string()), session_id)
+                        })
                     }
                 }
             }
             Some(requested) => {
-                let session_id = session.open_session(None).await?;
                 let reason = format!("this adapter cannot resume session {}", requested.as_str());
-                (SessionOpened::ResumeFailed(reason), session_id)
+                session
+                    .open_session(None)
+                    .await
+                    .map(|session_id| (SessionOpened::ResumeFailed(reason), session_id))
             }
-            None => {
-                let session_id = session.open_session(None).await?;
-                (SessionOpened::Fresh, session_id)
-            }
+            None => session
+                .open_session(None)
+                .await
+                .map(|session_id| (SessionOpened::Fresh, session_id)),
+        };
+        let (opened, session_id) = match opened_session {
+            Ok(opened) => opened,
+            Err(error) => return Err(self.fail_session_start(task_id, session, error)),
         };
 
         let record = SessionRecord::started(
@@ -723,8 +782,10 @@ impl Core {
     /// Fold adapter activity into the task state. The transcript itself is
     /// updated by [`HarnessSession`] as it pumps the same events.
     fn apply_events(&mut self, task_id: &TaskId, events: &[HarnessEvent]) -> Result<(), CoreError> {
+        let started_live = self.task(task_id)?.state.is_live();
         let mut next_state = None;
         let mut task_error = None;
+        let mut failure = None;
 
         for event in events {
             match event {
@@ -747,12 +808,28 @@ impl Core {
                 },
                 HarnessEvent::Exited { code, stderr } => {
                     if *code != Some(0) {
+                        // Only a turn that was still running when the process
+                        // died is a mid-turn exit; quitting is a separate path.
+                        if started_live {
+                            let tail = stderr.trim().to_string();
+                            failure = Some((
+                                FailureKind::MidTurnExit,
+                                format!("the agent exited with code {code:?}"),
+                                (!tail.is_empty()).then_some(tail),
+                            ));
+                        }
                         next_state = Some(TaskState::Failed);
                         task_error = Some(format!("the agent exited with code {code:?}: {stderr}"));
                     }
                 }
                 _ => {}
             }
+        }
+
+        if let Some((kind, text, detail)) = failure
+            && let Some(session) = self.sessions.get_mut(task_id)
+        {
+            session.push_failure(kind, text, detail);
         }
 
         if let Some(state) = next_state {
@@ -787,6 +864,41 @@ impl Core {
             Ok(TaskState::Review)
         } else {
             Ok(TaskState::Ready)
+        }
+    }
+
+    /// Keep a session that failed to start so its failure row stays visible, and
+    /// hand the original error back to the caller.
+    fn fail_session_start(
+        &mut self,
+        task_id: &TaskId,
+        mut session: HarnessSession,
+        error: CoreError,
+    ) -> CoreError {
+        if let CoreError::Harness(harness_error) = &error
+            && let Some(kind) = FailureKind::classify(harness_error)
+        {
+            session.push_failure(kind, error.to_string(), Some(kind.hint().to_string()));
+        }
+        self.sessions.insert(task_id.clone(), session);
+        error
+    }
+
+    /// Turn an adapter error into a visible failure row. Errors about Shepherd's
+    /// own state get no row, because the caller already reports them.
+    fn record_failure(&mut self, task_id: &TaskId, error: &CoreError) {
+        let CoreError::Harness(harness_error) = error else {
+            return;
+        };
+        let Some(kind) = FailureKind::classify(harness_error) else {
+            return;
+        };
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            session.push_failure(
+                kind,
+                harness_error.to_string(),
+                Some(kind.hint().to_string()),
+            );
         }
     }
 
@@ -1877,6 +1989,149 @@ mod tests {
         assert!(
             note.contains("started a new session"),
             "unexpected note: {note}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_missing_binary_leaves_a_failure_row_and_a_ready_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut scenario = TestCore::with_core(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::failing_start(
+                agent_harness::fake_harness::FakeFailure::MissingProgram,
+            )),
+        ));
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Install me".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let result = scenario
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(CoreError::Harness(
+                agent_harness::HarnessError::MissingProgram { .. }
+            ))
+        ));
+
+        let workspace = scenario.core().task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(
+            workspace.transcript[0]
+                .summary()
+                .contains("failure: agent not installed"),
+            "unexpected row: {:?}",
+            workspace.transcript[0].summary()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rejected_prompt_shows_a_sign_in_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut scenario = TestCore::with_core(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::failing_prompt(
+                agent_harness::fake_harness::FakeFailure::AuthRequired,
+            )),
+        ));
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Sign in".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let result = scenario
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await;
+        assert!(matches!(result, Err(CoreError::Harness(_))));
+
+        let workspace = scenario.core().task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(
+            workspace.transcript.first().map(Entry::summary),
+            Some("you: go".to_string())
+        );
+        assert!(
+            workspace
+                .transcript
+                .last()
+                .is_some_and(|entry| entry.summary().contains("failure: sign-in required")),
+            "unexpected transcript: {:?}",
+            workspace
+                .transcript
+                .iter()
+                .map(Entry::summary)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_mid_turn_exit_is_a_failure_row_and_a_failed_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut scenario = TestCore::with_core(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Exit {
+                    code: 3,
+                    stderr: "the agent crashed".to_string(),
+                },
+            ])]])),
+        ));
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Crash me".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id,
+                    text: "go".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Failed);
+        assert!(
+            workspace
+                .transcript
+                .last()
+                .is_some_and(|entry| entry.summary().contains("failure: agent exited mid-turn")),
+            "unexpected transcript: {:?}",
+            workspace
+                .transcript
+                .iter()
+                .map(Entry::summary)
+                .collect::<Vec<_>>()
         );
         Ok(())
     }

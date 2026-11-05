@@ -40,6 +40,11 @@ pub enum FakeStep {
         path: PathBuf,
         contents: String,
     },
+    /// The process dies before the turn finishes, the way a crash looks.
+    Exit {
+        code: i32,
+        stderr: String,
+    },
 }
 
 impl FakeStep {
@@ -67,6 +72,33 @@ impl FakeTurn {
         Self {
             steps,
             finish: TurnFinishReason::Completed,
+        }
+    }
+}
+
+/// A failure the fake adapter reports instead of a turn, so the core's failure
+/// rows are reachable without a broken install.
+#[derive(Clone, Copy, Debug)]
+pub enum FakeFailure {
+    MissingProgram,
+    UnsupportedVersion,
+    AuthRequired,
+}
+
+impl FakeFailure {
+    fn error(self) -> HarnessError {
+        match self {
+            Self::MissingProgram => HarnessError::MissingProgram {
+                program: "codex".to_string(),
+            },
+            // The wording a server uses when it does not know a method, and the
+            // one it uses when the caller is not signed in.
+            Self::UnsupportedVersion => {
+                HarnessError::Protocol("unknown method thread/start".to_string())
+            }
+            Self::AuthRequired => {
+                HarnessError::Protocol("401 Unauthorized: run `codex login`".to_string())
+            }
         }
     }
 }
@@ -99,6 +131,8 @@ pub struct FakeHarness {
     turn_active: bool,
     pending: Option<PendingApproval>,
     capabilities: Capabilities,
+    start_failure: Option<FakeFailure>,
+    prompt_failure: Option<FakeFailure>,
 }
 
 impl FakeHarness {
@@ -116,6 +150,8 @@ impl FakeHarness {
             turn_active: false,
             pending: None,
             capabilities: Capabilities::fake(),
+            start_failure: None,
+            prompt_failure: None,
         }
     }
 
@@ -127,6 +163,18 @@ impl FakeHarness {
     /// a stored thread.
     pub fn without_resume(mut self) -> Self {
         self.capabilities.resume = false;
+        self
+    }
+
+    /// Fail every start with this error, the way a missing binary does.
+    pub fn failing_start(mut self, failure: FakeFailure) -> Self {
+        self.start_failure = Some(failure);
+        self
+    }
+
+    /// Reject every prompt with this error, the way an expired sign-in does.
+    pub fn failing_prompt(mut self, failure: FakeFailure) -> Self {
+        self.prompt_failure = Some(failure);
         self
     }
 
@@ -221,6 +269,15 @@ impl FakeHarness {
                         }
                     })?;
                 }
+                FakeStep::Exit { code, stderr } => {
+                    self.turn_active = false;
+                    self.pending = None;
+                    self.send(HarnessEvent::Exited {
+                        code: Some(*code),
+                        stderr: stderr.clone(),
+                    })?;
+                    return Ok(());
+                }
             }
         }
 
@@ -240,6 +297,9 @@ impl AgentHarness for FakeHarness {
     }
 
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        if let Some(failure) = self.start_failure {
+            return Err(failure.error());
+        }
         self.cwd = Some(spec.cwd);
         self.started = true;
         self.send(HarnessEvent::SessionState {
@@ -263,6 +323,9 @@ impl AgentHarness for FakeHarness {
         }
         if self.pending.is_some() {
             return Err(HarnessError::ApprovalPending);
+        }
+        if let Some(failure) = self.prompt_failure {
+            return Err(failure.error());
         }
 
         let turn = self
@@ -539,6 +602,53 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, HarnessEvent::Exited { code: Some(0), .. }))
+        );
+    }
+
+    #[test]
+    fn failure_messages_classify_into_actionable_kinds() {
+        use crate::FailureKind;
+
+        assert_eq!(
+            FailureKind::classify(&HarnessError::MissingProgram {
+                program: "codex".to_string(),
+            }),
+            Some(FailureKind::MissingBinary)
+        );
+        assert_eq!(
+            FailureKind::classify(&HarnessError::Protocol(
+                "401 Unauthorized: run codex login".to_string()
+            )),
+            Some(FailureKind::AuthRequired)
+        );
+        assert_eq!(
+            FailureKind::classify(&HarnessError::Protocol(
+                "unknown method thread/start".to_string()
+            )),
+            Some(FailureKind::UnsupportedVersion)
+        );
+        assert_eq!(
+            FailureKind::classify(&HarnessError::Protocol(
+                "turn/start: malformed response".to_string()
+            )),
+            Some(FailureKind::Protocol)
+        );
+        assert_eq!(FailureKind::classify(&HarnessError::NotStarted), None);
+    }
+
+    #[test]
+    fn a_failure_row_carries_its_kind_and_hint() {
+        use crate::{Entry, FailureKind};
+
+        let mut transcript = Transcript::default();
+        transcript.push_failure(
+            FailureKind::MissingBinary,
+            "the `codex` program was not found",
+            Some(FailureKind::MissingBinary.hint().to_string()),
+        );
+        assert_eq!(
+            transcript.entry(0).map(Entry::summary),
+            Some("failure: agent not installed: the `codex` program was not found".to_string())
         );
     }
 }

@@ -52,6 +52,86 @@ pub enum HarnessError {
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
 
+/// Why a session failed, in terms the UI can label without parsing an adapter's
+/// prose. An older server reports an unsupported build or a missing sign-in as
+/// a JSON-RPC error, so classification reads the message it sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureKind {
+    MissingBinary,
+    UnsupportedVersion,
+    AuthRequired,
+    Protocol,
+    MidTurnExit,
+}
+
+impl FailureKind {
+    /// The failure a reported error belongs to, or `None` for an error that is
+    /// about the caller's own state (an unopened session, a pending approval).
+    pub fn classify(error: &HarnessError) -> Option<Self> {
+        match error {
+            HarnessError::MissingProgram { .. } => Some(Self::MissingBinary),
+            HarnessError::Spawn { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                Some(Self::MissingBinary)
+            }
+            HarnessError::Protocol(message) => {
+                let message = message.to_lowercase();
+                let says_one =
+                    |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
+                if says_one(&[
+                    "unauthorized",
+                    "401",
+                    "login",
+                    "authentication",
+                    "api key",
+                    "credential",
+                ]) {
+                    Some(Self::AuthRequired)
+                } else if says_one(&[
+                    "unsupported",
+                    "does not support",
+                    "unknown method",
+                    "method not found",
+                    "unknown command",
+                    "unexpected argument",
+                ]) {
+                    Some(Self::UnsupportedVersion)
+                } else {
+                    Some(Self::Protocol)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::MissingBinary => "agent not installed",
+            Self::UnsupportedVersion => "version not supported",
+            Self::AuthRequired => "sign-in required",
+            Self::Protocol => "protocol error",
+            Self::MidTurnExit => "agent exited mid-turn",
+        }
+    }
+
+    /// What the user can do about it, shown under the cause.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::MissingBinary => {
+                "Install the agent, or point Shepherd at its path in Settings, then retry."
+            }
+            Self::UnsupportedVersion => {
+                "Update the agent; this build does not speak the protocol Shepherd needs."
+            }
+            Self::AuthRequired => "Sign in to the agent, then retry.",
+            Self::Protocol => "The agent's response could not be used; retry the turn.",
+            Self::MidTurnExit => {
+                "The turn stopped before it finished; resume the task to continue."
+            }
+        }
+    }
+}
+
 /// A task's agent session identifier. The adapter chooses the value; the core
 /// persists it and passes it back to `open_session` for resume.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -396,6 +476,11 @@ pub enum EntryKind {
         text: String,
         is_error: bool,
     },
+    Failure {
+        kind: FailureKind,
+        text: String,
+        detail: Option<String>,
+    },
     Usage {
         used: u64,
         size: u64,
@@ -424,6 +509,9 @@ impl Entry {
                 } else {
                     format!("notice: {text}")
                 }
+            }
+            EntryKind::Failure { kind, text, .. } => {
+                format!("failure: {}: {text}", kind.label())
             }
             EntryKind::Usage { used, size, .. } => format!("usage: {used}/{size}"),
         }
@@ -513,7 +601,9 @@ impl Transcript {
                 EntryKind::Usage { .. } => {
                     self.item_rows.insert("usage".to_string(), index);
                 }
-                EntryKind::UserMessage { .. } | EntryKind::Notice { .. } => {}
+                EntryKind::UserMessage { .. }
+                | EntryKind::Notice { .. }
+                | EntryKind::Failure { .. } => {}
             }
             self.next_sequence = self.next_sequence.max(entry.sequence + 1);
             self.entries.push(entry);
@@ -530,6 +620,21 @@ impl Transcript {
         self.append(EntryKind::Notice {
             text: text.into(),
             is_error,
+        })
+    }
+
+    /// Record a failure the core diagnosed. Unlike a notice, a failure carries
+    /// a kind, so the row can be labelled and acted on without parsing text.
+    pub fn push_failure(
+        &mut self,
+        kind: FailureKind,
+        text: impl Into<String>,
+        detail: Option<String>,
+    ) -> TranscriptChange {
+        self.append(EntryKind::Failure {
+            kind,
+            text: text.into(),
+            detail,
         })
     }
 

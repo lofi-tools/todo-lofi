@@ -537,6 +537,13 @@ function entryBody(
   decide: (approvalId: string, decision: bridge.Decision) => void,
 ) {
   const kind = entry.kind
+  const failureLabels: Record<string, string> = {
+    missingBinary: 'Agent not installed',
+    unsupportedVersion: 'Version not supported',
+    authRequired: 'Sign-in required',
+    protocol: 'Protocol error',
+    midTurnExit: 'Agent exited mid-turn',
+  }
   switch (kind.type) {
     case 'userMessage':
       return <p class="entry__user">{kind.data.text}</p>
@@ -606,6 +613,18 @@ function entryBody(
     }
     case 'notice':
       return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{kind.data.text}</p>
+    case 'failure':
+      return (
+        <div class="entry__failure">
+          <p class="entry__failure-title">
+            {failureLabels[kind.data.kind] ?? kind.data.kind}
+          </p>
+          <p class="entry__failure-text">{kind.data.text}</p>
+          <Show when={kind.data.detail}>
+            {(detail) => <pre class="entry__failure-detail">{detail()}</pre>}
+          </Show>
+        </div>
+      )
     case 'usage':
       return <p class="entry__usage">{`${kind.data.used} of ${kind.data.size} tokens`}</p>
   }
