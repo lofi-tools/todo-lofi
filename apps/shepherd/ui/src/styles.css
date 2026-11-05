@@ -625,6 +625,16 @@ textarea {
   display: none;
 }
 
+.freebuff-terminal__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.freebuff-terminal__body > p {
+  margin: 12px;
+}
+
 .pane-header {
   display: flex;
   align-items: center;

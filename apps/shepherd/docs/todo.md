@@ -88,7 +88,7 @@ task can produce reviewable work.
 | S2 | A real Codex task streams, approves, cancels and resumes | Codex fixtures + fake server + live smoke | Real Codex works on a disposable repo. |
 | S3 | A Codex task reaches review, commits and squash-merges | Temp-repo Git tests + review-trigger tests | One real task goes prompt → review → merge in Shepherd. |
 | S4 | Multiple terminals, shared and task-scoped, survive task switches | Parser fixtures, layout round-trip, terminal tab UI tests | Terminal use is daily-driver quality. |
-| S5 | OpenCode, Pi, Claude/ACP and Freebuff each work or degrade honestly | Adapter contract tests + live smoke per tier | No adapter fakes structured state. |
+| S5 | OpenCode, Pi and Claude/ACP work or degrade honestly. Freebuff opens a plain terminal. | Adapter contract and live smokes for integrated agents, plus a terminal fixture for Freebuff | Each adapter reports only the state it can observe. |
 | S6 | Files, preview/annotation, search, attachments, notifications, settings | UI and feature tests | The v1 feature checklist is complete. |
 | S7 | Crash recovery, bounded resources, packaging and release checks | Chaos, performance, migration and packaging tests | v1 is trustworthy on the target platforms. |
 
@@ -492,11 +492,9 @@ Follow the spec’s native-first order:
    **unreviewed tools** fallback.
 3. **Claude Code / ACP** — reuse `libs/acp-client`; permissions, fs/terminal
    capabilities and session load.
-4. **Freebuff terminal wrapper** — bundled manifests, coarse state, plain
-   terminal fallback.
+4. **Freebuff terminal** runs the CLI directly in the conversation region.
 
-If Pi’s RPC probe is blocked, ACP and Freebuff may proceed in parallel while
-that is resolved; do not fake Pi’s structured state.
+If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 
 ### Build
 
@@ -504,7 +502,7 @@ that is resolved; do not fake Pi’s structured state.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
-- [ ] Freebuff PTY wrapper and manifest fixtures.
+- [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have
   visible outcomes.
@@ -512,10 +510,10 @@ that is resolved; do not fake Pi’s structured state.
 ### Proof
 
 - [ ] Contract fixtures per adapter.
-- [ ] One live smoke per installed CLI, gated in CI.
+- [ ] One live smoke per installed integrated CLI, gated in CI.
 - [ ] Approval, cancel, resume and failure paths where the tier supports them.
 - [ ] A missing capability hides the control instead of showing a dead button.
-- [ ] Freebuff with no matching manifest shows a plain terminal with a notice.
+- [x] Freebuff uses the plain terminal path. Verify it with fixtures only.
 
 ### Gate
 

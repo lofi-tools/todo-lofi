@@ -16,6 +16,49 @@ interface TerminalSize {
 
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
 
+export function FreebuffPane(props: { projectId: string; shown: boolean; onClose: () => void }) {
+  const [terminalId, setTerminalId] = createSignal<string>()
+  const [error, setError] = createSignal<string>()
+  let disposed = false
+
+  function close(id: string) {
+    void bridge.closeTerminal(id).catch((failure) => console.warn('Could not close the Freebuff terminal', failure))
+  }
+
+  onMount(() => {
+    void bridge.startFreebuffTerminal(props.projectId).then((id) => {
+      if (disposed) close(id)
+      else setTerminalId(id)
+    }).catch((failure) => {
+      if (!disposed) setError(describe(failure))
+    })
+  })
+
+  onCleanup(() => {
+    disposed = true
+    const id = terminalId()
+    if (id) close(id)
+  })
+
+  return (
+    <section class="chat" aria-label="Freebuff terminal" hidden={!props.shown}>
+      <header class="pane-header">
+        <h2 class="chat__title">Freebuff</h2>
+        <button type="button" class="project-action" onClick={props.onClose}>Back to chat</button>
+      </header>
+      <div class="freebuff-terminal__body">
+        <Show when={terminalId()} keyed fallback={
+          <Show when={error()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
+            {(message) => <p class="error" role="alert">{message()}</p>}
+          </Show>
+        }>
+          {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.shown ? { id } : undefined} />}
+        </Show>
+      </div>
+    </section>
+  )
+}
+
 interface TerminalPaneProps {
   projectId: string
   taskId: string | null
@@ -393,7 +436,7 @@ const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
-function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void; onMeasure: (size: TerminalSize) => void }) {
+function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -692,7 +735,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         try {
           await bridge.terminalResize(props.terminalId, size.columns, size.rows)
           lastSent = key
-          props.onMeasure(size)
+          props.onMeasure?.(size)
         } catch (failure) {
           setError(describe(failure))
         }
@@ -888,7 +931,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       window.clearTimeout(mirrorTimer)
       window.clearTimeout(compositionTimer)
-      if (input === document.activeElement) props.onFocus(null)
+      if (input === document.activeElement) props.onFocus?.(null)
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
 
@@ -954,11 +997,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onFocus={() => {
-          props.onFocus(props.terminalId)
+          props.onFocus?.(props.terminalId)
           updateWindowFocus()
         }}
         onBlur={() => {
-          props.onFocus(null)
+          props.onFocus?.(null)
           reportedKeys.clear()
           reportFocus(false)
         }}

@@ -300,6 +300,8 @@ test.beforeEach(async ({ context }) => {
           case 'terminal_list':
           case 'start_terminal':
             return [...terminals]
+          case 'start_freebuff_terminal':
+            return 'freebuff-fixture'
           case 'subscribe_terminal': {
             subscriptions.push(args.terminalId)
             const frame = new Uint8Array([
@@ -465,6 +467,23 @@ test('encodes typed keys into terminal input', async ({ page }) => {
       page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
     )
     .toEqual(['a', '\u0003', '\r', '\u001bOA'])
+})
+
+test('opens Freebuff as a standalone terminal in the conversation pane', async ({ page }) => {
+  await page.goto('/')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await chat.getByLabel('Prompt').fill('Keep this draft')
+  await chat.getByRole('button', { name: 'Agent: Codex' }).click()
+  await chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' }).click()
+
+  const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
+  await expect(chat).toBeHidden()
+  await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeFocused()
+  await expect(freebuff.getByLabel('Terminal output')).toContainText('B')
+  await freebuff.getByRole('button', { name: 'Back to chat' }).click()
+
+  await expect(freebuff).toBeHidden()
+  await expect(chat.getByLabel('Prompt')).toHaveValue('Keep this draft')
 })
 
 test('opens the project picker, filters, and adds a project', async ({ page }) => {

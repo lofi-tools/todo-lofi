@@ -43,9 +43,8 @@ closing the app keeps working.
 
 1. **Adapter-first, not single-protocol.** Use an agent's native protocol where it
    buys real capability (Codex, OpenCode, Pi RPC), fall back to ACP for the long
-   tail, use a PTY wrapper for a TUI like Freebuff, and a plain pane as the last
-   resort. The tier is always visible so a heuristic never masquerades as a
-   protocol.
+   tail, and use a plain terminal for Freebuff. The adapter tier is visible
+   where Shepherd integrates an agent.
 2. **One app, honest lifecycle.** The Rust core owns agents, PTYs and state; the
    shell only draws and sends input. Closing the window is quitting, it warns when
    work is live, and reopening never claims that killed work survived.
@@ -72,9 +71,9 @@ closing the app keeps working.
   tab with shared and task-specific terminals, preview/annotate, review, Git,
   files, and an always-on inspector with fixed regions and terminal layout
   presets.
-- **Native adapters** for Codex (first), OpenCode, then Pi over its RPC mode;
-  **ACP** for Claude Code and other ACP agents; a **terminal-wrapper adapter** for
-  Freebuff with bundled screen manifests and an honest coarse state.
+- **Native adapters** for Codex (first), OpenCode, then Pi over its RPC mode.
+  **ACP** supports Claude Code and other ACP agents. Freebuff runs directly in a
+  standalone terminal in the conversation region.
 - **Task isolation**: one Git worktree per task by default, under the repository's
   resolved Git directory, with a warned shared checkout as the exception.
 - **Task management**: parallel tasks with visible state (working, waiting on
@@ -126,8 +125,8 @@ closing the app keeps working.
   polling, each in its own worktree, with no cross-task file collisions.
 - Committing from the Git tab produces exactly the commit `git commit` would have
   produced there (hooks, signing, author, message).
-- An agent with no machine protocol (Freebuff) is usable in the Terminals tab, with its input
-  reaching the TUI and its state labelled as heuristic rather than protocol.
+- Freebuff opens in a standalone terminal in place of the conversation pane.
+  Input reaches its TUI through the normal PTY path.
 - A failed adapter probe explains the reason and offers the next tier down.
 - Window cold start under 1.2 s; streaming does not drop frames while a large diff
   is rendered.
@@ -149,7 +148,7 @@ closing the app keeps working.
 | M0 | Window shell, project registry, schema, palette, status bar, quit flow |
 | M1 | Fixed task workspace, project terminal layout, worktree per task |
 | M2 | Codex native adapter: streaming transcript, approvals, cancel, resume |
-| M3 | OpenCode adapter, ACP path for Claude Code, Freebuff terminal wrapper |
+| M3 | OpenCode adapter, ACP path for Claude Code, standalone Freebuff terminal |
 | M4 | Files, Git and preview panes, in-app commit |
 | M5 | Pi RPC adapter, attachments, mentions, model/mode pickers, cross-task search, notifications |
 

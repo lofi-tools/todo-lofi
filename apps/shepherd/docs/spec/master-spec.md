@@ -32,7 +32,7 @@ These were chosen explicitly and override the pre-interview draft.
 | Windows | **One window only**, ever. It lists every project and is already the multiplexer. |
 | Agent integration order | **Native adapter first**, then ACP, then a terminal wrapper, then a plain pane. First native adapters: **Codex**, then **OpenCode**, then **Pi**. |
 | Pi protocol | **JSON-line RPC** (not ACP): `pi --mode rpc` is Pi's documented subprocess interface, with run lifecycle, commands and extension UI. Pi documents no ACP mode. |
-| Freebuff | Native **terminal-wrapper adapter**: a real PTY shown in the Terminals tab, whose output is read for state and whose input is typed into the TUI. Manifests are **bundled only**, no user editing. |
+| Freebuff | A standalone PTY runs `freebuff` directly and replaces the conversation pane while open. |
 | Task isolation | **One Git worktree per task** by default, at `<git-dir>/shepherd/worktrees/<slug>`. A shared checkout is opt-in with a warning. |
 | Shared core | `libs/shepherd-core`, UI-agnostic: agents, terminals, state, Git, store. No Tauri or GPUI types; split out in v1 so v2 reuses it unchanged. |
 | App shell (v1) | **Tauri 2** with a **SolidJS + TypeScript** frontend on the system webview; terminals paint on a canvas. |
@@ -143,9 +143,9 @@ detailed treatment of its controls as the rest of the shell is built.
   inspector's selected tab is project-level, so switching tasks keeps the
   Terminals tab and its shared terminals in place; task-specific slots swap to the
   active task. The project remembers its last active task.
-- Regions are fixed. The middle region shows the task's chat or Settings. The
-  inspector is always present, and terminal splits live only inside its
-  Terminals tab. No pane is torn out or moved between regions.
+- Regions are fixed. The middle region shows the task's chat, Settings, or
+  the standalone Freebuff terminal. The inspector is always present, and
+  terminal splits live inside its Terminals tab.
 - Inspector tabs: **Terminals**, **Preview**, **Review**, **Git**, **Files**.
   Each tab has one pane except Terminals, which holds a split tree of terminal
   panes. Diff views live in Review and Git; there is no standalone diff tab.
@@ -472,29 +472,15 @@ a visible reason.
 Each native adapter records the exact command and protocol version used, shown in
 **Task → Diagnostics** next to the stderr tail.
 
-### 4.4 Freebuff: terminal-wrapper adapter
+### 4.4 Freebuff terminal
 
-Freebuff is integrated twice, in this order:
-
-1. **Wrapper adapter (primary).** Shepherd starts `freebuff` in a real PTY and
-   shows it in a pane. Output bytes are parsed for rendering and stripped for
-   analysis; coarse state comes from a **bundled** manifest per known version: a
-   prompt pattern (waiting), a busy pattern (working), an exit code (done).
-   Sending a prompt writes the text into the terminal's input line — bracketed
-   paste, then Enter — exactly as a user would. The TUI stays the real UI.
-2. **Pane fallback.** When no manifest matches, the same PTY is shown as an
-   ordinary terminal with no state claims and a "manifest missing for this
-   version" notice.
-
-Limits, stated in the UI rather than hidden: no structured tool calls, no
-approvals intercepted (the TUI asks its own questions), no transcript beyond the
-rendered screen, no resume after exit, and state is a heuristic ("likely
-working"). Manifests are bundled only: users cannot edit them, and an update ships
-before or with any TUI change. A stale manifest degrades to the plain pane; it
-never guesses.
-
-Manifests follow herdr-core's approach: a small data file per agent and version
-with prompt/busy patterns, tested against recorded screen fixtures.
+Choosing **Freebuff (terminal)** runs `freebuff` directly in a PTY in the
+selected project's directory. The terminal replaces the conversation pane.
+Freebuff handles all prompts, approvals, and session behaviour in its own TUI.
+Shepherd renders the terminal screen and forwards terminal input. The PTY is
+temporary and sits outside the task lifecycle, worktrees, transcript, inspector
+layout, and persisted terminal records. **Back to chat** closes the terminal.
+Use a stub for automated verification and leave live Freebuff out of the suite.
 
 ### 4.5 ACP path
 
@@ -544,7 +530,6 @@ under `test-support`.
 | OpenCode | native | `opencode serve` or ACP mode, whichever the version exposes |
 | Pi | native | Pi RPC mode (flag verified at connect), with the bundled approval bridge |
 | Claude Code | ACP | `claude-code-acp` |
-| Freebuff | terminal wrapper | `freebuff` in a PTY with a bundled manifest |
 | Custom | user choice | any command, any tier |
 
 Adding an agent is a form: label, command, args, environment, tier, working
@@ -633,7 +618,7 @@ code, last command, scope and a restart action.
 
 Named presets: label, command, args, cwd policy (worktree or project root), env,
 optional prompt prefix. Shipped: shell, `codex`, `opencode`, `pi`, `claude`,
-`freebuff`, plus user-defined. Environment values may use `!command` substitution,
+plus user-defined. Environment values may use `!command` substitution,
 resolved at spawn and never stored.
 
 ## 6. Projects
@@ -1080,7 +1065,7 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 | **M0** | Task-workspace shell, project registry, schema, palette, status bar, settings files, quit flow | Add two projects and restart to verify both persist with their last task workspaces and trees. Compose opens a draft in the chosen project. Its menu can reveal archived tasks. The selected project shows a flat list and switching projects collapses the previous list. A missing last task opens a draft. Settings and keybindings survive restart in the config directory. A malformed file falls back to defaults with a banner. The palette lists commands with their bindings and disabled reasons. Quitting with nothing running is instant. A missing path is flagged. |
 | **M1** | Fixed task workspace, terminal service, project terminal layout, worktree per task | Split the Terminals tab and resize it; switch tasks and keep a shared terminal mounted; a task terminal disappears with its task and returns on reselect; the terminal layout is saved per project; chat and inspector cannot be torn apart; closing a terminal view keeps it running; quitting with a working agent warns and stops it within 2 s; restart shows ended terminals in their task workspaces and restarts them; the first send creates a worktree under the Git directory |
 | **M2** | Codex native adapter end to end | A prompt streams into the transcript with tool rows; approvals follow the agent's review mode; cancel stops the turn; resume works by thread ID; a finished turn with changes lands in **needs review**, a chat-only turn returns to **ready**, and both archive and review-note actions work; approval cards show a diff when the adapter or worktree provides one and say when they cannot; adapter item IDs map to canonical entries and ordering holds after reconnect; an archived worktree unused for 30 days is removed and reopens from its branch or tip; quitting mid-turn marks the task interrupted |
-| **M3** | OpenCode adapter, ACP path (Claude Code), Freebuff terminal wrapper | Each tier produces a correct transcript or an honest coarse state; Freebuff input reaches its TUI and its badge matches a captured manifest fixture; a missing manifest shows a plain pane |
+| **M3** | OpenCode adapter, ACP path (Claude Code), standalone Freebuff terminal | OpenCode and ACP produce a correct transcript. A fixture verifies that Freebuff opens a plain terminal in the conversation region. |
 | **M4** | Files, Git and preview panes | Tree respects ignore rules; badges update; stage, unstage, commit with hooks and signing, history and branch checkout work; a failing hook preserves the message; squash-merge is disabled on a dirty or off-base root and lists conflict paths with a terminal action; preview loads the project URL and element annotations add structured context, with screenshot fallback when injection is blocked |
 | **M5** | Pi RPC adapter, attachments, mentions, model/mode pickers, cross-task search, notifications | Pi runs through RPC, uses its approval bridge when available, and is labelled **unreviewed tools** when it is not; a version without RPC drops to a pane with a reason; images and files reach the agent; `@file` inserts a link; search finds text in old tasks |
 | **M6** | v2 GPUI shell over the same core: gpui-kit panes, GPUI canvas terminal, v1 shell deleted after flow parity. Starts only when v1 is feature complete, with no calendar date | Every v1 flow passes on GPUI; keybindings, settings, transcripts and search history carry over; theme and accessibility parity and the platform floor are tracked as accepted debt at deletion; `cargo tree -p shepherd-core` has no Tauri or GPUI crate; frames and input behave identically |
@@ -1108,9 +1093,10 @@ all UI follow-up answers are recorded here for traceability.
 - The project list shows a flat task list under the selected project when more
   than one task is visible. **Show archived** includes `done` tasks in that list.
   The unfinished count excludes `done` and `cancelled` (§2.1).
-- The workspace has a fixed middle region for chat or Settings and a fixed
-  inspector on the right. Switching tasks swaps chat and task-specific terminal
-  slots while the inspector tab and shared terminals stay mounted (§2.2).
+- The workspace has a fixed middle region for chat, Settings, or the standalone
+  Freebuff terminal and a fixed inspector on the right. Switching tasks swaps
+  chat and task-specific terminal slots while the inspector tab and shared
+  terminals stay mounted (§2.2).
 - **Inspector:** always-on right region, resizable but never closed; tabs are
   Terminals, Preview, Review, Git and Files; terminal splits live only inside
   Terminals (§2.1, §2.2).
@@ -1169,7 +1155,6 @@ persistence and presentation.
 | OpenCode | native | `opencode serve` | `opencode acp` | server mode, session control, models |
 | Pi | native | `pi --mode rpc` | terminal `pi` | LF framing and record families, `agent_settled`, extension-UI methods; approval bridge (degraded label if absent) |
 | Claude Code | ACP | `claude-code-acp` | terminal `claude` | initialize, session/load, modes |
-| Freebuff | wrapper | `freebuff` in a PTY | plain pane | bundled manifest prompt/busy patterns |
 | Custom | any | user command | terminal | chosen adapter's handshake |
 
 No command line in this table is a stable contract, and neither is its location:

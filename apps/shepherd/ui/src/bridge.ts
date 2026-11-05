@@ -328,6 +328,10 @@ export function restartTerminal(terminalId: string, columns: number, rows: numbe
   return invoke('restart_terminal', { terminalId, columns, rows })
 }
 
+export function startFreebuffTerminal(projectId: string): Promise<string> {
+  return invoke('start_freebuff_terminal', { projectId })
+}
+
 interface SearchPoint {
   line: number
   column: number

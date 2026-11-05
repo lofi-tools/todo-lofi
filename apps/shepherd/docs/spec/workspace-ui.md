@@ -103,8 +103,10 @@ current layout and give future changes a point of comparison.
   headline typography, underline each name, and add a small down caret. The
   triggers have transparent backgrounds and no borders. Use Shepherd's dark
   popover styling for the expanded menus. The project picker switches the
-  selected project. Codex is the current agent, with unavailable agents
-  disabled until their integrations are ready.
+  selected project. Codex is the default agent. **Freebuff (terminal)** opens
+  a standalone terminal in the conversation pane, with **Back to chat** to
+  close it. Other unavailable agents are disabled until their integrations
+  are ready.
 
 ## Conversation composer
 

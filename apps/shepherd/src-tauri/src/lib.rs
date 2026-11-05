@@ -101,6 +101,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::save_terminal_layout,
             bridge::commands::terminal_list,
             bridge::commands::start_terminal,
+            bridge::commands::start_freebuff_terminal,
             bridge::commands::restart_terminal,
             bridge::commands::search_terminal,
             bridge::commands::terminal_scroll,

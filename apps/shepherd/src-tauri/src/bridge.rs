@@ -520,36 +520,69 @@ impl ShellState {
         self.launch_terminal(record, columns, rows).await
     }
 
+    pub async fn start_freebuff_terminal(&self, project_id: String) -> Result<String, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
+        let cwd = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        let id = self
+            .spawn_terminal(
+                TerminalSpec {
+                    id: TerminalId::new(uuid::Uuid::new_v4().to_string()),
+                    columns: 80,
+                    rows: 24,
+                    cwd,
+                    command: "freebuff".into(),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                },
+                None,
+            )
+            .await?;
+        Ok(id.as_str().to_owned())
+    }
+
     async fn launch_terminal(
         &self,
         record: TerminalRecord,
         columns: u16,
         rows: u16,
     ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        let project_id = record.project_id.clone();
+        self.spawn_terminal(
+            TerminalSpec {
+                id: record.id.clone(),
+                columns,
+                rows,
+                cwd: record.cwd.clone(),
+                command: record.command.clone(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            Some(record),
+        )
+        .await?;
+        Ok(self.core.lock().await.terminals_for(&project_id))
+    }
+
+    async fn spawn_terminal(
+        &self,
+        spec: TerminalSpec,
+        record: Option<TerminalRecord>,
+    ) -> Result<TerminalId, BridgeError> {
         let state = self.core.lock().await.shutdown_state();
         if state != shepherd_core::ShutdownState::Running {
             return Err(CoreError::NotRunning { state }.into());
         }
-        let project_id = record.project_id.clone();
-        let bell_project = project_id.clone();
-        let bell_task = record.task_id.as_ref().map(|id| id.as_str().to_owned());
+        let (columns, rows) = (spec.columns, spec.rows);
         let (output, mut receiver) = mpsc::channel(32);
         let terminal_id = self
             .engine
             .lock()
             .await
-            .spawn(
-                TerminalSpec {
-                    id: record.id.clone(),
-                    columns,
-                    rows,
-                    cwd: record.cwd.clone(),
-                    command: record.command.clone(),
-                    args: Vec::new(),
-                    environment: BTreeMap::new(),
-                },
-                output,
-            )
+            .spawn(spec, output)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
 
         let screen = Screen::new(usize::from(columns), usize::from(rows));
@@ -564,8 +597,9 @@ impl ShellState {
             .await
             .insert(terminal_id.as_str().to_string(), Arc::clone(&slot));
 
-        let saved = self.core.lock().await.record_terminal(&record).await;
-        if let Err(error) = saved {
+        if let Some(record) = &record
+            && let Err(error) = self.core.lock().await.record_terminal(record).await
+        {
             self.screens.lock().await.remove(terminal_id.as_str());
             if let Err(close_error) = self.engine.lock().await.close(&terminal_id) {
                 tracing::warn!(%close_error, "could not roll back terminal spawn");
@@ -575,8 +609,8 @@ impl ShellState {
 
         let engine = Arc::clone(&self.engine);
         let screens = Arc::clone(&self.screens);
-        let core = Arc::clone(&self.core);
-        let shell_events = self.events.clone();
+        let recorded = record.map(|record| (record, Arc::clone(&self.core), self.events.clone()));
+        let running_id = terminal_id.clone();
         let id = terminal_id.as_str().to_string();
         tauri::async_runtime::spawn(async move {
             let mut pending = None;
@@ -599,16 +633,15 @@ impl ShellState {
                     Err(_) => None,
                     Ok(Some(TerminalEvent::Exited { exit_code })) => {
                         screens.lock().await.remove(&id);
-                        let mut core = core.lock().await;
-                        if let Err(error) = core
-                            .end_terminal(&TerminalId::new(id.clone()), exit_code)
-                            .await
-                        {
-                            tracing::warn!(%error, "could not mark the terminal ended");
-                        }
-                        for event in core.drain_events() {
-                            if let Err(error) = shell_events.send(event) {
-                                tracing::debug!(%error, "no shell is subscribed to terminal events");
+                        if let Some((_, core, shell_events)) = &recorded {
+                            let mut core = core.lock().await;
+                            if let Err(error) = core.end_terminal(&running_id, exit_code).await {
+                                tracing::warn!(%error, "could not mark the terminal ended");
+                            }
+                            for event in core.drain_events() {
+                                if let Err(error) = shell_events.send(event) {
+                                    tracing::debug!(%error, "no shell is subscribed to terminal events");
+                                }
                             }
                         }
                         break;
@@ -636,23 +669,24 @@ impl ShellState {
                     (slot.screen.take_replies(), slot.screen.take_bell())
                 };
                 if bell
+                    && let Some((record, _, shell_events)) = &recorded
                     && let Err(error) = shell_events.send(Event::TerminalBell {
-                        project_id: bell_project.clone(),
-                        task_id: bell_task.clone(),
+                        project_id: record.project_id.clone(),
+                        task_id: record.task_id.as_ref().map(|id| id.as_str().to_owned()),
                         terminal_id: id.clone(),
                     })
                 {
                     tracing::debug!(%error, "no shell is subscribed to terminal bells");
                 }
                 if !replies.is_empty()
-                    && let Err(error) = engine.lock().await.write_reply(&terminal_id, replies)
+                    && let Err(error) = engine.lock().await.write_reply(&running_id, replies)
                 {
                     tracing::debug!(%error, "could not send terminal replies");
                 }
             }
         });
 
-        Ok(self.core.lock().await.terminals_for(&project_id))
+        Ok(terminal_id)
     }
 
     async fn screen_slot(&self, terminal_id: &str) -> Result<Arc<Mutex<ScreenSlot>>, BridgeError> {
@@ -1197,6 +1231,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn start_freebuff_terminal(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<String, BridgeError> {
+        state.start_freebuff_terminal(project_id).await
+    }
+
+    #[tauri::command]
     pub async fn restart_terminal(
         state: State<'_, ShellState>,
         terminal_id: String,
@@ -1555,6 +1597,53 @@ mod tests {
             .await
             .expect_err("a mismatched approval must fail");
         assert!(error.to_string().contains("approval"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_standalone_pty_has_a_screen_but_no_project_terminal_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let terminal = state
+            .spawn_terminal(
+                TerminalSpec {
+                    id: TerminalId::new("standalone-fixture"),
+                    columns: 80,
+                    rows: 24,
+                    cwd: directory.path().to_path_buf(),
+                    command: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        "printf 'standalone-ready\\n'; read line".into(),
+                    ],
+                    environment: BTreeMap::new(),
+                },
+                None,
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while state
+                .search_terminal(
+                    terminal.as_str(),
+                    "standalone-ready",
+                    None,
+                    SearchDirection::Previous,
+                )
+                .await?
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<(), BridgeError>(())
+        })
+        .await??;
+        assert!(state.terminal_list(project.id.clone()).await.is_empty());
+        state.close_terminal(terminal.as_str().to_owned()).await?;
         Ok(())
     }
 

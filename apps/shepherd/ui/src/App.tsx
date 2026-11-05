@@ -15,7 +15,7 @@ import { ProjectRow } from './ProjectRow'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
-import { TerminalPane } from './TerminalPane'
+import { FreebuffPane, TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -28,7 +28,7 @@ const AGENT_OPTIONS: PickerOption[] = [
   { id: 'opencode', name: 'OpenCode (coming soon)', disabled: true },
   { id: 'pi', name: 'Pi (coming soon)', disabled: true },
   { id: 'claude', name: 'Claude Code (coming soon)', disabled: true },
-  { id: 'freebuff', name: 'Freebuff (coming soon)', disabled: true },
+  { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
 
 function appearanceStorage() {
@@ -50,6 +50,7 @@ export function App() {
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
+  const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
   const [projectModel] = createResource(
     () => {
@@ -114,6 +115,19 @@ export function App() {
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
+  const agentOptions = () => {
+    const project = selectedProject()
+    if (project && !project.missing && !pending()) return AGENT_OPTIONS
+    return AGENT_OPTIONS.map((agent) => agent.id === 'freebuff' ? { ...agent, disabled: true } : agent)
+  }
+
+  function chooseAgent(agent: string) {
+    const project = selectedProject()
+    if (agent === 'freebuff' && project && !project.missing && !pending()) {
+      setFreebuffProjectId(project.id)
+    }
+  }
+
   function chooseSendAccent(accent: SendAccent) {
     setSendAccent(accent)
     try {
@@ -165,6 +179,7 @@ export function App() {
   }
 
   async function selectProject(project: bridge.ProjectSnapshot) {
+    setFreebuffProjectId(undefined)
     if (selectedProjectId() !== project.id) setPrompt('')
     setTerminalListEvent(undefined)
     setSelectedProjectId(project.id)
@@ -319,6 +334,7 @@ export function App() {
   }
 
   function newTask(projectId: string) {
+    setFreebuffProjectId(undefined)
     setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task')
@@ -492,6 +508,7 @@ export function App() {
                                 aria-current={task.id === selectedTaskId() ? 'true' : undefined}
                                 onClick={() => {
                                   setSettingsOpen(false)
+                                  setFreebuffProjectId(undefined)
                                   void run(() => selectTask(task.id))
                                 }}
                               >
@@ -549,7 +566,13 @@ export function App() {
           />
         </Show>
 
-        <section class="chat" aria-label="Task chat" hidden={settingsOpen()}>
+        <Show when={freebuffProjectId()} keyed>
+          {(projectId) => (
+            <FreebuffPane projectId={projectId} shown={!settingsOpen()} onClose={() => setFreebuffProjectId(undefined)} />
+          )}
+        </Show>
+
+        <section class="chat" aria-label="Task chat" hidden={settingsOpen() || !!freebuffProjectId()}>
           <Show when={workspace()}>
             {(current) => (
               <header class="pane-header">
@@ -616,7 +639,7 @@ export function App() {
                     <div class="chat__welcome">
                       <h1 aria-label={`What should ${DEFAULT_AGENT.name} build in ${project().name}?`}>
                         What should{' '}
-                        <HeadlinePicker label="Agent" value={DEFAULT_AGENT.id} text={DEFAULT_AGENT.name} options={AGENT_OPTIONS} />
+                        <HeadlinePicker label="Agent" value={DEFAULT_AGENT.id} text={DEFAULT_AGENT.name} options={agentOptions()} onChange={chooseAgent} />
                         {' '}build in{' '}
                         <HeadlinePicker
                           label="Project"
@@ -673,7 +696,7 @@ export function App() {
               }}
             />
             <div class="composer__actions">
-              <ComposerPickers />
+              <ComposerPickers agents={agentOptions()} onAgentChange={chooseAgent} />
               <div class="composer__send-actions">
                 <ComposerModelPicker model={composerModel()} />
                 <button
@@ -901,7 +924,7 @@ const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers() {
+function ComposerPickers(props: { agents: PickerOption[]; onAgentChange: (value: string) => void }) {
   return (
     <>
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
@@ -917,7 +940,7 @@ function ComposerPickers() {
           <PickerCaret />
         </PickerMenu>
       </div>
-      <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={AGENT_OPTIONS} triggerClass="composer__picker" above>
+      <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
         <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
         <PickerCaret />
       </PickerMenu>
