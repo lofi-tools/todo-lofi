@@ -1173,6 +1173,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_task_left_waiting_is_interrupted_by_the_next_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+
+        let first_run = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::approval("approval-1", "Run tests"),
+            ])]])),
+        );
+        let mut scenario = TestCore::with_core(first_run);
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id,
+                    title: "Survive a crash".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: "go".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+
+        // No quit: the process disappears while the task waits for approval.
+        drop(scenario);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let workspace = reopened.task_workspace(&task_id)?;
+        // The record survives and is no longer live; the transcript belongs to
+        // the session that vanished, so it comes back empty.
+        assert_eq!(workspace.task.state, TaskState::Interrupted);
+        assert!(workspace.transcript.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_fake_task_runs_through_approval_quit_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
