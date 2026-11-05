@@ -819,6 +819,19 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if (previous && (previous.displayOffset !== next.displayOffset || previous.columns !== next.columns || previous.rows !== next.rows)) {
         selection = undefined
         selecting = undefined
+        selectionAnchor = undefined
+      } else if (previous && selection) {
+        const [first, last] = selectionRange(previous, selection)
+        for (let index = first; index <= last; index++) {
+          const before = previous.cells[index]
+          const after = next.cells[index]
+          if (before?.text === after?.text && before?.width === after?.width && before?.wraps === after?.wraps) continue
+          selection = undefined
+          selecting = undefined
+          selectionAnchor = undefined
+          changedRows = null
+          break
+        }
       }
       const rows = changedRows && new Set(changedRows)
       if (rows && previous && (previous.cursorRow !== next.cursorRow || previous.cursorColumn !== next.cursorColumn || previous.cursorVisible !== next.cursorVisible || previous.cursorStyle !== next.cursorStyle)) {
