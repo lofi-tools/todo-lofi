@@ -1481,7 +1481,11 @@ impl Core {
 
         Ok(CommandResult::Quit(QuitSummary {
             interrupted_tasks,
-            live_terminals: 0,
+            live_terminals: self
+                .terminals
+                .values()
+                .filter(|terminal| terminal.ended_at.is_none())
+                .count(),
         }))
     }
 

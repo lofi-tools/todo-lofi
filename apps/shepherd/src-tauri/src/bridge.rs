@@ -260,8 +260,13 @@ impl ShellState {
     }
 
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
         match self.execute(Command::Quit { force }).await? {
-            CommandResult::Quit(summary) => Ok(summary),
+            CommandResult::Quit(summary) => {
+                self.engine.lock().await.terminate_all();
+                Ok(summary)
+            }
+
             other => Err(unexpected(&other)),
         }
     }

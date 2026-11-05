@@ -40,12 +40,33 @@ impl PtyTerminals {
         }
     }
 
+    pub fn terminate_all(&mut self) {
+        let sessions = match self.sessions.lock() {
+            Ok(mut sessions) => std::mem::take(&mut *sessions),
+            Err(error) => {
+                tracing::error!(%error, "could not drain terminal sessions");
+                std::mem::take(&mut *error.into_inner())
+            }
+        };
+        for (terminal_id, mut session) in sessions {
+            if let Err(error) = session.killer.kill() {
+                tracing::warn!(%terminal_id, %error, "could not stop terminal process");
+            }
+        }
+    }
+
     fn sessions(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Session>>, TerminalError> {
         self.sessions
             .lock()
             .map_err(|_| TerminalError::Backend("the terminal table is poisoned".to_string()))
+    }
+}
+
+impl Drop for PtyTerminals {
+    fn drop(&mut self) {
+        self.terminate_all();
     }
 }
 

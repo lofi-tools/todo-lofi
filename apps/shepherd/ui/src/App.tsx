@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createSignal, onMount } from 'solid-js'
+import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
@@ -35,6 +35,7 @@ export function App() {
   const [pending, setPending] = createSignal(false)
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
+  let allowClose = false
 
   const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
   const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
@@ -133,6 +134,23 @@ export function App() {
     if (!scan() && !scanning()) void scanProjects(false)
   }
 
+  onMount(() => {
+    let disposed = false
+    let detach: (() => void) | undefined
+    void getCurrentWindow().onCloseRequested((event) => {
+      if (allowClose) return
+      event.preventDefault()
+      if (!pending()) quit()
+    }).then((unlisten) => {
+      if (disposed) unlisten()
+      else detach = unlisten
+    }).catch(console.error)
+    onCleanup(() => {
+      disposed = true
+      detach?.()
+    })
+  })
+
   function addProject(path: string) {
     setPickerOpen(false)
     void run(async () => {
@@ -194,6 +212,7 @@ export function App() {
       try {
         const summary = await bridge.quit(false)
         setShutdownNote(`quit: ${summary.interruptedTasks} interrupted`)
+        allowClose = true
         await getCurrentWindow().close()
       } catch (failure) {
         const message = describe(failure)
@@ -211,6 +230,7 @@ export function App() {
       const summary = await bridge.quit(true)
       setQuitRequired(null)
       setShutdownNote(`quit: ${summary.interruptedTasks} interrupted`)
+      allowClose = true
       await getCurrentWindow().close()
     })
   }
