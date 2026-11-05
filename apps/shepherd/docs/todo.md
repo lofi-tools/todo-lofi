@@ -564,6 +564,12 @@ Manual script:
    candidate selection and commit it. Verify that the shell receives the
    committed text once and the candidate UI follows the terminal cursor.
 
+The packaged macOS test app used a disposable database and the British keyboard
+layout. With the cursor moved by a shell command, Option+E followed by E
+delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
+selection and candidate-window placement still need a system IME with
+conversion candidates.
+
 ### Gate
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without
