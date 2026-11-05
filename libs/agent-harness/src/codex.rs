@@ -1,14 +1,15 @@
-//! Codex adapter over `codex app-server`.
+//! Codex adapter over `codex app-server`, with a `codex exec --json` fallback
+//! for builds that predate the subcommand.
 //!
 //! The protocol is newline-delimited JSON-RPC 2.0 over stdio with the `jsonrpc`
 //! header omitted. `probe` answers which tier this build supports before the
 //! core commits to it; the harness translates notifications and server requests
 //! into [`HarnessEvent`]s and never writes to the store itself.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,8 +23,8 @@ use tokio::time::timeout;
 
 use crate::{
     AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, FileDiff,
-    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
-    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
+    SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
 };
 
 /// Protocol methods Shepherd knows how to drive. A build that advertises fewer
@@ -629,6 +630,595 @@ impl AgentHarness for CodexHarness {
     }
 }
 
+/// The `codex exec --json` tier, for builds without `app-server`.
+///
+/// Exec mode runs one process per turn, prints its stream as
+/// `{"id":"…","msg":{"type":"…"}}` lines, suppresses delta events, reports a
+/// turn's result only by exiting, and cannot answer approvals. Its capability
+/// set says so, so the core never offers the controls it lacks.
+pub struct ExecHarness {
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+    environment: BTreeMap<String, String>,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+    stderr_task: Option<JoinHandle<()>>,
+    run: Option<ExecRun>,
+    session_id: Option<SessionId>,
+    next_turn: u64,
+    started: bool,
+}
+
+/// One `codex exec --json` process. The waiter owns the child, so a cancel and
+/// a natural exit cannot both reap the same process.
+struct ExecRun {
+    waiter: JoinHandle<()>,
+    reader: JoinHandle<()>,
+    kill: Option<oneshot::Sender<()>>,
+    finished: Arc<AtomicBool>,
+}
+
+static EXEC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+impl ExecHarness {
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            receiver,
+            program: String::new(),
+            args: Vec::new(),
+            cwd: PathBuf::new(),
+            environment: BTreeMap::new(),
+            stderr: Arc::new(Mutex::new(VecDeque::new())),
+            stderr_task: None,
+            run: None,
+            session_id: None,
+            next_turn: 0,
+            started: false,
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: false,
+            thoughts: true,
+            tool_calls: true,
+            ..Capabilities::default()
+        }
+    }
+
+    /// Exec mode reports no thread handle before a run, so the session carries
+    /// a local identifier. Resume is not advertised for the same reason.
+    fn local_session_id() -> SessionId {
+        let sequence = EXEC_SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        SessionId::new(format!("exec-{}-{sequence}", std::process::id()))
+    }
+}
+
+impl Default for ExecHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AgentHarness for ExecHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.receiver
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        if self.started {
+            return Err(HarnessError::Protocol(
+                "the codex exec session is already started".to_string(),
+            ));
+        }
+        self.program = spec.program;
+        self.args = spec.args;
+        self.cwd = spec.cwd;
+        self.environment = spec.environment;
+        self.started = true;
+        self.sender
+            .send(HarnessEvent::SessionState {
+                state: SessionState::Ready,
+            })
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        Ok(self.capabilities())
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if !self.started {
+            return Err(HarnessError::NotStarted);
+        }
+        if let Some(session) = resume {
+            return Err(HarnessError::Protocol(format!(
+                "the codex exec tier cannot resume thread {}; this build has no app-server",
+                session.as_str()
+            )));
+        }
+        let session_id = Self::local_session_id();
+        self.session_id = Some(session_id.clone());
+        Ok(session_id)
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        if !self.started {
+            return Err(HarnessError::NotStarted);
+        }
+        if self.session_id.is_none() {
+            return Err(HarnessError::SessionMissing);
+        }
+        if self
+            .run
+            .as_ref()
+            .is_some_and(|run| !run.finished.load(Ordering::Relaxed))
+        {
+            return Err(HarnessError::Protocol(
+                "a codex exec turn is still running".to_string(),
+            ));
+        }
+        self.run = None;
+
+        let mut command = Command::new(&self.program);
+        command
+            .arg("exec")
+            .arg("--json")
+            .args(&self.args)
+            .arg(&input.text)
+            .current_dir(&self.cwd)
+            .envs(&self.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let mut child = command
+            .spawn()
+            .map_err(|source| spawn_error(&self.program, source))?;
+        let Some(stdout) = child.stdout.take() else {
+            return Err(HarnessError::Protocol(
+                "codex exec stdout was not captured".to_string(),
+            ));
+        };
+        let Some(stderr) = child.stderr.take() else {
+            return Err(HarnessError::Protocol(
+                "codex exec stderr was not captured".to_string(),
+            ));
+        };
+
+        self.stderr = Arc::new(Mutex::new(VecDeque::new()));
+        self.stderr_task = Some(spawn_stderr_reader(stderr, Arc::clone(&self.stderr)));
+
+        let turn_id = TurnId::new(format!("exec-turn-{}", self.next_turn));
+        self.next_turn += 1;
+        let (kill, kill_receiver) = oneshot::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let waiter = spawn_exec_waiter(
+            child,
+            kill_receiver,
+            self.sender.clone(),
+            Arc::clone(&self.stderr),
+            Arc::clone(&finished),
+        );
+        let reader = spawn_exec_reader(stdout, self.sender.clone());
+        self.run = Some(ExecRun {
+            waiter,
+            reader,
+            kill: Some(kill),
+            finished,
+        });
+
+        self.sender
+            .send(HarnessEvent::SessionState {
+                state: SessionState::Working,
+            })
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        self.sender
+            .send(HarnessEvent::TurnStarted { turn_id })
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        Ok(())
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        let Some(run) = self.run.as_mut() else {
+            return Err(HarnessError::Protocol(
+                "there is no codex exec turn to cancel".to_string(),
+            ));
+        };
+        if run.finished.load(Ordering::Relaxed) {
+            return Err(HarnessError::Protocol(
+                "the codex exec turn already finished".to_string(),
+            ));
+        }
+        let Some(kill) = run.kill.take() else {
+            return Err(HarnessError::Protocol(
+                "the codex exec turn is already stopping".to_string(),
+            ));
+        };
+        kill.send(()).map_err(|_| {
+            HarnessError::Protocol("the codex exec process already exited".to_string())
+        })?;
+        Ok(())
+    }
+
+    async fn respond(
+        &mut self,
+        _approval_id: ApprovalId,
+        _decision: Decision,
+    ) -> HarnessResult<()> {
+        Err(HarnessError::Protocol(
+            "the codex exec tier cannot answer approval requests".to_string(),
+        ))
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        if !self.started {
+            return Ok(());
+        }
+
+        let reported = match self.run.take() {
+            Some(mut run) => {
+                if !run.finished.load(Ordering::Relaxed)
+                    && let Some(kill) = run.kill.take()
+                    && kill.send(()).is_err()
+                {
+                    tracing::debug!("the codex exec process was already gone");
+                }
+                let joined = timeout(Duration::from_secs(5), &mut run.waiter)
+                    .await
+                    .is_ok();
+                if !joined {
+                    tracing::warn!("the codex exec process did not stop within 5s");
+                    run.waiter.abort();
+                }
+                run.reader.abort();
+                joined
+            }
+            None => false,
+        };
+
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        self.started = false;
+        self.session_id = None;
+
+        if !reported {
+            self.sender
+                .send(HarnessEvent::Exited {
+                    code: None,
+                    stderr: stderr_tail(&self.stderr),
+                })
+                .map_err(|_| HarnessError::ChannelClosed)?;
+        }
+        Ok(())
+    }
+}
+
+fn spawn_exec_waiter(
+    mut child: Child,
+    kill: oneshot::Receiver<()>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+    finished: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome = tokio::select! {
+            status = child.wait() => Some(status),
+            _ = kill => None,
+        };
+        let cancelled = outcome.is_none();
+        let status = match outcome {
+            Some(status) => status,
+            None => {
+                if let Err(error) = child.kill().await {
+                    tracing::debug!(%error, "could not kill the codex exec process");
+                }
+                child.wait().await
+            }
+        };
+
+        finished.store(true, Ordering::Relaxed);
+        let code = match &status {
+            Ok(status) => status.code(),
+            Err(error) => {
+                tracing::debug!(%error, "waiting for the codex exec process failed");
+                None
+            }
+        };
+        let reason = if cancelled {
+            TurnFinishReason::Cancelled
+        } else if matches!(&status, Ok(status) if status.success()) {
+            TurnFinishReason::Completed
+        } else {
+            TurnFinishReason::Failed
+        };
+        if sender.send(HarnessEvent::TurnFinished { reason }).is_err() {
+            tracing::debug!("the core stopped listening to codex events");
+        }
+        if sender
+            .send(HarnessEvent::Exited {
+                code,
+                stderr: stderr_tail(&stderr),
+            })
+            .is_err()
+        {
+            tracing::debug!("the core stopped listening to codex events");
+        }
+    })
+}
+
+fn spawn_exec_reader(
+    stdout: ChildStdout,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        loop {
+            let line = match lines.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::debug!(%error, "reading codex exec stdout failed");
+                    break;
+                }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let message = match serde_json::from_str::<Value>(trimmed) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::warn!(%error, "codex exec wrote a line that is not JSON");
+                    continue;
+                }
+            };
+            for event in exec_events(&message) {
+                if sender.send(event).is_err() {
+                    tracing::debug!("the core stopped listening to codex events");
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// Map one `codex exec --json` line to events. Exec prints a config summary and
+/// a prompt echo before the stream, so a line without a `msg` object is not an
+/// event.
+fn exec_events(message: &Value) -> Vec<HarnessEvent> {
+    let Some(event) = message.get("msg").filter(|value| value.is_object()) else {
+        return Vec::new();
+    };
+    let Some(kind) = event.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let event_id = message
+        .get("id")
+        .map(id_label)
+        .unwrap_or_else(|| "event".to_string());
+
+    match kind {
+        "agent_message" => exec_delta(event, &event_id, "message", DeltaKind::Message)
+            .into_iter()
+            .collect(),
+        "agent_reasoning" => exec_delta(event, &event_id, "reasoning", DeltaKind::Thought)
+            .into_iter()
+            .collect(),
+        "exec_command_begin" | "exec_command_end" => {
+            exec_command_event(event, kind).into_iter().collect()
+        }
+        "patch_apply_begin" | "patch_apply_end" => {
+            exec_patch_event(event, kind).into_iter().collect()
+        }
+        "mcp_tool_call_begin" | "mcp_tool_call_end" => {
+            exec_mcp_event(event, kind).into_iter().collect()
+        }
+        "token_count" => exec_usage(event).into_iter().collect(),
+        "plan_update" => exec_plan(event).into_iter().collect(),
+        "error" | "stream_error" => {
+            let text = event
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("codex exec reported an error");
+            tracing::warn!(kind, "{text}");
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn exec_delta(
+    event: &Value,
+    event_id: &str,
+    prefix: &str,
+    kind: DeltaKind,
+) -> Option<HarnessEvent> {
+    let field = match kind {
+        DeltaKind::Message => "message",
+        DeltaKind::Thought => "text",
+    };
+    let text = event.get(field).and_then(Value::as_str)?;
+    Some(HarnessEvent::Delta {
+        item_id: ItemId::new(format!("{prefix}-{event_id}")),
+        kind,
+        text: text.to_string(),
+    })
+}
+
+fn exec_command_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
+    let tool_call_id = event.get("call_id").and_then(Value::as_str)?;
+    let title = exec_command_title(event);
+    let (status, output) = if kind == "exec_command_end" {
+        let failed = event
+            .get("exit_code")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0);
+        let status = if failed {
+            ToolStatus::Failed
+        } else {
+            ToolStatus::Completed
+        };
+        (status, exec_command_output(event))
+    } else {
+        (ToolStatus::Running, None)
+    };
+    Some(exec_tool_event(
+        tool_call_id,
+        title,
+        "command",
+        status,
+        output,
+    ))
+}
+
+fn exec_command_title(event: &Value) -> String {
+    match event.get("command") {
+        Some(Value::Array(parts)) => {
+            let joined = parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if joined.is_empty() {
+                "Run a command".to_string()
+            } else {
+                joined
+            }
+        }
+        Some(Value::String(command)) => command.clone(),
+        _ => "Run a command".to_string(),
+    }
+}
+
+fn exec_command_output(event: &Value) -> Option<String> {
+    event
+        .get("aggregated_output")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            event
+                .get("stdout")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
+        .or_else(|| {
+            event
+                .get("stderr")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+        })
+        .map(str::to_string)
+}
+
+fn exec_patch_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
+    let tool_call_id = event.get("call_id").and_then(Value::as_str)?;
+    let (status, output) = if kind == "patch_apply_end" {
+        let succeeded = event
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = if succeeded {
+            ToolStatus::Completed
+        } else {
+            ToolStatus::Failed
+        };
+        (status, exec_command_output(event))
+    } else {
+        (ToolStatus::Running, None)
+    };
+    Some(exec_tool_event(
+        tool_call_id,
+        "Apply file changes".to_string(),
+        "edit",
+        status,
+        output,
+    ))
+}
+
+fn exec_mcp_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
+    let tool_call_id = event.get("call_id").and_then(Value::as_str)?;
+    let title = event
+        .get("invocation")
+        .and_then(|invocation| invocation.get("tool"))
+        .and_then(Value::as_str)
+        .unwrap_or("Call a tool")
+        .to_string();
+    let (status, output) = if kind == "mcp_tool_call_end" {
+        (
+            ToolStatus::Completed,
+            event.get("result").map(Value::to_string),
+        )
+    } else {
+        (ToolStatus::Running, None)
+    };
+    Some(exec_tool_event(tool_call_id, title, "tool", status, output))
+}
+
+fn exec_usage(event: &Value) -> Option<HarnessEvent> {
+    let info = event.get("info")?;
+    let used = info
+        .get("total_token_usage")
+        .and_then(|usage| usage.get("total_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let size = info
+        .get("model_context_window")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    Some(HarnessEvent::Usage {
+        used,
+        size,
+        cost: None,
+    })
+}
+
+fn exec_plan(event: &Value) -> Option<HarnessEvent> {
+    let rows = event
+        .get("plan")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|row| {
+            let text = row.get("step").and_then(Value::as_str)?;
+            let status = row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending");
+            Some(PlanRow {
+                text: text.to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        None
+    } else {
+        Some(HarnessEvent::Plan { rows })
+    }
+}
+
+fn exec_tool_event(
+    tool_call_id: &str,
+    title: String,
+    kind: &str,
+    status: ToolStatus,
+    output: Option<String>,
+) -> HarnessEvent {
+    HarnessEvent::ToolCall {
+        tool_call_id: ToolCallId::new(tool_call_id),
+        title,
+        kind: kind.to_string(),
+        status,
+        output,
+        diffs: Vec::new(),
+        terminal_id: None,
+    }
+}
+
 fn spawn_writer(
     mut stdin: ChildStdin,
     mut outgoing: mpsc::UnboundedReceiver<Value>,
@@ -1206,8 +1796,9 @@ done
         (harness, capabilities)
     }
 
-    async fn collect_until<F>(harness: &mut CodexHarness, reached: F) -> Vec<HarnessEvent>
+    async fn collect_until<H, F>(harness: &mut H, reached: F) -> Vec<HarnessEvent>
     where
+        H: AgentHarness,
         F: Fn(&[HarnessEvent]) -> bool,
     {
         let mut events = Vec::new();
@@ -1463,4 +2054,148 @@ while IFS= read -r line; do
   esac
 done
 "#;
+
+    /// Prints the exec-mode preamble and a short event stream, then exits 0.
+    const EXEC_STUB: &str = r#"#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo "codex-cli 0.9.0"; exit 0; fi
+directory="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$@" > "$directory/args.txt"
+printf '{"model":"gpt-5"}\n'
+printf '{"prompt":"run the tests"}\n'
+printf '{"id":"0","msg":{"type":"session_configured","session_id":"sess_1"}}\n'
+printf '{"id":"1","msg":{"type":"task_started"}}\n'
+printf '{"id":"2","msg":{"type":"agent_message","message":"running the tests"}}\n'
+printf '{"id":"3","msg":{"type":"exec_command_begin","call_id":"call_1","command":["bash","-lc","cargo test"]}}\n'
+printf '{"id":"4","msg":{"type":"exec_command_end","call_id":"call_1","command":["bash","-lc","cargo test"],"stdout":"ok","stderr":"","aggregated_output":"ok","exit_code":0}}\n'
+printf '{"id":"5","msg":{"type":"token_count","info":{"total_token_usage":{"total_tokens":15},"model_context_window":200000}}}\n'
+exit 0
+"#;
+
+    /// Stays alive so a cancel has a running process to kill.
+    const EXEC_SLOW_STUB: &str = r#"#!/usr/bin/env bash
+printf '{"id":"0","msg":{"type":"task_started"}}\n'
+sleep 30
+"#;
+
+    async fn start_exec(stub: &str, cwd: &Path) -> (ExecHarness, Capabilities) {
+        let mut harness = ExecHarness::new();
+        let capabilities = harness
+            .start(spec(stub, cwd))
+            .await
+            .expect("the stub exec tier starts");
+        harness
+            .open_session(None)
+            .await
+            .expect("the session handle opens");
+        (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn the_exec_tier_advertises_only_what_it_can_do() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-exec.sh", EXEC_STUB);
+        let (mut harness, capabilities) = start_exec(&stub, directory.path()).await;
+
+        assert!(capabilities.tool_calls);
+        assert!(!capabilities.streaming);
+        assert!(!capabilities.approvals);
+        assert!(!capabilities.resume);
+
+        let error = harness
+            .open_session(Some(SessionId::new("sess_1")))
+            .await
+            .expect_err("exec cannot resume a stored thread");
+        assert!(matches!(error, HarnessError::Protocol(message) if message.contains("resume")));
+
+        harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn exec_events_map_to_messages_tools_and_usage() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-exec.sh", EXEC_STUB);
+        let (mut harness, _capabilities) = start_exec(&stub, directory.path()).await;
+
+        harness
+            .prompt(PromptInput {
+                text: "run the tests".to_string(),
+            })
+            .await
+            .expect("the exec turn starts");
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::Exited { .. }))
+        })
+        .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::Delta { text, kind: DeltaKind::Message, .. } if text == "running the tests"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCall {
+                title,
+                status: ToolStatus::Completed,
+                output: Some(output),
+                ..
+            } if title == "bash -lc cargo test" && output == "ok"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::Usage {
+                used: 15,
+                size: 200000,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed
+            }
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::Exited { code: Some(0), .. }))
+        );
+
+        let arguments = std::fs::read_to_string(directory.path().join("args.txt"))
+            .expect("the stub recorded its arguments");
+        assert!(arguments.contains("--json"));
+        assert!(arguments.contains("run the tests"));
+        harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn cancelling_exec_kills_the_run() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-exec-slow.sh", EXEC_SLOW_STUB);
+        let (mut harness, _capabilities) = start_exec(&stub, directory.path()).await;
+
+        harness
+            .prompt(PromptInput {
+                text: "keep going".to_string(),
+            })
+            .await
+            .expect("the exec turn starts");
+        harness.cancel().await.expect("the run is killed");
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(matches!(
+            events
+                .iter()
+                .find(|event| matches!(event, HarnessEvent::TurnFinished { .. })),
+            Some(HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Cancelled
+            })
+        ));
+        harness.shutdown().await.expect("the session stops");
+    }
 }
