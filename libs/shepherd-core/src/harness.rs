@@ -121,7 +121,8 @@ impl HarnessSession {
                 HarnessEvent::ApprovalRequested { request } => {
                     self.pending_approval = Some(request.approval_id.clone());
                 }
-                HarnessEvent::ApprovalResolved { approval_id, .. } => {
+                HarnessEvent::ApprovalResolved { approval_id, .. }
+                | HarnessEvent::ApprovalWithdrawn { approval_id } => {
                     if self.pending_approval.as_ref() == Some(approval_id) {
                         self.pending_approval = None;
                     }

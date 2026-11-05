@@ -1041,6 +1041,9 @@ impl Core {
         };
         let events = match events {
             Ok(events) => events,
+            Err(error @ CoreError::Harness(agent_harness::HarnessError::NoPendingApproval)) => {
+                return Err(error);
+            }
             Err(error) => {
                 self.record_failure(task_id, &error);
                 self.set_task_state(task_id, TaskState::Ready)?;
@@ -1283,7 +1286,8 @@ impl Core {
     /// Fold adapter activity into the task state. The transcript itself is
     /// updated by [`HarnessSession`] as it pumps the same events.
     fn apply_events(&mut self, task_id: &TaskId, events: &[HarnessEvent]) -> Result<(), CoreError> {
-        let started_live = self.task(task_id)?.state.is_live();
+        let initial_state = self.task(task_id)?.state;
+        let started_live = initial_state.is_live();
         let mut next_state = None;
         let mut turn_completed = false;
         let mut task_error = None;
@@ -1293,6 +1297,17 @@ impl Core {
             match event {
                 HarnessEvent::ApprovalRequested { .. } => {
                     next_state = Some(TaskState::Waiting);
+                }
+                HarnessEvent::ApprovalResolved { .. } | HarnessEvent::ApprovalWithdrawn { .. } => {
+                    if next_state.unwrap_or(initial_state) == TaskState::Waiting
+                        && self
+                            .sessions
+                            .get(task_id)
+                            .and_then(HarnessSession::pending_approval)
+                            .is_none()
+                    {
+                        next_state = Some(TaskState::Working);
+                    }
                 }
                 HarnessEvent::TurnFinished { reason } => match reason {
                     TurnFinishReason::Completed => match self.state_after_completed_turn(task_id) {

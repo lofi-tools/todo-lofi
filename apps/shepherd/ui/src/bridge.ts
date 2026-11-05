@@ -126,6 +126,7 @@ export interface PermissionEntry {
   paths: string[]
   patch: FileDiff | null
   decision: Decision | null
+  withdrawn: boolean
 }
 
 export type FailureKind =

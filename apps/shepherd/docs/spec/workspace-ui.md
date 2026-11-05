@@ -113,7 +113,8 @@ current layout and give future changes a point of comparison.
 - Show **Cancel turn** in the conversation header during an active turn. The
   shortcut is Command+. on macOS and Ctrl+. on Linux. Show **Cancelling…**
   until the adapter settles the turn, and pause approval actions during that
-  interval.
+  interval. When the server withdraws an approval, retain its arguments and
+  show **withdrawn** in place of the actions.
 - Show **Resume** beside the state in the conversation header when the task is
   interrupted. Enable the composer when the core reports the task is ready.
 

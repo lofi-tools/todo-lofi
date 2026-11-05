@@ -8,7 +8,7 @@ install or a network.
 | File | What it holds |
 | --- | --- |
 | `app-server-session.jsonl` | A streamed turn: two deltas that merge into one row, a completed command item, turn completion. |
-| `app-server-approval.jsonl` | A turn that pauses on a command approval, then completes. |
+| `app-server-approval.jsonl` | A turn completes while a command approval is unanswered, withdrawing the request. |
 | `exec-session.jsonl` | The `codex exec --json` tier: prompt echo, command begin/end, token usage. |
 
 These were recorded against the scripted stub servers in `codex.rs`, whose

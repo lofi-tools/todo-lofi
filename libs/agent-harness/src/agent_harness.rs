@@ -433,6 +433,9 @@ pub enum HarnessEvent {
         approval_id: ApprovalId,
         decision: Decision,
     },
+    ApprovalWithdrawn {
+        approval_id: ApprovalId,
+    },
     ModeChanged {
         mode: String,
     },
@@ -497,6 +500,8 @@ pub enum EntryKind {
         paths: Vec<String>,
         patch: Option<FileDiff>,
         decision: Option<Decision>,
+        #[serde(default)]
+        withdrawn: bool,
     },
     Notice {
         text: String,
@@ -524,9 +529,13 @@ impl Entry {
             EntryKind::ToolCall { title, status, .. } => format!("{title} ({status:?})"),
             EntryKind::Plan { rows } => format!("plan ({} rows)", rows.len()),
             EntryKind::Permission {
-                title, decision, ..
+                title,
+                decision,
+                withdrawn,
+                ..
             } => match decision {
                 Some(decision) => format!("approval: {title} ({decision:?})"),
+                None if *withdrawn => format!("approval: {title} (withdrawn)"),
                 None => format!("approval: {title} (pending)"),
             },
             EntryKind::Notice { text, is_error } => {
@@ -696,7 +705,10 @@ impl Transcript {
             HarnessEvent::ApprovalResolved {
                 approval_id,
                 decision,
-            } => self.resolve_approval(approval_id.as_str(), *decision),
+            } => self.settle_approval(approval_id.as_str(), Some(*decision)),
+            HarnessEvent::ApprovalWithdrawn { approval_id } => {
+                self.settle_approval(approval_id.as_str(), None)
+            }
             _ => TranscriptChange::default(),
         }
     }
@@ -840,6 +852,7 @@ impl Transcript {
                         .collect(),
                     patch: request.patch,
                     decision: None,
+                    withdrawn: false,
                 };
             }
             return TranscriptChange {
@@ -860,6 +873,7 @@ impl Transcript {
                     .collect(),
                 patch: request.patch,
                 decision: None,
+                withdrawn: false,
             },
             Some(key.clone()),
         );
@@ -869,14 +883,24 @@ impl Transcript {
         change
     }
 
-    fn resolve_approval(&mut self, approval_id: &str, decision: Decision) -> TranscriptChange {
+    fn settle_approval(
+        &mut self,
+        approval_id: &str,
+        decision: Option<Decision>,
+    ) -> TranscriptChange {
         let Some(index) = self.approval_rows.get(approval_id).copied() else {
             return TranscriptChange::default();
         };
         if let Some(entry) = self.entries.get_mut(index)
-            && let EntryKind::Permission { decision: slot, .. } = &mut entry.kind
+            && let EntryKind::Permission {
+                decision: slot,
+                withdrawn,
+                ..
+            } = &mut entry.kind
+            && (decision.is_some() || slot.is_none())
         {
-            *slot = Some(decision);
+            *slot = decision;
+            *withdrawn = decision.is_none();
         }
         TranscriptChange {
             appended: false,

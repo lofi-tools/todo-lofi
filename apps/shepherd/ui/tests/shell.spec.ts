@@ -274,6 +274,9 @@ test.beforeEach(async ({ context }) => {
             if (!task || task.state !== 'waiting') throw new Error('No active turn to cancel')
             window.addEventListener('test-cancel-finished', () => {
               task.state = 'ready'
+              transcripts[task.id] = transcripts[task.id].map((entry) => entry.kind.type === 'permission'
+                ? { ...entry, kind: { ...entry.kind, data: { ...entry.kind.data, withdrawn: true } } }
+                : entry)
               callbacks.get(eventChannel)?.({
                 index: eventIndex++,
                 message: { type: 'taskWorkspaceChanged', data: workspace(task.id) },
@@ -317,6 +320,20 @@ test.beforeEach(async ({ context }) => {
                 data: { text: 'working on it' },
               }),
             ]
+            if (options.has('cancel-approval')) {
+              transcripts[task.id].push(entry(`entry-${task.id}-3`, 3, {
+                type: 'permission',
+                data: {
+                  approvalId: 'cancel-approval',
+                  title: 'Run a command',
+                  arguments: null,
+                  paths: [],
+                  patch: null,
+                  decision: null,
+                  withdrawn: false,
+                },
+              }))
+            }
             return workspace(task.id)
           }
           case 'terminal_layout':
@@ -425,7 +442,7 @@ test('resumes an interrupted task from its conversation header', async ({ page }
 })
 
 test('cancels an active turn and waits for the settled workspace', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/?cancel-approval')
   const chat = page.getByRole('region', { name: 'Task chat' })
   const prompt = chat.getByLabel('Prompt')
   for (const shortcut of [false, true]) {
@@ -436,10 +453,13 @@ test('cancels an active turn and waits for the settled workspace', async ({ page
     if (shortcut) await page.keyboard.press('ControlOrMeta+.')
     else await cancel.click()
     await expect(chat.getByRole('button', { name: 'Cancelling…' })).toBeDisabled()
+    await expect(chat.getByRole('button', { name: 'Allow' })).toBeDisabled()
     await expect(chat.locator('.chat__state')).toHaveText('waiting')
     await expect(prompt).toBeDisabled()
     await page.evaluate(() => window.dispatchEvent(new Event('test-cancel-finished')))
     await expect(chat.locator('.chat__state')).toHaveText('ready')
+    await expect(chat.locator('.entry__permission')).toContainText('withdrawn')
+    await expect(chat.getByRole('button', { name: 'Allow' })).toHaveCount(0)
     await expect(prompt).toBeEnabled()
   }
 })

@@ -1309,8 +1309,8 @@ function entryBody(
             {(patch) => <DiffBlock patch={patch()} />}
           </Show>
           <Show
-            when={permission.decision === null}
-            fallback={<span class="entry__permission-decision">{permission.decision}</span>}
+            when={!permission.withdrawn && permission.decision === null}
+            fallback={<span class="entry__permission-decision">{permission.withdrawn ? 'withdrawn' : permission.decision}</span>}
           >
             <div class="entry__actions">
               <button type="button" disabled={cancelling()} onClick={() => decide(permission.approvalId, 'allow')}>

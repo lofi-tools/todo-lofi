@@ -1936,22 +1936,35 @@ async fn handle_notification(
                 events.push(event);
             }
         }
-        "turn/completed" => {
-            let reason = turn_finish_reason(params);
-            pending.lock().await.turn_id = None;
+        "serverRequest/resolved" => {
+            if let Some(request_id) = params.get("requestId").and_then(Value::as_i64) {
+                let mut pending = pending.lock().await;
+                let approval_id = pending
+                    .approvals
+                    .iter()
+                    .find_map(|(id, server_id)| (*server_id == request_id).then(|| id.clone()));
+                if let Some(approval_id) = approval_id {
+                    pending.approvals.remove(&approval_id);
+                    events.push(HarnessEvent::ApprovalWithdrawn {
+                        approval_id: ApprovalId::new(approval_id),
+                    });
+                }
+            }
+        }
+        "turn/completed" | "turn/failed" | "turn/cancelled" => {
+            let reason = match method {
+                "turn/failed" => TurnFinishReason::Failed,
+                "turn/cancelled" => TurnFinishReason::Cancelled,
+                _ => turn_finish_reason(params),
+            };
+            let mut pending = pending.lock().await;
+            pending.turn_id = None;
+            events.extend(pending.approvals.drain().map(|(id, _)| {
+                HarnessEvent::ApprovalWithdrawn {
+                    approval_id: ApprovalId::new(id),
+                }
+            }));
             events.push(HarnessEvent::TurnFinished { reason });
-        }
-        "turn/failed" => {
-            pending.lock().await.turn_id = None;
-            events.push(HarnessEvent::TurnFinished {
-                reason: TurnFinishReason::Failed,
-            });
-        }
-        "turn/cancelled" => {
-            pending.lock().await.turn_id = None;
-            events.push(HarnessEvent::TurnFinished {
-                reason: TurnFinishReason::Cancelled,
-            });
         }
         _ => {}
     }
@@ -2185,7 +2198,7 @@ while IFS= read -r line; do
 done
 "#;
 
-    /// Streams nothing and waits for an interrupt.
+    /// Waits for an interrupt while two approvals are unanswered.
     const INTERRUPT_STUB: &str = r#"#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
 directory="$(cd "$(dirname "$0")" && pwd)"
@@ -2201,10 +2214,13 @@ while IFS= read -r line; do
     *'"method":"turn/start"'*)
       printf '{"id":%s,"result":{"turn":{"id":"turn_waiting","status":"inProgress"}}}\n' "$id"
       printf '{"method":"item/agentMessage/delta","params":{"itemId":"item_1","delta":"waiting"}}\n'
+      printf '{"id":80,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-80","command":"First command"}}\n'
+      printf '{"id":81,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-81","command":"Second command"}}\n'
       ;;
     *'"method":"turn/interrupt"'*)
       printf '%s\n' "$line" >> "$directory/interrupt.txt"
       printf '{"id":%s,"result":{}}\n' "$id"
+      printf '{"method":"serverRequest/resolved","params":{"requestId":80,"threadId":"thr_waiting"}}\n'
       printf '{"method":"turn/completed","params":{"turn":{"id":"turn_waiting","status":"interrupted"}}}\n'
       ;;
     *) : ;;
@@ -2436,13 +2452,13 @@ done
     }
 
     #[tokio::test]
-    async fn a_recorded_approval_replays_as_a_pending_card() {
+    async fn a_recorded_approval_with_no_decision_is_withdrawn_when_the_turn_ends() {
         let transcript = replay_app_server("app-server-approval.jsonl").await;
         assert_eq!(
             summaries(&transcript),
             vec![
                 "agent: About to run the tests.".to_string(),
-                "approval: cargo test (pending)".to_string(),
+                "approval: cargo test (withdrawn)".to_string(),
             ]
         );
     }
@@ -2748,10 +2764,12 @@ done
             })
             .await
             .expect("the turn starts");
-        collect_until(&mut harness, |events| {
+        let requests = collect_until(&mut harness, |events| {
             events
                 .iter()
-                .any(|event| matches!(event, HarnessEvent::Delta { .. }))
+                .filter(|event| matches!(event, HarnessEvent::ApprovalRequested { .. }))
+                .count()
+                == 2
         })
         .await;
 
@@ -2774,6 +2792,24 @@ done
         let interrupt = std::fs::read_to_string(directory.path().join("interrupt.txt"))
             .expect("the stub recorded the interrupt");
         assert!(interrupt.contains("turn/interrupt"));
+        let mut transcript = crate::Transcript::default();
+        for event in requests.iter().chain(&events) {
+            transcript.apply(event);
+        }
+        for title in ["First command", "Second command"] {
+            assert!(
+                transcript
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.summary() == format!("approval: {title} (withdrawn)"))
+            );
+        }
+        harness
+            .prompt(PromptInput {
+                text: "a follow-up after cancellation".to_owned(),
+            })
+            .await
+            .expect("no withdrawn approval blocks the follow-up");
         harness.shutdown().await.expect("the session stops");
     }
 

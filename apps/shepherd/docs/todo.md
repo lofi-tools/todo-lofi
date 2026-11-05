@@ -300,6 +300,8 @@ an approval, a cancel and a resume inside Shepherd.
 - [x] Expose **Cancel turn** in the conversation header and through its
   keyboard shortcut. The browser smoke verifies the transition through
   **Cancelling…** and the composer re-enabling after the turn ends.
+- [x] Retire unanswered Codex approvals when the server resolves the request
+  or the turn ends. Mark those cards withdrawn and allow the next prompt.
 
 ### Proof
 
