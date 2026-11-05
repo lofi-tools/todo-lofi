@@ -362,8 +362,9 @@ review and merge gate is tracked separately.
 
 - [x] Edit-then-revert stays `ready`. The core fixture edits and restores a
   file during the same turn.
-- [ ] a commit, branch change or content change in an already-dirty file enters
-  `review`;
+- [x] A commit, branch change or content change in an already-dirty file enters
+  `review`. Git fixtures verify HEAD and branch baseline changes. The core
+  applies the same baseline comparison and verifies the dirty-file transition.
 - [ ] worktree creation appears in `git worktree list` and uses the default
   branch even when the root is on another branch;
 - [ ] stage, unstage, commit with hooks and signing disabled;
