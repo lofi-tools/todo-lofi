@@ -767,8 +767,12 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn unsubscribe_terminal(state: State<'_, ShellState>, subscription_id: String) {
+    pub async fn unsubscribe_terminal(
+        state: State<'_, ShellState>,
+        subscription_id: String,
+    ) -> Result<(), BridgeError> {
         state.inner().unsubscribe_terminal(&subscription_id).await;
+        Ok(())
     }
 
     /// The window's single event stream. The channel stays open for the life of
