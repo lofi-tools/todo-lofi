@@ -1088,10 +1088,6 @@ textarea {
   flex: 0 0 128px;
 }
 
-.composer__picker--approval .picker-caret {
-  margin-inline-start: auto;
-}
-
 .composer__picker:hover,
 .composer__picker[aria-expanded='true'] {
   background: var(--surface);
