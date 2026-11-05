@@ -61,12 +61,14 @@ struct ScreenSlot {
 }
 
 /// The state Tauri manages for the window: one core, one event broadcaster, the
-/// PTY engine and one parsed screen per live terminal.
+/// PTY engine, one parsed screen per live terminal, and the cached project scan
+/// shared with the startup scan task.
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     events: broadcast::Sender<Event>,
     engine: Mutex<PtyTerminals>,
     screens: Arc<Mutex<BTreeMap<String, ScreenSlot>>>,
+    scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
 }
 
 impl ShellState {
@@ -77,6 +79,7 @@ impl ShellState {
             events,
             engine: Mutex::new(PtyTerminals::new()),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
+            scan: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -103,7 +106,23 @@ impl ShellState {
         let core = Core::load(Box::new(store), harness_factory)
             .await
             .map_err(BridgeError::from)?;
-        Ok(Self::new(core))
+        let state = Self::new(core);
+
+        // Walking the home directory can take seconds, so the scan starts with
+        // the app and the picker reads whatever has landed by the time it opens.
+        if let Some(home) = home_directory() {
+            let scan = state.scan.clone();
+            tauri::async_runtime::spawn(async move {
+                match tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
+                    .await
+                {
+                    Ok(found) => *scan.lock().await = Some(found),
+                    Err(error) => tracing::warn!(%error, "the startup project scan failed"),
+                }
+            });
+        }
+
+        Ok(state)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -219,6 +238,32 @@ impl ShellState {
 
     pub async fn project_list(&self) -> ProjectList {
         self.core.lock().await.project_list()
+    }
+
+    /// The cached home-directory scan. `rescan` walks the tree again; otherwise
+    /// the first call after startup does the work and later calls reuse it.
+    pub async fn project_scan(
+        &self,
+        rescan: bool,
+    ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+        let mut cache = self.scan.lock().await;
+        if rescan || cache.is_none() {
+            let home = home_directory()
+                .ok_or_else(|| BridgeError::new("scan", "no home directory to scan"))?;
+            let found =
+                tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
+                    .await
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "scan",
+                            format!("the project scan did not finish: {error}"),
+                        )
+                    })?;
+            *cache = Some(found);
+        }
+        cache
+            .clone()
+            .ok_or_else(|| BridgeError::new("scan", "the project scan produced no result"))
     }
 
     pub async fn task_list(&self, project_id: String) -> Result<TaskList, BridgeError> {
@@ -410,6 +455,10 @@ impl ShellState {
     }
 }
 
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -498,6 +547,14 @@ pub mod commands {
     #[tauri::command]
     pub async fn project_list(state: State<'_, ShellState>) -> Result<ProjectList, BridgeError> {
         Ok(state.inner().project_list().await)
+    }
+
+    #[tauri::command]
+    pub async fn project_scan(
+        state: State<'_, ShellState>,
+        rescan: bool,
+    ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+        state.inner().project_scan(rescan).await
     }
 
     #[tauri::command]

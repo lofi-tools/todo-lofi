@@ -37,6 +37,22 @@ export interface ProjectList {
   projects: ProjectSnapshot[]
 }
 
+/** One row in the project picker: a repository, a directory leading to one, or
+ * a synthetic group holding the entries a level could not show. A group has an
+ * empty path. */
+export interface ProjectNode {
+  name: string
+  path: string
+  repository: boolean
+  children: ProjectNode[]
+}
+
+export interface ProjectScan {
+  root: string
+  repositories: number
+  tree: ProjectNode[]
+}
+
 export interface TaskSummary {
   id: string
   projectId: string
@@ -208,6 +224,10 @@ export function quit(force: boolean): Promise<QuitSummary> {
 
 export function projectList(): Promise<ProjectList> {
   return invoke<ProjectList>('project_list')
+}
+
+export function scanProjects(rescan: boolean): Promise<ProjectScan> {
+  return invoke<ProjectScan>('project_scan', { rescan })
 }
 
 export function taskList(projectId: string): Promise<TaskList> {

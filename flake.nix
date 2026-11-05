@@ -113,6 +113,15 @@
             '';
             # prun = ''set -x; package="$1"; shift; cargo run -p "$package" -- $@'';
             dt = ''set -e;  cd demos/desktop-tauri; cargo tauri dev '';
+
+            # Shepherd's desktop shell: Vite on 1420 plus the Tauri app. Runs
+            # from the repository root so the pnpm workspace resolves wherever
+            # the shell was invoked.
+            shep = with bash; ''
+              set -euo pipefail
+              cd "${wd}"
+              exec pnpm dev:shepherd
+            '';
             ccheck = ''set -ex;
               cargo check -p desktop-gpui
               cargo check -p storage

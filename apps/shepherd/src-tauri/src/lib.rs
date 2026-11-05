@@ -34,6 +34,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::resume_task,
             bridge::commands::quit,
             bridge::commands::project_list,
+            bridge::commands::project_scan,
             bridge::commands::task_list,
             bridge::commands::task_workspace,
             bridge::commands::terminal_list,

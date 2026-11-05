@@ -21,6 +21,30 @@ test.beforeEach(async ({ page }) => {
       unfinishedTaskCount: 1,
     }
 
+    const projects = [project]
+
+    const scan = {
+      root: '/tmp/home',
+      repositories: 3,
+      tree: [
+        {
+          name: 'src',
+          path: '/tmp/home/src',
+          repository: false,
+          children: [
+            { name: 'alpha', path: '/tmp/home/src/alpha', repository: true, children: [] },
+            { name: 'beta', path: '/tmp/home/src/beta', repository: true, children: [] },
+          ],
+        },
+        {
+          name: 'notes',
+          path: '/tmp/home/notes',
+          repository: false,
+          children: [{ name: 'solo', path: '/tmp/home/notes/solo', repository: true, children: [] }],
+        },
+      ],
+    }
+
     const tasks = [
       {
         id: 'task-1',
@@ -116,8 +140,23 @@ test.beforeEach(async ({ page }) => {
       invoke: async (command, args) => {
         switch (command) {
           case 'project_list':
-          case 'add_project':
-            return { projects: [project] }
+            return { projects: [...projects] }
+          case 'project_scan':
+            return scan
+          case 'add_project': {
+            const name = args.path.split('/').filter(Boolean).pop() ?? 'project'
+            if (!projects.some((candidate) => candidate.path === args.path)) {
+              projects.push({
+                id: `project-${name}`,
+                path: args.path,
+                name,
+                missing: false,
+                lastTaskId: null,
+                unfinishedTaskCount: 0,
+              })
+            }
+            return { projects: [...projects] }
+          }
           case 'task_list':
             // A fresh array each call: real IPC serializes, and Solid skips a
             // setter handed the identical reference.
@@ -212,6 +251,23 @@ test('encodes typed keys into terminal input', async ({ page }) => {
       page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
     )
     .toEqual(['a', '\u0003', '\r', '\u001b[A'])
+})
+
+test('opens the project picker, filters, and adds a project', async ({ page }) => {
+  await page.goto('/')
+
+  await page.getByRole('button', { name: 'Add project' }).click()
+  const picker = page.getByRole('dialog', { name: 'Add project' })
+  await expect(picker).toBeVisible()
+
+  const filter = page.getByLabel('Filter repositories')
+  await filter.fill('alph')
+  await expect(page.getByRole('option', { name: /alpha/ })).toBeVisible()
+  await expect(page.getByRole('option', { name: /solo/ })).toHaveCount(0)
+
+  await page.getByRole('option', { name: /alpha/ }).click()
+  await expect(picker).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /alpha/ })).toBeVisible()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

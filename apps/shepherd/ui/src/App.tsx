@@ -8,6 +8,7 @@ import { For, Show, createSignal, onMount } from 'solid-js'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { ProjectPicker } from './ProjectPicker'
 import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
@@ -21,7 +22,10 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [prompt, setPrompt] = createSignal('')
-  const [projectPath, setProjectPath] = createSignal('')
+  const [pickerOpen, setPickerOpen] = createSignal(false)
+  const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
+  const [scanning, setScanning] = createSignal(false)
+  const [scanError, setScanError] = createSignal<string | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
@@ -107,13 +111,28 @@ export function App() {
     })
   })
 
-  function addProject() {
-    const path = projectPath().trim()
-    if (!path) return
+  async function scanProjects(rescan: boolean) {
+    setScanning(true)
+    setScanError(null)
+    try {
+      setScan(await bridge.scanProjects(rescan))
+    } catch (failure) {
+      setScanError(describe(failure))
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  function openPicker() {
+    setPickerOpen(true)
+    if (!scan() && !scanning()) void scanProjects(false)
+  }
+
+  function addProject(path: string) {
+    setPickerOpen(false)
     void run(async () => {
       const list = await bridge.addProject(path)
       setProjects(list.projects)
-      setProjectPath('')
       const added = list.projects.find((project) => project.path === path)
       const target = added ?? list.projects[list.projects.length - 1]
       if (target) await selectProject(target)
@@ -197,23 +216,13 @@ export function App() {
         <aside class="sidebar" aria-label="Projects">
           <h2 class="sidebar__title">Projects</h2>
           <div class="add-project">
-            <input
-              class="add-project__input"
-              aria-label="Project path"
-              placeholder="Path to a repository"
-              value={projectPath()}
-              onInput={(event) => setProjectPath(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') addProject()
-              }}
-            />
-            <button type="button" onClick={addProject} disabled={pending() || !projectPath().trim()}>
-              Add
+            <button type="button" class="add-project__open" onClick={openPicker} disabled={pending()}>
+              Add project
             </button>
           </div>
 
           <Show when={projects().length === 0}>
-            <p class="empty">No projects yet. Add a repository path above.</p>
+            <p class="empty">No projects yet. Add one with the button above.</p>
           </Show>
 
           <ul class="projects">
@@ -394,6 +403,17 @@ export function App() {
           </div>
         </aside>
       </div>
+
+      <Show when={pickerOpen()}>
+        <ProjectPicker
+          scan={scan()}
+          loading={scanning()}
+          error={scanError()}
+          onRescan={() => void scanProjects(true)}
+          onCancel={() => setPickerOpen(false)}
+          onSelect={addProject}
+        />
+      </Show>
 
       <Show when={quitRequired()}>
         <div class="banner" role="alert">

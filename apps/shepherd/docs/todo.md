@@ -39,7 +39,7 @@ and merge it without leaving Shepherd?”
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 24; the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus a Playwright smoke in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 28 (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 4 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -182,6 +182,29 @@ fake task, read the stream and use one terminal.
   traces.
 - [x] Implement quit confirmation for a working/waiting fake task; mark
   interrupted on restart; show a terminal as ended with a restart action.
+- [x] Add a project directory picker, modeled on taskstream's
+  (`apps/taskstream-desktop/src/projects.rs` for the scan,
+  `src/ui_parts/project_picker.rs` for the dialog). Replace the sidebar's path
+  text input with an **Add project** button that opens a picker. Scan `~` for
+  Git repositories as the app starts, on a background task: bounded depth,
+  skipping junk (`node_modules`, `target`, `.cargo`, `Library`, `.Trash`, …),
+  and stopping at a repository root so repos nested inside a checkout are not
+  listed twice. Cluster the results into a tree rather than a flat list:
+  collapse chains of single-child directories, and keep each level to roughly
+  eight branches by grouping the remainder, so deep `~/src/me/...` trees stay
+  readable. Add a filter field, arrow-key navigation, Enter to select and Esc
+  to cancel; cache the scan for the session and show loading, empty and error
+  states plus a re-scan. Selecting a directory calls the existing `add_project`
+  command with its path, and the project is named after the directory.
+  Proof: a unit test for the scan and clustering over temp directories, and a
+  Playwright smoke that opens the picker, filters, and adds a project.
+
+**macOS scan caveat:** a scan rooted at `~` can reach TCC-protected folders
+(Documents, Desktop, Downloads, Pictures, Music, Movies), which makes a bundled
+app prompt for access. Taskstream avoids that by rooting at `~/src`; the
+Shepherd scan must either skip those folders explicitly or keep a configurable
+root. Paths outside `~` are not reachable from the picker once the text input is
+replaced, so that trade-off is recorded here rather than discovered later.
 
 **Terminal risk decision:** the `libghostty-vt` spike comes before the canvas UI
 is treated as done. If the pinned Zig build blocks on this machine, record the
