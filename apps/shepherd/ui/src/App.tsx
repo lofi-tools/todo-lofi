@@ -433,7 +433,7 @@ export function App() {
           >
             <Show when={inspectorTab() === 'terminals'}>
               <Show when={selectedProjectId()} fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId()} />}
+                {(projectId) => <TerminalPane projectId={projectId()} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} />}
               </Show>
             </Show>
             <Show when={inspectorTab() === 'review'}>

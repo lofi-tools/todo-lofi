@@ -10,6 +10,8 @@ import * as bridge from './bridge'
 
 interface TerminalPaneProps {
   projectId: string
+  taskId: string | null
+  taskHasWorktree: boolean
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
@@ -18,25 +20,30 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
 
-  const selected = () => terminals().find((terminal) => terminal.id === selectedId()) ?? null
+  const visible = () => terminals().filter((terminal) =>
+    terminal.scope === 'project' || terminal.taskId === props.taskId)
+  const selected = () => {
+    const list = visible()
+    return list.find((terminal) => terminal.id === selectedId())
+      ?? list.find((terminal) => terminal.endedAt === null) ?? list.at(-1) ?? null
+  }
 
   function applyList(list: bridge.TerminalSnapshot[]) {
     setTerminals(list)
-    const current = selectedId()
-    if (current && list.some((terminal) => terminal.id === current)) return
-    const live = list.find((terminal) => terminal.endedAt === null)
-    setSelectedId(live?.id ?? list[list.length - 1]?.id ?? null)
   }
 
   async function refresh(projectId: string) {
-    applyList(await bridge.terminalList(projectId))
+    const list = await bridge.terminalList(projectId)
+    if (props.projectId === projectId) applyList(list)
   }
 
-  async function start() {
+  async function start(taskId: string | null = null) {
+    const projectId = props.projectId
     setPending(true)
     setError(null)
     try {
-      const list = await bridge.startTerminal(props.projectId, 80, 24)
+      const list = await bridge.startTerminal(projectId, taskId, 80, 24)
+      if (props.projectId !== projectId) return
       const created = list[list.length - 1]
       if (created) setSelectedId(created.id)
       setTerminals(list)
@@ -80,7 +87,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     <div class="terminal-pane">
       <div class="terminal-pane__bar">
         <button type="button" onClick={() => void start()} disabled={pending()}>
-          New terminal
+          New shared terminal
+        </button>
+        <button type="button" onClick={() => void start(props.taskId)} disabled={pending() || !props.taskHasWorktree}>
+          New task terminal
         </button>
         <Show when={selected()}>
           {(terminal) => (
@@ -103,13 +113,13 @@ export function TerminalPane(props: TerminalPaneProps) {
         {(terminal) => (
           <div class="terminal-pane__body">
             <ul class="terminal-list" aria-label="Terminals">
-              <For each={terminals()}>
+              <For each={visible()}>
                 {(entry) => (
                   <li>
                     <button
                       type="button"
                       class="terminal-list__item"
-                      aria-current={entry.id === selectedId() ? 'true' : undefined}
+                      aria-current={entry.id === selected()?.id ? 'true' : undefined}
                       onClick={() => setSelectedId(entry.id)}
                     >
                       <span>{entry.title}</span>
@@ -131,7 +141,7 @@ export function TerminalPane(props: TerminalPaneProps) {
                       {terminal().title} ended{formatExit(terminal().exitCode)} in{' '}
                       {terminal().cwd}
                     </p>
-                    <button type="button" onClick={() => void start()} disabled={pending()}>
+                    <button type="button" onClick={() => void start(terminal().taskId)} disabled={pending()}>
                       Restart
                     </button>
                   </div>

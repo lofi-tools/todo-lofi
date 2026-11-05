@@ -322,6 +322,25 @@ impl Core {
             .collect()
     }
 
+    pub fn terminal_directory(
+        &self,
+        project_id: &ProjectId,
+        task_id: Option<&TaskId>,
+    ) -> Result<PathBuf, CoreError> {
+        let root = self.project_path(project_id)?;
+        let Some(task_id) = task_id else {
+            return Ok(root);
+        };
+        let task = self.task(task_id)?;
+        if &task.project_id != project_id {
+            return Err(CoreError::TaskNotFound {
+                id: task_id.to_string(),
+            });
+        }
+        let (_, _, path) = self.task_git_worktree(task_id)?;
+        Ok(path.to_path_buf())
+    }
+
     pub async fn record_terminal(&mut self, terminal: &TerminalRecord) -> Result<(), CoreError> {
         self.store.save_terminal(terminal).await?;
         self.terminals.insert(terminal.id.clone(), terminal.clone());

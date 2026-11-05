@@ -316,25 +316,20 @@ impl ShellState {
             .terminals_for(&ProjectId::new(project_id))
     }
 
-    /// Spawn one PTY in the project's directory, record it, and start parsing
-    /// its output. The returned list includes the new live terminal.
     pub async fn start_terminal(
         &self,
         project_id: String,
+        task_id: Option<String>,
         columns: u16,
         rows: u16,
     ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
         let project_id = ProjectId::new(project_id);
-        let project = {
-            let core = self.core.lock().await;
-            core.project_list()
-                .projects
-                .into_iter()
-                .find(|project| project.id == project_id.as_str())
-        }
-        .ok_or_else(|| BridgeError::new("project", "project not found"))?;
-
-        let cwd = PathBuf::from(&project.path);
+        let task_id = task_id.map(TaskId::new);
+        let cwd = self
+            .core
+            .lock()
+            .await
+            .terminal_directory(&project_id, task_id.as_ref())?;
         let command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let (output, mut receiver) = mpsc::unbounded_channel();
         let terminal_id = self
@@ -367,6 +362,10 @@ impl ShellState {
             command,
             now_millis(),
         );
+        let record = match task_id {
+            Some(task_id) => record.for_task(task_id),
+            None => record,
+        };
         let screen = Screen::new(usize::from(columns), usize::from(rows));
         let (frames, _) = watch::channel(screen.frame());
         self.screens.lock().await.insert(
@@ -715,12 +714,13 @@ pub mod commands {
     pub async fn start_terminal(
         state: State<'_, ShellState>,
         project_id: String,
+        task_id: Option<String>,
         columns: u16,
         rows: u16,
     ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
         state
             .inner()
-            .start_terminal(project_id, columns, rows)
+            .start_terminal(project_id, task_id, columns, rows)
             .await
     }
 

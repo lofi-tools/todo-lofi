@@ -87,6 +87,12 @@ impl TerminalRecord {
         }
     }
 
+    pub fn for_task(mut self, task_id: TaskId) -> Self {
+        self.task_id = Some(task_id);
+        self.scope = TerminalScope::Task;
+        self
+    }
+
     pub fn snapshot(&self) -> TerminalSnapshot {
         TerminalSnapshot {
             id: self.id.as_str().to_string(),

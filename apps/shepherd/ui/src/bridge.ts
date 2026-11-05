@@ -261,10 +261,11 @@ export function terminalList(projectId: string): Promise<TerminalSnapshot[]> {
 
 export function startTerminal(
   projectId: string,
+  taskId: string | null,
   columns: number,
   rows: number,
 ): Promise<TerminalSnapshot[]> {
-  return invoke<TerminalSnapshot[]>('start_terminal', { projectId, columns, rows })
+  return invoke<TerminalSnapshot[]>('start_terminal', { projectId, taskId, columns, rows })
 }
 
 export function terminalWrite(terminalId: string, data: string): Promise<void> {

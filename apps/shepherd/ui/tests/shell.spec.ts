@@ -325,7 +325,7 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   await page.goto('/')
 
   await page.getByRole('tab', { name: 'Terminals' }).click()
-  await expect(page.getByRole('button', { name: 'New terminal' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'New shared terminal' })).toBeVisible()
   await expect(page.getByRole('button', { name: /Terminal 1/ })).toBeVisible()
 
   await page.getByRole('button', { name: /Terminal 2/ }).click()
