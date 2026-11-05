@@ -5,7 +5,9 @@
 //! terminal boundary. Frames are the whole visible grid; dirty-row runs are a
 //! later optimisation, not a correctness requirement.
 
-use alacritty_terminal::event::VoidListener;
+use std::sync::{Arc, Mutex};
+
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::term::cell::Flags;
@@ -79,8 +81,23 @@ impl Dimensions for ScreenSize {
     }
 }
 
+#[derive(Clone, Default)]
+struct PtyReplies(Arc<Mutex<Vec<u8>>>);
+
+impl EventListener for PtyReplies {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(text.as_bytes());
+        }
+    }
+}
+
 pub struct Screen {
-    term: Term<VoidListener>,
+    term: Term<PtyReplies>,
+    replies: PtyReplies,
     parser: Processor,
     columns: usize,
     rows: usize,
@@ -89,8 +106,10 @@ pub struct Screen {
 impl Screen {
     pub fn new(columns: usize, rows: usize) -> Self {
         let size = ScreenSize { columns, rows };
+        let replies = PtyReplies::default();
         Self {
-            term: Term::new(Config::default(), &size, VoidListener),
+            term: Term::new(Config::default(), &size, replies.clone()),
+            replies,
             parser: Processor::new(),
             columns,
             rows,
@@ -99,6 +118,16 @@ impl Screen {
 
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    pub fn take_replies(&self) -> Vec<u8> {
+        std::mem::take(
+            &mut *self
+                .replies
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) {
@@ -322,6 +351,14 @@ mod tests {
         assert_eq!(row(&frame, 0), "hello     ");
         assert_eq!(row(&frame, 1), "world     ");
         assert_eq!((frame.cursor_row, frame.cursor_column), (1, 5));
+    }
+
+    #[test]
+    fn cursor_position_queries_are_answered() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"abc\x1b[6n");
+        assert_eq!(screen.take_replies(), b"\x1b[1;4R");
+        assert!(screen.take_replies().is_empty());
     }
 
     #[test]

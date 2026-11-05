@@ -85,7 +85,7 @@ pub struct ShellState {
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
     terminal_lifecycle: Mutex<()>,
-    engine: Mutex<PtyTerminals>,
+    engine: Arc<Mutex<PtyTerminals>>,
     screens: Arc<Mutex<BTreeMap<String, ScreenSlot>>>,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
 }
@@ -98,7 +98,7 @@ impl ShellState {
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
-            engine: Mutex::new(PtyTerminals::new()),
+            engine: Arc::new(Mutex::new(PtyTerminals::new())),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
             scan: Arc::new(Mutex::new(None)),
         }
@@ -442,6 +442,7 @@ impl ShellState {
             return Err(error.into());
         }
 
+        let engine = Arc::clone(&self.engine);
         let screens = Arc::clone(&self.screens);
         let core = Arc::clone(&self.core);
         let shell_events = self.events.clone();
@@ -450,10 +451,19 @@ impl ShellState {
             while let Some(event) = receiver.recv().await {
                 match event {
                     TerminalEvent::Output(bytes) => {
-                        let mut screens = screens.lock().await;
-                        if let Some(slot) = screens.get_mut(&id) {
+                        let replies = {
+                            let mut screens = screens.lock().await;
+                            let Some(slot) = screens.get_mut(&id) else {
+                                continue;
+                            };
                             slot.screen.process(&bytes);
                             slot.frames.send_replace(slot.screen.frame());
+                            slot.screen.take_replies()
+                        };
+                        if !replies.is_empty()
+                            && let Err(error) = engine.lock().await.write(&terminal_id, &replies)
+                        {
+                            tracing::debug!(%error, "could not send terminal replies");
                         }
                     }
                     TerminalEvent::Exited { exit_code } => {
