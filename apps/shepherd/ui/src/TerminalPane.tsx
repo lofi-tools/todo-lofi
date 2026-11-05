@@ -20,6 +20,7 @@ interface TerminalPaneProps {
   projectId: string
   taskId: string | null
   taskHasWorktree: boolean
+  shown: boolean
   attention: string[]
   onTerminalFocus: (id: string | null) => void
   listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
@@ -200,7 +201,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         </ul>
       </details>
       <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
-        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+        <TerminalTree node={root()!} terminal={terminal} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={restart} measure={(id, size) => measuredSizes.set(id, size)}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
@@ -270,6 +271,7 @@ interface TerminalTreeProps {
   resize: (path: SplitPath, ratio: number) => void
   terminal: TerminalLookup
   active: string | null
+  shown: boolean
   select: (id: string) => void
   onTerminalFocus: (id: string | null) => void
   focusRequest: { id: string } | undefined
@@ -317,7 +319,7 @@ function TerminalTree(props: TerminalTreeProps) {
               </div>
             }>
               <Show when={entry().id} keyed>
-                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} onMeasure={(size) => props.measure(id, size)} />}
+                {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} onMeasure={(size) => props.measure(id, size)} />}
               </Show>
             </Show>
           </section>
@@ -388,7 +390,7 @@ const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
-function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void; onMeasure: (size: TerminalSize) => void }) {
+function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void; onMeasure: (size: TerminalSize) => void }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -426,7 +428,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   function scheduleDraw(rows: Iterable<number> | null = null) {
     if (rows === null) dirtyRows = null
     else if (dirtyRows) for (const row of rows) dirtyRows.add(row)
-    if (paintRequest !== undefined) return
+    if (paintRequest !== undefined || !props.shown) return
     paintRequest = window.requestAnimationFrame(() => {
       paintRequest = undefined
       const rows = dirtyRows
@@ -434,6 +436,17 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       draw(rows)
     })
   }
+
+  createEffect(() => {
+    if (props.shown) {
+      scheduleDraw()
+      if (frame && !copying()) setVisibleText(viewportText(frame))
+    } else {
+      if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
+      paintRequest = undefined
+      dirtyRows = null
+    }
+  })
 
   function draw(changedRows: Iterable<number> | null) {
     const current = frame
@@ -771,7 +784,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
         mirrorTimer = window.setTimeout(() => {
           mirrorTimer = undefined
-          if (frame && !copying()) setVisibleText(viewportText(frame))
+          if (frame && props.shown && !copying()) setVisibleText(viewportText(frame))
         }, 100)
       }
     }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {

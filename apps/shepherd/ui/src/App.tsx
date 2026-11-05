@@ -480,7 +480,7 @@ export function App() {
           >
             <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal} />}
+                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'} attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal} />}
               </Show>
             </div>
             <Show when={inspectorTab() === 'review'}>
