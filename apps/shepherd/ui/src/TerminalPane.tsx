@@ -421,7 +421,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   const reportedKeys = new Map<string, string>()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
-  let mouseButton: number | undefined
+  let mouseCapture: { pointerId: number; button: number } | undefined
   let mousePosition = ''
   let wheelRemainder = 0
 
@@ -545,10 +545,10 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1): boolean {
     const current = frame
     const cell = cellAt(event)
-    if (!current || !cell || current.displayOffset || event.shiftKey || !(current.modes & MOUSE_REPORTING)) return false
+    if (!current || !cell || current.displayOffset || (event.shiftKey && action !== 'release') || !(current.modes & MOUSE_REPORTING)) return false
     const position = `${cell.column},${cell.row}`
     if (action === 'move') {
-      if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || mouseButton === undefined)) return false
+      if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || !mouseCapture)) return false
       if (mousePosition === position) return true
       button += 32
     }
@@ -576,7 +576,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   function onPointerDown(event: PointerEvent & { currentTarget: HTMLCanvasElement }) {
     input?.focus({ preventScroll: true })
     const cell = cellAt(event)
-    if (!cell || !frame) return
+    if (!cell || !frame || mouseCapture || selecting !== undefined) return
     if (event.button === 0 && (event.metaKey || event.ctrlKey) && frame.cells[cell.row * frame.columns + cell.column]?.linked) {
       event.preventDefault()
       void bridge.openTerminalLink(props.terminalId, cell.row, cell.column).catch((failure) => setError(describe(failure)))
@@ -585,7 +585,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const button = [0, 1, 2][event.button]
     if (button !== undefined && reportMouse(event, button, 'press')) {
       event.preventDefault()
-      mouseButton = button
+      mouseCapture = { pointerId: event.pointerId, button }
       event.currentTarget.setPointerCapture(event.pointerId)
       return
     }
@@ -599,7 +599,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function onPointerMove(event: PointerEvent) {
-    if (selecting === undefined && reportMouse(event, mouseButton ?? 3, 'move')) return
+    if (mouseCapture && mouseCapture.pointerId !== event.pointerId) return
+    if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move')) return
     const cell = cellAt(event)
     if (!cell || !frame || !selection || event.pointerId !== selecting) return
     selection.end = cell.row * frame.columns + cell.column
@@ -607,8 +608,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function releaseMouse(event: PointerEvent) {
-    if (mouseButton !== undefined) reportMouse(event, mouseButton, 'release')
-    mouseButton = undefined
+    if (mouseCapture?.pointerId === event.pointerId) {
+      reportMouse(event, mouseCapture.button, 'release')
+      mouseCapture = undefined
+    }
+    if (selecting === event.pointerId) selecting = undefined
   }
 
   function viewportText(current: bridge.TerminalFrame): string {
@@ -853,7 +857,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         onContextMenu={(event) => {
           if (!event.shiftKey && !frame?.displayOffset && ((frame?.modes ?? 0) & MOUSE_REPORTING)) event.preventDefault()
         }}
-        onLostPointerCapture={() => { selecting = undefined }}
+        onLostPointerCapture={releaseMouse}
       />
       <textarea
         ref={input}
