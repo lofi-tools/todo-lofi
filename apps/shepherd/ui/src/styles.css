@@ -99,6 +99,9 @@ textarea {
 .shell__history .shell__icon-button {
   width: 19px;
   height: 24px;
+}
+
+.shell__history .shell__icon-button:disabled {
   color: var(--text-disabled);
 }
 
@@ -646,13 +649,11 @@ textarea {
   display: none;
 }
 
-.freebuff-terminal__body {
-  flex: 1;
-  min-height: 0;
+.chat--terminal {
   overflow: auto;
 }
 
-.freebuff-terminal__body > p {
+.chat--terminal > p {
   margin: 12px;
 }
 

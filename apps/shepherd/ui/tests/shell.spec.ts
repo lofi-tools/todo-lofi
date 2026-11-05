@@ -188,6 +188,7 @@ test.beforeEach(async ({ context }) => {
 
     // Every byte the shell writes to the PTY, in order.
     const writes = []
+    const closedTerminals: string[] = []
 
     function entry(id, sequence, kind) {
       return { id, sequence, kind }
@@ -386,6 +387,9 @@ test.beforeEach(async ({ context }) => {
           case 'terminal_write':
             writes.push(args.data)
             return null
+          case 'close_terminal':
+            closedTerminals.push(args.terminalId)
+            return null
           case 'quit':
             return { interruptedTasks: 0, liveTerminals: 0 }
           default:
@@ -395,6 +399,7 @@ test.beforeEach(async ({ context }) => {
     }
 
     window.__writes = writes
+    window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__terminalLayout = () => terminalLayout
   })
@@ -577,12 +582,21 @@ test('opens Freebuff as a standalone terminal in the conversation pane', async (
 
   const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
   await expect(chat).toBeHidden()
-  await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeFocused()
+  await expect(freebuff.getByRole('heading')).toHaveCount(0)
+  const input = freebuff.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(input).toBeFocused()
   await expect(freebuff.getByLabel('Terminal output')).toContainText('B')
-  await freebuff.getByRole('button', { name: 'Back to chat' }).click()
+  await input.press('a')
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __writes: string[] }).__writes,
+  )).toEqual(['a'])
+  await page.getByRole('banner', { name: 'Workspace header' }).getByRole('button', { name: 'Back to chat' }).click()
 
   await expect(freebuff).toBeHidden()
   await expect(chat.getByLabel('Prompt')).toHaveValue('Keep this draft')
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __closedTerminals: string[] }).__closedTerminals,
+  )).toEqual(['freebuff-fixture'])
 })
 
 test('opens the project picker, filters, and adds a project', async ({ page }) => {

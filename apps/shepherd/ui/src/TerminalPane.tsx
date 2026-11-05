@@ -16,7 +16,7 @@ interface TerminalSize {
 
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
 
-export function FreebuffPane(props: { projectId: string; shown: boolean; onClose: () => void }) {
+export function FreebuffPane(props: { projectId: string; shown: boolean }) {
   const [terminalId, setTerminalId] = createSignal<string>()
   const [error, setError] = createSignal<string>()
   let disposed = false
@@ -41,20 +41,14 @@ export function FreebuffPane(props: { projectId: string; shown: boolean; onClose
   })
 
   return (
-    <section class="chat" aria-label="Freebuff terminal" hidden={!props.shown}>
-      <header class="pane-header">
-        <h2 class="chat__title">Freebuff</h2>
-        <button type="button" class="project-action" onClick={props.onClose}>Back to chat</button>
-      </header>
-      <div class="freebuff-terminal__body">
-        <Show when={terminalId()} keyed fallback={
-          <Show when={error()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
-            {(message) => <p class="error" role="alert">{message()}</p>}
-          </Show>
-        }>
-          {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.shown ? { id } : undefined} />}
+    <section class="chat chat--terminal" aria-label="Freebuff terminal" hidden={!props.shown}>
+      <Show when={terminalId()} keyed fallback={
+        <Show when={error()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
+          {(message) => <p class="error" role="alert">{message()}</p>}
         </Show>
-      </div>
+      }>
+        {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.shown ? { id } : undefined} />}
+      </Show>
     </section>
   )
 }

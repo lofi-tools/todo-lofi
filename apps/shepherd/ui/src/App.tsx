@@ -510,7 +510,8 @@ export function App() {
 
   return (
     <div class="shell">
-      <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}>
+      <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
+        onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
         <aside class="sidebar" aria-label="Workspace navigation">
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
@@ -636,7 +637,7 @@ export function App() {
 
         <Show when={freebuffProjectId()} keyed>
           {(projectId) => (
-            <FreebuffPane projectId={projectId} shown={!settingsOpen()} onClose={() => setFreebuffProjectId(undefined)} />
+            <FreebuffPane projectId={projectId} shown={!settingsOpen()} />
           )}
         </Show>
 
@@ -936,6 +937,7 @@ function WorkspaceFrame(props: {
   taskId: string | null
   inspectorWidth: number | null
   onInspectorWidthChange: (width: number) => Promise<void>
+  onBackToChat?: () => void
 }) {
   const macWindow = isTauri() && navigator.platform.startsWith('Mac')
   const [metrics, setMetrics] = createSignal({ width: 360, limit: INSPECTOR_MAX_WIDTH })
@@ -984,7 +986,10 @@ function WorkspaceFrame(props: {
           <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
         </Show>
         <div class="shell__history" role="group" aria-label="Navigation history">
-          <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
+          <button class="shell__icon-button" type="button"
+            aria-label={props.onBackToChat ? 'Back to chat' : 'Previous'}
+            title={props.onBackToChat ? 'Back to chat' : 'Previous'}
+            disabled={!props.onBackToChat} onClick={() => props.onBackToChat?.()}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="m14 6-6 6 6 6" />
             </svg>

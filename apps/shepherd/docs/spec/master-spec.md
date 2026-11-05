@@ -481,8 +481,9 @@ selected project's directory. The terminal replaces the conversation pane.
 Freebuff handles all prompts, approvals, and session behaviour in its own TUI.
 Shepherd renders the terminal screen and forwards terminal input. The PTY is
 temporary and sits outside the task lifecycle, worktrees, transcript, inspector
-layout, and persisted terminal records. **Back to chat** closes the terminal.
-Use a stub for automated verification and leave live Freebuff out of the suite.
+layout, and persisted terminal records. The terminal fills the conversation
+pane. **Back to chat** in the window header closes it. Verify this path with
+fixtures only.
 
 ### 4.5 ACP path
 

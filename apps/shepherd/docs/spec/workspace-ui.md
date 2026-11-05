@@ -19,7 +19,8 @@ current layout and give future changes a point of comparison.
 - Place a slim icon rail to the left, outside the wrapper. The rail and the
   Previous and Next control group share a 52 px width and 6 px padding. The
   rail currently has placeholder icons for Workspace, Conversations, and Tools.
-  Previous and Next are also placeholders until navigation history is implemented.
+  Previous and Next are placeholders for navigation history. While the
+  Freebuff terminal is visible, Previous is available as **Back to chat**.
 - On macOS, show the native window controls on the app's surface, with the
   title hidden. Put Previous and Next directly to their right on the same
   horizontal line in a single 42 px header. The free header space is draggable.
@@ -106,9 +107,9 @@ current layout and give future changes a point of comparison.
   triggers have transparent backgrounds and no borders. Use Shepherd's dark
   popover styling for the expanded menus. The project picker switches the
   selected project. Codex is the default agent. **Freebuff (terminal)** opens
-  a standalone terminal in the conversation pane, with **Back to chat** to
-  close it. Other unavailable agents are disabled until their integrations
-  are ready.
+  a standalone terminal that fills the conversation pane. Use **Back to chat**
+  in the window header to close it. Other unavailable agents are disabled until
+  their integrations are ready.
 
 ## Conversation lifecycle
 
