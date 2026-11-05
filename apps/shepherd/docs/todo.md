@@ -560,6 +560,9 @@ task-scoped, persistent and fast enough.
 - [x] Bound PTY queues and allow one frame in flight per webview subscription.
   Coalesce paints and defer canvas work while the tab is hidden. Rate-limit
   frame delivery from the previous send so an idle pane can update immediately.
+  Each terminal view limits queued input to 128 operations and 1 MiB of
+  payload. Kitty key presses reserve room for their releases. The browser
+  fixture stalls a write, checks the limit, and verifies input resumes in order.
 
 ### Proof
 

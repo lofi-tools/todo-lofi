@@ -16,6 +16,7 @@ test.beforeEach(async ({ context }) => {
     let desktopProjectReads = 0
     let eventChannel
     let eventIndex = 0
+    let releaseTerminalWrite: (() => void) | undefined
     const options = new URLSearchParams(window.location.search)
 
     const project = {
@@ -405,6 +406,9 @@ test.beforeEach(async ({ context }) => {
           }
           case 'terminal_write':
             writes.push(args.data)
+            if (options.has('blocked-terminal-write') && writes.length === 1) {
+              await new Promise<void>((resolve) => { releaseTerminalWrite = resolve })
+            }
             return null
           case 'close_terminal':
             closedTerminals.push(args.terminalId)
@@ -418,6 +422,7 @@ test.beforeEach(async ({ context }) => {
     }
 
     window.__writes = writes
+    window.__releaseTerminalWrite = () => releaseTerminalWrite?.()
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__terminalLayout = () => terminalLayout
@@ -592,6 +597,39 @@ test('encodes typed keys into terminal input', async ({ page }) => {
       page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
     )
     .toEqual(['a', '\u0003', '\r', '\u001bOA'])
+})
+
+test('bounds stalled terminal input and reserves room for key release', async ({ page }) => {
+  await page.goto('/?kitty-terminal&blocked-terminal-write')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+  const writes = () => page.evaluate(() => (window as unknown as { __writes: string[] }).__writes)
+
+  await input.evaluate((element) => {
+    for (let index = 0; index < 130; index++) {
+      element.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'a', code: 'KeyA', bubbles: true, cancelable: true, repeat: index > 0,
+      }))
+    }
+  })
+  await expect(page.getByText('Terminal input is full.', { exact: false })).toBeVisible()
+  await expect.poll(writes).toEqual(['\x1b[97;;97u'])
+
+  await input.dispatchEvent('keyup', { key: 'a', code: 'KeyA', bubbles: true, cancelable: true })
+  await page.evaluate(() => (window as unknown as { __releaseTerminalWrite: () => void }).__releaseTerminalWrite())
+  await expect.poll(async () => (await writes()).length).toBe(128)
+  expect((await writes()).at(-1)).toBe('\x1b[97;1:3u')
+
+  await input.evaluate((element) => {
+    const clipboard = new DataTransfer()
+    clipboard.setData('text/plain', '界'.repeat(400_000))
+    element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+  })
+  await expect(page.getByText('Terminal paste exceeds the 1 MiB input limit.')).toBeVisible()
+  expect(await writes()).toHaveLength(128)
+
+  await input.press('b')
+  await expect.poll(async () => (await writes()).slice(-2)).toEqual(['\x1b[98;;98u', '\x1b[98;1:3u'])
 })
 
 test('opens Freebuff as a standalone terminal in the conversation pane', async ({ page }) => {

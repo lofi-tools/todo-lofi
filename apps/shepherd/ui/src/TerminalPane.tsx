@@ -512,6 +512,9 @@ const FOCUS_REPORTING = 1 << 11
 const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
+const MAX_PENDING_INPUT_WRITES = 128
+const MAX_PENDING_INPUT_BYTES = 1024 * 1024
+const KEY_RELEASE_BUDGET = 128
 
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
@@ -540,6 +543,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let resizing = false
   let queuedSize: ReturnType<typeof measure> | undefined
   let inputWrites = Promise.resolve()
+  let pendingInputWrites = 0
+  let pendingInputBytes = 0
   const reportedKeys = new Map<string, string>()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
@@ -825,13 +830,27 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function queueInput(send: () => Promise<void>) {
+  function queueInput(send: () => Promise<void>, bytes = 0, reservesKeyRelease = false): boolean {
+    // A press accepted before the queue fills still needs room for its release.
+    const reservedReleases = reportedKeys.size + Number(reservesKeyRelease)
+    if (pendingInputWrites + reservedReleases >= MAX_PENDING_INPUT_WRITES ||
+        pendingInputBytes + bytes + reservedReleases * KEY_RELEASE_BUDGET > MAX_PENDING_INPUT_BYTES) {
+      setError('Terminal input is full. Try again after the terminal catches up.')
+      return false
+    }
     setError(null)
-    inputWrites = inputWrites.then(send).catch((failure) => { setError(describe(failure)) })
+    pendingInputWrites++
+    pendingInputBytes += bytes
+    inputWrites = inputWrites.then(send).catch((failure) => { setError(describe(failure)) }).finally(() => {
+      pendingInputWrites--
+      pendingInputBytes -= bytes
+    })
+    return true
   }
 
-  function write(data: string | number[], followOutput = true) {
-    if (data.length) queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput))
+  function write(data: string | number[], followOutput = true, reservesKeyRelease = false): boolean {
+    const bytes = typeof data === 'string' ? data.length * 3 : data.length
+    return bytes > 0 && queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput), bytes, reservesKeyRelease)
   }
 
   function reportFocus(focused: boolean) {
@@ -840,8 +859,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       return
     }
     if (reportedFocus === focused) return
-    reportedFocus = focused
-    write(focused ? '\x1b[I' : '\x1b[O', false)
+    if (write(focused ? '\x1b[I' : '\x1b[O', false)) reportedFocus = focused
   }
 
   function updateWindowFocus() {
@@ -926,13 +944,15 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (event.metaKey && ['c', 'v'].includes(event.key.toLowerCase())) return
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
     const encoded = encodeKittyKey(event, modes)
-    if (encoded && event.code) reportedKeys.set(event.code, event.key)
     const data = encoded ?? encodeLegacyKey(event, modes)
     if (data === null) return
     selection = undefined
     scheduleDraw()
     event.preventDefault()
-    write(data)
+    const reportsKey = !!(encoded && event.code)
+    if (write(data, true, reportsKey && !reportedKeys.has(event.code)) && reportsKey) {
+      reportedKeys.set(event.code, event.key)
+    }
   }
 
   function onKeyUp(event: KeyboardEvent) {
@@ -947,16 +967,24 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const text = event.clipboardData?.getData('text/plain')
     if (!text) return
     event.preventDefault()
+    if (text.length > MAX_PENDING_INPUT_BYTES) {
+      setError('Terminal paste exceeds the 1 MiB input limit.')
+      return
+    }
     const paste = (frame?.modes ?? 0) & BRACKETED_PASTE
       ? `\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}\x1b[201~`
       : text.replace(/\r?\n/g, '\r')
     const bytes = new TextEncoder().encode(paste)
+    if (bytes.length > MAX_PENDING_INPUT_BYTES) {
+      setError('Terminal paste exceeds the 1 MiB input limit.')
+      return
+    }
     queueInput(async () => {
       const chunkSize = 16 * 1024
       for (let offset = 0; offset < bytes.length; offset += chunkSize) {
         await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)), offset === 0)
       }
-    })
+    }, bytes.length)
   }
 
   onMount(() => {
