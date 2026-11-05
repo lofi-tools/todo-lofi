@@ -67,6 +67,42 @@ async function exerciseComposition(terminalId: string, input: HTMLTextAreaElemen
   await waitFor('composed text delivered once', () => terminalOutput().split('\n').some((line) => line.trim() === 'S4_IME:かな'))
 }
 
+async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
+  const program = String.raw`
+import os, select, termios, tty
+
+def expect(expected):
+    data = b''
+    while len(data) < len(expected) and select.select([0], [], [], 5)[0]:
+        chunk = os.read(0, len(expected) - len(data))
+        if not chunk:
+            break
+        data += chunk
+    assert data == expected, repr(data)
+
+settings = termios.tcgetattr(0)
+tty.setraw(0)
+try:
+    os.write(1, b'\x1b[>3u\x1b[?u')
+    expect(b'\x1b[?3u')
+    os.write(1, b'\r\nS4_' + b'KITTY_READY\r\n')
+    expect(b'\x1b[27u\x1b[27;1:3u')
+    os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
+finally:
+    os.write(1, b'\x1b[<u')
+    termios.tcsetattr(0, termios.TCSANOW, settings)
+`
+  const argument = "'" + program.replaceAll("'", "'\"'\"'") + "'"
+  await bridge.terminalWrite(terminalId, `python3 -c ${argument}\r`)
+  await waitFor('Kitty negotiation reply in the PTY', () => terminalOutput().includes('S4_KITTY_READY'))
+  for (const type of ['keydown', 'keyup']) {
+    input.dispatchEvent(new KeyboardEvent(type, {
+      key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+    }))
+  }
+  await waitFor('Kitty key press and release in the PTY', () => terminalOutput().includes('S4_KITTY_PASS'))
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -92,8 +128,9 @@ async function smoke() {
   await waitFor('PTY output in the webview', () => terminalOutput().includes('S4_READY'))
   await exerciseAlternateScreen(terminal.id, input)
   await exerciseComposition(terminal.id, input)
+  await exerciseKitty(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
-  return { ok: true, roundTrip: true, alternateScreen: true, compositionEvents: true, burstPaintMs }
+  return { ok: true, roundTrip: true, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 void (async () => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command -v vim less >/dev/null
+command -v vim less python3 >/dev/null
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
