@@ -16,8 +16,13 @@ export async function waitFor<T>(label: string, read: () => T | null | undefined
   throw new Error(`Timed out waiting for ${label}`)
 }
 
-export function terminalOutput(): string {
-  return document.querySelector('.terminal-view__text')?.textContent ?? ''
+function terminalOutput(scope: ParentNode = document): string {
+  return scope.querySelector('.terminal-view__text')?.textContent ?? ''
+}
+
+function terminalPane(title: string): HTMLElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLElement>('.terminal-tile'))
+    .find((entry) => entry.getAttribute('aria-label') === title)
 }
 
 async function measureBurst(terminalId: string): Promise<number> {
@@ -65,7 +70,7 @@ async function measurePacing(terminalId: string) {
   }
 }
 
-function press(input: HTMLTextAreaElement, key: string) {
+function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
@@ -127,6 +132,41 @@ finally:
   await waitFor('Kitty key press and release in the PTY', () => terminalOutput().includes('S4_KITTY_PASS'))
 }
 
+async function exerciseSplit(projectId: string, terminalId: string, title: string) {
+  const split = await waitFor('split action', () => {
+    const entry = button('Split right')
+    return entry && !entry.disabled && entry
+  })
+  split.click()
+  const divider = await waitFor('live split divider', () => document.querySelector<HTMLElement>('.terminal-divider'))
+  await waitFor('both canvases in the split', () => document.querySelectorAll('.terminal-view__canvas').length === 2)
+  await waitFor('split layout save', () => !button('Split right')?.disabled)
+  press(divider, 'ArrowRight')
+  await waitFor('persisted resize', () => divider.getAttribute('aria-valuenow') === '55')
+
+  await bridge.terminalWrite(terminalId, "printf 'S4_%s:%s\\n' VIEW \"$$\"\r")
+  const identity = await waitFor('first PTY identity', () => {
+    const pane = terminalPane(title)
+    return pane && terminalOutput(pane).match(/S4_VIEW:\d+/)?.[0]
+  })
+  const first = await waitFor('first pane', () => terminalPane(title))
+  const hide = Array.from(first.querySelectorAll('button')).find((entry) => entry.textContent === 'Hide pane')
+  if (!hide) throw new Error('The first pane has no Hide action')
+  hide.click()
+  await waitFor('first pane detached', () => !terminalPane(title))
+  const reopen = await waitFor('hidden terminal instance', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.terminal-list__item'))
+    .find((entry) => !entry.disabled && entry.querySelector('span')?.textContent === title))
+  reopen.click()
+  await waitFor('same PTY screen after reopening', () => {
+    const pane = terminalPane(title)
+    return pane && terminalOutput(pane).includes(identity)
+  })
+  const terminals = await bridge.terminalList(projectId)
+  if (terminals.length !== 2 || terminals.some((entry) => entry.endedAt !== null)) {
+    throw new Error('Hiding and reopening changed the live terminal records')
+  }
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -155,7 +195,8 @@ async function smoke() {
   await exerciseKitty(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
-  return { ok: true, roundTrip: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  await exerciseSplit(project.id, terminal.id, terminal.title)
+  return { ok: true, roundTrip: true, splitReattach: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 void (async () => {
