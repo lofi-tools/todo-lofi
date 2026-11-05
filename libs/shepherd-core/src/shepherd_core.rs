@@ -536,7 +536,7 @@ impl Core {
 
         match self.task(task_id)?.state {
             TaskState::Draft => self.create_worktree(task_id).await?,
-            TaskState::Ready | TaskState::Review => {}
+            TaskState::Ready | TaskState::Review => self.repair_worktree(task_id).await?,
             state => {
                 return Err(CoreError::TaskNotReady {
                     id: task_id.as_str().to_string(),
@@ -664,6 +664,7 @@ impl Core {
             });
         }
 
+        self.repair_worktree(task_id).await?;
         self.set_task_state(task_id, TaskState::Starting)?;
         self.sessions.remove(task_id);
         let stored_session_id = self
@@ -701,6 +702,20 @@ impl Core {
         self.save_task(task_id).await?;
         let workspace = self.publish_task(task_id)?;
         Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn repair_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let task = self.task(task_id)?.clone();
+        if let (Some(path), Some(branch)) = (&task.worktree_path, &task.branch) {
+            let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
+            let missing = !path.exists();
+            if missing && let Some(session) = self.sessions.get_mut(task_id) {
+                session.shutdown().await?;
+                self.sessions.remove(task_id);
+            }
+            GitService.restore_worktree(&repository, path, branch, None)?;
+        }
+        Ok(())
     }
 
     async fn create_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {

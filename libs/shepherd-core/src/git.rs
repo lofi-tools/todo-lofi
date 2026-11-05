@@ -29,6 +29,10 @@ pub enum GitError {
         status: std::process::ExitStatus,
         stderr: String,
     },
+    #[error("not a Shepherd worktree: {path:?}")]
+    InvalidWorktree { path: PathBuf },
+    #[error("task branch {branch} is missing and has no recorded tip")]
+    MissingBranch { branch: String },
     #[error("Git is in detached HEAD state at {path}")]
     DetachedHead { path: String },
 }
@@ -71,6 +75,59 @@ impl GitService {
                 base_branch,
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn restore_worktree(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+        branch: &str,
+        recorded_tip: Option<&str>,
+    ) -> Result<(), GitError> {
+        if path.parent() != Some(repository.git_dir.join("shepherd/worktrees").as_path()) {
+            return Err(GitError::InvalidWorktree { path: path.to_path_buf() });
+        }
+        match path.symlink_metadata() {
+            Ok(_) => return self.validate_worktree(repository, path),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(GitError::Io { source }),
+        }
+        let path_text = path.to_str().ok_or_else(|| GitError::InvalidWorktree {
+            path: path.to_path_buf(),
+        })?;
+        let registered = run_git(&repository.root, &["worktree", "list", "--porcelain", "-z"])?;
+        if registered.split('\0').any(|field| field.strip_prefix("worktree ") == Some(path_text)) {
+            run_git(&repository.root, &["worktree", "remove", "--", path_text])?;
+        }
+        let reference = format!("refs/heads/{branch}");
+        if run_git(&repository.root, &["show-ref", "--verify", "--quiet", &reference]).is_ok() {
+            run_git(&repository.root, &["worktree", "add", "--", path_text, branch])?;
+        } else if let Some(tip) = recorded_tip {
+            self.create_worktree(repository, path, branch, tip)?;
+        } else {
+            return Err(GitError::MissingBranch { branch: branch.to_string() });
+        }
+        Ok(())
+    }
+
+    pub fn validate_worktree(&self, repository: &GitRepository, path: &Path) -> Result<(), GitError> {
+        let invalid = || GitError::InvalidWorktree { path: path.to_path_buf() };
+        if !path.starts_with(repository.git_dir.join("shepherd/worktrees"))
+            || path.symlink_metadata().map_err(|source| GitError::Io { source })?.is_symlink()
+        {
+            return Err(invalid());
+        }
+        let root = run_git(path, &["rev-parse", "--show-toplevel"])?;
+        let common = |cwd: &Path| -> Result<PathBuf, GitError> {
+            let value = run_git(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+            canonicalize(Path::new(&value))
+        };
+        if canonicalize(Path::new(&root))? != canonicalize(path)?
+            || common(path)? != common(&repository.root)?
+        {
+            return Err(invalid());
+        }
         Ok(())
     }
 
