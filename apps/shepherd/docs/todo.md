@@ -39,7 +39,7 @@ and merge it without leaving Shepherd?”
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 23; the Tauri shell has 6 tests (bridge commands, snapshot serialization, durable load, and the PTY engine's output, exit code and close). The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 9 focused tests; `shepherd-core` has 24; the Tauri shell has 6 tests (bridge commands, snapshot serialization, durable load, and the PTY engine's output, exit code and close). The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -196,7 +196,7 @@ not found), so the spike is built on `alacritty_terminal 0.26` behind the core's
 
 Automated:
 
-- [ ] Core integration test: add project → draft → send → stream → quit →
+- [x] Core integration test: add project → draft → send → stream → quit →
   restart.
 - [ ] Playwright smoke: add project, flat task row, draft row, send, Terminals
   tab, task switch.

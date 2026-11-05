@@ -1488,6 +1488,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_walking_skeleton_runs_from_project_to_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+
+        let first_run = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("streaming text".to_string()),
+                FakeStep::approval("approval-1", "Run tests"),
+            ])]])),
+        );
+        let mut scenario = TestCore::with_core(first_run);
+
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    project_id: project_id.clone(),
+                    title: "Ship the skeleton".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(draft.task.state, TaskState::Draft);
+        assert_eq!(draft.task.proposed_branch, "shepherd/ship-the-skeleton");
+        let task_id = TaskId::new(draft.task.id.clone());
+
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: "start".to_string(),
+                })
+                .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+        assert_eq!(
+            summaries(&workspace),
+            vec![
+                "you: start".to_string(),
+                "agent: streaming text".to_string(),
+                "approval: Run tests (pending)".to_string(),
+            ]
+        );
+        let worktree_path = PathBuf::from(
+            workspace
+                .task
+                .worktree_path
+                .clone()
+                .expect("the first prompt creates the worktree"),
+        );
+        assert!(worktree_path.is_dir());
+        assert!(
+            !git_in(
+                &repository,
+                &["branch", "--list", "shepherd/ship-the-skeleton"]
+            )
+            .is_empty()
+        );
+
+        let trace = scenario.trace();
+        for expected in [
+            "event: ProjectListChanged",
+            "event: TaskListChanged",
+            "event: TaskChanged",
+            "event: TaskWorkspaceChanged",
+        ] {
+            assert!(
+                trace.contains(expected),
+                "{expected} missing from the stream:\n{trace}"
+            );
+        }
+
+        let refused = scenario.execute(Command::Quit { force: false }).await;
+        assert!(matches!(
+            refused,
+            Err(CoreError::QuitConfirmationRequired { live_tasks: 1 })
+        ));
+        let result = scenario.execute(Command::Quit { force: true }).await?;
+        let CommandResult::Quit(summary) = result else {
+            panic!("expected a quit result");
+        };
+        assert_eq!(summary.interrupted_tasks, 1);
+        assert_eq!(summary.live_terminals, 0);
+        assert_eq!(scenario.core().shutdown_state(), ShutdownState::Closed);
+        drop(scenario);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("after restart".to_string()),
+            ])]])),
+        )
+        .await?;
+        let mut scenario = TestCore::with_core(reopened);
+
+        let projects = scenario.core().project_list();
+        assert_eq!(projects.projects.len(), 1);
+        assert_eq!(projects.projects[0].unfinished_task_count, 1);
+
+        let workspace = scenario.core().task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Interrupted);
+        assert_eq!(
+            workspace.task.branch.as_deref(),
+            Some("shepherd/ship-the-skeleton")
+        );
+
+        let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(
+            workspace.transcript[0]
+                .summary()
+                .contains("did not survive"),
+            "unexpected resume note: {:?}",
+            workspace.transcript[0].summary()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_terminal_record_is_ended_after_a_restart() -> Result<(), Box<dyn std::error::Error>>
     {
         let directory = TestDirectory::new()?;
