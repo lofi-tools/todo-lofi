@@ -641,6 +641,40 @@ test('applies the Send accent from Appearance and restores it after reload', asy
   await expect(nextWindow.getByRole('radio', { name: expectedAccent })).toBeChecked()
 })
 
+test('focuses the composer card and opens the toolbar menus above it', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 600 })
+  await page.goto('/')
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  await expect(prompt).toBeEnabled()
+  await prompt.focus()
+  await expect(composer).toHaveCSS('border-color', 'rgb(111, 125, 255)')
+  await expect(prompt).toHaveCSS('outline-style', 'none')
+
+  await composer.getByRole('button', { name: 'Attachments and commands' }).click()
+  const attachments = composer.getByRole('menu', { name: 'Attachments and commands' })
+  await expect(attachments.getByRole('menuitem', { name: 'Attach files (coming soon)' })).toBeDisabled()
+  await expect(attachments.getByRole('menuitem', { name: 'Commands (coming soon)' })).toBeDisabled()
+
+  const shell = composer.getByRole('button', { name: 'Shell approvals: Ask me' })
+  await shell.click()
+  const approvals = composer.getByRole('menu', { name: 'Shell approvals' })
+  await expect(attachments).toBeHidden()
+  await expect(approvals.getByRole('menuitemradio', { name: 'Ask me', checked: true })).toBeFocused()
+  await expect(approvals.getByRole('menuitemradio', { name: 'Approve for me (coming soon)' })).toBeDisabled()
+  const shellBounds = await shell.boundingBox()
+  const menuBounds = await approvals.boundingBox()
+  if (!shellBounds || !menuBounds) throw new Error('The approvals menu and trigger should be visible')
+  expect(menuBounds.y + menuBounds.height).toBeLessThan(shellBounds.y)
+
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await expect(composer.getByRole('menuitemradio', { name: 'Codex', checked: true })).toBeVisible()
+  await composer.getByRole('button', { name: 'Model / effort: Agent default' }).click()
+  const model = composer.getByRole('menu', { name: 'Model / effort' })
+  await expect(model.getByRole('menuitemradio', { name: 'Agent default', checked: true })).toBeVisible()
+  await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
+})
+
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {
   await page.goto('/')
 

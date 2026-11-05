@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -23,7 +23,7 @@ type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
 const DEFAULT_AGENT = { id: 'codex', name: 'Codex' }
-const AGENT_OPTIONS: HeadlineOption[] = [
+const AGENT_OPTIONS: PickerOption[] = [
   DEFAULT_AGENT,
   { id: 'opencode', name: 'OpenCode (coming soon)', disabled: true },
   { id: 'pi', name: 'Pi (coming soon)', disabled: true },
@@ -656,6 +656,7 @@ export function App() {
               }}
             />
             <div class="composer__actions">
+              <ComposerPickers />
               <button
                 type="button"
                 class="composer__send composer__send--icon"
@@ -798,22 +799,83 @@ export function App() {
   )
 }
 
-interface HeadlineOption {
+interface PickerOption {
   id: string
   name: string
   detail?: string
   disabled?: boolean
 }
 
-function HeadlinePicker(props: {
+interface PickerMenuProps {
   label: string
-  value: string
-  text: string
-  options: HeadlineOption[]
+  text?: string
+  value?: string
+  options: PickerOption[]
   onChange?: (value: string) => void
-}) {
+}
+
+const ATTACHMENT_OPTIONS: PickerOption[] = [
+  { id: 'attach', name: 'Attach files (coming soon)', disabled: true },
+  { id: 'commands', name: 'Commands (coming soon)', disabled: true },
+]
+
+const APPROVAL_OPTIONS: PickerOption[] = [
+  { id: 'ask', name: 'Ask me' },
+  { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
+]
+
+const MODEL_OPTIONS: PickerOption[] = [
+  { id: 'default', name: 'Agent default' },
+  { id: 'model', name: 'Choose model (coming soon)', disabled: true },
+  { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
+]
+
+function ComposerPickers() {
+  return (
+    <>
+      <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
+        <PlusIcon />
+      </PickerMenu>
+      <PickerMenu label="Shell approvals" text="Ask me" value="ask" options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
+          <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
+        </svg>
+        <PickerCaret />
+      </PickerMenu>
+      <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={AGENT_OPTIONS} triggerClass="composer__picker" above>
+        <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
+        <PickerCaret />
+      </PickerMenu>
+      <PickerMenu label="Model / effort" text="Agent default" value="default" options={MODEL_OPTIONS} triggerClass="composer__picker composer__picker--model" above>
+        <span class="composer__picker-label">Model / effort</span>
+        <PickerCaret />
+      </PickerMenu>
+    </>
+  )
+}
+
+function HeadlinePicker(props: PickerMenuProps & { text: string }) {
+  return (
+    <PickerMenu {...props} triggerClass="headline-picker">
+      <span class="headline-picker__text">{props.text}</span>
+      <PickerCaret />
+    </PickerMenu>
+  )
+}
+
+function PickerCaret() {
+  return (
+    <svg class="picker-caret" width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
+    </svg>
+  )
+}
+
+function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boolean; children: JSX.Element }) {
   const menuId = createUniqueId()
   const [open, setOpen] = createSignal(false)
+  const triggerLabel = () => props.text ? `${props.label}: ${props.text}` : props.label
   let trigger!: HTMLButtonElement
   let menu!: HTMLSpanElement
 
@@ -823,9 +885,9 @@ function HeadlinePicker(props: {
     const gap = 6
     const below = window.innerHeight - bounds.bottom - gap - viewportInset
     const above = bounds.top - gap - viewportInset
-    menu.style.removeProperty('--headline-menu-room')
-    const opensAbove = menu.offsetHeight > below && above > below
-    menu.style.setProperty('--headline-menu-room', `${Math.max(0, opensAbove ? above : below)}px`)
+    menu.style.removeProperty('--picker-menu-room')
+    const opensAbove = props.above ? menu.offsetHeight <= above || above >= below : menu.offsetHeight > below && above > below
+    menu.style.setProperty('--picker-menu-room', `${Math.max(0, opensAbove ? above : below)}px`)
     const left = Math.min(bounds.left, window.innerWidth - menu.offsetWidth - viewportInset)
     menu.style.left = `${Math.max(viewportInset, left)}px`
     menu.style.top = `${opensAbove ? bounds.top - gap - menu.offsetHeight : bounds.bottom + gap}px`
@@ -852,25 +914,24 @@ function HeadlinePicker(props: {
     <>
       <button
         ref={trigger}
-        class="headline-picker"
+        class={props.triggerClass}
         type="button"
-        aria-label={`${props.label}: ${props.text}`}
+        aria-label={triggerLabel()}
+        title={props.above ? triggerLabel() : undefined}
         aria-haspopup="menu"
         aria-controls={menuId}
         aria-expanded={open()}
         popovertarget={menuId}
       >
-        <span class="headline-picker__text">{props.text}</span>
-        <svg width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
-        </svg>
+        {props.children}
       </button>
       <span
         ref={menu}
         id={menuId}
-        class="headline-picker__menu"
+        class="picker-menu"
         popover="auto"
         role="menu"
+        tabindex={-1}
         aria-label={props.label}
         on:toggle={(event) => {
           const isOpen = event.newState === 'open'
@@ -879,7 +940,8 @@ function HeadlinePicker(props: {
           positionMenu()
           const current = menu.querySelector<HTMLButtonElement>('button[aria-checked="true"]:enabled')
             ?? menu.querySelector<HTMLButtonElement>('button:enabled')
-          current?.focus()
+            ?? menu
+          current.focus()
         }}
         onKeyDown={(event) => {
           if (event.key === 'Tab') {
@@ -908,9 +970,9 @@ function HeadlinePicker(props: {
             <button
               type="button"
               class="nav-item"
-              role="menuitemradio"
+              role={props.value === undefined ? 'menuitem' : 'menuitemradio'}
               tabindex={-1}
-              aria-checked={props.value === option.id}
+              aria-checked={props.value === undefined ? undefined : props.value === option.id}
               title={option.detail}
               disabled={option.disabled}
               onClick={() => {
