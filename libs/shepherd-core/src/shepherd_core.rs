@@ -1613,6 +1613,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn denying_an_approval_ends_the_turn() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::approval("approval-1", "Run tests"),
+                FakeStep::Message("must not appear".to_string()),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Deny me".to_string(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+
+        let workspace = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id,
+                approval_id: ApprovalId::new("approval-1"),
+                decision: Decision::Deny,
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(
+            summaries(&workspace),
+            vec![
+                "you: go".to_string(),
+                "approval: Run tests (Deny)".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelling_keeps_the_worktree_and_the_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;

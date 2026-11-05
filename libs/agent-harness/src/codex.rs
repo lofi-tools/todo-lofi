@@ -2363,6 +2363,52 @@ done
     }
 
     #[tokio::test]
+    async fn a_denied_approval_is_reported_as_declined() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-denial.sh", APPROVAL_STUB);
+        let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
+
+        harness
+            .prompt(PromptInput {
+                text: "run the tests".to_string(),
+            })
+            .await
+            .expect("the turn starts");
+        collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. }))
+        })
+        .await;
+
+        harness
+            .respond(ApprovalId::new("item_2"), Decision::Deny)
+            .await
+            .expect("the decision is sent");
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ApprovalResolved {
+                decision: Decision::Deny,
+                ..
+            }
+        )));
+
+        let decision = std::fs::read_to_string(directory.path().join("decision.txt"))
+            .expect("the stub recorded the decision");
+        assert!(
+            decision.contains("\"decline\""),
+            "unexpected decision payload: {decision}"
+        );
+        harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
     async fn a_file_change_approval_carries_its_diff() {
         let directory = TempDir::new().expect("temp dir");
         let stub = write_stub(&directory, "codex-files.sh", FILE_APPROVAL_STUB);
