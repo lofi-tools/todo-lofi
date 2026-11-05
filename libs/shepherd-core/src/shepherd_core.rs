@@ -942,6 +942,28 @@ mod tests {
         workspace.transcript.iter().map(Entry::summary).collect()
     }
 
+    fn git_in(repository: &TestRepository, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn worktree_count(repository: &TestRepository) -> usize {
+        git_in(repository, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count()
+    }
+
     #[tokio::test]
     async fn adding_a_project_marks_a_missing_path() {
         let directory = TestDirectory::new().expect("temp directory");
@@ -983,9 +1005,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_draft_has_no_worktree_or_branch() {
-        let directory = TestDirectory::new().expect("temp directory");
+        let repository = TestRepository::new().expect("temp repository");
         let mut core = Core::new();
-        let project_id = add_project(&mut core, directory.path().to_path_buf())
+        let project_id = add_project(&mut core, repository.path().to_path_buf())
             .await
             .expect("project should be added");
 
@@ -1005,6 +1027,20 @@ mod tests {
         assert!(workspace.task.branch.is_none());
         assert!(workspace.transcript.is_empty());
         assert_eq!(workspace.task.proposed_branch, "shepherd/fix-the-parser");
+        // The project path is canonicalized when it is added, so compare the
+        // tail of the path rather than the whole temp directory.
+        assert!(
+            PathBuf::from(&workspace.task.proposed_worktree_path)
+                .ends_with(".git/shepherd/worktrees/fix-the-parser"),
+            "unexpected proposed worktree path: {}",
+            workspace.task.proposed_worktree_path
+        );
+
+        // Naming the branch and the path must not create either of them.
+        assert!(!PathBuf::from(&workspace.task.proposed_worktree_path).exists());
+        assert_eq!(git_in(&repository, &["branch", "--list", "shepherd/*"]), "");
+        assert_eq!(worktree_count(&repository), 1);
+        assert_eq!(git_in(&repository, &["status", "--porcelain"]), "");
 
         let tasks = core.task_list(&project_id).expect("task list");
         assert_eq!(tasks.tasks.len(), 1);
@@ -1013,9 +1049,9 @@ mod tests {
 
     #[tokio::test]
     async fn discarding_a_draft_removes_it_without_git_state() {
-        let directory = TestDirectory::new().expect("temp directory");
+        let repository = TestRepository::new().expect("temp repository");
         let mut core = Core::new();
-        let project_id = add_project(&mut core, directory.path().to_path_buf())
+        let project_id = add_project(&mut core, repository.path().to_path_buf())
             .await
             .expect("project should be added");
         let result = core
@@ -1028,6 +1064,7 @@ mod tests {
         else {
             panic!("expected a task workspace");
         };
+        let proposed_worktree_path = PathBuf::from(&workspace.task.proposed_worktree_path);
         let task_id = TaskId::new(workspace.task.id);
 
         assert!(
@@ -1041,6 +1078,12 @@ mod tests {
                 .tasks
                 .is_empty()
         );
+
+        // Discarding removes the record and leaves the repository untouched.
+        assert!(!proposed_worktree_path.exists());
+        assert_eq!(git_in(&repository, &["branch", "--list", "shepherd/*"]), "");
+        assert_eq!(worktree_count(&repository), 1);
+        assert_eq!(git_in(&repository, &["status", "--porcelain"]), "");
     }
 
     #[test]

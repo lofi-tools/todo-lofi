@@ -265,6 +265,49 @@ textarea {
   text-transform: uppercase;
 }
 
+.draft {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 12px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.draft__note {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.draft__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.draft__facts dt {
+  color: var(--text-muted);
+}
+
+.draft__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.draft button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 12px;
+}
+
 .chat__transcript {
   padding: 16px;
   overflow: auto;

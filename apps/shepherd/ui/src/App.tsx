@@ -131,6 +131,18 @@ export function App() {
     })
   }
 
+  function discardDraft() {
+    const current = workspace()
+    if (!current) return
+    void run(async () => {
+      await bridge.discardDraft(current.task.id)
+      setWorkspace(null)
+      setSelectedTaskId(null)
+      const projectId = selectedProjectId()
+      if (projectId) await loadTasks(projectId)
+    })
+  }
+
   function sendPrompt() {
     const current = workspace()
     const text = prompt().trim()
@@ -268,6 +280,32 @@ export function App() {
               {(current) => <span class="chat__state">{current().task.state}</span>}
             </Show>
           </header>
+
+          <Show when={workspace()}>
+            {(current) => (
+              <Show when={current().task.state === 'draft'}>
+                <div class="draft">
+                  <p class="draft__note">
+                    Nothing is created yet. The first prompt creates the branch and the
+                    worktree below.
+                  </p>
+                  <dl class="draft__facts">
+                    <dt>Proposed branch</dt>
+                    <dd>
+                      <code>{current().task.proposedBranch}</code>
+                    </dd>
+                    <dt>Proposed worktree</dt>
+                    <dd>
+                      <code>{current().task.proposedWorktreePath}</code>
+                    </dd>
+                  </dl>
+                  <button type="button" onClick={discardDraft} disabled={pending()}>
+                    Discard draft
+                  </button>
+                </div>
+              </Show>
+            )}
+          </Show>
 
           <div class="chat__transcript">
             <Show
