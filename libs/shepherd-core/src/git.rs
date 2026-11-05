@@ -868,6 +868,37 @@ mod tests {
     }
 
     #[test]
+    fn squash_merge_refuses_dirty_and_off_base_project_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let task = task_worktree(&fixture)?;
+        fixture.write_file("untracked.txt", "keep me")?;
+        let merge = || {
+            GitService.squash_merge(
+                fixture.path(),
+                &task,
+                "main",
+                "shepherd/example",
+                "Task result",
+            )
+        };
+        assert!(
+            matches!(merge(), Err(GitError::MergeUnavailable { reason }) if reason.contains("uncommitted"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("untracked.txt"))?,
+            "keep me"
+        );
+        std::fs::remove_file(fixture.path().join("untracked.txt"))?;
+        run_git(fixture.path(), &["switch", "-c", "off-base"])?;
+        assert!(
+            matches!(merge(), Err(GitError::MergeUnavailable { reason }) if reason.contains("Switch the project root to main"))
+        );
+        assert!(!GitService.has_changes(fixture.path())?);
+        Ok(())
+    }
+
+    #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");
