@@ -2,7 +2,8 @@
 set -euo pipefail
 
 phases=(prepare restore)
-unset SHEPHERD_DEV_CODEX_APPROVAL_REPLAY
+duration=180s
+unset SHEPHERD_DEV_CODEX_SMOKE
 case "${1:-}" in
   "")
     command -v vim less python3 >/dev/null
@@ -11,10 +12,16 @@ case "${1:-}" in
   --codex-approval)
     command -v python3 >/dev/null
     phases=(codex-approval)
-    export SHEPHERD_DEV_CODEX_APPROVAL_REPLAY=1
+    export SHEPHERD_DEV_CODEX_SMOKE=approval-replay
+    ;;
+  --codex-live)
+    command -v python3 >/dev/null
+    phases=(codex-live)
+    duration=300s
+    export SHEPHERD_DEV_CODEX_SMOKE=approval-cancel
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval]" >&2
+    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live]" >&2
     exit 2
     ;;
 esac
@@ -57,10 +64,10 @@ config=$(cat <<EOF
 EOF
 )
 launch=(pnpm --dir apps/shepherd exec tauri dev --no-watch --config "$config")
-if [[ ${SHEPHERD_DEV_CODEX_APPROVAL_REPLAY:-} == 1 ]]; then
+if [[ -n ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
   launch+=(--features desktop-codex-smoke)
 fi
 for phase in "${phases[@]}"; do
-  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
+  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s "$duration" "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
 done

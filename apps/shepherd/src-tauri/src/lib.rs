@@ -51,7 +51,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 .flatten()
                 .filter(|path| !path.is_empty());
             #[cfg(debug_assertions)]
-            let dev_factory = dev_harness::factory(override_directory.is_some())?;
+            let dev_factory = dev_harness::factory(app, override_directory.is_some())?;
             #[cfg(not(debug_assertions))]
             let dev_factory: Option<Box<dyn HarnessFactory>> = None;
             let data_directory = match override_directory {
@@ -110,6 +110,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::unsubscribe_terminal,
             bridge::commands::subscribe_terminal,
             bridge::commands::subscribe,
+            #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
+            dev_harness::finish_codex_smoke,
         ])
         .run(tauri::generate_context!())
 }

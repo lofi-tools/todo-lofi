@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from '../src/bridge'
@@ -7,14 +8,16 @@ declare const __SHEPHERD_SMOKE_PROJECT__: string
 declare const __SHEPHERD_SMOKE_PHASE__: string
 
 const INTERRUPTED_TASK = 'Other terminal scope'
+const NETWORK_PROMPT = "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"
+const CODEX_WAIT = 75_000
 
 export function button(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll('button'))
     .find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent?.trim()) === label)
 }
 
-export async function waitFor<T>(label: string, read: () => T | null | undefined | false): Promise<T> {
-  const until = performance.now() + 12_000
+export async function waitFor<T>(label: string, read: () => T | null | undefined | false, timeout = 12_000): Promise<T> {
+  const until = performance.now() + timeout
   while (performance.now() < until) {
     const value = read()
     if (value) return value
@@ -385,19 +388,22 @@ async function openFixtureProject() {
   return project
 }
 
-async function replayCodexApproval() {
-  await openFixtureProject()
-  await sendPrompt("Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com")
-
-  const card = await waitFor('waiting Codex approval with command arguments', () => {
+function waitForCodexApproval(timeout?: number) {
+  return waitFor('waiting Codex approval with command arguments', () => {
     if (chatState() === 'failed') {
-      throw new Error(document.querySelector('.diagnostics pre')?.textContent ?? 'The Codex replay failed')
+      throw new Error(document.querySelector('.diagnostics pre')?.textContent ?? 'The Codex turn failed')
     }
     const entry = document.querySelector('.entry__permission')
     const argumentsText = entry?.querySelector('.entry__arguments')?.textContent ?? ''
     return chatState() === 'waiting' && argumentsText.includes('curl') &&
       argumentsText.includes('https://example.com') && entry
-  })
+  }, timeout)
+}
+
+async function replayCodexApproval() {
+  await openFixtureProject()
+  await sendPrompt(NETWORK_PROMPT)
+  const card = await waitForCodexApproval()
   const deny = Array.from(card.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === 'Deny')
   if (!deny) throw new Error('The approval card has no Deny button')
   deny.click()
@@ -405,6 +411,32 @@ async function replayCodexApproval() {
     chatState() === 'ready' &&
     document.querySelector('.entry__permission-decision')?.textContent === 'deny')
   return { ok: true, codexApprovalReplay: true }
+}
+
+async function exerciseLiveCodex() {
+  await openFixtureProject()
+  await sendPrompt(NETWORK_PROMPT)
+  const card = await waitForCodexApproval(CODEX_WAIT)
+  const allow = Array.from(card.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === 'Allow')
+  if (!allow) throw new Error('The approval card has no Allow button')
+  allow.click()
+  await waitFor('recorded allowance and completed turn', () => chatState() === 'ready' &&
+    document.querySelector('.entry__permission-decision')?.textContent === 'allow' &&
+    document.querySelector('.entry__agent')?.textContent, CODEX_WAIT)
+
+  await sendPrompt('Run the shell command `sleep 25` and wait for it to finish.')
+  await waitFor('running sleep tool', () => Array.from(document.querySelectorAll('.entry__tool')).some((entry) =>
+    entry.querySelector('.entry__tool-title')?.textContent?.includes('sleep 25') &&
+    entry.querySelector('.entry__tool-status')?.textContent === 'running'), CODEX_WAIT)
+  const cancel = await enabledButton('Cancel turn')
+  cancel.click()
+  await waitFor('interrupted turn settles', () => chatState() === 'ready')
+
+  await sendPrompt('Reply with the single word: ready.')
+  await waitFor('reply after cancellation', () => chatState() === 'ready' &&
+    Array.from(document.querySelectorAll('.entry__agent')).at(-1)?.textContent?.trim() === 'ready', CODEX_WAIT)
+  const replay = await invoke<boolean>('finish_codex_smoke')
+  return { ok: true, approvalAllowed: true, cancelledRunningTool: true, followUp: true, replay }
 }
 
 async function smoke() {
@@ -517,6 +549,9 @@ void (async () => {
       case 'codex-approval':
         result = await replayCodexApproval()
         break
+      case 'codex-live':
+        result = await exerciseLiveCodex()
+        break
       default:
         result = await smoke()
     }
@@ -531,6 +566,12 @@ void (async () => {
   } finally {
     const confirm = button('Quit anyway')
     if (confirm) confirm.click()
-    else await getCurrentWindow().close()
+    else {
+      await getCurrentWindow().close()
+      if (!result.ok) {
+        const confirm = await enabledButton('Quit anyway').catch(() => undefined)
+        confirm?.click()
+      }
+    }
   }
 })()
