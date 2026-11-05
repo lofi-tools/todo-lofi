@@ -266,7 +266,9 @@ impl Core {
             }
             .into());
         }
-        updated.branch_tip_sha = Some(GitService.checked_out_tip(path, branch)?);
+        let tip = GitService.checked_out_tip(path, branch)?;
+        GitService.retain_task_tip(&repository, task_id.as_str(), &tip)?;
+        updated.branch_tip_sha = Some(tip);
         self.store.save_task(&updated).await?;
         self.tasks.insert(task_id.clone(), updated.clone());
         let Some(path) = updated.worktree_path.as_deref() else {

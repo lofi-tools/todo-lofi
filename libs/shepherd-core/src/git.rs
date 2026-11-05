@@ -440,6 +440,17 @@ impl GitService {
         Ok(None)
     }
 
+    pub fn retain_task_tip(
+        &self,
+        repository: &GitRepository,
+        task_id: &str,
+        tip: &str,
+    ) -> Result<(), GitError> {
+        let reference = format!("refs/shepherd/tasks/{task_id}");
+        run_git(&repository.root, &["update-ref", &reference, tip])?;
+        Ok(())
+    }
+
     pub fn checked_out_tip(&self, path: &Path, branch: &str) -> Result<String, GitError> {
         let reference = format!("refs/heads/{branch}");
         if run_git(path, &["symbolic-ref", "--quiet", "HEAD"])? != reference {
@@ -975,6 +986,35 @@ mod tests {
             )
             .is_ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_recorded_tip_can_restore_a_worktree_after_its_branch_is_deleted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let repository = fixture.repository();
+        let path = task_worktree(&fixture)?;
+        std::fs::write(path.join("README.md"), "archived content\n")?;
+        run_git(&path, &["commit", "-am", "Keep this result"])?;
+        let tip = GitService.checked_out_tip(&path, "shepherd/example")?;
+
+        GitService.retain_task_tip(repository, "example-id", &tip)?;
+        GitService.remove_clean_worktree(repository, &path)?;
+        run_git(fixture.path(), &["branch", "-D", "shepherd/example"])?;
+        assert_eq!(
+            run_git(
+                fixture.path(),
+                &["rev-parse", "refs/shepherd/tasks/example-id"]
+            )?,
+            tip
+        );
+        GitService.restore_worktree(repository, &path, "shepherd/example", Some(&tip))?;
+        assert_eq!(
+            std::fs::read_to_string(path.join("README.md"))?,
+            "archived content\n"
+        );
+        assert_eq!(GitService.checked_out_tip(&path, "shepherd/example")?, tip);
         Ok(())
     }
 
