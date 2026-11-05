@@ -155,8 +155,10 @@ pub struct Task {
 
 impl Task {
     /// A draft appears in the sidebar immediately, but no worktree or branch is
-    /// created until the first prompt.
-    pub fn draft(project_id: ProjectId, title: &str, project_path: &Path) -> Self {
+    /// created until the first prompt. The proposal names the repository's real
+    /// Git directory, so a checkout whose `.git` is a file still gets the right
+    /// path.
+    pub fn draft(project_id: ProjectId, title: &str, git_dir: &Path) -> Self {
         let slug = slugify(title);
         let now = now_millis();
         Self {
@@ -165,11 +167,7 @@ impl Task {
             title: title.to_string(),
             state: TaskState::Draft,
             tier: AgentTier::Native,
-            proposed_worktree_path: project_path
-                .join(".git")
-                .join("shepherd")
-                .join("worktrees")
-                .join(&slug),
+            proposed_worktree_path: git_dir.join("shepherd").join("worktrees").join(&slug),
             proposed_branch: format!("shepherd/{slug}"),
             worktree_path: None,
             branch: None,

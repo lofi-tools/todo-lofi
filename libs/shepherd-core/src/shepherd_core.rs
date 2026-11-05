@@ -463,7 +463,20 @@ impl Core {
             });
         }
 
-        let task = Task::draft(project_id.clone(), &title, &project.path);
+        let git_dir = match GitService::discover(&project.path) {
+            Ok(repository) => repository.git_dir,
+            Err(error) => {
+                // The draft still appears; the first prompt reports the real Git
+                // failure instead of refusing to name a task.
+                tracing::debug!(
+                    project = %project.path.display(),
+                    %error,
+                    "drafting without a resolvable Git directory"
+                );
+                project.path.join(".git")
+            }
+        };
+        let task = Task::draft(project_id.clone(), &title, &git_dir);
         let task_id = task.id.clone();
         let mut updated_project = project.clone();
         updated_project.last_task_id = Some(task_id.clone());

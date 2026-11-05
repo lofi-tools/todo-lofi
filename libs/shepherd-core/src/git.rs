@@ -41,15 +41,10 @@ impl GitService {
     pub fn discover(path: &Path) -> Result<GitRepository, GitError> {
         let root = run_git(path, &["rev-parse", "--show-toplevel"])?;
         let git_dir = run_git(path, &["rev-parse", "--absolute-git-dir"])?;
-        let default_branch = run_git(path, &["symbolic-ref", "--short", "HEAD"]).map_err(|_| {
-            GitError::DetachedHead {
-                path: path.display().to_string(),
-            }
-        })?;
         Ok(GitRepository {
             root: canonicalize(Path::new(&root))?,
             git_dir: canonicalize(Path::new(&git_dir))?,
-            default_branch,
+            default_branch: default_branch(path)?,
         })
     }
 
@@ -84,6 +79,28 @@ impl GitService {
         let status = run_git(worktree_path, &["status", "--porcelain"])?;
         Ok(!status.is_empty())
     }
+}
+
+/// The branch a new worktree starts from. A recorded remote HEAD wins, then
+/// the conventional names, and only then whatever happens to be checked out:
+/// tasks must not branch off an unrelated feature checkout.
+fn default_branch(path: &Path) -> Result<String, GitError> {
+    if let Ok(reference) = run_git(
+        path,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) && let Some(name) = reference.strip_prefix("refs/remotes/origin/")
+    {
+        return Ok(name.to_string());
+    }
+    for candidate in ["main", "master"] {
+        let reference = format!("refs/heads/{candidate}");
+        if run_git(path, &["rev-parse", "--verify", "--quiet", &reference]).is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+    run_git(path, &["symbolic-ref", "--short", "HEAD"]).map_err(|_| GitError::DetachedHead {
+        path: path.display().to_string(),
+    })
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, GitError> {
@@ -138,6 +155,39 @@ mod tests {
         let list =
             run_git(fixture.path(), &["worktree", "list", "--porcelain"]).expect("worktree list");
         assert!(list.contains(&worktree.display().to_string()));
+    }
+
+    #[test]
+    fn a_worktree_starts_from_the_default_branch_not_the_checked_out_one() {
+        let fixture = TestRepository::new().expect("repository fixture");
+        run_git(fixture.path(), &["checkout", "-b", "feature"]).expect("feature branch");
+        fixture
+            .write_file("NOTES.md", "feature only\n")
+            .expect("write change");
+        run_git(fixture.path(), &["add", "NOTES.md"]).expect("stage change");
+        run_git(fixture.path(), &["commit", "-m", "feature commit"]).expect("commit change");
+
+        let repository = GitService::discover(fixture.path()).expect("discover on feature");
+        assert_eq!(repository.default_branch, "main");
+
+        let worktree = repository
+            .git_dir
+            .join("shepherd")
+            .join("worktrees")
+            .join("task-2");
+        GitService
+            .create_worktree(
+                &repository,
+                &worktree,
+                "shepherd/task-2",
+                &repository.default_branch,
+            )
+            .expect("worktree should be created from main");
+
+        assert!(!worktree.join("NOTES.md").exists());
+        let head = run_git(&worktree, &["rev-parse", "HEAD"]).expect("worktree head");
+        let main = run_git(fixture.path(), &["rev-parse", "main"]).expect("main head");
+        assert_eq!(head, main);
     }
 
     #[test]
