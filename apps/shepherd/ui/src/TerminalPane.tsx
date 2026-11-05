@@ -7,7 +7,7 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
-import { encodeLegacyKey } from './terminal_keys'
+import { encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 
 interface TerminalPaneProps {
   projectId: string
@@ -358,6 +358,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   let resizing = false
   let queuedSize: ReturnType<typeof measure> | undefined
   let inputWrites = Promise.resolve()
+  const reportedKeys = new Map<string, string>()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
   let mouseButton: number | undefined
@@ -635,12 +636,25 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         return
       }
     }
-    const data = encodeLegacyKey(event, frame?.modes ?? 0)
+    const modes = frame?.modes ?? 0
+    if (event.metaKey && ['c', 'v'].includes(event.key.toLowerCase())) return
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
+    const encoded = encodeKittyKey(event, modes)
+    if (encoded && event.code) reportedKeys.set(event.code, event.key)
+    const data = encoded ?? encodeLegacyKey(event, modes)
     if (data === null) return
     selection = undefined
     draw()
     event.preventDefault()
     write(data)
+  }
+
+  function onKeyUp(event: KeyboardEvent) {
+    const key = reportedKeys.get(event.code)
+    if (!key) return
+    reportedKeys.delete(event.code)
+    const data = encodeKittyKey(event, frame?.modes ?? 0, key)
+    if (data) write(data)
   }
 
   function onPaste(event: ClipboardEvent) {
@@ -745,12 +759,14 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         autocomplete="off"
         spellcheck={false}
         onKeyDown={onKeyDown}
+        onKeyUp={onKeyUp}
         onFocus={() => {
           props.onFocus(props.terminalId)
           if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I')
         }}
         onBlur={() => {
           props.onFocus(null)
+          reportedKeys.clear()
           if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O')
         }}
         onPaste={onPaste}
@@ -759,11 +775,11 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         onCompositionEnd={(event) => {
           composing = false
           event.currentTarget.value = ''
-          write(event.data)
+          write(encodeTerminalText(event.data, frame?.modes ?? 0))
         }}
         onInput={(event) => {
           if (composing || (event as InputEvent).isComposing) return
-          write(event.currentTarget.value)
+          write(encodeTerminalText(event.currentTarget.value, frame?.modes ?? 0))
           event.currentTarget.value = ''
         }}
       />
