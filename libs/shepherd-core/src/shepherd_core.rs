@@ -1697,7 +1697,6 @@ mod live_exit {
     struct KilledCodexFactory {
         run: LiveCodexRun,
         marker: PathBuf,
-        wrapper: Option<PathBuf>,
     }
 
     impl HarnessFactory for KilledCodexFactory {
@@ -1706,15 +1705,7 @@ mod live_exit {
         }
 
         fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
-            if let Some(wrapper) = &self.wrapper {
-                SpawnSpec {
-                    program: wrapper.to_string_lossy().into_owned(),
-                    cwd,
-                    ..SpawnSpec::default()
-                }
-            } else {
-                self.run.spec(cwd, "killed", Some(&self.marker))
-            }
+            self.run.spec_with_exit_gate(cwd, "killed", &self.marker)
         }
     }
 
@@ -1730,37 +1721,11 @@ mod live_exit {
         let database = TestDatabase::new()?;
         let directory = tempfile::TempDir::new()?;
         let marker = directory.path().join("kill");
-        let wrapper = if run.is_replay() {
-            None
-        } else {
-            let wrapper = directory.path().join("codex-killed.sh");
-            let spec = run.spec(repository.path().to_path_buf(), "killed", None);
-            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
-            let invocation = std::iter::once(spec.program.as_str())
-                .chain(spec.args.iter().map(String::as_str))
-                .map(quote)
-                .collect::<Vec<_>>()
-                .join(" ");
-            // Keep the harness pipe on fd 3 when the shell backgrounds Codex.
-            let script = format!(
-                "#!/bin/bash\nexec 3<&0\n{invocation} <&3 &\nchild=$!\nwhile [ ! -f {} ] && kill -0 \"$child\" 2>/dev/null; do sleep 0.1; done\nif [ -f {} ]; then printf 'codex app-server killed mid-turn\\n' >&2; kill -9 \"$child\"; fi\nwait \"$child\"\n",
-                quote(&marker.to_string_lossy()),
-                quote(&marker.to_string_lossy()),
-            );
-            std::fs::write(&wrapper, script)?;
-            std::fs::set_permissions(
-                &wrapper,
-                std::os::unix::fs::PermissionsExt::from_mode(0o755),
-            )?;
-            Some(wrapper)
-        };
-
         let mut core = Core::with_services(
             Box::new(TursoStore::open(&database.uri()).await?),
             Box::new(KilledCodexFactory {
                 run: run.clone(),
                 marker: marker.clone(),
-                wrapper,
             }),
         );
 

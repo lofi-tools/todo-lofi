@@ -506,6 +506,21 @@ async function resumeCodexAfterRestart() {
   return { ok: true, resumedCodexAfterRestart: true, retainedWorktree: true, replay }
 }
 
+async function exerciseCodexExit() {
+  await openFixtureProject()
+  await startCodexSleep()
+  await invoke('trigger_codex_smoke_exit')
+  await waitFor('failed task with a mid-turn exit row', () => chatState() === 'failed' &&
+    document.querySelector('.entry__failure-title')?.textContent === 'Agent exited mid-turn')
+  const diagnostics = await waitFor('Codex diagnostics', () =>
+    document.querySelector<HTMLDetailsElement>('.diagnostics'))
+  diagnostics.querySelector('summary')?.click()
+  await waitFor('visible stderr tail', () => diagnostics.open &&
+    diagnostics.querySelector('pre')?.textContent?.includes('codex app-server killed mid-turn'))
+  const replay = await invoke<boolean>('finish_codex_smoke')
+  return { ok: true, failedMidTurn: true, stderrVisible: true, replay }
+}
+
 async function smoke() {
   const project = await openFixtureProject()
   if (navigator.platform.startsWith('Mac')) {
@@ -622,6 +637,9 @@ void (async () => {
         break
       case 'codex-after-restart':
         result = await resumeCodexAfterRestart()
+        break
+      case 'codex-exit':
+        result = await exerciseCodexExit()
         break
       default:
         result = await smoke()

@@ -30,8 +30,13 @@ case "${1:-}" in
     phases=(codex-before-restart codex-after-restart)
     export SHEPHERD_DEV_CODEX_SMOKE=restart
     ;;
+  --codex-exit)
+    command -v python3 >/dev/null
+    phases=(codex-exit)
+    export SHEPHERD_DEV_CODEX_SMOKE=mid-turn-exit
+    ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart]" >&2
+    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit]" >&2
     exit 2
     ;;
 esac

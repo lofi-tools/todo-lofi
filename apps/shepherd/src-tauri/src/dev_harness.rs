@@ -13,13 +13,15 @@ use tauri::Manager;
 #[cfg(debug_assertions)]
 pub fn factory(
     _app: &tauri::App,
-    isolated: bool,
+    data_directory: Option<&std::path::Path>,
 ) -> std::io::Result<Option<Box<dyn HarnessFactory>>> {
     #[cfg(feature = "desktop-codex-smoke")]
-    if let Some(factory) = codex_smoke_factory(_app, isolated)? {
+    if let Some(factory) = codex_smoke_factory(_app, data_directory)? {
         return Ok(Some(factory));
     }
-    if isolated && std::env::var("SHEPHERD_DEV_SCRIPTED_HARNESS").as_deref() == Ok("1") {
+    if data_directory.is_some()
+        && std::env::var("SHEPHERD_DEV_SCRIPTED_HARNESS").as_deref() == Ok("1")
+    {
         return Ok(Some(Box::new(ScriptedHarnessFactory)));
     }
     Ok(None)
@@ -36,19 +38,20 @@ impl HarnessFactory for ScriptedHarnessFactory {
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
 fn codex_smoke_factory(
     app: &tauri::App,
-    isolated: bool,
+    data_directory: Option<&std::path::Path>,
 ) -> std::io::Result<Option<Box<dyn HarnessFactory>>> {
     let mode = std::env::var("SHEPHERD_DEV_CODEX_SMOKE").unwrap_or_default();
     if mode.is_empty() {
         return Ok(None);
     }
-    if !isolated {
+    let Some(data_directory) = data_directory else {
         return Err(std::io::Error::other("Codex smoke requires isolated data"));
-    }
+    };
     let scenario = match mode.as_str() {
         "approval-replay" => "network-approval",
         "approval-cancel" => "desktop-approval-cancel",
         "worktree-edit" => "desktop-worktree-edit",
+        "mid-turn-exit" => "desktop-mid-turn-exit",
         "restart" => match std::env::var("SHEPHERD_DESKTOP_SMOKE_PHASE").as_deref() {
             Ok("codex-before-restart") => "desktop-before-restart",
             Ok("codex-after-restart") => "desktop-after-restart",
@@ -65,12 +68,29 @@ fn codex_smoke_factory(
     };
     let run = run.map_err(|error| std::io::Error::other(error.to_string()))?;
     let apply_patch = mode == "worktree-edit" && run.is_replay();
+    let exit_gate = (mode == "mid-turn-exit").then(|| data_directory.join("codex-exit"));
+    if let Some(gate) = &exit_gate {
+        app.manage(CodexExitGate(gate.clone()));
+    }
     app.manage(run.clone());
     Ok(Some(Box::new(CodexSmoke {
         run,
         session,
         apply_patch,
+        exit_gate,
     })))
+}
+
+#[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
+struct CodexExitGate(std::path::PathBuf);
+
+#[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
+#[tauri::command]
+pub fn trigger_codex_smoke_exit(app: tauri::AppHandle) -> Result<(), String> {
+    let gate = app
+        .try_state::<CodexExitGate>()
+        .ok_or_else(|| "Codex exit smoke is inactive".to_string())?;
+    std::fs::write(&gate.0, b"kill").map_err(|error| error.to_string())
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
@@ -92,15 +112,21 @@ struct CodexSmoke {
     run: LiveCodexRun,
     session: &'static str,
     apply_patch: bool,
+    exit_gate: Option<std::path::PathBuf>,
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
 impl HarnessFactory for CodexSmoke {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
-        Ok(Box::new(self.run.harness(self.session, false)))
+        Ok(Box::new(
+            self.run.harness(self.session, self.exit_gate.is_some()),
+        ))
     }
 
     fn spawn_spec(&self, cwd: std::path::PathBuf) -> agent_harness::SpawnSpec {
+        if let Some(gate) = &self.exit_gate {
+            return self.run.spec_with_exit_gate(cwd, self.session, gate);
+        }
         let mut spec = self.run.spec(cwd, self.session, None);
         if self.apply_patch {
             spec.environment

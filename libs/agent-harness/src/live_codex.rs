@@ -234,6 +234,41 @@ impl LiveCodexRun {
         }
     }
 
+    pub fn spec_with_exit_gate(&self, cwd: PathBuf, session: &str, gate: &Path) -> SpawnSpec {
+        let mut spec = self.spec(cwd, session, Some(gate));
+        if !self.is_replay() {
+            // Bash otherwise disconnects the background command from the harness pipe.
+            let wrapper = r#"
+gate=$1
+shift
+exec 3<&0
+"$@" <&3 &
+child=$!
+while kill -0 "$child" 2>/dev/null; do
+  if [ -f "$gate" ]; then
+    if kill -KILL "$child" 2>/dev/null; then
+      printf 'codex app-server killed mid-turn\n' >&2
+    fi
+    break
+  fi
+  sleep 0.05
+done
+wait "$child"
+"#;
+            let program = std::mem::replace(&mut spec.program, "/bin/bash".into());
+            let mut arguments = vec![
+                "-c".into(),
+                wrapper.into(),
+                "shepherd-codex-exit".into(),
+                gate.to_string_lossy().into_owned(),
+                program,
+            ];
+            arguments.append(&mut spec.args);
+            spec.args = arguments;
+        }
+        spec
+    }
+
     pub fn is_replay(&self) -> bool {
         self.cached.is_some()
     }

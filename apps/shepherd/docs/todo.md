@@ -329,8 +329,7 @@ Manual script on a throwaway repository:
 3. Approve a tool call; confirm the decision is recorded.
 4. Start another turn and cancel it.
 5. Kill the Codex process mid-turn; confirm `failed` and the stderr tail.
-   Covered by the ignored live test: the real process is SIGKILLed mid-turn and
-   the task ends `failed` with a failure row and the stderr tail.
+   Covered by the core exit test and the native process-exit smoke below.
 6. Restart Shepherd and resume the session.
    Covered by the core restart test and the two-launch native smoke below.
 
@@ -391,6 +390,16 @@ resume, and the thread returned by Codex.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-restart
+```
+
+The native process-exit smoke terminates its own Codex child with SIGKILL
+during a running tool call. It verifies the failed task, the **Agent exited
+mid-turn** row, and the stderr tail in Diagnostics. The verified response
+sequence and exit are recorded in `desktop-mid-turn-exit.json` and replayed
+after the smoke requests the exit.
+
+```sh
+direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-exit
 ```
 
 **If it fails:** do not build more adapters or UI breadth. Record the exact
@@ -709,7 +718,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | --- | --- | --- | --- |
 | 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shepherd-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
 | 2026-11-05 | S1 | Pass | The two-launch macOS smoke added the repository through the picker, created a draft with no branch or worktree, displayed scripted text and a tool row, ran `pwd` and `printf`, and sent Ctrl+C to a foreground command. Task switching preserved the draft, transcript, and shared terminal. Closing the window warned about one waiting task. After confirming and relaunching, the task was interrupted, terminal records were ended, and **Resume** reattached the scripted session. The 18-test browser suite also passed. |
-| 2026-11-05 | S2 | Partial | A live headless run on a disposable repository (`codex-cli 0.166.0-alpha.6`, ignored test) streamed 32 deltas, reported two tool calls, changed the file, reopened the same thread after restarting the process, and cancelled a running turn. It found and fixed one protocol gap: `thread/start` takes `workspace-write`, not `workspaceWrite`. A mid-turn SIGKILL of the real process is proven through the core (ignored test: task `failed`, failure row, stderr tail). A live approval request is also proven at the adapter: Codex asked before a network command, the request carried the command and its decisions, the denial was recorded, and the turn completed. Restart-resume is proven through the core too: an ignored test quits mid-turn, reloads the same database, sees the task interrupted, resumes the recorded thread and finishes another turn. The native macOS smoke replayed the captured live approval exchange through the actual adapter and window. The command and approval actions appeared in the transcript, clicking Deny recorded the decision, and the task returned to ready. A native live run allowed a network approval, cancelled a running tool, and finished a follow-up in the same thread at GPT-6.1 Terra low effort. The live desktop also streamed a one-file edit and displayed its worktree diff in Review. The two-launch native smoke confirmed the interrupted state and resumed the same live Codex thread and worktree. The native failure and stderr presentation after a mid-turn process kill remains open. Automated suites: 38 `agent-harness` (2 live, ignored), 37 `shepherd-core` plus 2 ignored live runs, 9 shell. |
+| 2026-11-05 | S2 | Pass | The native macOS window ran the installed Codex CLI at GPT-6.1 Terra low effort on disposable repositories. It streamed a one-file edit into Review, allowed an approval, interrupted a running command, accepted a follow-up, rendered the failure row and stderr after a mid-turn SIGKILL, and resumed the same thread and worktree after relaunch. All four native scenarios replayed their captures in fresh disposable data. The headless adapter and core suites also cover protocol probing, tool mapping, fallback, failure, and session recovery. |
 |  | S3 |  |  |
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim and less, distinguished Ctrl+I from Tab in interactive fish, and checked composition events, bracketed paste and SGR mouse reports. It verified PTY size changes, preserved a shared terminal across task switches, and restarted both shared and task terminals after relaunch. The latest run painted the tail of a 1 MiB burst in 185 ms and all 24 paced markers, with a 93 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. System IME, Ubuntu and the manual workday gate remain open. |
 |  | S5 |  |  |
@@ -721,7 +730,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | Unknown | Resolve by |
 | --- | --- |
 | Does `libghostty-vt` build with the pinned Zig on macOS and Ubuntu? | S1 spike; fallback to `alacritty_terminal` behind the trait if not. |
-| Does Codex `app-server` expose the methods Shepherd needs on the installed version? | Resolved for 0.166.0-alpha.6: thread start, turn start, streaming items, interrupt and resume all answered live (see Gate log). The desktop window was not exercised live; an approval request, a mid-turn kill and a restart-and-resume through the core were. |
+| Does Codex `app-server` expose the methods Shepherd needs on the installed version? | Resolved on macOS with 0.166.0-alpha.6. The native S2 smokes verified thread start, turn start, streamed items, approvals, interrupt, mid-turn exit, and thread resume. |
 | Does Tauri’s system webview support the preview iframe and annotation injection? | S6 preview fixture; screenshot fallback if not. |
 | Does Turso FTS behave closely enough to the search spec? | S6 query/ranking tests; keep search syntax behind `search.rs`. |
 | Does squash-merge behave correctly with the project’s hooks and signing? | S3 temp-repo tests; never test on a real checkout. |
