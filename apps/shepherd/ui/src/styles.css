@@ -866,6 +866,17 @@ textarea {
   clip-path: inset(50%);
 }
 
+.terminal-view__copy {
+  position: absolute;
+  inset: 8px;
+  resize: none;
+  padding: 4px;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/17px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .terminal-view__find {
   position: absolute;
   top: 8px;

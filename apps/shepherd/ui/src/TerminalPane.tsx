@@ -342,11 +342,13 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
+  const [copying, setCopying] = createSignal(false)
   const [visibleText, setVisibleText] = createSignal('')
   const [searching, setSearching] = createSignal(false)
   const [noMatch, setNoMatch] = createSignal(false)
   let match: bridge.TerminalMatch | null = null
   let searchInput: HTMLInputElement | undefined
+  let copyInput: HTMLTextAreaElement | undefined
   let searchGeneration = 0
   let composing = false
   let canvas: HTMLCanvasElement | undefined
@@ -669,6 +671,14 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       searchInput?.focus()
       return
     }
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'x' && frame) {
+      event.preventDefault()
+      setVisibleText(viewportText(frame))
+      setCopying(true)
+      copyInput?.focus()
+      copyInput?.select()
+      return
+    }
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'c') {
       const text = selectedText()
       if (text) {
@@ -725,7 +735,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
         mirrorTimer = window.setTimeout(() => {
           mirrorTimer = undefined
-          if (frame) setVisibleText(viewportText(frame))
+          if (frame && !copying()) setVisibleText(viewportText(frame))
         }, 100)
       }
     }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {
@@ -810,6 +820,23 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         }}
       />
       <pre class="terminal-view__text" aria-label="Terminal output">{visibleText()}</pre>
+      <Show when={copying()}>
+        <textarea
+          ref={copyInput}
+          class="terminal-view__copy"
+          aria-label="Copy terminal output"
+          aria-description="Use the selection shortcuts to copy text. Escape returns to the terminal."
+          value={visibleText()}
+          readOnly
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape') return
+            event.preventDefault()
+            setCopying(false)
+            if (frame) setVisibleText(viewportText(frame))
+            input?.focus({ preventScroll: true })
+          }}
+        />
+      </Show>
       <Show when={finding()}>
         <form class="terminal-view__find" onSubmit={(event) => {
           event.preventDefault()
