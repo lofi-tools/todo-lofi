@@ -91,12 +91,30 @@ export function App() {
     setArchiveVisibility((previous) => new Map(previous).set(projectId, visible))
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
-  const [inspectorTab, setInspectorTab] = createSignal('terminals')
+  const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
+  const inspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
+  let pendingInspectorTabSave = Promise.resolve()
   let inspector: HTMLElement | undefined
   const [emptyInspectorWidth, setEmptyInspectorWidth] = createSignal<number | null>(null)
   const inspectorWidth = () => selectedTaskId()
     ? workspace()?.layout.inspectorWidth ?? null
     : emptyInspectorWidth()
+
+  function setInspectorTab(tab: bridge.InspectorTab) {
+    const projectId = selectedProjectId()
+    setInspectorTabs((tabs) => new Map(tabs).set(projectId, tab))
+    if (!projectId) return
+    pendingInspectorTabSave = pendingInspectorTabSave
+      .then(() => bridge.saveInspectorTab(projectId, tab))
+      .catch((failure) => {
+        setError(`Could not save the inspector tab. ${describe(failure)}`)
+      })
+  }
+
+  function restoreInspectorTab(projectId: string, tab: bridge.InspectorTab) {
+    if (!INSPECTOR_TABS.some((option) => option.id === tab && option.enabled)) return
+    setInspectorTabs((tabs) => tabs.has(projectId) ? tabs : new Map(tabs).set(projectId, tab))
+  }
 
   async function resizeInspector(width: number) {
     const taskId = selectedTaskId()
@@ -518,6 +536,7 @@ export function App() {
   function quit() {
     void run(async () => {
       try {
+        await pendingInspectorTabSave
         const summary = await bridge.quit(false)
         setShutdownNote(`quit: ${summary.interruptedTasks} interrupted`)
         allowClose = true
@@ -535,6 +554,7 @@ export function App() {
 
   function forceQuit() {
     void run(async () => {
+      await pendingInspectorTabSave
       const summary = await bridge.quit(true)
       setQuitRequired(null)
       setShutdownNote(`quit: ${summary.interruptedTasks} interrupted`)
@@ -879,6 +899,7 @@ export function App() {
                   projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
                   shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
+                  onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}
                   attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal}
                 />}
               </Show>
@@ -1314,8 +1335,8 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
   )
 }
 
-interface InspectorTab {
-  id: string
+interface InspectorTabOption {
+  id: bridge.InspectorTab
   label: string
   enabled: boolean
 }
@@ -1338,7 +1359,7 @@ function PlusIcon() {
   )
 }
 
-const INSPECTOR_TABS: InspectorTab[] = [
+const INSPECTOR_TABS: InspectorTabOption[] = [
   { id: 'terminals', label: 'Terminals', enabled: true },
   { id: 'preview', label: 'Preview', enabled: false },
   { id: 'review', label: 'Review', enabled: true },

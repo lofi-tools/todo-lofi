@@ -320,7 +320,7 @@ async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
 }
 
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
-  const initialWidth = paneWidth(title)
+  const initialWidth = await waitFor('painted terminal before splitting', () => paneWidth(title))
   const initialColumns = await ptyColumns(terminalId, title, 'INITIAL_SIZE')
   const split = await waitFor('split action', () => {
     const entry = button('Split right')
@@ -390,6 +390,7 @@ async function exerciseProjectSwitch(project: bridge.ProjectSnapshot, terminal: 
   secondRow.click()
   await waitFor('other project without the shared terminal', () =>
     secondRow.getAttribute('aria-current') === 'true' && !terminalPane(terminal.title))
+  await openInspectorTab('review')
   await bridge.terminalWrite(terminal.id, "printf 'S4_%s:%s\\n' PROJECT_AFTER \"$project_marker\"\r")
 
   const originalRow = await enabledButton(project.name)
@@ -399,6 +400,14 @@ async function exerciseProjectSwitch(project: bridge.ProjectSnapshot, terminal: 
     return pane && terminalOutput(pane).includes('S4_PROJECT_BEFORE')
       && terminalOutput(pane).includes('S4_PROJECT_AFTER:preserved')
   })
+  secondRow.click()
+  await waitFor('Review still selected for the other project', () =>
+    secondRow.getAttribute('aria-current') === 'true'
+      && document.querySelector('#inspector-tab-review[aria-selected="true"]'))
+  originalRow.click()
+  await waitFor('Terminals still selected for the original project', () =>
+    originalRow.getAttribute('aria-current') === 'true'
+      && document.querySelector('#inspector-tab-terminals[aria-selected="true"]'))
 }
 
 async function selectTask(title: string) {
@@ -568,7 +577,7 @@ async function exerciseCodexEdit() {
   return { ok: true, streamedText: true, toolRow: true, reviewedWorktreeEdit: true, replay }
 }
 
-async function openInspectorTab(tab: 'review' | 'git') {
+async function openInspectorTab(tab: 'terminals' | 'review' | 'git') {
   const control = await waitFor(`${tab} tab`, () =>
     document.querySelector<HTMLButtonElement>(`#inspector-tab-${tab}`))
   control.click()
@@ -752,6 +761,7 @@ async function smoke() {
   await selectTask(INTERRUPTED_TASK)
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
+  await openInspectorTab('git')
   await requestQuitWithLiveTask()
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
@@ -767,6 +777,9 @@ async function restore() {
   }
   const layout = await bridge.terminalLayout(project.id)
   if (layout.root?.type !== 'split') throw new Error('The split layout was not restored')
+  await waitFor('Git tab selected after relaunch', () =>
+    document.querySelector('#inspector-tab-git[aria-selected="true"]'))
+  await openInspectorTab('terminals')
 
   const restart = await waitFor('restored terminal restart action', () => {
     const pane = terminalPane(first.title)

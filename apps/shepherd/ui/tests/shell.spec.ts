@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -144,7 +144,8 @@ test.beforeEach(async ({ context }) => {
       },
     ]
 
-    let terminalLayout: TerminalLayout = { revision: 0, root: null }
+    let terminalLayout: TerminalLayout = { revision: 0, root: null, inspectorTab: 'terminals' }
+    const otherInspectorTabs = new Map<string, InspectorTab>()
     const workspaceLayouts = new Map<string, WorkspaceLayout>()
     const subscriptions: string[] = []
     if (new URLSearchParams(window.location.search).has('scoped-terminals')) {
@@ -164,6 +165,7 @@ test.beforeEach(async ({ context }) => {
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/other',
       })
       terminalLayout = {
+        ...terminalLayout,
         revision: 1,
         root: {
           type: 'split', axis: 'horizontal', ratio: 500,
@@ -181,6 +183,7 @@ test.beforeEach(async ({ context }) => {
       )
       const panes = terminals.map(({ id }): TerminalSplit => ({ type: 'pane', terminalId: id }))
       terminalLayout = {
+        ...terminalLayout,
         revision: 1,
         root: panes.reduceRight((second, first) => ({ type: 'split', axis: 'horizontal', ratio: 500, first, second })),
       }
@@ -356,10 +359,15 @@ test.beforeEach(async ({ context }) => {
             return workspace(task.id)
           }
           case 'terminal_layout':
-            return terminalLayout
+            return args.projectId === project.id ? terminalLayout
+              : { revision: 0, root: null, inspectorTab: otherInspectorTabs.get(args.projectId) ?? 'terminals' }
           case 'save_terminal_layout':
-            terminalLayout = { ...args.layout, revision: args.layout.revision + 1 }
+            terminalLayout = { ...args.layout, revision: args.layout.revision + 1, inspectorTab: terminalLayout.inspectorTab }
             return terminalLayout
+          case 'save_inspector_tab':
+            if (args.projectId === project.id) terminalLayout = { ...terminalLayout, inspectorTab: args.tab }
+            else otherInspectorTabs.set(args.projectId, args.tab)
+            return null
           case 'terminal_list':
           case 'start_terminal':
             return [...terminals]

@@ -531,8 +531,9 @@ task-scoped, persistent and fast enough.
   (swap with the active task; keep running while hidden).
 - [x] Add **New task terminal**, **New shared terminal**, the instance menu,
   ended-terminal restart and close/reopen.
-- [x] Make the inspector tab project-level so shared terminals stay in view
-  across task switches.
+- [x] Save the selected inspector tab with the project layout. Shared terminals
+  stay in view across task switches, and each project restores its own tab when
+  selected again or reopened after a relaunch.
 - [x] Route terminal focus and keyboard input. Show bell attention on the
   Terminals tab and on the owning task for task-scoped terminals.
   Command+Shift+T on macOS and Ctrl+Shift+N on Linux open and focus a new

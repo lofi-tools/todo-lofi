@@ -20,7 +20,8 @@ use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
-    TerminalEvent, TerminalId, TerminalRecord, TerminalService, TerminalSnapshot, TerminalSpec,
+    InspectorTab, TerminalEvent, TerminalId, TerminalRecord, TerminalService, TerminalSnapshot,
+    TerminalSpec,
 };
 use shepherd_core::{
     Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary, TaskId,
@@ -1231,6 +1232,20 @@ pub mod commands {
             .lock()
             .await
             .save_terminal_layout(&ProjectId::new(project_id), layout)
+            .await?)
+    }
+
+    #[tauri::command]
+    pub async fn save_inspector_tab(
+        state: State<'_, ShellState>,
+        project_id: String,
+        tab: InspectorTab,
+    ) -> Result<(), BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .save_inspector_tab(&ProjectId::new(project_id), tab)
             .await?)
     }
 

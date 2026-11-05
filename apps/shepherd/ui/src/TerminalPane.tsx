@@ -60,6 +60,7 @@ interface TerminalPaneProps {
   shown: boolean
   shortcutsEnabled: boolean
   onShow: () => void
+  onLayoutLoaded: (layout: bridge.TerminalLayout) => void
   attention: string[]
   onTerminalFocus: (id: string | null) => void
   listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
@@ -69,7 +70,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   let region: HTMLDivElement | undefined
   const measuredSizes = new Map<string, TerminalSize>()
   const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
-  const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null })
+  const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null, inspectorTab: 'terminals' })
   const [layoutLoaded, setLayoutLoaded] = createSignal(false)
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
   const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
@@ -248,7 +249,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (disposed) return
       batch(() => {
         if (props.listEvent === initialEvent) setTerminals(list)
-        if (saved) setLayout(saved)
+        setLayout(saved)
+        props.onLayoutLoaded(saved)
         setLayoutLoaded(true)
       })
     })

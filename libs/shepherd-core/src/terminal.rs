@@ -129,6 +129,19 @@ pub struct TerminalSnapshot {
 pub struct TerminalLayout {
     pub revision: u64,
     pub root: Option<TerminalSplit>,
+    #[serde(default)]
+    pub inspector_tab: InspectorTab,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InspectorTab {
+    #[default]
+    Terminals,
+    Preview,
+    Review,
+    Git,
+    Files,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

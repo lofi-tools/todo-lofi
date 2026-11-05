@@ -306,12 +306,14 @@ export function saveWorkspaceLayout(taskId: string, layout: WorkspaceLayout): Pr
 }
 
 export type SplitAxis = 'horizontal' | 'vertical'
+export type InspectorTab = 'terminals' | 'preview' | 'review' | 'git' | 'files'
 export type TerminalSplit =
   | { type: 'pane'; terminalId: string }
   | { type: 'split'; axis: SplitAxis; ratio: number; first: TerminalSplit; second: TerminalSplit }
 export interface TerminalLayout {
   revision: number
   root: TerminalSplit | null
+  inspectorTab: InspectorTab
 }
 
 export function terminalLayout(projectId: string): Promise<TerminalLayout> {
@@ -320,6 +322,10 @@ export function terminalLayout(projectId: string): Promise<TerminalLayout> {
 
 export function saveTerminalLayout(projectId: string, layout: TerminalLayout): Promise<TerminalLayout> {
   return invoke('save_terminal_layout', { projectId, layout })
+}
+
+export function saveInspectorTab(projectId: string, tab: InspectorTab): Promise<void> {
+  return invoke('save_inspector_tab', { projectId, tab })
 }
 
 export function terminalList(projectId: string): Promise<TerminalSnapshot[]> {

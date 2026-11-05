@@ -38,7 +38,7 @@ use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::store::{MemoryStore, Store, StoreError};
-use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalSnapshot};
+use crate::terminal::{InspectorTab, TerminalId, TerminalLayout, TerminalRecord, TerminalSnapshot};
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -403,17 +403,47 @@ impl Core {
         if !self.valid_terminal_layout(project_id, &layout) {
             return Err(CoreError::InvalidTerminalLayout);
         }
-        if self.terminal_layout(project_id)?.revision != layout.revision {
+        let current = self.terminal_layout(project_id)?;
+        if current.revision != layout.revision {
             return Err(CoreError::TerminalLayoutChanged);
         }
+        layout.inspector_tab = current.inspector_tab;
         layout.revision = layout
             .revision
             .checked_add(1)
             .ok_or(CoreError::TerminalLayoutChanged)?;
-        self.store.save_terminal_layout(project_id, &layout).await?;
+        self.persist_terminal_layout(project_id, &layout).await?;
+        Ok(layout)
+    }
+
+    pub async fn save_inspector_tab(
+        &mut self,
+        project_id: &ProjectId,
+        tab: InspectorTab,
+    ) -> Result<(), CoreError> {
+        if self.shutdown != ShutdownState::Running {
+            return Err(CoreError::NotRunning {
+                state: self.shutdown,
+            });
+        }
+        let mut layout = self.terminal_layout(project_id)?;
+        if layout.inspector_tab == tab {
+            return Ok(());
+        }
+        // Tab changes leave the split revision available for in-flight split edits.
+        layout.inspector_tab = tab;
+        self.persist_terminal_layout(project_id, &layout).await
+    }
+
+    async fn persist_terminal_layout(
+        &mut self,
+        project_id: &ProjectId,
+        layout: &TerminalLayout,
+    ) -> Result<(), CoreError> {
+        self.store.save_terminal_layout(project_id, layout).await?;
         self.terminal_layouts
             .insert(project_id.clone(), layout.clone());
-        Ok(layout)
+        Ok(())
     }
 
     pub fn terminal_record(&self, id: &TerminalId) -> Result<TerminalRecord, CoreError> {
@@ -3314,17 +3344,22 @@ mod tests {
                 terminal_id: id.into(),
             })
         };
+        let legacy_layout: TerminalLayout = serde_json::from_str(r#"{"revision":0,"root":null}"#)?;
+        assert_eq!(legacy_layout, TerminalLayout::default());
         let edit = TerminalLayout {
-            revision: 0,
             root: Some(TerminalSplit::Split {
                 axis: SplitAxis::Horizontal,
                 ratio: 650,
                 first: pane("first"),
                 second: pane("second"),
             }),
+            ..legacy_layout
         };
+        core.save_inspector_tab(&project, InspectorTab::Review)
+            .await?;
         let saved = core.save_terminal_layout(&project, edit.clone()).await?;
         assert_eq!(saved.revision, 1);
+        assert_eq!(saved.inspector_tab, InspectorTab::Review);
         assert!(matches!(
             core.save_terminal_layout(&project, edit).await,
             Err(CoreError::TerminalLayoutChanged)
@@ -3335,6 +3370,7 @@ mod tests {
                 TerminalLayout {
                     revision: saved.revision,
                     root: Some(*pane("foreign")),
+                    ..TerminalLayout::default()
                 }
             )
             .await,

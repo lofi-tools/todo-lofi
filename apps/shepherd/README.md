@@ -40,8 +40,9 @@ a Vim edit, pages through less, selects a result in full-screen fzf, and
 exercises Kitty key reports, bracketed paste,
 mouse reports, scrollback search, PTY resizing, output bursts and terminal
 continuity while switching tasks or projects. It also checks distinct Ctrl+I and Tab
-bindings when fish 4 or later is installed. The second launch checks layout
-restoration and restarts a shared terminal and a task terminal in its worktree.
+bindings when fish 4 or later is installed. The second launch checks the saved
+inspector tab and split layout, then restarts a shared terminal and a task
+terminal in its worktree.
 Run it from an active desktop session with `vim`, `less`, `fzf` and `python3`
 on your path.
 
