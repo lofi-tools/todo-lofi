@@ -406,6 +406,8 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   let canvas: HTMLCanvasElement | undefined
   let container: HTMLDivElement | undefined
   let frame: bridge.TerminalFrame | null = null
+  let paintRequest: number | undefined
+  let dirtyRows: Set<number> | null = null
   let cellWidth = 7.8
   let lastSent = ''
   let resizing = false
@@ -421,7 +423,19 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     if (props.focusRequest?.id === props.terminalId) input?.focus({ preventScroll: true })
   })
 
-  function draw(changedRows: Iterable<number> | null = null) {
+  function scheduleDraw(rows: Iterable<number> | null = null) {
+    if (rows === null) dirtyRows = null
+    else if (dirtyRows) for (const row of rows) dirtyRows.add(row)
+    if (paintRequest !== undefined) return
+    paintRequest = window.requestAnimationFrame(() => {
+      paintRequest = undefined
+      const rows = dirtyRows
+      dirtyRows = new Set()
+      draw(rows)
+    })
+  }
+
+  function draw(changedRows: Iterable<number> | null) {
     const current = frame
     if (!canvas || !current) return
     const context = canvas.getContext('2d')
@@ -564,7 +578,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     selection = { start: index, end: index }
     selecting = event.pointerId
     event.currentTarget.setPointerCapture(event.pointerId)
-    draw()
+    scheduleDraw()
   }
 
   function onPointerMove(event: PointerEvent) {
@@ -572,7 +586,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     const cell = cellAt(event)
     if (!cell || !frame || !selection || event.pointerId !== selecting) return
     selection.end = cell.row * frame.columns + cell.column
-    draw()
+    scheduleDraw()
   }
 
   function releaseMouse(event: PointerEvent) {
@@ -644,7 +658,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     setSearching(false)
     setNoMatch(false)
     match = null
-    draw()
+    scheduleDraw()
   }
 
   function closeSearch() {
@@ -663,7 +677,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       if (generation !== searchGeneration) return
       match = found
       setNoMatch(!found)
-      draw()
+      scheduleDraw()
     } catch (failure) {
       if (generation === searchGeneration) setError(describe(failure))
     } finally {
@@ -704,7 +718,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     const data = encoded ?? encodeLegacyKey(event, modes)
     if (data === null) return
     selection = undefined
-    draw()
+    scheduleDraw()
     event.preventDefault()
     write(data)
   }
@@ -753,7 +767,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         if (next.cursorVisible) rows.add(next.cursorRow)
       }
       frame = next
-      draw(rows)
+      scheduleDraw(rows)
       if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
         mirrorTimer = window.setTimeout(() => {
           mirrorTimer = undefined
@@ -766,6 +780,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
     onCleanup(() => {
       detached = true
+      if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       window.clearTimeout(mirrorTimer)
       window.clearTimeout(compositionTimer)
       if (input === document.activeElement) props.onFocus(null)
