@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,11 +250,109 @@ impl GitService {
         })
     }
 
+    pub fn review(&self, path: &Path, base: &str) -> Result<ReviewSnapshot, GitError> {
+        let base_ref = format!("refs/heads/{base}");
+        let ancestor = run_git(path, &["merge-base", "HEAD", &base_ref])?;
+        let changed = git_bytes(path, &["diff", "--name-only", "-z", &ancestor, "--"])?;
+        let mut files = self.status(path)?;
+        for name in git_paths(&changed) {
+            if !files.iter().any(|file| file.path == name) {
+                files.push(GitFile {
+                    path: name,
+                    index: " ".into(),
+                    worktree: " ".into(),
+                });
+            }
+        }
+        let mut diff = run_git(
+            path,
+            &["diff", "--no-ext-diff", "--no-textconv", &ancestor, "--"],
+        )?;
+        for file in files
+            .iter()
+            .filter(|file| file.index == "?" && file.worktree == "?")
+        {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--",
+                    "/dev/null",
+                    &file.path,
+                ])
+                .output()
+                .map_err(|source| GitError::Io { source })?;
+            if output.status.code() == Some(1) {
+                diff.push('\n');
+                diff.push_str(&String::from_utf8_lossy(&output.stdout));
+            } else if !output.status.success() {
+                return Err(GitError::CommandFailed {
+                    command: "git diff --no-index".into(),
+                    status: output.status,
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                });
+            }
+        }
+        Ok(ReviewSnapshot { files, diff })
+    }
+
+    fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
+        let bytes = git_bytes(
+            path,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--no-renames",
+                "--untracked-files=all",
+            ],
+        )?;
+        Ok(bytes
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let [index, worktree, b' ', name @ ..] = entry else {
+                    return None;
+                };
+                Some(GitFile {
+                    path: String::from_utf8_lossy(name).into_owned(),
+                    index: char::from(*index).to_string(),
+                    worktree: char::from(*worktree).to_string(),
+                })
+            })
+            .collect())
+    }
+
     /// True when the worktree has staged, unstaged or untracked changes.
     pub fn has_changes(&self, worktree_path: &Path) -> Result<bool, GitError> {
         let status = run_git(worktree_path, &["status", "--porcelain"])?;
         Ok(!status.is_empty())
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFile {
+    pub path: String,
+    pub index: String,
+    pub worktree: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSnapshot {
+    pub files: Vec<GitFile>,
+    pub diff: String,
+}
+
+fn git_paths(bytes: &[u8]) -> impl Iterator<Item = String> + '_ {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| String::from_utf8_lossy(name).into_owned())
 }
 
 #[derive(PartialEq, Eq)]

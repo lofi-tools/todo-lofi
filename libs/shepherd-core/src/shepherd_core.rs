@@ -392,6 +392,19 @@ impl Core {
         })
     }
 
+    pub fn review_snapshot(&self, task_id: &TaskId) -> Result<git::ReviewSnapshot, CoreError> {
+        let task = self.task(task_id)?;
+        let (Some(path), Some(base)) = (&task.worktree_path, &task.base_branch) else {
+            return Err(CoreError::TaskNotReady {
+                id: task.id.to_string(),
+                state: task.state.as_str(),
+            });
+        };
+        let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
+        GitService.validate_worktree(&repository, path)?;
+        Ok(GitService.review(path, base)?)
+    }
+
     pub fn task_workspace(&self, task_id: &TaskId) -> Result<TaskWorkspace, CoreError> {
         let task = self.task(task_id)?;
         let project =

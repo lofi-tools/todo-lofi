@@ -909,3 +909,24 @@ textarea {
   padding: 4px 0;
   font-size: 12px;
 }
+
+.git-pane {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.git-pane__files {
+  margin: 0;
+  padding-left: 1.25em;
+  overflow-wrap: anywhere;
+}
+
+.git-pane__diff {
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+}

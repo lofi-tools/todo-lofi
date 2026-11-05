@@ -9,6 +9,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
 import { ProjectPicker } from './ProjectPicker'
+import { ReviewPane } from './ReviewPane'
 import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
@@ -21,6 +22,7 @@ export function App() {
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const [inspectorTab, setInspectorTab] = createSignal('terminals')
   const [prompt, setPrompt] = createSignal('')
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
@@ -399,7 +401,8 @@ export function App() {
                   role="tab"
                   class="inspector__tab"
                   id={`inspector-tab-${tab.id}`}
-                  aria-selected={tab.id === 'terminals'}
+                  aria-selected={tab.id === inspectorTab()}
+                  onClick={() => setInspectorTab(tab.id)}
                   aria-disabled={!tab.enabled}
                   aria-controls="inspector-pane"
                   disabled={!tab.enabled}
@@ -414,13 +417,17 @@ export function App() {
             class="inspector__pane"
             id="inspector-pane"
             role="tabpanel"
-            aria-labelledby="inspector-tab-terminals"
+            aria-labelledby={`inspector-tab-${inspectorTab()}`}
           >
-            <Show
-              when={selectedProjectId()}
-              fallback={<p class="empty">No terminals yet.</p>}
-            >
-              {(projectId) => <TerminalPane projectId={projectId()} />}
+            <Show when={inspectorTab() === 'terminals'}>
+              <Show when={selectedProjectId()} fallback={<p class="empty">No terminals yet.</p>}>
+                {(projectId) => <TerminalPane projectId={projectId()} />}
+              </Show>
+            </Show>
+            <Show when={inspectorTab() === 'review'}>
+              <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
+                <ReviewPane taskId={workspace()!.task.id} revision={workspace()!.task.updatedAt} />
+              </Show>
             </Show>
           </div>
         </aside>
@@ -497,7 +504,7 @@ interface InspectorTab {
 const INSPECTOR_TABS: InspectorTab[] = [
   { id: 'terminals', label: 'Terminals', enabled: true },
   { id: 'preview', label: 'Preview', enabled: false },
-  { id: 'review', label: 'Review', enabled: false },
+  { id: 'review', label: 'Review', enabled: true },
   { id: 'git', label: 'Git', enabled: false },
   { id: 'files', label: 'Files', enabled: false },
 ]

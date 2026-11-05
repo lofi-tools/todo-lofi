@@ -302,3 +302,18 @@ export async function subscribeToEvents(handler: (event: Event) => void): Promis
   await invoke('subscribe', { channel })
   return channel
 }
+
+export interface GitFile {
+  path: string
+  index: string
+  worktree: string
+}
+
+export interface ReviewSnapshot {
+  files: GitFile[]
+  diff: string
+}
+
+export function reviewSnapshot(taskId: string): Promise<ReviewSnapshot> {
+  return invoke('review_snapshot', { taskId })
+}
