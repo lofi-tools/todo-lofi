@@ -28,6 +28,7 @@ export function App() {
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
+  const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
@@ -73,7 +74,7 @@ export function App() {
   const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
   const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
   const canStartTask = () => {
-    const project = projects().find((entry) => entry.id === selectedProjectId())
+    const project = selectedProject()
     return !!project && !project.missing && loadedTasksFor() === project.id
       && !selectedTaskId() && visibleTasks().length === 0
   }
@@ -498,12 +499,14 @@ export function App() {
         </Show>
 
         <section class="chat" aria-label="Task chat" hidden={settingsOpen()}>
-          <header class="pane-header">
-            <span class="chat__title">{workspace()?.task.title ?? 'No task selected'}</span>
-            <Show when={workspace()}>
-              {(current) => <span class="chat__state">{current().task.state}</span>}
-            </Show>
-          </header>
+          <Show when={workspace()}>
+            {(current) => (
+              <header class="pane-header">
+                <span class="chat__title">{current().task.title}</span>
+                <span class="chat__state">{current().task.state}</span>
+              </header>
+            )}
+          </Show>
 
           <Show when={workspace()}>
             {(current) => (
@@ -556,7 +559,13 @@ export function App() {
           <div class="chat__transcript">
             <Show
               when={workspace()}
-              fallback={<p class="empty">{canStartTask() ? 'Type a prompt to start a chat.' : 'Select a task to read its transcript.'}</p>}
+              fallback={
+                <Show when={canStartTask()} fallback={<p class="empty">Select a task to read its transcript.</p>}>
+                  <div class="chat__welcome">
+                    <h1>What should Codex build in {selectedProject()?.name}?</h1>
+                  </div>
+                </Show>
+              }
             >
               {(current) => (
                 <Show

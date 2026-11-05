@@ -543,9 +543,10 @@ textarea {
 }
 
 .chat {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .chat[hidden] {
@@ -672,8 +673,26 @@ textarea {
 }
 
 .chat__transcript {
+  flex: 1;
+  min-height: 0;
   padding: 16px;
   overflow: auto;
+}
+
+.chat__welcome {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  text-align: center;
+}
+
+.chat__welcome h1 {
+  max-width: 24ch;
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .transcript {
