@@ -36,6 +36,7 @@ pub struct FrameCell {
     pub background: u32,
     pub bold: bool,
     pub italic: bool,
+    pub linked: bool,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -163,6 +164,16 @@ impl Screen {
         true
     }
 
+    pub fn link(&self, row: usize, column: usize) -> Option<String> {
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        let grid = self.term.grid();
+        let line = Line(row as i32 - grid.display_offset() as i32);
+        let cell = &grid[line][Column(column)];
+        cell.hyperlink().map(|link| link.uri().to_owned())
+    }
+
     pub fn frame(&self) -> TerminalFrame {
         let grid = self.term.grid();
         let cursor = grid.cursor.point;
@@ -208,6 +219,7 @@ impl Screen {
                 background,
                 bold: cell.flags.contains(Flags::BOLD),
                 italic: cell.flags.contains(Flags::ITALIC),
+                linked: cell.hyperlink().is_some(),
             });
         }
 

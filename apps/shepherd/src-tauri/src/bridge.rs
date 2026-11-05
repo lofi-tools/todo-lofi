@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_harness::Decision;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
@@ -54,6 +54,22 @@ impl From<CoreError> for BridgeError {
 
 fn unexpected(result: &CommandResult) -> BridgeError {
     BridgeError::new("bridge", format!("unexpected command result: {result:?}"))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum TerminalInput {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl TerminalInput {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
 }
 
 struct ScreenSlot {
@@ -502,7 +518,7 @@ impl ShellState {
     pub async fn terminal_write(
         &self,
         terminal_id: String,
-        data: String,
+        data: TerminalInput,
     ) -> Result<(), BridgeError> {
         self.engine
             .lock()
@@ -515,6 +531,51 @@ impl ShellState {
             slot.frames.send_replace(slot.screen.frame());
         }
         Ok(())
+    }
+
+    pub async fn open_terminal_link(
+        &self,
+        terminal_id: &str,
+        row: usize,
+        column: usize,
+    ) -> Result<(), BridgeError> {
+        let link = self
+            .screens
+            .lock()
+            .await
+            .get(terminal_id)
+            .and_then(|slot| slot.screen.link(row, column))
+            .ok_or_else(|| BridgeError::new("terminal", "no link at this position"))?;
+        let url = tauri::Url::parse(&link)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+            .ok_or_else(|| BridgeError::new("terminal", "terminal links must use HTTP or HTTPS"))?;
+        let program = match std::env::consts::OS {
+            "macos" => "open",
+            "linux" => "xdg-open",
+            _ => {
+                return Err(BridgeError::new(
+                    "terminal",
+                    "opening terminal links is unavailable",
+                ));
+            }
+        };
+        let status = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(program)
+                .arg(url.as_str())
+                .status()
+        })
+        .await
+        .map_err(|error| BridgeError::new("terminal", error.to_string()))?
+        .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(BridgeError::new(
+                "terminal",
+                format!("could not open the terminal link: {status}"),
+            ))
+        }
     }
 
     pub async fn terminal_resize(
@@ -875,9 +936,22 @@ pub mod commands {
     pub async fn terminal_write(
         state: State<'_, ShellState>,
         terminal_id: String,
-        data: String,
+        data: TerminalInput,
     ) -> Result<(), BridgeError> {
         state.inner().terminal_write(terminal_id, data).await
+    }
+
+    #[tauri::command]
+    pub async fn open_terminal_link(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        row: usize,
+        column: usize,
+    ) -> Result<(), BridgeError> {
+        state
+            .inner()
+            .open_terminal_link(&terminal_id, row, column)
+            .await
     }
 
     #[tauri::command]

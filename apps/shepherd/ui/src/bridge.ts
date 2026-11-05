@@ -180,6 +180,7 @@ export interface FrameCell {
   background: number
   bold: boolean
   italic: boolean
+  linked: boolean
 }
 
 export interface TerminalFrame {
@@ -311,8 +312,12 @@ export function terminalScroll(terminalId: string, lines: number): Promise<void>
   return invoke('terminal_scroll', { terminalId, lines })
 }
 
-export function terminalWrite(terminalId: string, data: string): Promise<void> {
+export function terminalWrite(terminalId: string, data: string | number[]): Promise<void> {
   return invoke<void>('terminal_write', { terminalId, data })
+}
+
+export function openTerminalLink(terminalId: string, row: number, column: number): Promise<void> {
+  return invoke('open_terminal_link', { terminalId, row, column })
 }
 
 export function terminalResize(

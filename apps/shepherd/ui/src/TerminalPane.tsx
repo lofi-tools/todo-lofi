@@ -311,7 +311,13 @@ function formatExit(exitCode: number | null): string {
 const FONT = '13px ui-monospace, SFMono-Regular, Menlo, monospace'
 const LINE_HEIGHT = 17
 const DEFAULT_BACKGROUND = 0x131316
+const MOUSE_CLICK = 1 << 3
 const BRACKETED_PASTE = 1 << 4
+const MOUSE_SGR = 1 << 5
+const MOUSE_MOTION = 1 << 6
+const MOUSE_DRAG = 1 << 13
+const MOUSE_UTF8 = 1 << 14
+const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
 function TerminalCanvas(props: { terminalId: string }) {
   const [error, setError] = createSignal<string | null>(null)
@@ -330,6 +336,8 @@ function TerminalCanvas(props: { terminalId: string }) {
   let lastSent = ''
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
+  let mouseButton: number | undefined
+  let mousePosition = ''
 
   function draw() {
     if (!canvas || !frame) return
@@ -380,6 +388,7 @@ function TerminalCanvas(props: { terminalId: string }) {
       if (context.font !== font) context.font = font
       context.fillStyle = hex(cell.foreground)
       context.fillText(cell.text, x, y + 1, cell.width * cellWidth)
+      if (cell.linked) context.fillRect(x, y + LINE_HEIGHT - 2, cell.width * cellWidth, 1)
     })
     if (current.cursorVisible) {
       context.fillStyle = 'rgba(230, 230, 234, 0.35)'
@@ -396,10 +405,54 @@ function TerminalCanvas(props: { terminalId: string }) {
     }
   }
 
+  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move'): boolean {
+    const current = frame
+    const cell = cellAt(event)
+    if (!current || !cell || current.displayOffset || event.shiftKey || !(current.modes & MOUSE_REPORTING)) return false
+    const position = `${cell.column},${cell.row}`
+    if (action === 'move') {
+      if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || mouseButton === undefined)) return false
+      if (mousePosition === position) return true
+      button += 32
+    }
+    mousePosition = position
+    const modifiers = (event.altKey ? 8 : 0) + (event.ctrlKey ? 16 : 0)
+    const column = cell.column + 1
+    const row = cell.row + 1
+    if (current.modes & MOUSE_SGR) {
+      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`)
+    } else {
+      const utf8 = (current.modes & MOUSE_UTF8) !== 0
+      const limit = utf8 ? 2015 : 223
+      if (column <= limit && row <= limit) {
+        const code = (action === 'release' ? 3 : button) + modifiers + 32
+        const prefix = [27, 91, 77, code]
+        const coordinates = utf8
+          ? Array.from(new TextEncoder().encode(String.fromCodePoint(column + 32, row + 32)))
+          : [column + 32, row + 32]
+        write([...prefix, ...coordinates])
+      }
+    }
+    return true
+  }
+
   function onPointerDown(event: PointerEvent & { currentTarget: HTMLCanvasElement }) {
     input?.focus({ preventScroll: true })
     const cell = cellAt(event)
-    if (!cell || !frame || event.button !== 0) return
+    if (!cell || !frame) return
+    if (event.button === 0 && (event.metaKey || event.ctrlKey) && frame.cells[cell.row * frame.columns + cell.column]?.linked) {
+      event.preventDefault()
+      void bridge.openTerminalLink(props.terminalId, cell.row, cell.column).catch((failure) => setError(describe(failure)))
+      return
+    }
+    const button = [0, 1, 2][event.button]
+    if (button !== undefined && reportMouse(event, button, 'press')) {
+      event.preventDefault()
+      mouseButton = button
+      event.currentTarget.setPointerCapture(event.pointerId)
+      return
+    }
+    if (event.button !== 0) return
     event.preventDefault()
     const index = cell.row * frame.columns + cell.column
     selection = { start: index, end: index }
@@ -409,10 +462,16 @@ function TerminalCanvas(props: { terminalId: string }) {
   }
 
   function onPointerMove(event: PointerEvent) {
+    if (selecting === undefined && reportMouse(event, mouseButton ?? 3, 'move')) return
     const cell = cellAt(event)
     if (!cell || !frame || !selection || event.pointerId !== selecting) return
     selection.end = cell.row * frame.columns + cell.column
     draw()
+  }
+
+  function releaseMouse(event: PointerEvent) {
+    if (mouseButton !== undefined) reportMouse(event, mouseButton, 'release')
+    mouseButton = undefined
   }
 
   function selectedText(): string {
@@ -487,7 +546,7 @@ function TerminalCanvas(props: { terminalId: string }) {
     return sequences[key] ?? null
   }
 
-  function write(data: string) {
+  function write(data: string | number[]) {
     if (!data) return
     setError(null)
     void bridge.terminalWrite(props.terminalId, data).catch((failure) => setError(describe(failure)))
@@ -591,6 +650,7 @@ function TerminalCanvas(props: { terminalId: string }) {
     function wheel(event: WheelEvent) {
       if (!event.deltaY || !frame) return
       event.preventDefault()
+      if (reportMouse(event, event.deltaY < 0 ? 64 : 65, 'press')) return
       const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY : event.deltaY / LINE_HEIGHT
       const count = Math.max(1, Math.round(Math.abs(lines)))
       void bridge.terminalScroll(props.terminalId, -Math.sign(lines) * count).catch(console.error)
@@ -616,6 +676,11 @@ function TerminalCanvas(props: { terminalId: string }) {
         aria-hidden="true"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
+        onPointerUp={releaseMouse}
+        onPointerCancel={releaseMouse}
+        onContextMenu={(event) => {
+          if (!event.shiftKey && !frame?.displayOffset && ((frame?.modes ?? 0) & MOUSE_REPORTING)) event.preventDefault()
+        }}
         onLostPointerCapture={() => { selecting = undefined }}
       />
       <textarea
