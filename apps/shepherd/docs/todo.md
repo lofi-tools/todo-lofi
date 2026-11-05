@@ -50,7 +50,7 @@ and merge it without leaving Shepherd?”
 | `pnpm` | 11.25.0 | Use it for the v1 UI. |
 | Node | 24.21.0 | Fine for Vite/Tauri tooling. |
 | `zig` | In the flake's build dependencies (`pkgs.zig`) | Builds `libghostty-vt` at build time only. The shipped app statically links the archive, so end users install nothing. Confirm `pkgs.zig` satisfies the bindings' required Zig version before the engine spike. |
-| `codex` | Available through the ChatGPT app bundle; protocol support unverified | S2 can use recorded fixtures and a fake server, but the S2 gate requires a live `codex` run. |
+| `codex` | Not on `PATH`. The ChatGPT app bundle (`com.openai.codex`) ships codex-cli 0.166.0-alpha.6 at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`; the older `Contents/Resources/codex` path is absent. | Adapter resolution must find the bundle binary. S2 can use recorded fixtures and a fake server, but the S2 gate requires a live `codex` run. |
 | Git | 2.50.1 | Use temporary repositories for every automated Git test. |
 
 ## Priority map
@@ -256,6 +256,10 @@ an approval, a cancel and a resume inside Shepherd.
 - [x] Implement `codex app-server` probing and JSON-RPC: thread start, turn
   start, streaming items, approvals, interrupt and thread resume.
 - [x] Implement the `codex exec --json` fallback for older versions.
+- [ ] Resolve the Codex executable, since the ChatGPT app does not add it to
+  `PATH`: the profile's path, then `PATH`, then the macOS bundle's packaged
+  layouts, then report which installation kind was found — or that none is — with
+  the path, version and verified tier.
 - [ ] Map Codex item IDs to canonical transcript IDs; preserve order after
   reconnect.
 - [ ] Render approval cards with tool, arguments and a diff when the adapter or

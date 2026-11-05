@@ -416,6 +416,24 @@ older versions, giving a one-shot transcript without interactive approvals. The
 adapter probes the method surface and refuses features the installed version does
 not implement; resume uses the thread ID the server returns.
 
+The desktop app is a normal way to have Codex installed, and it does not put
+`codex` on `PATH`: on macOS the same binary sits inside the app bundle
+(`Contents/Resources/codex-cli/bin/codex` in current builds,
+`Contents/Resources/codex` in older ones, bundle `com.openai.codex`). The adapter
+resolves the executable from the profile's explicit path first, then `PATH`, then
+those bundle locations, and diagnostics show the path it chose or every path it
+tried. A bundle layout change is a resolvable misconfiguration with a visible
+reason, never a crash or a silent fallback.
+
+Detection is therefore one step that resolves, verifies and classifies, and it
+has a fourth answer beyond the three location kinds: **not installed**. A
+candidate is only believed once `--version` and the handshake succeed, and the
+kind, path and version are recorded and shown in diagnostics. An ACP client such
+as Zed's `codex-acp` is not a fourth kind: it is a bridge that starts the same
+Codex binary, so an installation reachable only through that client still has to
+be resolved and verified here. Shepherd drives Codex natively; ACP stays the tier
+for agents that ship no native surface, not a second Codex path.
+
 **OpenCode** — second. Prefer its server mode (`opencode serve`, HTTP with an
 event stream) when available, because it gives session control and reconnect;
 otherwise its ACP mode through the same adapter interface. Both paths map to one
@@ -529,7 +547,7 @@ under `test-support`.
 
 | Label | Tier | Entry (verified at connect) |
 | --- | --- | --- |
-| Codex | native | `codex app-server` (fallback `codex exec --json`) |
+| Codex | native | `codex app-server` from the resolved executable — profile path, `PATH`, or the macOS app bundle — with `codex exec --json` as the fallback |
 | OpenCode | native | `opencode serve` or ACP mode, whichever the version exposes |
 | Pi | native | Pi RPC mode (flag verified at connect), with the bundled approval bridge |
 | Claude Code | ACP | `claude-code-acp` |
@@ -1162,9 +1180,11 @@ persistence and presentation.
 | Freebuff | wrapper | `freebuff` in a PTY | plain pane | bundled manifest prompt/busy patterns |
 | Custom | any | user command | terminal | chosen adapter's handshake |
 
-No command line in this table is a stable contract. The registry probes the
-installed version, and a mismatch downgrades the tier with a visible reason
-rather than failing silently.
+No command line in this table is a stable contract, and neither is its location:
+Codex may exist only inside the ChatGPT app bundle, so finding the executable is
+part of connecting and the chosen path is shown in diagnostics. The registry
+probes the installed version, and a mismatch downgrades the tier with a visible
+reason rather than failing silently.
 
 ## Appendix C — Default keymap
 
