@@ -106,6 +106,15 @@ function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
+async function typeIntoRestartedTerminal(title: string, command: string) {
+  const input = await waitFor('focused input in the restarted terminal', () => {
+    const field = terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input')
+    return field && document.activeElement === field && field
+  })
+  for (const key of command) press(input, key)
+  press(input, 'Enter')
+}
+
 async function exerciseShellInterrupt(terminalId: string, input: HTMLTextAreaElement) {
   const script = 'import time; print("S1_" + "WAIT"); time.sleep(60)'
   await bridge.terminalWrite(terminalId, `python3 -u -c ${shellQuote(script)}\r`)
@@ -715,10 +724,10 @@ async function restore() {
   if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
     throw new Error('Restart should reuse the restored terminal ID')
   }
-  await bridge.terminalWrite(first.id, "printf 'S4_%s\\n' RESTORED\r")
+  await typeIntoRestartedTerminal(first.title, 'echo S4_RESTORED')
   await waitFor('fresh PTY output after restore', () => {
     const pane = terminalPane(first.title)
-    return pane && terminalOutput(pane).includes('S4_RESTORED')
+    return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_RESTORED')
   })
   const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.scope === 'task')
   const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.id === scoped?.taskId)
@@ -732,7 +741,7 @@ async function restore() {
   })
   restartTask.click()
   await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  await bridge.terminalWrite(scoped.id, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"\r")
+  await typeIntoRestartedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
   const marker = 'S4_TASK_RESTORED:' + task.worktreePath.split('/').at(-1)
   await waitFor('worktree output after task terminal restart', () => {
     const pane = terminalPane(scoped.title)

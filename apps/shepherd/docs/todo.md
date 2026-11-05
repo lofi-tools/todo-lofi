@@ -536,6 +536,8 @@ task-scoped, persistent and fast enough.
 - [x] Route terminal focus and keyboard input. Show bell attention on the
   Terminals tab and on the owning task for task-scoped terminals.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
+  Restart returns keyboard focus to the terminal. The native smoke types
+  directly into both restarted PTYs.
 - [x] Measure parser and encoder throughput on a 1 MiB output burst.
 - [x] Measure delivery and paint latency for a 1 MiB burst in the desktop
   webview before considering WebGL.

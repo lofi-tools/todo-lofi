@@ -191,7 +191,11 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   function restart(id: string) {
     const { columns, rows } = measuredSizes.get(id) ?? DEFAULT_TERMINAL_SIZE
-    void run(async () => { setTerminals(await bridge.restartTerminal(id, columns, rows)) })
+    void run(async () => {
+      setTerminals(await bridge.restartTerminal(id, columns, rows))
+      setSelectedId(id)
+      if (props.shown && terminal(id)?.endedAt === null) setFocusRequest({ id })
+    })
   }
 
   function splitActive(axis: bridge.SplitAxis) {
