@@ -39,7 +39,7 @@ and merge it without leaving Shepherd?”
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 28 focused tests (19 of them drive the Codex adapter through stub binaries: probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip, an interrupt, resume, and the `exec --json` fallback with its stream mapping and cancel); `shepherd-core` has 28 (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 4 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 29 focused tests (20 of them drive the Codex adapter through stub binaries: probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip including a file-change diff, an interrupt, resume, and the `exec --json` fallback with its stream mapping and cancel); `shepherd-core` has 28 (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 5 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -262,7 +262,7 @@ an approval, a cancel and a resume inside Shepherd.
   the path, version and verified tier.
 - [x] Map Codex item IDs to canonical transcript IDs; preserve order after
   reconnect.
-- [ ] Render approval cards with tool, arguments and a diff when the adapter or
+- [x] Render approval cards with tool, arguments and a diff when the adapter or
   worktree provides one.
 - [ ] Persist the session/thread ID; resume on restart; show an explicit
   fallback when the session is gone.

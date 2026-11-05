@@ -508,6 +508,30 @@ function describe(failure: unknown): string {
   return String(failure)
 }
 
+function formatArguments(argumentsValue: unknown): string {
+  if (argumentsValue === null || argumentsValue === undefined) return ''
+  if (typeof argumentsValue === 'string') return argumentsValue
+  return JSON.stringify(argumentsValue, null, 2)
+}
+
+function DiffBlock(props: { patch: bridge.FileDiff }) {
+  return (
+    <div class="entry__diff">
+      <p class="entry__diff-path">{props.patch.path}</p>
+      <Show when={props.patch.oldText}>
+        {(oldText) => (
+          <For each={oldText().split('\n')}>
+            {(line) => <p class="entry__diff-removed">{`- ${line}`}</p>}
+          </For>
+        )}
+      </Show>
+      <For each={props.patch.newText.split('\n')}>
+        {(line) => <p class="entry__diff-added">{`+ ${line}`}</p>}
+      </For>
+    </div>
+  )
+}
+
 function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
@@ -544,11 +568,25 @@ function entryBody(
       )
     case 'permission': {
       const permission = kind.data
+      const argumentsText = formatArguments(permission.arguments)
       return (
         <div class="entry__permission">
           <p class="entry__permission-title">{permission.title}</p>
           <Show when={permission.paths.length > 0}>
             <p class="entry__permission-paths">{permission.paths.join(', ')}</p>
+          </Show>
+          <Show when={argumentsText.length > 0}>
+            <pre class="entry__arguments">{argumentsText}</pre>
+          </Show>
+          <Show
+            when={permission.patch}
+            fallback={
+              <p class="entry__permission-note">
+                diff not available; the arguments above are the whole request
+              </p>
+            }
+          >
+            {(patch) => <DiffBlock patch={patch()} />}
           </Show>
           <Show
             when={permission.decision === null}

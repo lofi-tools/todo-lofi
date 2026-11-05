@@ -66,6 +66,40 @@ test.beforeEach(async ({ page }) => {
           sequence: 1,
           kind: { type: 'agentText', data: { text: 'ready to go' } },
         },
+        {
+          id: 'entry-2',
+          sequence: 2,
+          kind: {
+            type: 'permission',
+            data: {
+              approvalId: 'approval-1',
+              title: 'Run tests',
+              arguments: { command: 'cargo test' },
+              paths: ['src/main.rs'],
+              patch: {
+                path: 'src/main.rs',
+                oldText: 'const answer = 41;',
+                newText: 'const answer = 42;',
+              },
+              decision: null,
+            },
+          },
+        },
+        {
+          id: 'entry-3',
+          sequence: 3,
+          kind: {
+            type: 'permission',
+            data: {
+              approvalId: 'approval-2',
+              title: 'Delete scratch file',
+              arguments: null,
+              paths: [],
+              patch: null,
+              decision: null,
+            },
+          },
+        },
       ],
     }
 
@@ -232,6 +266,23 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('shows an approval with its tool, arguments and diff', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /Ship it/ }).click()
+
+  const withDiff = page.locator('.entry__permission').filter({ hasText: 'Run tests' })
+  await expect(withDiff).toContainText('cargo test')
+  await expect(withDiff.locator('.entry__diff-path')).toHaveText('src/main.rs')
+  await expect(withDiff).toContainText('- const answer = 41;')
+  await expect(withDiff).toContainText('+ const answer = 42;')
+  await expect(withDiff.getByRole('button', { name: 'Allow' })).toBeVisible()
+
+  const withoutDiff = page
+    .locator('.entry__permission')
+    .filter({ hasText: 'Delete scratch file' })
+  await expect(withoutDiff).toContainText('diff not available')
 })
 
 test('encodes typed keys into terminal input', async ({ page }) => {

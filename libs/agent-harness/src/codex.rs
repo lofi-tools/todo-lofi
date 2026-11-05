@@ -1627,7 +1627,7 @@ async fn handle_server_request(
         title: approval_title(&method, &params),
         arguments: params.clone(),
         paths: approval_paths(&params),
-        patch: None,
+        patch: approval_patch(&method, &params),
     };
     pending
         .lock()
@@ -1820,8 +1820,17 @@ fn approval_title(method: &str, params: &Value) -> String {
     }
 }
 
+/// A file-change approval carries its changes inline, so the card can show a
+/// diff instead of asking the user to imagine one.
+fn approval_patch(method: &str, params: &Value) -> Option<FileDiff> {
+    if method != "item/fileChange/requestApproval" {
+        return None;
+    }
+    file_diffs(params).into_iter().next()
+}
+
 fn approval_paths(params: &Value) -> Vec<PathBuf> {
-    params
+    let mut paths = params
         .get("paths")
         .and_then(Value::as_array)
         .map(|paths| {
@@ -1829,9 +1838,16 @@ fn approval_paths(params: &Value) -> Vec<PathBuf> {
                 .iter()
                 .filter_map(Value::as_str)
                 .map(PathBuf::from)
-                .collect()
+                .collect::<Vec<_>>()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for diff in file_diffs(params) {
+        let path = PathBuf::from(diff.path);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 fn item_id(params: &Value) -> String {
@@ -1927,6 +1943,32 @@ while IFS= read -r line; do
       printf '%s\n' "$line" >> "$directory/interrupt.txt"
       printf '{"id":%s,"result":{}}\n' "$id"
       printf '{"method":"turn/completed","params":{"turn":{"id":"turn_waiting","status":"interrupted"}}}\n'
+      ;;
+    *) : ;;
+  esac
+done
+"#;
+
+    /// Asks for approval of a file change that carries its own diff.
+    const FILE_APPROVAL_STUB: &str = r#"#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo "codex-cli 9.9.9"; exit 0; fi
+directory="$(cd "$(dirname "$0")" && pwd)"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"capabilities":{"methods":["thread/start","turn/start","item/fileChange/requestApproval"]}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"thr_files"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"turn_files","status":"inProgress"}}}\n' "$id"
+      printf '{"id":77,"method":"item/fileChange/requestApproval","params":{"itemId":"item_9","threadId":"thr_files","turnId":"turn_files","changes":[{"path":"src/main.rs","kind":"update","diff":"@@ -1 +1 @@\\n-const answer = 41;\\n+const answer = 42;"}]}}\n'
+      ;;
+    *'"id":77'*)
+      printf '%s\n' "$line" >> "$directory/decision.txt"
+      printf '{"method":"turn/completed","params":{"turn":{"id":"turn_files","status":"completed"}}}\n'
       ;;
     *) : ;;
   esac
@@ -2160,6 +2202,43 @@ done
             decision.contains("\"accept\""),
             "unexpected decision payload: {decision}"
         );
+        harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn a_file_change_approval_carries_its_diff() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex-files.sh", FILE_APPROVAL_STUB);
+        let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
+
+        harness
+            .prompt(PromptInput {
+                text: "rename the answer".to_string(),
+            })
+            .await
+            .expect("the turn starts");
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ApprovalRequested { .. }))
+        })
+        .await;
+        let request = events
+            .iter()
+            .find_map(|event| match event {
+                HarnessEvent::ApprovalRequested { request } => Some(request),
+                _ => None,
+            })
+            .expect("the file approval arrives");
+
+        let patch = request.patch.as_ref().expect("the card can show a diff");
+        assert_eq!(patch.path, "src/main.rs");
+        assert!(
+            patch.new_text.contains("+const answer = 42;"),
+            "unexpected patch: {}",
+            patch.new_text
+        );
+        assert_eq!(request.paths, vec![PathBuf::from("src/main.rs")]);
         harness.shutdown().await.expect("the session stops");
     }
 
