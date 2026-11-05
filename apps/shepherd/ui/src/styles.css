@@ -78,7 +78,7 @@ textarea {
 
 .sidebar__title {
   margin: 0;
-  padding: 4px 6px;
+  padding-block: 4px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
@@ -243,13 +243,13 @@ textarea {
 
 .projects__empty {
   display: grid;
+  justify-items: start;
   gap: 8px;
 }
 
 .projects__new {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
 }
 
@@ -279,6 +279,7 @@ textarea {
 
 .sidebar__settings {
   border: 0;
+  color: var(--text-muted);
 }
 
 .sidebar__settings:hover {
