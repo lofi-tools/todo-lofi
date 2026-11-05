@@ -341,11 +341,23 @@ export function gitSnapshot(taskId: string): Promise<GitSnapshot> {
   return invoke('git_snapshot', { taskId })
 }
 
+export interface GitFileDiff {
+  staged: string
+  unstaged: string
+  revision: string
+  canDiscard: boolean
+}
+
+export function gitFileDiff(taskId: string, file: string): Promise<GitFileDiff> {
+  return invoke('git_file_diff', { taskId, file })
+}
+
 export type GitMutation =
   | { type: 'stage'; path: string | null }
   | { type: 'unstage'; path: string }
   | { type: 'commit'; message: string; expected: string }
   | { type: 'amend'; message: string; expected: string }
+  | { type: 'discard'; path: string; expected: string }
   | { type: 'checkout'; branch: string }
   | { type: 'createBranch'; branch: string }
   | { type: 'squashMerge' }

@@ -43,6 +43,8 @@ pub enum GitError {
     InvalidStatus,
     #[error("file is no longer in Git status: {path}")]
     UnknownPath { path: String },
+    #[error("the unstaged diff changed or cannot be discarded; open it again before retrying")]
+    DiscardChanged,
     #[error("enter a commit message")]
     EmptyCommitMessage,
     #[error("staging changed; refresh Git status before committing")]
@@ -346,6 +348,57 @@ impl GitService {
         args.extend(file.original_path.as_deref());
         let bytes = git_bytes(path, &args)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    pub fn file_diff(&self, path: &Path, name: &str) -> Result<GitFileDiff, GitError> {
+        let file = self.require_changed_path(path, name)?;
+        let mut args = vec![
+            "--literal-pathspecs",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            &file.path,
+        ];
+        args.extend(file.original_path.as_deref());
+        let staged = {
+            let mut staged_args = args.clone();
+            staged_args.insert(2, "--cached");
+            git_bytes(path, &staged_args)?
+        };
+        let unstaged = git_bytes(path, &args)?;
+        args.insert(2, "--binary");
+        let full_diff = git_bytes(path, &args)?;
+        let revision = Sha256::digest(full_diff)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let conflict = ["DD", "AU", "UD", "UA", "DU", "AA", "UU"]
+            .contains(&format!("{}{}", file.index, file.worktree).as_str());
+        Ok(GitFileDiff {
+            staged: String::from_utf8_lossy(&staged).into_owned(),
+            unstaged: String::from_utf8_lossy(&unstaged).into_owned(),
+            revision,
+            can_discard: !conflict && matches!(file.worktree.as_str(), "M" | "D" | "T"),
+        })
+    }
+
+    pub fn discard_unstaged(
+        &self,
+        path: &Path,
+        file: &str,
+        expected: &str,
+    ) -> Result<(), GitError> {
+        let diff = self.file_diff(path, file)?;
+        if !diff.can_discard || diff.revision != expected {
+            return Err(GitError::DiscardChanged);
+        }
+        run_git(
+            path,
+            &["--literal-pathspecs", "restore", "--worktree", "--", file],
+        )?;
+        Ok(())
     }
 
     pub fn checkout_status(&self, path: &Path) -> Result<CheckoutStatus, GitError> {
@@ -688,6 +741,15 @@ pub struct GitCommit {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub staged: String,
+    pub unstaged: String,
+    pub revision: String,
+    pub can_discard: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CheckoutStatus {
     pub branch: Option<String>,
     pub tracking: Option<String>,
@@ -716,6 +778,7 @@ pub enum GitMutation {
     Unstage { path: String },
     Commit { message: String, expected: String },
     Amend { message: String, expected: String },
+    Discard { path: String, expected: String },
     Checkout { branch: String },
     CreateBranch { branch: String },
     SquashMerge,

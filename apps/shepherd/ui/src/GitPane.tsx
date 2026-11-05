@@ -1,6 +1,6 @@
 import { For, Show, createResource, createSignal } from 'solid-js'
 
-import { gitSnapshot, mutateGit, type GitMutation } from './bridge'
+import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
 
 export function GitPane(props: { taskId: string; revision: number; live: boolean; openTerminal: () => void }) {
   const [git, { refetch, mutate }] = createResource(
@@ -12,6 +12,15 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   const [newBranch, setNewBranch] = createSignal('')
   const [message, setMessage] = createSignal('')
   const [amendRequested, setAmendRequested] = createSignal<string | null>(null)
+  const [selectedFile, setSelectedFile] = createSignal<string | null>(null)
+  const [discardRequested, setDiscardRequested] = createSignal<string | null>(null)
+  const [fileDiff, { refetch: refetchFile }] = createResource(
+    () => {
+      const path = selectedFile()
+      return path ? [props.taskId, props.revision, path] as const : false
+    },
+    ([taskId, , path]) => gitFileDiff(taskId, path),
+  )
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal('')
   const disabled = () => props.live || pending() || git.loading
@@ -21,13 +30,18 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
     setPending(true)
     setError('')
     try {
-      mutate(await mutateGit(props.taskId, operation))
+      const snapshot = await mutateGit(props.taskId, operation)
+      mutate(snapshot)
+      setDiscardRequested(null)
+      if (snapshot.files.some((file) => file.path === selectedFile())) void refetchFile()
+      else setSelectedFile(null)
       if (operation.type === 'commit' || operation.type === 'amend') { setMessage(''); setAmendRequested(null) }
       if (operation.type === 'createBranch') setNewBranch('')
       if (operation.type === 'checkout') setBranch('')
     } catch (failure) {
       setError((failure as { message?: string })?.message ?? String(failure))
       void refetch()
+      void refetchFile()
     } finally {
       setPending(false)
     }
@@ -36,7 +50,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   return (
     <section class="git-pane" aria-label="Git worktree">
       <div class="terminal-pane__bar">
-        <button type="button" onClick={() => void refetch()} disabled={git.loading}>Refresh</button>
+        <button type="button" onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }} disabled={git.loading}>Refresh</button>
       </div>
       <Show when={git.loading}><p class="empty" role="status">Loading Git status…</p></Show>
       <Show when={error()}><pre class="git-pane__diff" role="alert">{error()}</pre></Show>
@@ -82,7 +96,12 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
                   <li>
-                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code>{' '}
+                    <button class="git-pane__file" type="button" disabled={!file.actionable}
+                      aria-pressed={selectedFile() === file.path}
+                      onClick={() => { setDiscardRequested(null); setSelectedFile(file.path) }}>
+                      {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+                    </button>
                     <div class="terminal-pane__bar">
                       <Show when={file.actionable && file.worktree.trim()}>
                         <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: file.path })}>Stage</button>
@@ -94,6 +113,38 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
                   </li>
                 )}</For>
               </ul>
+            </Show>
+            <Show when={selectedFile()}>
+              {(name) => (
+                <>
+                  <Show when={fileDiff.loading}><p class="empty" role="status">Loading file diff…</p></Show>
+                  <Show when={fileDiff.error}><p role="alert">{fileDiff.error.message ?? String(fileDiff.error)}</p></Show>
+                  <Show when={!fileDiff.loading && !fileDiff.error && fileDiff()}>
+                    {(diff) => (
+                      <section class="git-pane" aria-label={`Diff for ${name()}`}>
+                        <Show when={diff().staged}>
+                          <h3>Staged</h3><pre class="git-pane__diff">{diff().staged}</pre>
+                        </Show>
+                        <Show when={diff().unstaged}>
+                          <h3>Unstaged</h3><pre class="git-pane__diff">{diff().unstaged}</pre>
+                        </Show>
+                        <Show when={!diff().staged && !diff().unstaged}><p class="empty">No tracked diff.</p></Show>
+                        <Show when={diff().canDiscard}>
+                          <div class="terminal-pane__bar">
+                            <Show when={discardRequested() === diff().revision} fallback={
+                              <button type="button" disabled={disabled()} onClick={() => setDiscardRequested(diff().revision)}>Discard unstaged changes…</button>
+                            }>
+                              <button type="button" disabled={disabled()}
+                                onClick={() => void apply({ type: 'discard', path: name(), expected: diff().revision })}>Discard changes to {name()}</button>
+                              <button type="button" onClick={() => setDiscardRequested(null)}>Cancel</button>
+                            </Show>
+                          </div>
+                        </Show>
+                      </section>
+                    )}
+                  </Show>
+                </>
+              )}
             </Show>
             <Show when={snapshot().files.some((file) => file.worktree.trim())}>
               <div class="terminal-pane__bar">

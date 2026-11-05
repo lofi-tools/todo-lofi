@@ -605,6 +605,19 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn git_file_diff(
+        state: State<'_, ShellState>,
+        task_id: String,
+        file: String,
+    ) -> Result<shepherd_core::git::GitFileDiff, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .git_file_diff(&TaskId::new(task_id), &file)?)
+    }
+
+    #[tauri::command]
     pub async fn git_snapshot(
         state: State<'_, ShellState>,
         task_id: String,

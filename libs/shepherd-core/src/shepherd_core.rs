@@ -494,6 +494,15 @@ impl Core {
         Ok(GitService.review_file_diff(path, base, file)?)
     }
 
+    pub fn git_file_diff(
+        &self,
+        task_id: &TaskId,
+        file: &str,
+    ) -> Result<git::GitFileDiff, CoreError> {
+        let (_, _, path) = self.task_git_worktree(task_id)?;
+        Ok(GitService.file_diff(path, file)?)
+    }
+
     pub async fn mutate_git(
         &mut self,
         task_id: &TaskId,
@@ -520,6 +529,10 @@ impl Core {
             git::GitMutation::Amend { message, expected } => {
                 GitService.amend(path, &message, &expected)?
             }
+            git::GitMutation::Discard {
+                path: file,
+                expected,
+            } => GitService.discard_unstaged(path, &file, &expected)?,
             git::GitMutation::Checkout { branch } => GitService.checkout(path, &branch)?,
             git::GitMutation::CreateBranch { branch } => GitService.create_branch(path, &branch)?,
             git::GitMutation::SquashMerge => {
