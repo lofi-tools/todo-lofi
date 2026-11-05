@@ -14,13 +14,17 @@ pnpm install
 shep
 ```
 
-`shep` runs `pnpm dev:shepherd`, which starts Vite on port 1420 and opens the
-desktop window. Tauri relaunches the app when the shell, its local Rust
-dependencies, or the frontend source and configuration change. Vite keeps
-running between app restarts. Non-interactive runners can use
-`direnv exec . shep`. Use `direnv exec . shep --test` to launch on port 1435
-with a separate database at `.cache/test-db/shepherd.db`. This database persists
-between test launches.
+`shep` starts Vite on port 1420 and uses `.cache/test-db/shepherd.db`. Projects
+and chats in that test database persist across launches.
+
+`shep --test` starts on port 1435 with an empty database in a fresh directory
+under `.cache/test-db/`. Changes survive Tauri reloads during that launch.
+Closing the app discards the session database. The next `shep --test` launch
+starts empty again.
+
+Tauri reloads the app when the shell, its local Rust dependencies, or the frontend
+changes. Vite keeps running during those reloads. Non-interactive runners can use
+`direnv exec . shep` or `direnv exec . shep --test`.
 
 Set `SHEPHERD_DEV_DATA_DIR` to an absolute path when exercising the debug app
 with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`

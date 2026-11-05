@@ -120,15 +120,21 @@
             shep = with bash; ''
               set -euo pipefail
               cd "${wd}"
+              test_database_root="$PWD/.cache/test-db"
               case "$*" in
-                "") ;;
+                "")
+                  export SHEPHERD_DEV_DATA_DIR="$test_database_root"
+                  exec pnpm dev:shepherd
+                  ;;
                 --test)
-                  export SHEPHERD_DEV_DATA_DIR="$PWD/.cache/test-db"
-                  exec pnpm dev:shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
+                  mkdir -p "$test_database_root"
+                  session_data_directory=$(mktemp -d "$test_database_root/session.XXXXXX")
+                  trap 'rm -rf -- "$session_data_directory"' EXIT
+                  export SHEPHERD_DEV_DATA_DIR="$session_data_directory"
+                  pnpm dev:shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
                   ;;
                 *) printf '%s\n' 'Usage: shep [--test]' >&2; exit 2 ;;
               esac
-              exec pnpm dev:shepherd
             '';
             ccheck = ''set -ex;
               cargo check -p desktop-gpui
