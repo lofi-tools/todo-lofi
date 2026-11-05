@@ -268,6 +268,10 @@ export function startTerminal(
   return invoke<TerminalSnapshot[]>('start_terminal', { projectId, taskId, columns, rows })
 }
 
+export function restartTerminal(terminalId: string, columns: number, rows: number): Promise<TerminalSnapshot[]> {
+  return invoke('restart_terminal', { terminalId, columns, rows })
+}
+
 export function terminalWrite(terminalId: string, data: string): Promise<void> {
   return invoke<void>('terminal_write', { terminalId, data })
 }

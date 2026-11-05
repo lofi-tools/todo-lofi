@@ -341,6 +341,15 @@ impl Core {
         Ok(path.to_path_buf())
     }
 
+    pub fn terminal_record(&self, id: &TerminalId) -> Result<TerminalRecord, CoreError> {
+        self.terminals
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CoreError::TerminalNotFound {
+                id: id.as_str().into(),
+            })
+    }
+
     pub async fn record_terminal(&mut self, terminal: &TerminalRecord) -> Result<(), CoreError> {
         self.store.save_terminal(terminal).await?;
         self.terminals.insert(terminal.id.clone(), terminal.clone());

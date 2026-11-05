@@ -54,6 +54,20 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }
 
+  async function restart(terminalId: string) {
+    const projectId = props.projectId
+    setPending(true)
+    setError(null)
+    try {
+      const list = await bridge.restartTerminal(terminalId, 80, 24)
+      if (props.projectId === projectId) applyList(list)
+    } catch (failure) {
+      setError(describe(failure))
+    } finally {
+      setPending(false)
+    }
+  }
+
   async function close(terminalId: string) {
     setPending(true)
     setError(null)
@@ -141,7 +155,7 @@ export function TerminalPane(props: TerminalPaneProps) {
                       {terminal().title} ended{formatExit(terminal().exitCode)} in{' '}
                       {terminal().cwd}
                     </p>
-                    <button type="button" onClick={() => void start(terminal().taskId)} disabled={pending()}>
+                    <button type="button" onClick={() => void restart(terminal().id)} disabled={pending()}>
                       Restart
                     </button>
                   </div>

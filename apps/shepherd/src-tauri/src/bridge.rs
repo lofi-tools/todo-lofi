@@ -68,6 +68,7 @@ pub struct ShellState {
     core: Arc<Mutex<Core>>,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
+    terminal_lifecycle: Mutex<()>,
     engine: Mutex<PtyTerminals>,
     screens: Arc<Mutex<BTreeMap<String, ScreenSlot>>>,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
@@ -80,6 +81,7 @@ impl ShellState {
             core: Arc::new(Mutex::new(core)),
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
+            terminal_lifecycle: Mutex::new(()),
             engine: Mutex::new(PtyTerminals::new()),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
             scan: Arc::new(Mutex::new(None)),
@@ -323,14 +325,67 @@ impl ShellState {
         columns: u16,
         rows: u16,
     ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
         let project_id = ProjectId::new(project_id);
         let task_id = task_id.map(TaskId::new);
-        let cwd = self
+        let (cwd, title) = {
+            let core = self.core.lock().await;
+            let cwd = core.terminal_directory(&project_id, task_id.as_ref())?;
+            let title = format!("Terminal {}", core.terminals_for(&project_id).len() + 1);
+            (cwd, title)
+        };
+        let record = TerminalRecord::project_shared(
+            TerminalId::new(uuid::Uuid::new_v4().to_string()),
+            project_id,
+            title,
+            cwd,
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+            now_millis(),
+        );
+        let record = match task_id {
+            Some(task_id) => record.for_task(task_id),
+            None => record,
+        };
+        self.launch_terminal(record, columns, rows).await
+    }
+
+    pub async fn restart_terminal(
+        &self,
+        terminal_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
+        let mut record = self
             .core
             .lock()
             .await
-            .terminal_directory(&project_id, task_id.as_ref())?;
-        let command = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            .terminal_record(&TerminalId::new(terminal_id))?;
+        if record.ended_at.is_none() {
+            return Err(BridgeError::new("terminal", "terminal is already running"));
+        }
+        if !record.cwd.is_dir() {
+            return Err(BridgeError::new(
+                "terminal",
+                format!("terminal directory is missing: {}", record.cwd.display()),
+            ));
+        }
+        record.ended_at = None;
+        record.exit_code = None;
+        self.launch_terminal(record, columns, rows).await
+    }
+
+    async fn launch_terminal(
+        &self,
+        record: TerminalRecord,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        let state = self.core.lock().await.shutdown_state();
+        if state != shepherd_core::ShutdownState::Running {
+            return Err(CoreError::NotRunning { state }.into());
+        }
+        let project_id = record.project_id.clone();
         let (output, mut receiver) = mpsc::unbounded_channel();
         let terminal_id = self
             .engine
@@ -338,11 +393,11 @@ impl ShellState {
             .await
             .spawn(
                 TerminalSpec {
-                    id: TerminalId::new(uuid::Uuid::new_v4().to_string()),
+                    id: record.id.clone(),
                     columns,
                     rows,
-                    cwd: cwd.clone(),
-                    command: command.clone(),
+                    cwd: record.cwd.clone(),
+                    command: record.command.clone(),
                     args: Vec::new(),
                     environment: BTreeMap::new(),
                 },
@@ -350,22 +405,6 @@ impl ShellState {
             )
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
 
-        let title = {
-            let core = self.core.lock().await;
-            format!("Terminal {}", core.terminals_for(&project_id).len() + 1)
-        };
-        let record = TerminalRecord::project_shared(
-            terminal_id.clone(),
-            project_id.clone(),
-            title,
-            cwd,
-            command,
-            now_millis(),
-        );
-        let record = match task_id {
-            Some(task_id) => record.for_task(task_id),
-            None => record,
-        };
         let screen = Screen::new(usize::from(columns), usize::from(rows));
         let (frames, _) = watch::channel(screen.frame());
         self.screens.lock().await.insert(
@@ -721,6 +760,19 @@ pub mod commands {
         state
             .inner()
             .start_terminal(project_id, task_id, columns, rows)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn restart_terminal(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+        state
+            .inner()
+            .restart_terminal(terminal_id, columns, rows)
             .await
     }
 
