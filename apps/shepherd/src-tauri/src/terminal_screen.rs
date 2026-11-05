@@ -491,12 +491,15 @@ impl Screen {
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut foreground, &mut background);
             }
+            let hidden = cell.flags.contains(Flags::HIDDEN);
             cells.push(FrameCell {
                 text: if cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 {
                     String::new()
+                } else if hidden {
+                    " ".to_owned()
                 } else {
                     let mut text = cell.c.to_string();
                     if let Some(combining) = cell.zerowidth() {
@@ -518,10 +521,10 @@ impl Screen {
                 background,
                 bold: cell.flags.contains(Flags::BOLD),
                 italic: cell.flags.contains(Flags::ITALIC),
-                linked: cell.hyperlink().is_some(),
+                linked: !hidden && cell.hyperlink().is_some(),
                 wraps: cell.flags.contains(Flags::WRAPLINE),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                underline: !hidden && cell.flags.intersects(Flags::ALL_UNDERLINES),
+                strikeout: !hidden && cell.flags.contains(Flags::STRIKEOUT),
             });
         }
 
@@ -796,6 +799,13 @@ mod tests {
             frame.cells.get(1).map(|cell| cell.foreground),
             Some(0xabcdef)
         );
+    }
+
+    #[test]
+    fn concealed_text_does_not_leave_the_screen() {
+        let mut screen = Screen::new(16, 2);
+        screen.process(b"\x1b[8msecret\x1b[0mvisible");
+        assert!(row(&screen.frame(), 0).starts_with("      visible"));
     }
 
     #[test]
