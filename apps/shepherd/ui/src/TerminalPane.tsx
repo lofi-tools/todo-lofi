@@ -220,20 +220,14 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
 
   function handleShortcut(event: KeyboardEvent) {
-    if (event.altKey || event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return
+    if (event.defaultPrevented || event.altKey || event.isComposing || event.keyCode === 229 ||
+        !props.shortcutsEnabled || !(event.metaKey || event.ctrlKey)) return
     const target = event.target
     if (!(target instanceof HTMLElement) || !target.matches('.terminal-view__input')) return
     const id = active()
     if (!id) return
     const letter = event.key.toLowerCase()
-    if (event.code === 'Backquote') {
-      event.preventDefault()
-      const ids = paneIds(root()).filter((pane) => terminal(pane)?.endedAt === null)
-      if (ids.length === 0) return
-      const index = ids.indexOf(id)
-      const next = ids[(index + (event.shiftKey ? -1 : 1) + ids.length) % ids.length]
-      if (next) setFocusRequest({ id: next })
-    } else if (event.shiftKey && (letter === 'd' || letter === 'e')) {
+    if (event.shiftKey && (letter === 'd' || letter === 'e')) {
       event.preventDefault()
       if (!event.repeat) splitActive(letter === 'd' ? 'horizontal' : 'vertical')
     } else if (letter === 'w' && (event.metaKey ? !event.shiftKey : event.shiftKey)) {

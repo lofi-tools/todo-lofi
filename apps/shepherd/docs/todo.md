@@ -537,6 +537,9 @@ task-scoped, persistent and fast enough.
   Terminals tab and on the owning task for task-scoped terminals.
   Command+Shift+T on macOS and Ctrl+Shift+N on Linux open and focus a new
   terminal in the selected task's worktree.
+  Command+Backquote on macOS and Ctrl+Backquote on Linux cycle through the
+  Terminals tab and live splits. Shift reverses the cycle. Up and Down move
+  between enabled inspector tabs.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
   Restart returns keyboard focus to the terminal. The native smoke types
   directly into both restarted PTYs.

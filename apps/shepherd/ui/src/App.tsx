@@ -92,6 +92,7 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
+  let inspector: HTMLElement | undefined
   const [emptyInspectorWidth, setEmptyInspectorWidth] = createSignal<number | null>(null)
   const inspectorWidth = () => selectedTaskId()
     ? workspace()?.layout.inspectorWidth ?? null
@@ -311,6 +312,8 @@ export function App() {
     let disposed = false
     let detach: (() => void) | undefined
     window.addEventListener('keydown', onCancelShortcut, true)
+    const inspectorElement = inspector
+    inspectorElement?.addEventListener('keydown', onInspectorFocusShortcut, true)
     void getCurrentWindow().onCloseRequested((event) => {
       if (allowClose) return
       event.preventDefault()
@@ -323,6 +326,7 @@ export function App() {
       disposed = true
       detach?.()
       window.removeEventListener('keydown', onCancelShortcut, true)
+      inspectorElement?.removeEventListener('keydown', onInspectorFocusShortcut, true)
     })
   })
 
@@ -468,6 +472,37 @@ export function App() {
       || !canCancel()) return
     event.preventDefault()
     if (!event.repeat) cancelTurn()
+  }
+
+  function onInspectorFocusShortcut(event: KeyboardEvent) {
+    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.altKey ||
+        !modifier || event.code !== 'Backquote' || !workspaceShortcutsEnabled() ||
+        inspectorTab() !== 'terminals' || !inspector) return
+    const tab = inspector.querySelector<HTMLButtonElement>('#inspector-tab-terminals')
+    const terminals = Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input'))
+    if (!tab || !terminals.length) return
+    const stops = [tab, ...terminals]
+    const index = stops.findIndex((stop) => stop === event.target)
+    if (index < 0) return
+    event.preventDefault()
+    const step = event.shiftKey ? -1 : 1
+    stops[(index + step + stops.length) % stops.length]?.focus({ preventScroll: true })
+  }
+
+  function onInspectorTabKeyDown(event: KeyboardEvent, tabList: HTMLDivElement) {
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
+        !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+    const tabs = Array.from(tabList.querySelectorAll<HTMLButtonElement>('button:enabled'))
+    const current = tabs.findIndex((tab) => tab === event.target)
+    if (current < 0) return
+    event.preventDefault()
+    const step = event.key === 'ArrowUp' ? -1 : 1
+    let next = (current + step + tabs.length) % tabs.length
+    if (event.key === 'Home') next = 0
+    if (event.key === 'End') next = tabs.length - 1
+    tabs[next]?.click()
+    tabs[next]?.focus()
   }
 
   function resumeTask() {
@@ -798,12 +833,13 @@ export function App() {
           </div>
         </section>
 
-        <aside class="inspector" id="workspace-inspector" aria-label="Inspector">
+        <aside ref={inspector} class="inspector" id="workspace-inspector" aria-label="Inspector">
           <div
             class="inspector__tabs"
             role="tablist"
             aria-orientation="vertical"
             aria-label="Inspector tabs"
+            onKeyDown={(event) => onInspectorTabKeyDown(event, event.currentTarget)}
           >
             <For each={INSPECTOR_TABS}>
               {(tab) => (
@@ -813,6 +849,7 @@ export function App() {
                   class="inspector__tab"
                   id={`inspector-tab-${tab.id}`}
                   aria-selected={tab.id === inspectorTab()}
+                  tabIndex={tab.id === inspectorTab() ? 0 : -1}
                   onClick={() => setInspectorTab(tab.id)}
                   aria-disabled={!tab.enabled}
                   aria-controls="inspector-pane"
