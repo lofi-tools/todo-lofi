@@ -6,6 +6,8 @@
 
 import { expect, test } from '@playwright/test'
 
+import type { TerminalLayout, TerminalSnapshot } from '../src/bridge'
+
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const callbacks = new Map()
@@ -103,7 +105,7 @@ test.beforeEach(async ({ page }) => {
       ],
     }
 
-    const terminals = [
+    const terminals: TerminalSnapshot[] = [
       {
         id: 'terminal-1',
         projectId: 'project-1',
@@ -129,6 +131,34 @@ test.beforeEach(async ({ page }) => {
         exitCode: 0,
       },
     ]
+
+    let terminalLayout: TerminalLayout = { revision: 0, root: null }
+    const subscriptions: string[] = []
+    if (new URLSearchParams(window.location.search).has('scoped-terminals')) {
+      terminals.push({
+        ...terminals[0],
+        id: 'terminal-task',
+        taskId: 'task-1',
+        scope: 'task',
+        title: 'Task shell',
+        cwd: tasks[0].worktreePath,
+      })
+      tasks.push({
+        ...tasks[0],
+        id: 'task-other',
+        title: 'Other task',
+        branch: 'shepherd/other',
+        worktreePath: '/tmp/demo/.git/shepherd/worktrees/other',
+      })
+      terminalLayout = {
+        revision: 1,
+        root: {
+          type: 'split', axis: 'horizontal', ratio: 500,
+          first: { type: 'pane', terminalId: 'terminal-1' },
+          second: { type: 'pane', terminalId: 'terminal-task' },
+        },
+      }
+    }
 
     // Every byte the shell writes to the PTY, in order.
     const writes = []
@@ -227,13 +257,15 @@ test.beforeEach(async ({ page }) => {
             return workspace(task.id)
           }
           case 'terminal_layout':
-            return { revision: 0, root: null }
+            return terminalLayout
           case 'save_terminal_layout':
-            return { ...args.layout, revision: args.layout.revision + 1 }
+            terminalLayout = { ...args.layout, revision: args.layout.revision + 1 }
+            return terminalLayout
           case 'terminal_list':
           case 'start_terminal':
             return [...terminals]
           case 'subscribe_terminal': {
+            subscriptions.push(args.terminalId)
             const frame = new Uint8Array([
               1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0,
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
@@ -258,6 +290,7 @@ test.beforeEach(async ({ page }) => {
     }
 
     window.__writes = writes
+    window.__subscriptions = subscriptions
   })
 })
 
@@ -349,4 +382,25 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   await page.getByRole('button', { name: /Terminal 2/ }).click()
   await expect(page.getByText('ended with exit code 0', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible()
+})
+
+test('keeps the shared terminal attached while switching task terminals', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+
+  const shared = page.getByRole('region', { name: 'Terminal 1' })
+  const scoped = page.getByRole('region', { name: 'Task shell' })
+  await expect(shared.getByRole('textbox')).toBeVisible()
+  await expect(scoped.getByRole('textbox')).toBeVisible()
+
+  await page.getByRole('button', { name: /Other task/ }).click()
+  await expect(scoped).toHaveCount(0)
+  await expect(shared.getByRole('textbox')).toBeVisible()
+
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(scoped.getByRole('textbox')).toBeVisible()
+  const subscriptions = await page.evaluate(() =>
+    (window as unknown as { __subscriptions: string[] }).__subscriptions,
+  )
+  expect(subscriptions.filter((id) => id === 'terminal-1')).toHaveLength(1)
+  expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
 })
