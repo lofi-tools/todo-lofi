@@ -14,13 +14,27 @@ import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
-import { SettingsPane } from './SettingsPane'
+import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
 import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
+const SEND_ACCENT_KEY = 'shepherd.sendAccent'
+
+function appearanceStorage() {
+  return import.meta.env.VITE_SHEPHERD_EPHEMERAL === '1' ? sessionStorage : localStorage
+}
+
+function loadSendAccent(): SendAccent {
+  try {
+    const stored = appearanceStorage().getItem(SEND_ACCENT_KEY)
+    return SEND_ACCENTS.find((accent) => accent === stored) ?? SEND_ACCENTS[0]
+  } catch {
+    return SEND_ACCENTS[0]
+  }
+}
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
@@ -37,6 +51,7 @@ export function App() {
   const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const [sendAccent, setSendAccent] = createSignal(loadSendAccent())
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
   const showsArchived = (projectId: string | null) =>
     (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
@@ -70,6 +85,15 @@ export function App() {
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
+
+  function chooseSendAccent(accent: SendAccent) {
+    setSendAccent(accent)
+    try {
+      appearanceStorage().setItem(SEND_ACCENT_KEY, accent)
+    } catch {
+      setError('Could not save the Send button accent.')
+    }
+  }
 
   const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
   const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
@@ -488,6 +512,8 @@ export function App() {
           <SettingsPane
             showArchived={showArchived()}
             onShowArchived={setShowArchived}
+            sendAccent={sendAccent()}
+            onSendAccent={chooseSendAccent}
             onAddProject={openPicker}
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
@@ -608,6 +634,7 @@ export function App() {
               <button
                 type="button"
                 class="composer__send composer__send--icon"
+                data-send-accent={sendAccent()}
                 aria-label="Send"
                 title="Send"
                 onClick={sendPrompt}

@@ -22,6 +22,10 @@ under `.cache/test-db/`. Changes survive Tauri reloads during that launch.
 Closing the app discards the session database. The next `shep --test` launch
 starts empty again.
 
+Choose the Send button color under **Settings → Appearance**. The choice is
+saved between launches for `shep` and lasts for the window session in
+`shep --test`.
+
 Tauri reloads the app when the shell, its local Rust dependencies, or the frontend
 changes. Vite keeps running during those reloads. Non-interactive runners can use
 `direnv exec . shep` or `direnv exec . shep --test`.

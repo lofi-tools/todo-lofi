@@ -131,6 +131,7 @@
                   session_data_directory=$(mktemp -d "$test_database_root/session.XXXXXX")
                   trap 'rm -rf -- "$session_data_directory"' EXIT
                   export SHEPHERD_DEV_DATA_DIR="$session_data_directory"
+                  export VITE_SHEPHERD_EPHEMERAL=1
                   pnpm dev:shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
                   ;;
                 *) printf '%s\n' 'Usage: shep [--test]' >&2; exit 2 ;;

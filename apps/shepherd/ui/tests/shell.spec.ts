@@ -8,8 +8,8 @@ import { expect, test } from '@playwright/test'
 
 import type { TerminalLayout, TerminalSnapshot } from '../src/bridge'
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
+test.beforeEach(async ({ context }) => {
+  await context.addInitScript(() => {
     const callbacks = new Map()
     let nextCallbackId = 1
     let nextTask = 2
@@ -584,6 +584,39 @@ test('opens settings in the task pane and returns to the current chat', async ({
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
   await page.getByRole('button', { name: 'demo', exact: true }).press('Shift+F10')
   await expect(page.getByRole('menuitemcheckbox', { name: 'Show archived' })).toHaveAttribute('aria-checked', 'true')
+})
+
+test('applies the Send accent from Appearance and restores it after reload', async ({ page }) => {
+  await page.goto('/')
+  const settings = page.getByRole('button', { name: 'Settings', exact: true })
+  const appearance = page.getByRole('button', { name: 'Appearance', exact: true })
+  const accents = page.getByRole('group', { name: 'Send button accent' })
+  const blue = accents.getByRole('radio', { name: 'Blue' })
+  const teal = accents.getByRole('radio', { name: 'Teal' })
+  await settings.click()
+  await appearance.click()
+  await expect(blue).toBeChecked()
+  await teal.check()
+  await settings.click()
+
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  await expect(composer).toHaveCSS('box-shadow', /inset/)
+  await expect(prompt).toHaveCSS('box-shadow', 'none')
+  await prompt.fill('Use the new accent')
+  await expect(composer.getByRole('button', { name: 'Send', exact: true })).toHaveCSS('background-color', 'rgb(105, 215, 196)')
+
+  await page.reload()
+  await settings.click()
+  await appearance.click()
+  await expect(teal).toBeChecked()
+
+  const nextWindow = await page.context().newPage()
+  await nextWindow.goto('/')
+  await nextWindow.getByRole('button', { name: 'Settings', exact: true }).click()
+  await nextWindow.getByRole('button', { name: 'Appearance', exact: true }).click()
+  const expectedAccent = process.env.VITE_SHEPHERD_EPHEMERAL === '1' ? 'Blue' : 'Teal'
+  await expect(nextWindow.getByRole('radio', { name: expectedAccent })).toBeChecked()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

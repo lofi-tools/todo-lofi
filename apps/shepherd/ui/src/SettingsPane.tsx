@@ -2,11 +2,16 @@ import { For, Show, createEffect, createSignal, on, type JSX } from 'solid-js'
 
 import type { ProjectSnapshot } from './bridge'
 
-const categories = ['Workspace', 'Projects'] as const
+const categories = ['Workspace', 'Projects', 'Appearance'] as const
+
+export const SEND_ACCENTS = ['Blue', 'Violet', 'Teal', 'Amber', 'Neutral'] as const
+export type SendAccent = (typeof SEND_ACCENTS)[number]
 
 interface SettingsPaneProps {
   showArchived: boolean
   onShowArchived: (value: boolean) => void
+  sendAccent: SendAccent
+  onSendAccent: (accent: SendAccent) => void
   onAddProject: () => void
   pending: boolean
   projectImports: JSX.Element
@@ -75,6 +80,25 @@ export function SettingsPane(props: SettingsPaneProps) {
             <button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button>
             <p class="empty">Import all from</p>
             {props.projectImports}
+          </Show>
+          <Show when={category() === 'Appearance'}>
+            <fieldset class="settings__accent-picker">
+              <legend>Send button accent</legend>
+              <For each={SEND_ACCENTS}>
+                {(accent) => (
+                  <input
+                    class="settings__accent-swatch"
+                    type="radio"
+                    name="send-accent"
+                    data-send-accent={accent}
+                    aria-label={accent}
+                    title={accent}
+                    checked={props.sendAccent === accent}
+                    onChange={() => props.onSendAccent(accent)}
+                  />
+                )}
+              </For>
+            </fieldset>
           </Show>
         </section>
       </div>
