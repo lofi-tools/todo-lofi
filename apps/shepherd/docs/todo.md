@@ -397,8 +397,9 @@ task-scoped, persistent and fast enough.
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
   hyperlinks. Kitty modes negotiate independently for each screen. Fixtures
   cover reflow and key encoding. The native smoke drives Vim, less and
-  composition events. A PTY probe verifies Kitty negotiation and key reports.
-  A system input method and real Kitty-enabled applications still need a manual
+  composition events. Native PTY probes verify Kitty negotiation and key
+  reports, bracketed paste and SGR mouse reports. Interactive fish verifies
+  distinct Ctrl+I and Tab bindings. A system input method still needs a manual
   pass.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
@@ -431,8 +432,9 @@ Automated:
   subscription across task switches, task pane visibility, split resize,
   hide and reopen, key encoding and keyboard copy mode.
 - [x] Native macOS smoke covers Vim and less alternate screens, synthetic
-  composition, a Kitty protocol probe, burst and paced paint, scrollback
-  search, split resize, reattachment, quit and restart from the saved layout.
+  composition, Kitty and fish key reports, bracketed paste, SGR mouse input,
+  burst and paced paint, scrollback search, PTY split resize, task switching,
+  reattachment, quit and restart of shared and task terminals.
 
 Manual script:
 
@@ -443,6 +445,9 @@ Manual script:
 5. Switch tasks; shared stays, task-specific swaps.
 6. Close a terminal view and reopen it from the instance menu.
 7. Quit and relaunch; both appear ended with restart actions.
+8. With a system input method enabled, compose text in a terminal, move the
+   candidate selection and commit it. Verify that the shell receives the
+   committed text once and the candidate UI follows the terminal cursor.
 
 ### Gate
 
@@ -618,7 +623,7 @@ Record every gate result here. Do not silently mark a gate passed.
 |  | S1 |  |  |
 | 2026-11-05 | S2 | Partial | A live headless run on a disposable repository (`codex-cli 0.166.0-alpha.6`, ignored test) streamed 32 deltas, reported two tool calls, changed the file, reopened the same thread after restarting the process, and cancelled a running turn. It found and fixed one protocol gap: `thread/start` takes `workspace-write`, not `workspaceWrite`. A mid-turn SIGKILL of the real process is proven through the core (ignored test: task `failed`, failure row, stderr tail). A live approval request is also proven at the adapter: Codex asked before a network command, the request carried the command and its decisions, the denial was recorded, and the turn completed. Restart-resume is proven through the core too: an ignored test quits mid-turn, reloads the same database, sees the task interrupted, resumes the recorded thread and finishes another turn. Still unverified before a pass: the desktop window, including how the approval card renders there. The core now pumps adapter events between commands (covered by a focused test), so a live turn can stream into the window. The desktop shell was also built and launched from the Nix shell on 2026-11-05 (Vite on 1420 answered 200 and the Tauri binary ran), but the window was not inspected and no task was driven through it. Automated suites: 38 `agent-harness` (2 live, ignored), 37 `shepherd-core` plus 2 ignored live runs, 9 shell. |
 |  | S3 |  |  |
-| 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim and less, checked composition events and Kitty negotiation through a real PTY, searched scrollback in both directions, resized and reattached a split, then restored both ended records and restarted one after relaunch. The latest run painted the tail of a 1 MiB burst in 179 ms and all 24 paced markers, with an 85 ms maximum gap between their first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. System IME, an interactive Kitty-enabled app, Ubuntu and the manual workday gate remain open. |
+| 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim and less, distinguished Ctrl+I from Tab in interactive fish, and checked composition events, bracketed paste and SGR mouse reports. It verified PTY size changes, preserved a shared terminal across task switches, and restarted both shared and task terminals after relaunch. The latest run painted the tail of a 1 MiB burst in 185 ms and all 24 paced markers, with a 93 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. System IME, Ubuntu and the manual workday gate remain open. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |

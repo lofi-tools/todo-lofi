@@ -24,19 +24,20 @@ Set `SHEPHERD_DEV_DATA_DIR` to an absolute path when exercising the debug app
 with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
 to point the debug project picker at a fixture directory.
 
-Until the Codex adapter lands in S2, the shell runs a scripted adapter
-(`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
-real agent.
-
-The native terminal smoke uses a disposable project and database and a
-separate dev server on port 1432. The first launch exercises Vim, less, Kitty
-key reports, scrollback search, split resizing and output bursts. The second
-launch checks layout restoration and terminal restart. Run it from an active
-desktop session with `vim`, `less` and `python3` on your path.
+The native terminal smoke uses a disposable Git project, database and scripted
+agent. The first launch exercises Vim, less, Kitty key reports, bracketed paste,
+mouse reports, scrollback search, PTY resizing, output bursts and switching
+between task and shared terminals. It also checks distinct Ctrl+I and Tab
+bindings when fish 4 or later is installed. The second launch checks layout
+restoration and restarts a shared terminal and a task terminal in its worktree.
+Run it from an active desktop session with `vim`, `less` and `python3` on your path.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh
 ```
+
+The smoke uses a separate dev server on port 1432. Set
+`SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
 ## Bridge
 
