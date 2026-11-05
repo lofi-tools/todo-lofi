@@ -928,6 +928,31 @@ mod tests {
     }
 
     #[test]
+    fn repairs_the_missing_checkout_without_touching_other_registrations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let path = task_worktree(&fixture)?;
+        let other = fixture
+            .repository()
+            .git_dir
+            .join("shepherd/worktrees/other");
+        GitService.create_worktree(fixture.repository(), &other, "shepherd/other", "main")?;
+        std::fs::remove_dir_all(&path)?;
+        std::fs::remove_dir_all(&other)?;
+        let tip = run_git(
+            fixture.path(),
+            &["rev-parse", "refs/heads/shepherd/example"],
+        )?;
+
+        GitService.restore_worktree(fixture.repository(), &path, "shepherd/example", None)?;
+        assert_eq!(run_git(&path, &["rev-parse", "HEAD"])?, tip);
+        let list = run_git(fixture.path(), &["worktree", "list", "--porcelain"])?;
+        assert!(list.contains(other.to_str().ok_or("non-UTF-8 worktree path")?));
+        assert!(!other.exists());
+        Ok(())
+    }
+
+    #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");
