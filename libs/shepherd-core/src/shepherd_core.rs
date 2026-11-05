@@ -3158,6 +3158,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_layout_round_trips_and_rejects_stale_or_foreign_panes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::terminal::{SplitAxis, TerminalSplit};
+
+        let directory = TestDirectory::new()?;
+        let other = TestDirectory::new()?;
+        let database = directory.join("shepherd.db");
+        let store = TursoStore::open_at(&database).await?;
+        let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
+        let project = add_project(&mut core, directory.path().to_path_buf()).await?;
+        let foreign = add_project(&mut core, other.path().to_path_buf()).await?;
+        for (id, owner, path) in [
+            ("first", &project, directory.path()),
+            ("second", &project, directory.path()),
+            ("foreign", &foreign, other.path()),
+        ] {
+            let terminal = TerminalRecord::project_shared(
+                TerminalId::new(id),
+                owner.clone(),
+                id,
+                path.to_path_buf(),
+                "/bin/sh",
+                1,
+            );
+            core.record_terminal(&terminal).await?;
+        }
+        let pane = |id: &str| {
+            Box::new(TerminalSplit::Pane {
+                terminal_id: id.into(),
+            })
+        };
+        let edit = TerminalLayout {
+            revision: 0,
+            root: Some(TerminalSplit::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 650,
+                first: pane("first"),
+                second: pane("second"),
+            }),
+        };
+        let saved = core.save_terminal_layout(&project, edit.clone()).await?;
+        assert_eq!(saved.revision, 1);
+        assert!(matches!(
+            core.save_terminal_layout(&project, edit).await,
+            Err(CoreError::TerminalLayoutChanged)
+        ));
+        assert!(matches!(
+            core.save_terminal_layout(
+                &project,
+                TerminalLayout {
+                    revision: saved.revision,
+                    root: Some(*pane("foreign")),
+                }
+            )
+            .await,
+            Err(CoreError::InvalidTerminalLayout)
+        ));
+        drop(core);
+
+        let store = TursoStore::open_at(&database).await?;
+        let reopened = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(reopened.terminal_layout(&project)?, saved);
+        assert_eq!(
+            reopened.terminal_layout(&foreign)?,
+            TerminalLayout::default()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_terminal_record_is_ended_after_a_restart() -> Result<(), Box<dyn std::error::Error>>
     {
         let directory = TestDirectory::new()?;
