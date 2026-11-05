@@ -635,7 +635,7 @@ impl ShellState {
             && let Err(error) = self.core.lock().await.record_terminal(record).await
         {
             self.screens.lock().await.remove(terminal_id.as_str());
-            if let Err(close_error) = self.engine.lock().await.close(&terminal_id) {
+            if let Err(close_error) = self.stop_terminal_process(terminal_id).await {
                 tracing::warn!(%close_error, "could not roll back terminal spawn");
             }
             return Err(error.into());
@@ -867,10 +867,16 @@ impl ShellState {
     }
 
     pub async fn close_terminal(&self, terminal_id: String) -> Result<(), BridgeError> {
-        self.engine
-            .lock()
+        let _guard = self.terminal_lifecycle.lock().await;
+        self.stop_terminal_process(TerminalId::new(terminal_id))
             .await
-            .close(&TerminalId::new(terminal_id.clone()))
+    }
+
+    async fn stop_terminal_process(&self, terminal_id: TerminalId) -> Result<(), BridgeError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || engine.blocking_lock().close(&terminal_id))
+            .await
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))
     }
 

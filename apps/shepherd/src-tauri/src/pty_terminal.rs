@@ -49,6 +49,25 @@ impl TerminalProcessGroup {
                     && libc::getpgid(self.group) == self.group
             }
     }
+
+    fn finish_hangup(mut groups: Vec<Self>) {
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        groups.retain(Self::still_owned);
+        while !groups.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            groups.retain(Self::still_owned);
+        }
+        for group in groups {
+            // The PTY may already have detached from the surviving job. Check
+            // its leader still belongs to the original session before signaling.
+            if group.still_owned() && unsafe { libc::killpg(group.group, libc::SIGKILL) } == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    tracing::warn!(%error, process_group = group.group, "could not stop terminal process group");
+                }
+            }
+        }
+    }
 }
 
 impl Session {
@@ -120,7 +139,7 @@ impl PtyTerminals {
             }
         };
         #[cfg(unix)]
-        let mut groups: Vec<_> = sessions
+        let groups = sessions
             .values()
             .flat_map(Session::process_groups)
             .collect();
@@ -130,25 +149,7 @@ impl PtyTerminals {
             }
         }
         #[cfg(unix)]
-        {
-            let deadline = std::time::Instant::now() + Duration::from_millis(200);
-            groups.retain(TerminalProcessGroup::still_owned);
-            while !groups.is_empty() && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-                groups.retain(TerminalProcessGroup::still_owned);
-            }
-            for group in groups {
-                // The PTY may already have detached from the surviving job. Check
-                // its leader still belongs to the original session before signaling.
-                if group.still_owned() && unsafe { libc::killpg(group.group, libc::SIGKILL) } == -1
-                {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        tracing::warn!(%error, process_group = group.group, "could not stop terminal process group");
-                    }
-                }
-            }
-        }
+        TerminalProcessGroup::finish_hangup(groups);
     }
 
     pub fn write_reply(
@@ -398,10 +399,15 @@ impl TerminalService for PtyTerminals {
         else {
             return Ok(());
         };
+        #[cfg(unix)]
+        let groups = session.process_groups().collect();
         session
             .hangup()
             .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
         session.closing = true;
+        drop(sessions);
+        #[cfg(unix)]
+        TerminalProcessGroup::finish_hangup(groups);
         Ok(())
     }
 }
@@ -486,29 +492,45 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn closing_a_live_terminal_removes_it() {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_a_live_terminal_stops_a_job_that_ignores_hangup()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut engine = PtyTerminals::new();
-        let (sender, _receiver) = mpsc::channel(8);
-        let terminal_id = engine
-            .spawn(
-                TerminalSpec {
-                    id: TerminalId::new("test-terminal"),
-                    columns: 80,
-                    rows: 24,
-                    cwd: std::env::temp_dir(),
-                    command: "/bin/sh".to_string(),
-                    args: vec!["-c".to_string(), "sleep 30".to_string()],
-                    environment: BTreeMap::new(),
-                },
-                sender,
-            )
-            .expect("the PTY should spawn");
+        let (sender, mut receiver) = mpsc::channel(8);
+        let terminal_id = engine.spawn(
+            TerminalSpec {
+                id: TerminalId::new("test-terminal"),
+                columns: 80,
+                rows: 24,
+                cwd: std::env::temp_dir(),
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "trap '' HUP; printf ready; sleep 10".to_string(),
+                ],
+                environment: BTreeMap::new(),
+            },
+            sender,
+        )?;
+        let ready = tokio::time::timeout(Duration::from_secs(3), receiver.recv()).await?;
+        assert!(matches!(ready, Some(TerminalEvent::Output(bytes)) if bytes == b"ready"));
 
-        engine.close(&terminal_id).expect("close should succeed");
+        engine.close(&terminal_id)?;
         assert!(
             engine.write(&terminal_id, b"x".to_vec()).is_err(),
             "a closed terminal keeps no writer"
         );
+        let stopped = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = receiver.recv().await {
+                if matches!(event, TerminalEvent::Exited { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await?;
+        assert!(stopped, "the terminal should report its exit");
+        Ok(())
     }
 }
