@@ -480,7 +480,7 @@ mod tests {
         assert!(row(&history, 0).starts_with("first"));
 
         screen.follow_output();
-        screen.process(b"\x1b[?1049halternate");
+        screen.process(b"\x1b[?1049h\x1b[Halternate");
         assert!(row(&screen.frame(), 0).starts_with("alternate"));
         screen.process(b"\x1b[?1049l");
         assert!(row(&screen.frame(), 2).starts_with("fourth"));
