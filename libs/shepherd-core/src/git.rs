@@ -899,6 +899,35 @@ mod tests {
     }
 
     #[test]
+    fn squash_merge_lists_conflicts_and_leaves_the_base_tip_alone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let task = task_worktree(&fixture)?;
+        std::fs::write(task.join("README.md"), "task edit\n")?;
+        run_git(&task, &["commit", "-am", "Task edit"])?;
+        fixture.write_file("README.md", "base edit\n")?;
+        run_git(fixture.path(), &["commit", "-am", "Base edit"])?;
+        let base_tip = run_git(fixture.path(), &["rev-parse", "HEAD"])?;
+
+        let result = GitService.squash_merge(
+            fixture.path(),
+            &task,
+            "main",
+            "shepherd/example",
+            "Task result",
+        );
+        assert!(
+            matches!(result, Err(GitError::MergeConflicts { paths, .. }) if paths == "README.md")
+        );
+        assert_eq!(run_git(fixture.path(), &["rev-parse", "HEAD"])?, base_tip);
+        assert_eq!(
+            run_git(fixture.path(), &["diff", "--name-only", "--diff-filter=U"])?,
+            "README.md"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");
