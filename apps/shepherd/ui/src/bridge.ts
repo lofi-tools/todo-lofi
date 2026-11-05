@@ -31,6 +31,7 @@ export interface ProjectSnapshot {
   missing: boolean
   lastTaskId: string | null
   unfinishedTaskCount: number
+  reviewTaskCount: number
 }
 
 export interface ProjectList {

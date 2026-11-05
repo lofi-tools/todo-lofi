@@ -335,7 +335,7 @@ squash-merge into the base from inside Shepherd.
 - [ ] Add the Review tab: changed files, status, worktree diff and review notes.
 - [x] Add the Git tab: status, stage/unstage, commit, branch display, checkout,
   squash-merge, dirty-root refusal and conflict paths.
-- [ ] Add review badges on the task row and Review tab, plus the status-bar
+- [x] Add review badges on the task row and Review tab, plus the status-bar
   review count.
 - [ ] Implement **Mark reviewed and archive**, **Reopen** and **Send review
   note**.

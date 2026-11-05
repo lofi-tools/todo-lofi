@@ -35,7 +35,7 @@ export function App() {
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
 
   const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
-  const reviewCount = () => tasks().filter((task) => task.state === 'review').length
+  const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
   const canCompose = () => {
     const state = workspace()?.task.state
     return state === 'draft' || state === 'ready'
@@ -271,7 +271,9 @@ export function App() {
                               >
                                 <span class="task__state" aria-hidden="true" />
                                 <span class="task__title">{task.title}</span>
-                                <span class="task__state-label">{task.state}</span>
+                                <Show when={task.state === 'review'} fallback={<span class="task__state-label">{task.state}</span>}>
+                                  <ReviewBadge />
+                                </Show>
                               </button>
                             </li>
                           )}
@@ -410,6 +412,9 @@ export function App() {
                   title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
                 >
                   {tab.label}
+                  <Show when={tab.id === 'review' && workspace()?.task.state === 'review'}>
+                    <ReviewBadge />
+                  </Show>
                 </button>
               )}
             </For>
@@ -516,6 +521,10 @@ const INSPECTOR_TABS: InspectorTab[] = [
   { id: 'git', label: 'Git', enabled: true },
   { id: 'files', label: 'Files', enabled: false },
 ]
+
+function ReviewBadge() {
+  return <span class="review-badge">Needs review</span>
+}
 
 function Dot() {
   return (

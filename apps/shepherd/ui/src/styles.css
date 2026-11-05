@@ -930,3 +930,17 @@ textarea {
   background: var(--surface-raised);
   border: 1px solid var(--border);
 }
+
+.review-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.inspector__tab .review-badge {
+  margin-inline-start: 5px;
+}

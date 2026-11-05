@@ -1216,6 +1216,7 @@ impl Core {
         self.emit(Event::TaskChanged(TaskSummary::from(&task)));
         self.emit(Event::TaskWorkspaceChanged(workspace.clone()));
         self.emit(Event::TaskListChanged(tasks));
+        self.emit(Event::ProjectListChanged(self.project_list()));
         Ok(workspace)
     }
 
@@ -1238,6 +1239,11 @@ impl Core {
                 .as_ref()
                 .map(|task_id| task_id.as_str().to_string()),
             unfinished_task_count,
+            review_task_count: self
+                .tasks
+                .values()
+                .filter(|task| task.project_id == project.id && task.state == TaskState::Review)
+                .count(),
         }
     }
 
