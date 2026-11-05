@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -279,6 +280,14 @@ impl Screen {
             }
             bytes = remaining;
         }
+    }
+
+    pub fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    pub fn finish_sync(&mut self) {
+        self.parser.stop_sync(&mut self.term);
     }
 
     fn keyboard_index(&self) -> usize {
@@ -688,6 +697,17 @@ mod tests {
         screen.process(b"abc\x1b[6n");
         assert_eq!(screen.take_replies(), b"\x1b[1;4R");
         assert!(screen.take_replies().is_empty());
+    }
+
+    #[test]
+    fn a_synchronized_update_can_flush_without_an_end_marker() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b[?2026hhello");
+        assert!(screen.sync_deadline().is_some());
+        assert_eq!(row(&screen.frame(), 0), "          ");
+        screen.finish_sync();
+        assert!(screen.sync_deadline().is_none());
+        assert!(row(&screen.frame(), 0).starts_with("hello"));
     }
 
     #[test]

@@ -451,51 +451,24 @@ impl ShellState {
         let id = terminal_id.as_str().to_string();
         tauri::async_runtime::spawn(async move {
             let mut pending = None;
+            let mut deadline = None;
             loop {
-                let event = match pending.take() {
-                    Some(event) => event,
-                    None => match receiver.recv().await {
-                        Some(event) => event,
-                        None => break,
-                    },
+                let event = if let Some(event) = pending.take() {
+                    Ok(Some(event))
+                } else if let Some(deadline) = deadline {
+                    tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(deadline),
+                        receiver.recv(),
+                    )
+                    .await
+                } else {
+                    Ok(receiver.recv().await)
                 };
-                match event {
-                    TerminalEvent::Output(bytes) => {
-                        let (replies, bell) = {
-                            let mut screens = screens.lock().await;
-                            let Some(slot) = screens.get_mut(&id) else {
-                                continue;
-                            };
-                            slot.screen.process(&bytes);
-                            for _ in 0..31 {
-                                match receiver.try_recv() {
-                                    Ok(TerminalEvent::Output(bytes)) => slot.screen.process(&bytes),
-                                    Ok(event) => {
-                                        pending = Some(event);
-                                        break;
-                                    }
-                                    Err(_) => break,
-                                }
-                            }
-                            slot.frames.send_replace(Arc::new(slot.screen.frame()));
-                            (slot.screen.take_replies(), slot.screen.take_bell())
-                        };
-                        if bell
-                            && let Err(error) = shell_events.send(Event::TerminalBell {
-                                project_id: bell_project.clone(),
-                                task_id: bell_task.clone(),
-                                terminal_id: id.clone(),
-                            })
-                        {
-                            tracing::debug!(%error, "no shell is subscribed to terminal bells");
-                        }
-                        if !replies.is_empty()
-                            && let Err(error) = engine.lock().await.write(&terminal_id, &replies)
-                        {
-                            tracing::debug!(%error, "could not send terminal replies");
-                        }
-                    }
-                    TerminalEvent::Exited { exit_code } => {
+                let output = match event {
+                    Ok(Some(TerminalEvent::Output(bytes))) => Some(bytes),
+                    Ok(None) => break,
+                    Err(_) => None,
+                    Ok(Some(TerminalEvent::Exited { exit_code })) => {
                         screens.lock().await.remove(&id);
                         let mut core = core.lock().await;
                         if let Err(error) = core
@@ -511,6 +484,44 @@ impl ShellState {
                         }
                         break;
                     }
+                };
+                let (replies, bell) = {
+                    let mut screens = screens.lock().await;
+                    let Some(slot) = screens.get_mut(&id) else {
+                        continue;
+                    };
+                    if let Some(bytes) = output {
+                        slot.screen.process(&bytes);
+                        for _ in 0..31 {
+                            match receiver.try_recv() {
+                                Ok(TerminalEvent::Output(bytes)) => slot.screen.process(&bytes),
+                                Ok(event) => {
+                                    pending = Some(event);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    } else {
+                        slot.screen.finish_sync();
+                    }
+                    deadline = slot.screen.sync_deadline();
+                    slot.frames.send_replace(Arc::new(slot.screen.frame()));
+                    (slot.screen.take_replies(), slot.screen.take_bell())
+                };
+                if bell
+                    && let Err(error) = shell_events.send(Event::TerminalBell {
+                        project_id: bell_project.clone(),
+                        task_id: bell_task.clone(),
+                        terminal_id: id.clone(),
+                    })
+                {
+                    tracing::debug!(%error, "no shell is subscribed to terminal bells");
+                }
+                if !replies.is_empty()
+                    && let Err(error) = engine.lock().await.write(&terminal_id, &replies)
+                {
+                    tracing::debug!(%error, "could not send terminal replies");
                 }
             }
         });
