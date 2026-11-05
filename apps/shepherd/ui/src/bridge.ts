@@ -140,10 +140,17 @@ export interface Entry {
   kind: EntryKind
 }
 
+export interface AgentDiagnostics {
+  command: string
+  protocol: string
+  stderrTail: string
+}
+
 export interface TaskWorkspace {
   project: ProjectSnapshot
   task: TaskDetail
   transcript: Entry[]
+  diagnostics: AgentDiagnostics | null
 }
 
 export interface QuitSummary {

@@ -11,8 +11,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, FileDiff,
-    HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
+    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
+    FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
     SessionRoots, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
 };
 
@@ -294,6 +294,14 @@ impl FakeHarness {
 impl AgentHarness for FakeHarness {
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         &mut self.receiver
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        AgentDiagnostics {
+            command: "fake".to_string(),
+            protocol: "fake-harness".to_string(),
+            stderr_tail: String::new(),
+        }
     }
 
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {

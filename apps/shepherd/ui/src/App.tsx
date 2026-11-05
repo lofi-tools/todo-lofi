@@ -316,6 +316,28 @@ export function App() {
             )}
           </Show>
 
+          <Show when={workspace()?.diagnostics}>
+            {(diagnostics) => (
+              <details class="diagnostics">
+                <summary>Diagnostics</summary>
+                <dl>
+                  <dt>Command</dt>
+                  <dd>
+                    <code>{diagnostics().command || '—'}</code>
+                  </dd>
+                  <dt>Protocol</dt>
+                  <dd>{diagnostics().protocol || '—'}</dd>
+                  <Show when={diagnostics().stderrTail}>
+                    <dt>stderr</dt>
+                    <dd>
+                      <pre>{diagnostics().stderrTail}</pre>
+                    </dd>
+                  </Show>
+                </dl>
+              </details>
+            )}
+          </Show>
+
           <div class="chat__transcript">
             <Show
               when={workspace()}

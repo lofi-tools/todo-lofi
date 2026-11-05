@@ -1,6 +1,6 @@
 //! Snapshots returned by commands and included in change events.
 
-use agent_harness::Entry;
+use agent_harness::{AgentDiagnostics, Entry};
 use serde::Serialize;
 
 use crate::projects::{ProjectId, ProjectSnapshot};
@@ -25,4 +25,6 @@ pub struct TaskWorkspace {
     pub project: ProjectSnapshot,
     pub task: TaskDetail,
     pub transcript: Vec<Entry>,
+    /// What the adapter launched and speaks, once a session exists.
+    pub diagnostics: Option<AgentDiagnostics>,
 }

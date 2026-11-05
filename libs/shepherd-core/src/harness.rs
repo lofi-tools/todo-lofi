@@ -5,8 +5,8 @@
 //! shutdown. It does not know which CLI is underneath.
 
 use agent_harness::{
-    AgentHarness, ApprovalId, Capabilities, Decision, Entry, FailureKind, HarnessEvent,
-    PromptInput, SessionId, SpawnSpec, Transcript,
+    AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, Entry, FailureKind,
+    HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
 };
 
 use crate::CoreError;
@@ -151,6 +151,10 @@ impl HarnessSession {
 
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    pub fn diagnostics(&self) -> AgentDiagnostics {
+        self.harness.diagnostics()
     }
 
     pub fn session_id(&self) -> Option<&SessionId> {

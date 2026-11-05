@@ -378,6 +378,10 @@ impl Core {
                 .get(task_id)
                 .map(|session| session.transcript().entries().to_vec())
                 .unwrap_or_default(),
+            diagnostics: self
+                .sessions
+                .get(task_id)
+                .map(|session| session.diagnostics()),
         })
     }
 
@@ -2133,6 +2137,42 @@ mod tests {
                 .map(Entry::summary)
                 .collect::<Vec<_>>()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn diagnostics_name_the_command_and_protocol() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::default()]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Diagnose".to_string(),
+            })
+            .await?,
+        );
+        assert!(
+            draft.diagnostics.is_none(),
+            "a draft has no session to report"
+        );
+
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: TaskId::new(draft.task.id.clone()),
+                text: "go".to_string(),
+            })
+            .await?,
+        );
+        let diagnostics = workspace
+            .diagnostics
+            .expect("a running session reports diagnostics");
+        assert_eq!(diagnostics.command, "fake");
+        assert_eq!(diagnostics.protocol, "fake-harness");
+        assert!(diagnostics.stderr_tail.is_empty());
         Ok(())
     }
 }

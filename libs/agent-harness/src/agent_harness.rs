@@ -237,6 +237,28 @@ pub struct SpawnSpec {
     pub environment: BTreeMap<String, String>,
 }
 
+/// The exact launch and protocol an adapter used, for Task → Diagnostics. The
+/// core shows these verbatim, so nothing secret belongs in them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDiagnostics {
+    /// The program and arguments, as launched.
+    pub command: String,
+    /// The protocol surface and version the adapter verified.
+    pub protocol: String,
+    /// The child's stderr, newest last.
+    pub stderr_tail: String,
+}
+
+/// The command line as diagnostics show it. It is display text, not a shell
+/// command, so arguments are joined without quoting.
+pub fn command_line(spec: &SpawnSpec) -> String {
+    std::iter::once(spec.program.as_str())
+        .chain(spec.args.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The directories an agent session may touch. The first root is the primary
 /// working directory.
 #[derive(Clone, Debug, Default)]
@@ -885,6 +907,12 @@ pub trait AgentHarness: Send {
     /// Receive adapter events. The receiver is owned by the harness and must
     /// remain available for the whole session.
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent>;
+
+    /// What this session launched and which protocol it speaks. The default is
+    /// empty, so a test adapter need not invent values.
+    fn diagnostics(&self) -> AgentDiagnostics {
+        AgentDiagnostics::default()
+    }
 
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities>;
 

@@ -23,8 +23,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::{
-    AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, FileDiff,
-    HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
+    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
+    FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
     SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
 };
 
@@ -504,6 +504,9 @@ pub struct CodexHarness {
     supported: BTreeSet<String>,
     cwd: PathBuf,
     session_id: Option<SessionId>,
+    command: String,
+    protocol: String,
+    version: Option<String>,
     started: bool,
 }
 
@@ -529,8 +532,18 @@ impl CodexHarness {
                 .collect(),
             cwd: PathBuf::new(),
             session_id: None,
+            command: String::new(),
+            protocol: "app-server".to_string(),
+            version: None,
             started: false,
         }
+    }
+
+    /// The version the probe read, so diagnostics can name it. Capabilities
+    /// still come from the advertised methods, never from this string.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
     }
 
     fn supports(&self, method: &str) -> bool {
@@ -597,6 +610,14 @@ impl AgentHarness for CodexHarness {
         &mut self.receiver
     }
 
+    fn diagnostics(&self) -> AgentDiagnostics {
+        AgentDiagnostics {
+            command: self.command.clone(),
+            protocol: self.protocol.clone(),
+            stderr_tail: stderr_tail(&self.stderr),
+        }
+    }
+
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
         if self.started {
             return Err(HarnessError::Protocol(
@@ -604,6 +625,7 @@ impl AgentHarness for CodexHarness {
             ));
         }
 
+        self.command = crate::command_line(&spec);
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
@@ -659,6 +681,10 @@ impl AgentHarness for CodexHarness {
                 .map(|method| method.to_string())
                 .collect();
         }
+        self.protocol = match &self.version {
+            Some(version) => format!("app-server ({version})"),
+            None => "app-server".to_string(),
+        };
         self.send(json!({ "method": "initialized", "params": {} }))?;
         self.sender
             .send(HarnessEvent::SessionState {
@@ -844,6 +870,7 @@ pub struct ExecHarness {
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     program: String,
+    command: String,
     args: Vec<String>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -873,6 +900,7 @@ impl ExecHarness {
             sender,
             receiver,
             program: String::new(),
+            command: String::new(),
             args: Vec::new(),
             cwd: PathBuf::new(),
             environment: BTreeMap::new(),
@@ -914,12 +942,21 @@ impl AgentHarness for ExecHarness {
         &mut self.receiver
     }
 
+    fn diagnostics(&self) -> AgentDiagnostics {
+        AgentDiagnostics {
+            command: self.command.clone(),
+            protocol: "codex exec --json".to_string(),
+            stderr_tail: stderr_tail(&self.stderr),
+        }
+    }
+
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
         if self.started {
             return Err(HarnessError::Protocol(
                 "the codex exec session is already started".to_string(),
             ));
         }
+        self.command = crate::command_line(&spec);
         self.program = spec.program;
         self.args = spec.args;
         self.cwd = spec.cwd;
@@ -2045,6 +2082,24 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn diagnostics_report_the_command_and_protocol() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex.sh", PROTOCOL_STUB);
+        let mut harness = CodexHarness::new().with_version("codex-cli 9.9.9");
+        harness
+            .start(spec(&stub, directory.path()))
+            .await
+            .expect("the stub app-server starts");
+        harness.open_session(None).await.expect("a thread opens");
+
+        let diagnostics = harness.diagnostics();
+        assert_eq!(diagnostics.command, stub);
+        assert_eq!(diagnostics.protocol, "app-server (codex-cli 9.9.9)");
+
+        harness.shutdown().await.expect("the session stops");
     }
 
     async fn collect_until<H, F>(harness: &mut H, reached: F) -> Vec<HarnessEvent>
