@@ -292,7 +292,25 @@ async function restore() {
     const pane = terminalPane(first.title)
     return pane && terminalOutput(pane).includes('S4_RESTORED')
   })
-  return { ok: true, restoredLayout: true, restartedTerminal: true }
+  const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.title === 'Terminal scope')
+  const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.scope === 'task')
+  if (!task?.worktreePath || !scoped || scoped.taskId !== task.id || scoped.cwd !== task.worktreePath || scoped.endedAt === null) {
+    throw new Error('The task terminal should restore as ended with its worktree')
+  }
+  await selectTask(task.title)
+  const restartTask = await waitFor('restored task terminal restart action', () => {
+    const pane = terminalPane(scoped.title)
+    return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
+  })
+  restartTask.click()
+  await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
+  await bridge.terminalWrite(scoped.id, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"\r")
+  const marker = 'S4_TASK_RESTORED:' + task.worktreePath.split('/').at(-1)
+  await waitFor('worktree output after task terminal restart', () => {
+    const pane = terminalPane(scoped.title)
+    return pane && terminalOutput(pane).includes(marker)
+  })
+  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true }
 }
 
 void (async () => {
