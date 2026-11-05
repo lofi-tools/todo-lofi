@@ -1157,6 +1157,156 @@ fn normalize_project_path(path: &Path) -> Result<PathBuf, CoreError> {
 }
 
 #[cfg(test)]
+mod live_exit {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use agent_harness::codex::{CodexHarness, detect};
+    use agent_harness::{AgentHarness, SpawnSpec};
+
+    use crate::harness::HarnessFactory;
+    use crate::store::TursoStore;
+    use crate::test_support::{TestDatabase, TestRepository};
+    use crate::{Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
+
+    /// Starts the real Codex, then kills it with SIGKILL once the test creates
+    /// the marker file, so a mid-turn death is reproducible on demand.
+    struct KilledCodexFactory {
+        wrapper: PathBuf,
+        version: Option<String>,
+    }
+
+    impl HarnessFactory for KilledCodexFactory {
+        fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+            let harness = CodexHarness::new();
+            let harness = match &self.version {
+                Some(version) => harness.with_version(version.clone()),
+                None => harness,
+            };
+            Ok(Box::new(harness))
+        }
+
+        fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
+            SpawnSpec {
+                program: self.wrapper.to_string_lossy().into_owned(),
+                cwd,
+                ..SpawnSpec::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_killed_codex_process_fails_the_task_with_its_stderr_tail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let here = std::env::current_dir()?;
+        let detection = detect(None, &here).await;
+        let Some(install) = &detection.install else {
+            eprintln!("skipping the live kill: {}", detection.summary());
+            return Ok(());
+        };
+        eprintln!("{}", detection.summary());
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let directory = tempfile::TempDir::new()?;
+        let marker = directory.path().join("kill");
+        let wrapper = directory.path().join("codex-killed.sh");
+        // A backgrounded job gets /dev/null as stdin, so keep the harness pipe
+        // on fd 3 and hand it to codex explicitly.
+        let script = format!(
+            "#!/bin/bash\nexec 3<&0\n{:?} app-server <&3 &\nchild=$!\nwhile [ ! -f {:?} ]; do sleep 0.1; done\nkill -9 \"$child\"\nprintf 'codex app-server killed mid-turn\\n' >&2\nwait \"$child\"\n",
+            install.program, marker
+        );
+        std::fs::write(&wrapper, script)?;
+        std::fs::set_permissions(
+            &wrapper,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )?;
+
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(KilledCodexFactory {
+                wrapper,
+                version: install.probe.version.clone(),
+            }),
+        );
+
+        let CommandResult::ProjectList(projects) = core
+            .execute(Command::AddProject {
+                path: repository.path().to_path_buf(),
+            })
+            .await?
+        else {
+            return Err("expected a project list".into());
+        };
+        let project = projects.projects.first().ok_or("the project is listed")?;
+        let CommandResult::TaskWorkspace(draft) = core
+            .execute(Command::CreateDraft {
+                project_id: ProjectId::new(project.id.clone()),
+                title: "Kill a live turn".to_string(),
+            })
+            .await?
+        else {
+            return Err("expected a draft".into());
+        };
+        let task_id = TaskId::new(draft.task.id.clone());
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            text: "Run the shell command `sleep 30` in the repository and wait for it to finish, then say done.".to_string(),
+        })
+        .await?;
+
+        let mut live = false;
+        for _ in 0..900 {
+            core.pump().await?;
+            let workspace = core.task_workspace(&task_id)?;
+            if workspace.transcript.len() > 1 || workspace.task.state == TaskState::Waiting {
+                live = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(live, "the turn must stream something before the kill");
+        std::fs::write(&marker, b"kill")?;
+
+        let mut failed = None;
+        for _ in 0..900 {
+            core.pump().await?;
+            let workspace = core.task_workspace(&task_id)?;
+            if workspace.task.state == TaskState::Failed {
+                failed = Some(workspace);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let workspace = failed.ok_or("the killed process must fail the task")?;
+
+        let error = workspace.task.error.clone().unwrap_or_default();
+        assert!(error.contains("exited with code"), "task error: {error}");
+        let rows: Vec<String> = workspace
+            .transcript
+            .iter()
+            .map(|entry| entry.summary())
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.starts_with("failure:")),
+            "rows: {rows:?}"
+        );
+        let diagnostics = workspace
+            .diagnostics
+            .as_ref()
+            .ok_or("the workspace carries diagnostics")?;
+        assert!(
+            diagnostics.stderr_tail.contains("killed mid-turn"),
+            "stderr tail: {}",
+            diagnostics.stderr_tail
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod streaming {
     use std::sync::Mutex;
 
