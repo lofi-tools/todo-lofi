@@ -601,7 +601,8 @@ pub mod commands {
             .core
             .lock()
             .await
-            .mutate_git(&TaskId::new(task_id), mutation)?)
+            .mutate_git(&TaskId::new(task_id), mutation)
+            .await?)
     }
 
     #[tauri::command]

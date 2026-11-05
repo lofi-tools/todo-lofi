@@ -333,7 +333,7 @@ squash-merge into the base from inside Shepherd.
 - [x] Capture the turn baseline (HEAD/status/diff) and implement the review
   trigger for real changes only.
 - [ ] Add the Review tab: changed files, status, worktree diff and review notes.
-- [ ] Add the Git tab: status, stage/unstage, commit, branch display, checkout,
+- [x] Add the Git tab: status, stage/unstage, commit, branch display, checkout,
   squash-merge, dirty-root refusal and conflict paths.
 - [ ] Add review badges on the task row and Review tab, plus the status-bar
   review count.

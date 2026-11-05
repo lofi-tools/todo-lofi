@@ -421,18 +421,18 @@ impl Core {
         Ok(GitService.review(path, base)?)
     }
 
-    pub fn mutate_git(
+    pub async fn mutate_git(
         &mut self,
         task_id: &TaskId,
         mutation: git::GitMutation,
     ) -> Result<git::GitSnapshot, CoreError> {
-        let (task, _, path) = self.task_git_worktree(task_id)?;
+        let (task, repository, path) = self.task_git_worktree(task_id)?;
         if self.shutdown != ShutdownState::Running {
             return Err(CoreError::NotRunning {
                 state: self.shutdown,
             });
         }
-        if task.state.is_live() {
+        if task.state.is_live() || task.state == TaskState::Done {
             return Err(CoreError::TaskNotReady {
                 id: task_id.to_string(),
                 state: task.state.as_str(),
@@ -444,13 +444,30 @@ impl Core {
             git::GitMutation::Commit { message, expected } => {
                 GitService.commit(path, &message, &expected)?
             }
+            git::GitMutation::Checkout { branch } => GitService.checkout(path, &branch)?,
+            git::GitMutation::SquashMerge => {
+                let (Some(base), Some(branch)) = (&task.base_branch, &task.branch) else {
+                    return Err(GitError::MergeUnavailable {
+                        reason: "the task has no recorded branch".into(),
+                    }
+                    .into());
+                };
+                GitService.squash_merge(&repository.root, path, base, branch, &task.title)?;
+            }
         }
         self.git_snapshot(task_id)
     }
 
     pub fn git_snapshot(&self, task_id: &TaskId) -> Result<git::GitSnapshot, CoreError> {
-        let (_, _, path) = self.task_git_worktree(task_id)?;
-        Ok(GitService.snapshot(path)?)
+        let (task, repository, path) = self.task_git_worktree(task_id)?;
+        let mut snapshot = GitService.snapshot(path)?;
+        snapshot.merge_blocked = match (&task.base_branch, &task.branch) {
+            (Some(base), Some(branch)) => {
+                GitService.merge_blocked(&repository.root, path, base, branch)?
+            }
+            _ => Some("The task has no recorded branch.".into()),
+        };
+        Ok(snapshot)
     }
 
     pub fn task_workspace(&self, task_id: &TaskId) -> Result<TaskWorkspace, CoreError> {

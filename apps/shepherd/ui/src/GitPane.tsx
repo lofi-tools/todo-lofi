@@ -8,6 +8,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
     ([taskId]) => gitSnapshot(taskId),
   )
 
+  const [branch, setBranch] = createSignal('')
   const [message, setMessage] = createSignal('')
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal('')
@@ -20,6 +21,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
     try {
       mutate(await mutateGit(props.taskId, operation))
       if (operation.type === 'commit') setMessage('')
+      if (operation.type === 'checkout') setBranch('')
     } catch (failure) {
       setError((failure as { message?: string })?.message ?? String(failure))
       void refetch()
@@ -40,6 +42,14 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
         {(snapshot) => (
           <>
             <p>Branch: {snapshot().branch ?? 'Detached HEAD'}</p>
+            <div class="terminal-pane__bar">
+              <select aria-label="Local branch" value={branch()} onChange={(event) => setBranch(event.currentTarget.value)}>
+                <option value="">Choose a branch</option>
+                <For each={snapshot().branches}>{(name) => <option value={name}>{name}</option>}</For>
+              </select>
+              <button type="button" disabled={disabled() || !branch() || branch() === snapshot().branch || !!snapshot().files.length}
+                onClick={() => void apply({ type: 'checkout', branch: branch() })}>Checkout</button>
+            </div>
             <Show when={snapshot().files.length} fallback={<p class="empty">Working tree clean.</p>}>
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
@@ -69,6 +79,11 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
               <textarea class="composer__input" aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
               <button class="composer__send" type="submit" disabled={disabled() || !message().trim() || !snapshot().stagedDiff}>Commit staged changes</button>
             </form>
+            <div class="terminal-pane__bar">
+              <button type="button" disabled={disabled() || !!snapshot().mergeBlocked}
+                onClick={() => void apply({ type: 'squashMerge' })}>Squash-merge into base</button>
+            </div>
+            <Show when={snapshot().mergeBlocked}>{(reason) => <p class="empty">{reason()}</p>}</Show>
             <Show when={snapshot().stagedDiff}>
               <details><summary>Staged diff</summary><pre class="git-pane__diff">{snapshot().stagedDiff}</pre></details>
             </Show>

@@ -45,6 +45,14 @@ pub enum GitError {
     EmptyCommitMessage,
     #[error("staging changed; refresh Git status before committing")]
     StagingChanged,
+    #[error("local branch does not exist: {branch}")]
+    UnknownBranch { branch: String },
+    #[error("squash merge is unavailable: {reason}")]
+    MergeUnavailable { reason: String },
+    #[error(
+        "squash merge has conflicts in: {paths}. Resolve them in a project terminal.\n{detail}"
+    )]
+    MergeConflicts { paths: String, detail: String },
     #[error("Git is in detached HEAD state at {path}")]
     DetachedHead { path: String },
 }
@@ -315,6 +323,7 @@ impl GitService {
         Ok(GitSnapshot {
             branch: (head != "HEAD").then_some(head),
             staged_revision: self.staged_revision(path)?,
+            merge_blocked: None,
             branches: branches.lines().map(str::to_string).collect(),
             files: self.status(path)?,
             staged_diff: run_git(
@@ -378,6 +387,79 @@ impl GitService {
         Ok(format!("{:x}", hash.finalize()))
     }
 
+    pub fn checkout(&self, path: &Path, branch: &str) -> Result<(), GitError> {
+        if self.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            });
+        }
+        let reference = format!("refs/heads/{branch}");
+        if run_git(path, &["show-ref", "--verify", "--quiet", &reference]).is_err() {
+            return Err(GitError::UnknownBranch {
+                branch: branch.into(),
+            });
+        }
+        run_git(path, &["switch", "--no-guess", "--", branch])?;
+        Ok(())
+    }
+
+    pub fn merge_blocked(
+        &self,
+        root: &Path,
+        path: &Path,
+        base: &str,
+        branch: &str,
+    ) -> Result<Option<String>, GitError> {
+        let current = run_git(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        if current != base {
+            return Ok(Some(format!("Switch the project root to {base} first.")));
+        }
+        if self.has_changes(root)? {
+            return Ok(Some("The project root has uncommitted changes.".into()));
+        }
+        if self.has_changes(path)? {
+            return Ok(Some("Commit the task worktree changes first.".into()));
+        }
+        let current = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        if current != branch || branch == base {
+            return Ok(Some(
+                "Check out the task branch in its worktree first.".into(),
+            ));
+        }
+        let base_tip = run_git(root, &["rev-parse", "HEAD"])?;
+        let task_tip = run_git(path, &["rev-parse", "HEAD"])?;
+        if run_git(root, &["merge-base", &base_tip, &task_tip])? == task_tip {
+            return Ok(Some("The task branch has no commits to merge.".into()));
+        }
+        Ok(None)
+    }
+
+    pub fn squash_merge(
+        &self,
+        root: &Path,
+        path: &Path,
+        base: &str,
+        branch: &str,
+        message: &str,
+    ) -> Result<(), GitError> {
+        if let Some(reason) = self.merge_blocked(root, path, base, branch)? {
+            return Err(GitError::MergeUnavailable { reason });
+        }
+        let reference = format!("refs/heads/{branch}");
+        if let Err(error) = run_git(root, &["merge", "--squash", "--", &reference]) {
+            let conflicts = git_bytes(root, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
+            let paths = git_paths(&conflicts).collect::<Vec<_>>().join(", ");
+            if !paths.is_empty() {
+                return Err(GitError::MergeConflicts {
+                    paths,
+                    detail: error.to_string(),
+                });
+            }
+            return Err(error);
+        }
+        commit_with_message(root, message)
+    }
+
     fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
         let bytes = git_bytes(
             path,
@@ -434,6 +516,7 @@ pub struct GitSnapshot {
     pub files: Vec<GitFile>,
     pub staged_diff: String,
     pub staged_revision: String,
+    pub merge_blocked: Option<String>,
     pub unstaged_diff: String,
 }
 
@@ -443,6 +526,8 @@ pub enum GitMutation {
     Stage { path: Option<String> },
     Unstage { path: String },
     Commit { message: String, expected: String },
+    Checkout { branch: String },
+    SquashMerge,
 }
 
 fn commit_with_message(path: &Path, message: &str) -> Result<(), GitError> {

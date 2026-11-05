@@ -323,6 +323,7 @@ export interface GitSnapshot {
   branches: string[]
   files: GitFile[]
   stagedRevision: string
+  mergeBlocked: string | null
   stagedDiff: string
   unstagedDiff: string
 }
@@ -335,6 +336,8 @@ export type GitMutation =
   | { type: 'stage'; path: string | null }
   | { type: 'unstage'; path: string }
   | { type: 'commit'; message: string; expected: string }
+  | { type: 'checkout'; branch: string }
+  | { type: 'squashMerge' }
 
 export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSnapshot> {
   return invoke('mutate_git', { taskId, mutation })
