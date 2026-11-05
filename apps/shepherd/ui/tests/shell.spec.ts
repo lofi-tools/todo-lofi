@@ -36,13 +36,13 @@ test.beforeEach(async ({ page }) => {
           children: [
             { name: 'alpha', path: '/tmp/home/src/alpha', repository: true, children: [] },
             { name: 'beta', path: '/tmp/home/src/beta', repository: true, children: [] },
+            {
+              name: 'notes',
+              path: '/tmp/home/src/notes',
+              repository: false,
+              children: [{ name: 'solo', path: '/tmp/home/src/notes/solo', repository: true, children: [] }],
+            },
           ],
-        },
-        {
-          name: 'notes',
-          path: '/tmp/home/notes',
-          repository: false,
-          children: [{ name: 'solo', path: '/tmp/home/notes/solo', repository: true, children: [] }],
         },
       ],
     }
@@ -365,6 +365,12 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   await page.getByRole('button', { name: 'Add project' }).click()
   const picker = page.getByRole('dialog', { name: 'Add project' })
   await expect(picker).toBeVisible()
+  await expect(picker.getByRole('option')).toHaveCount(3)
+  await expect(picker.getByRole('option', { name: /alpha/ })).toBeVisible()
+  await expect(picker.getByRole('option', { name: /beta/ })).toBeVisible()
+  await picker.getByRole('option', { name: /notes/ }).click()
+  await expect(picker.getByRole('option', { name: /solo/ })).toBeVisible()
+  await picker.getByRole('button', { name: '/tmp/home', exact: true }).click()
 
   const filter = page.getByLabel('Filter repositories')
   await filter.fill('alph')

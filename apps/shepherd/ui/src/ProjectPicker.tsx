@@ -29,7 +29,13 @@ export function ProjectPicker(props: ProjectPickerProps) {
   const level = () => {
     const stack = trail()
     const current = stack[stack.length - 1]
-    return current ? current.children : (props.scan?.tree ?? [])
+    let nodes = current ? current.children : (props.scan?.tree ?? [])
+    while (nodes.length === 1) {
+      const [only] = nodes
+      if (only.repository || only.children.length === 0) break
+      nodes = only.children
+    }
+    return nodes
   }
 
   const needle = () => filter().trim().toLowerCase()
