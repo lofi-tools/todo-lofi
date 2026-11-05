@@ -193,7 +193,8 @@ CellRun     { count: u16, attrs: u8, fg: u32, bg: u32,
 ```
 
 The per-terminal channel identifies the terminal and orders its frames. Each
-channel message ends with a little-endian `u32` sequence. The webview
+channel message ends with a little-endian `u32` screen revision and `u32`
+sequence. Link activation uses the screen revision to reject stale coordinates. The webview
 acknowledges each decoded update before the shell sends another frame. Header
 flag bits 0 and 1 indicate cursor visibility and a full frame. Bits 2–3
 encode block, underline, beam and hollow block cursor shapes. Each row starts

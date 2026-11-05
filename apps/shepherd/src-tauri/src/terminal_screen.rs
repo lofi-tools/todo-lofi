@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalFrame {
+    pub revision: u32,
     pub columns: usize,
     pub rows: usize,
     pub cursor_column: usize,
@@ -529,6 +530,7 @@ impl Screen {
         }
 
         TerminalFrame {
+            revision: 0,
             columns: self.columns,
             rows: self.rows,
             cursor_column: cursor.column.0.min(self.columns.saturating_sub(1)),

@@ -73,18 +73,22 @@ impl TerminalInput {
 }
 
 struct ScreenSlot {
+    revision: u32,
     screen: Screen,
     frames: watch::Sender<Arc<TerminalFrame>>,
 }
 
 impl ScreenSlot {
-    fn publish(&self) {
+    fn publish(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         if self.frames.receiver_count() > 0 {
-            self.frames.send_replace(Arc::new(self.screen.frame()));
+            let mut frame = self.screen.frame();
+            frame.revision = self.revision;
+            self.frames.send_replace(Arc::new(frame));
         }
     }
 
-    fn subscribe(&self) -> watch::Receiver<Arc<TerminalFrame>> {
+    fn subscribe(&mut self) -> watch::Receiver<Arc<TerminalFrame>> {
         let first = self.frames.receiver_count() == 0;
         let receiver = self.frames.subscribe();
         if first {
@@ -452,7 +456,11 @@ impl ShellState {
 
         let screen = Screen::new(usize::from(columns), usize::from(rows));
         let (frames, _) = watch::channel(Arc::new(screen.frame()));
-        let slot = Arc::new(Mutex::new(ScreenSlot { screen, frames }));
+        let slot = Arc::new(Mutex::new(ScreenSlot {
+            revision: 0,
+            screen,
+            frames,
+        }));
         self.screens
             .lock()
             .await
@@ -621,14 +629,20 @@ impl ShellState {
         terminal_id: &str,
         row: usize,
         column: usize,
+        revision: u32,
     ) -> Result<(), BridgeError> {
         let slot = self.screen_slot(terminal_id).await?;
-        let link = slot
-            .lock()
-            .await
-            .screen
-            .link(row, column)
-            .ok_or_else(|| BridgeError::new("terminal", "no link at this position"))?;
+        let link = {
+            let slot = slot.lock().await;
+            if slot.revision != revision {
+                return Err(BridgeError::new(
+                    "terminal",
+                    "terminal output changed before the link could open",
+                ));
+            }
+            slot.screen.link(row, column)
+        }
+        .ok_or_else(|| BridgeError::new("terminal", "no link at this position"))?;
         let url = tauri::Url::parse(&link)
             .ok()
             .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
@@ -715,6 +729,7 @@ impl ShellState {
                 if previous.as_deref() != Some(frame.as_ref()) {
                     sequence = sequence.wrapping_add(1);
                     let mut payload = frame.encode(previous.as_deref());
+                    payload.extend(frame.revision.to_le_bytes());
                     payload.extend(sequence.to_le_bytes());
                     let response = tauri::ipc::Response::new(payload);
                     if let Err(error) = channel.send(response) {
@@ -1074,10 +1089,11 @@ pub mod commands {
         terminal_id: String,
         row: usize,
         column: usize,
+        revision: u32,
     ) -> Result<(), BridgeError> {
         state
             .inner()
-            .open_terminal_link(&terminal_id, row, column)
+            .open_terminal_link(&terminal_id, row, column, revision)
             .await
     }
 

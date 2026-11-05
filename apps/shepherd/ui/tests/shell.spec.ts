@@ -269,13 +269,13 @@ test.beforeEach(async ({ page }) => {
             const frame = new Uint8Array([
               1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0,
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
-              1, 0, 0, 0,
+              1, 0, 0, 0, 1, 0, 0, 0,
             ])
             callbacks.get(args.channel.id)?.({ index: 0, message: frame.buffer })
             const update = new Uint8Array([
               1, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 4, 0, 0, 1, 0,
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 66,
-              2, 0, 0, 0,
+              2, 0, 0, 0, 2, 0, 0, 0,
             ])
             if (new URLSearchParams(window.location.search).has('kitty-terminal')) {
               new DataView(update.buffer).setUint32(14, (31 << 18) | 1025, true)

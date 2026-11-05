@@ -187,6 +187,7 @@ export interface FrameCell {
 }
 
 export interface TerminalFrame {
+  revision: number
   columns: number
   rows: number
   cursorColumn: number
@@ -323,8 +324,8 @@ export function terminalWrite(terminalId: string, data: string | number[], follo
   return invoke<void>('terminal_write', { terminalId, data, followOutput })
 }
 
-export function openTerminalLink(terminalId: string, row: number, column: number): Promise<void> {
-  return invoke('open_terminal_link', { terminalId, row, column })
+export function openTerminalLink(terminalId: string, row: number, column: number, revision: number): Promise<void> {
+  return invoke('open_terminal_link', { terminalId, row, column, revision })
 }
 
 export function terminalResize(
@@ -340,9 +341,11 @@ export function closeTerminal(terminalId: string): Promise<void> {
 }
 
 function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | undefined) {
-  const payloadLength = buffer.byteLength - 4
+  const payloadLength = buffer.byteLength - 8
   if (payloadLength < 20) throw new Error('Truncated terminal frame')
-  const sequence = new DataView(buffer).getUint32(payloadLength, true)
+  const trailer = new DataView(buffer, payloadLength)
+  const revision = trailer.getUint32(0, true)
+  const sequence = trailer.getUint32(4, true)
   const view = new DataView(buffer, 0, payloadLength)
   let offset = 0
   const byte = () => view.getUint8(offset++)
@@ -403,7 +406,7 @@ function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | unde
     if (column !== columns) throw new Error('Incomplete terminal row')
   }
   if (offset !== payloadLength) throw new Error('Invalid terminal frame length')
-  const frame: TerminalFrame = { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells }
+  const frame: TerminalFrame = { revision, columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells }
   return { frame, sequence, changedRows: full ? null : changedRows }
 }
 

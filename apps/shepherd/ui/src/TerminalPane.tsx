@@ -581,7 +581,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (!cell || !frame || mouseCapture || selecting !== undefined) return
     if (event.button === 0 && (event.metaKey || event.ctrlKey) && frame.cells[cell.row * frame.columns + cell.column]?.linked) {
       event.preventDefault()
-      void bridge.openTerminalLink(props.terminalId, cell.row, cell.column).catch((failure) => setError(describe(failure)))
+      void bridge.openTerminalLink(props.terminalId, cell.row, cell.column, frame.revision).catch((failure) => setError(describe(failure)))
       return
     }
     const button = [0, 1, 2][event.button]
