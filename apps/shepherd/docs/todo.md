@@ -365,8 +365,9 @@ review and merge gate is tracked separately.
 - [x] A commit, branch change or content change in an already-dirty file enters
   `review`. Git fixtures verify HEAD and branch baseline changes. The core
   applies the same baseline comparison and verifies the dirty-file transition.
-- [ ] worktree creation appears in `git worktree list` and uses the default
-  branch even when the root is on another branch;
+- [x] Worktree creation appears in `git worktree list` and uses the default
+  branch even when the root is on another branch. Both behaviours pass in
+  temporary Git repositories.
 - [ ] stage, unstage, commit with hooks and signing disabled;
 - [ ] failing hook preserves the commit message;
 - [ ] squash-merge from a clean root;
