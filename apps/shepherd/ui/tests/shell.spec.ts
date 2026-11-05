@@ -275,6 +275,9 @@ test.beforeEach(async ({ page }) => {
               1, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 4, 0, 0, 1, 0,
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 66,
             ])
+            if (new URLSearchParams(window.location.search).has('kitty-terminal')) {
+              new DataView(update.buffer).setUint32(14, (31 << 18) | 1025, true)
+            }
             callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
             return `subscription-${args.terminalId}`
           }
@@ -291,6 +294,7 @@ test.beforeEach(async ({ page }) => {
 
     window.__writes = writes
     window.__subscriptions = subscriptions
+    window.__terminalLayout = () => terminalLayout
   })
 })
 
@@ -403,4 +407,41 @@ test('keeps the shared terminal attached while switching task terminals', async 
   )
   expect(subscriptions.filter((id) => id === 'terminal-1')).toHaveLength(1)
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
+})
+
+test('resizes a split and reopens a hidden terminal from the instance list', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+
+  const divider = page.getByRole('separator', { name: 'Resize terminal split' })
+  await expect(divider).toHaveAttribute('aria-valuenow', '50')
+  await divider.press('ArrowRight')
+  await expect(divider).toHaveAttribute('aria-valuenow', '55')
+  expect(await page.evaluate(() => {
+    const layout = (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout()
+    return layout.root?.type === 'split' ? layout.root.ratio : null
+  })).toBe(550)
+
+  const scoped = page.getByRole('region', { name: 'Task shell' })
+  await scoped.getByRole('button', { name: 'Hide pane' }).click()
+  await expect(scoped).toHaveCount(0)
+  await page.getByRole('button', { name: /Task shell.*hidden/ }).click()
+  await expect(scoped.getByRole('textbox')).toBeFocused()
+})
+
+test('reports Kitty key events and keeps a keyboard copy view', async ({ page }) => {
+  await page.goto('/?kitty-terminal')
+
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+  await input.press('a')
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __writes: string[] }).__writes,
+  )).toEqual(['\x1b[97;;97u', '\x1b[97;1:3u'])
+
+  await input.press('Control+Shift+x')
+  const copy = page.getByRole('textbox', { name: 'Copy terminal output' })
+  await expect(copy).toBeFocused()
+  await expect(copy).toHaveValue('BB')
+  await copy.press('Escape')
+  await expect(input).toBeFocused()
 })
