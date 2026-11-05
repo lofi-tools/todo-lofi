@@ -191,9 +191,10 @@ fake task, read the stream and use one terminal.
   excluding the home directories `~/.claude`, `~/.codex` and `~/ComfyUI-Installs`,
   and stopping at a repository root so repos nested inside a checkout are not
   listed twice. Cluster the results into a tree rather than a flat list:
-  collapse chains of single-child directories, open through levels that only
-  contain one directory, and group overflow past eight branches. Add a filter
-  field, arrow-key navigation, Enter to select and Esc
+  collapse chains of single-child directories, skip levels with a lone folder,
+  and list all siblings. Expand the first level by default and let folders
+  expand and collapse in place. Add a filter field, arrow-key navigation,
+  Enter to open and Esc
   to cancel; cache the scan for the session and show loading, empty and error
   states plus a re-scan. Selecting a directory calls the existing `add_project`
   command with its path, and the project is named after the directory.

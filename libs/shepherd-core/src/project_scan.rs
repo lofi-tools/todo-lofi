@@ -1,11 +1,10 @@
 //! Finding Git repositories under a directory, and shaping them into a tree the
-//! project picker can walk one level at a time.
+//! project picker can expand in place.
 //!
 //! The scan is best-effort: unreadable directories are skipped, and only
 //! directories that lead to a repository appear in the result. Chains of
-//! single-child directories collapse into one entry, and any level with more
-//! than [`MAX_BRANCHES`] entries groups the tail so a picker never renders an
-//! unbounded wall of siblings.
+//! single-child directories collapse into one entry. Siblings stay at the same
+//! level regardless of how many there are.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,9 +14,6 @@ use serde::Serialize;
 /// Maximum directory depth below the scan root. Deeper trees than this are
 /// rare, and the limit keeps a home-directory scan bounded.
 const MAX_SCAN_DEPTH: usize = 5;
-
-/// Entries shown per level before the remainder is grouped.
-const MAX_BRANCHES: usize = 8;
 
 /// Directories never worth descending into. Toolchain caches and dependency
 /// trees are noise; the macOS media folders are listed because reaching them
@@ -45,25 +41,16 @@ const SKIPPED_DIRS: &[&str] = &[
 ];
 
 /// One entry in the picker's tree. A node is either a repository the user can
-/// add, a directory that leads to repositories, or a synthetic group holding
-/// the entries a level could not show.
+/// add or a directory that leads to repositories.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectNode {
     /// Display name. A collapsed chain joins its segments with `/`.
     pub name: String,
-    /// Absolute path of the repository or directory. Empty for a group.
+    /// Absolute path of the repository or directory.
     pub path: String,
     pub repository: bool,
     pub children: Vec<ProjectNode>,
-}
-
-impl ProjectNode {
-    /// A group is a synthetic node with no path: it exists so a level can show
-    /// a bounded number of branches.
-    pub fn is_group(&self) -> bool {
-        self.path.is_empty() && !self.repository
-    }
 }
 
 /// The result of one scan.
@@ -198,23 +185,8 @@ fn collapse(mut node: RawNode) -> ProjectNode {
         name,
         path: node.path.display().to_string(),
         repository: node.repository,
-        children: cap_branches(node.children.into_values().map(collapse).collect()),
+        children: node.children.into_values().map(collapse).collect(),
     }
-}
-
-fn cap_branches(mut children: Vec<ProjectNode>) -> Vec<ProjectNode> {
-    if children.len() <= MAX_BRANCHES {
-        return children;
-    }
-    let overflow = children.split_off(MAX_BRANCHES);
-    let hidden = overflow.len();
-    children.push(ProjectNode {
-        name: format!("{hidden} more"),
-        path: String::new(),
-        repository: false,
-        children: cap_branches(overflow),
-    });
-    children
 }
 
 #[cfg(test)]
@@ -280,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_levels_with_more_branches_than_the_limit() -> Result<(), Box<dyn std::error::Error>> {
+    fn enumerates_all_siblings_under_the_same_parent() -> Result<(), Box<dyn std::error::Error>> {
         let root = TestDirectory::new()?;
         for index in 0..12 {
             repository(&root, &format!("many/repo-{index:02}"));
@@ -288,14 +260,19 @@ mod tests {
 
         let scan = scan(root.path());
         let many = node(&scan.tree, "many");
-        assert_eq!(many.children.len(), MAX_BRANCHES + 1);
-        let group = many
+        assert_eq!(scan.repositories, 12);
+        let names: Vec<_> = many
             .children
-            .last()
-            .filter(|node| node.is_group())
-            .expect("the tail is grouped");
-        assert_eq!(group.name, "4 more");
-        assert_eq!(group.children.len(), 4);
+            .iter()
+            .map(|child| child.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            (0..12)
+                .map(|index| format!("repo-{index:02}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(many.children.iter().all(|child| child.repository));
         Ok(())
     }
 

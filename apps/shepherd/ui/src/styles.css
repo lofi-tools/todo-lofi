@@ -146,23 +146,12 @@ textarea {
   font-size: 12px;
 }
 
-.picker__trail {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-  padding: 8px 10px 0;
-}
-
-.picker__crumb {
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
+.picker__root {
+  margin: 0;
+  padding: 8px 12px 0;
   color: var(--text-muted);
   font-size: 12px;
-}
-
-.picker__crumb:hover {
-  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .picker__filter {
@@ -200,6 +189,12 @@ textarea {
 .picker__row--active {
   border-color: var(--border);
   background: var(--surface-raised);
+}
+
+.picker__disclosure {
+  width: 10px;
+  flex: none;
+  color: var(--text-muted);
 }
 
 .picker__name {
