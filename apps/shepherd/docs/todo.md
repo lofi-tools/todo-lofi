@@ -198,7 +198,7 @@ Automated:
 
 - [x] Core integration test: add project → draft → send → stream → quit →
   restart.
-- [ ] Playwright smoke: add project, flat task row, draft row, send, Terminals
+- [x] Playwright smoke: add project, flat task row, draft row, send, Terminals
   tab, task switch.
 - [ ] Terminal fixture: feed bytes, assert parser state, input encoding and
   resize; no pixel assertions.
