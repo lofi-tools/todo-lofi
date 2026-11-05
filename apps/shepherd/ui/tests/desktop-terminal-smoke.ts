@@ -97,7 +97,11 @@ async function exerciseComposition(terminalId: string, input: HTMLTextAreaElemen
   await waitFor('composed text delivered once', () => terminalOutput().split('\n').some((line) => line.trim() === 'S4_IME:かな'))
 }
 
-async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
+function shellQuote(value: string): string {
+  return "'" + value.replaceAll("'", "'\"'\"'") + "'"
+}
+
+function runPtyProbe(terminalId: string, steps: string, reset: string) {
   const program = String.raw`
 import os, select, termios, tty
 
@@ -113,17 +117,22 @@ def expect(expected):
 settings = termios.tcgetattr(0)
 tty.setraw(0)
 try:
-    os.write(1, b'\x1b[>3u\x1b[?u')
-    expect(b'\x1b[?3u')
-    os.write(1, b'\r\nS4_' + b'KITTY_READY\r\n')
-    expect(b'\x1b[27u\x1b[27;1:3u')
-    os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
+    exec(${JSON.stringify(steps)})
 finally:
-    os.write(1, b'\x1b[<u')
+    os.write(1, bytes.fromhex(${JSON.stringify(reset)}))
     termios.tcsetattr(0, termios.TCSANOW, settings)
 `
-  const argument = "'" + program.replaceAll("'", "'\"'\"'") + "'"
-  await bridge.terminalWrite(terminalId, `python3 -c ${argument}\r`)
+  return bridge.terminalWrite(terminalId, `python3 -c ${shellQuote(program)}\r`)
+}
+
+async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
+  await runPtyProbe(terminalId, String.raw`
+os.write(1, b'\x1b[>3u\x1b[?u')
+expect(b'\x1b[?3u')
+os.write(1, b'\r\nS4_' + b'KITTY_READY\r\n')
+expect(b'\x1b[27u\x1b[27;1:3u')
+os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
+`, '1b5b3c75')
   await waitFor('Kitty negotiation reply in the PTY', () => terminalOutput().includes('S4_KITTY_READY'))
   for (const type of ['keydown', 'keyup']) {
     input.dispatchEvent(new KeyboardEvent(type, {
