@@ -22,6 +22,14 @@ type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
+const DEFAULT_AGENT = { id: 'codex', name: 'Codex' }
+const AGENT_OPTIONS: HeadlineOption[] = [
+  DEFAULT_AGENT,
+  { id: 'opencode', name: 'OpenCode (coming soon)', disabled: true },
+  { id: 'pi', name: 'Pi (coming soon)', disabled: true },
+  { id: 'claude', name: 'Claude Code (coming soon)', disabled: true },
+  { id: 'freebuff', name: 'Freebuff (coming soon)', disabled: true },
+]
 
 function appearanceStorage() {
   return import.meta.env.VITE_SHEPHERD_EPHEMERAL === '1' ? sessionStorage : localStorage
@@ -586,10 +594,27 @@ export function App() {
             <Show
               when={workspace()}
               fallback={
-                <Show when={canStartTask()} fallback={<p class="empty">Select a task to read its transcript.</p>}>
-                  <div class="chat__welcome">
-                    <h1>What should Codex build in {selectedProject()?.name}?</h1>
-                  </div>
+                <Show when={canStartTask() && selectedProject()} fallback={<p class="empty">Select a task to read its transcript.</p>}>
+                  {(project) => (
+                    <div class="chat__welcome">
+                      <h1 aria-label={`What should ${DEFAULT_AGENT.name} build in ${project().name}?`}>
+                        What should{' '}
+                        <HeadlinePicker label="Agent" value={DEFAULT_AGENT.id} text={DEFAULT_AGENT.name} options={AGENT_OPTIONS} />
+                        {' '}build in{' '}
+                        <HeadlinePicker
+                          label="Project"
+                          value={project().id}
+                          text={project().name}
+                          options={projects().map(({ id, name, path, missing }) => ({ id, name, detail: path, disabled: missing }))}
+                          onChange={(projectId) => {
+                            const next = projects().find((candidate) => candidate.id === projectId)
+                            if (next && next.id !== selectedProjectId()) openProject(next)
+                          }}
+                        />
+                        ?
+                      </h1>
+                    </div>
+                  )}
                 </Show>
               }
             >
@@ -770,6 +795,39 @@ export function App() {
         </Show>
       </footer>
     </div>
+  )
+}
+
+interface HeadlineOption {
+  id: string
+  name: string
+  detail?: string
+  disabled?: boolean
+}
+
+function HeadlinePicker(props: {
+  label: string
+  value: string
+  text: string
+  options: HeadlineOption[]
+  onChange?: (value: string) => void
+}) {
+  return (
+    <span class="headline-picker">
+      <span class="headline-picker__text" aria-hidden="true">{props.text}</span>
+      <svg width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
+      </svg>
+      <select aria-label={props.label} onChange={(event) => props.onChange?.(event.currentTarget.value)}>
+        <For each={props.options}>
+          {(option) => (
+            <option value={option.id} title={option.detail} selected={props.value === option.id} disabled={option.disabled}>
+              {option.name}
+            </option>
+          )}
+        </For>
+      </select>
+    </span>
   )
 }
 
