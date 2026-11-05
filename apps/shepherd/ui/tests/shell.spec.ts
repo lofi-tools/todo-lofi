@@ -223,7 +223,7 @@ test.beforeEach(async ({ context }) => {
           case 'project_list':
             return { projects: [...projects] }
           case 'codex_project_model':
-            return args.projectId === 'project-notes' ? 'notes-model' : 'project-model'
+            return 'gpt-6.1-terra'
           case 'project_remote':
             if (options.has('hugging-face-remote')) {
               return { label: 'datasets/example/data', forge: 'huggingface' }
@@ -381,7 +381,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await directory.click()
   const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
   await expect(welcome).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Model / effort: notes-model' })).toHaveText('notes-model')
+  await expect(page.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' })).toHaveText('gpt-6.1-terra')
   const agent = welcome.getByRole('button', { name: 'Agent: Codex' })
   await agent.click()
   const agentMenu = welcome.getByRole('menu', { name: 'Agent' })
@@ -678,9 +678,9 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
 
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await expect(composer.getByRole('menuitemradio', { name: 'Codex', checked: true })).toBeVisible()
-  await composer.getByRole('button', { name: 'Model / effort: project-model' }).click()
+  await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
   const model = composer.getByRole('menu', { name: 'Model / effort' })
-  await expect(model.getByRole('menuitemradio', { name: 'project-model', checked: true })).toBeVisible()
+  await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
   await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
 })
 

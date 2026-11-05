@@ -62,6 +62,10 @@ sources when the list already contains projects.
 The import uses the installed Codex app server's local project list. It works
 with a Codex installation that supports `project/list`.
 
+Shepherd launches its Codex app server with GPT-6.1 Terra (`gpt-6.1-terra`) as
+the default model. The composer displays the resolved model for the project or
+the model reported by the active session.
+
 ## Bridge
 
 Every core command has one `#[tauri::command]`, and the window receives core

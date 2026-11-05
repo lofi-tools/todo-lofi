@@ -4,12 +4,27 @@
 //! core asks this factory both for the adapter and for the command it should
 //! launch inside each task's directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agent_harness::codex::{CodexHarness, CodexInstall};
 use agent_harness::{AgentHarness, SpawnSpec};
 use shepherd_core::CoreError;
 use shepherd_core::harness::HarnessFactory;
+
+const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
+
+pub(crate) fn codex_spawn_spec(program: &Path, cwd: PathBuf) -> SpawnSpec {
+    SpawnSpec {
+        program: program.to_string_lossy().into_owned(),
+        args: vec![
+            "-c".into(),
+            format!("model=\"{DEFAULT_CODEX_MODEL}\""),
+            "app-server".into(),
+        ],
+        cwd,
+        ..SpawnSpec::default()
+    }
+}
 
 pub struct CodexHarnessFactory {
     program: PathBuf,
@@ -36,12 +51,7 @@ impl HarnessFactory for CodexHarnessFactory {
     }
 
     fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
-        SpawnSpec {
-            program: self.program.to_string_lossy().into_owned(),
-            args: vec!["app-server".to_string()],
-            cwd,
-            ..SpawnSpec::default()
-        }
+        codex_spawn_spec(&self.program, cwd)
     }
 }
 

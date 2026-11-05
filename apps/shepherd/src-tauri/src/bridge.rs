@@ -28,6 +28,7 @@ use shepherd_core::{
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
+use crate::codex_harness::codex_spawn_spec;
 use crate::pty_terminal::PtyTerminals;
 use crate::terminal_screen::{Screen, SearchDirection, SearchMatch, SearchPoint, TerminalFrame};
 
@@ -391,7 +392,7 @@ impl ShellState {
             .lock()
             .await
             .project_path(&ProjectId::new(project_id))?;
-        agent_harness::codex::project_model(program, directory)
+        agent_harness::codex::project_model(codex_spawn_spec(program, directory))
             .await
             .map_err(|error| BridgeError::new("codex_model", error.to_string()))
     }

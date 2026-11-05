@@ -566,18 +566,11 @@ async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
     Ok(projects)
 }
 
-pub async fn project_model(program: &Path, cwd: PathBuf) -> HarnessResult<Option<String>> {
+pub async fn project_model(spec: SpawnSpec) -> HarnessResult<Option<String>> {
     let mut harness = CodexHarness::new();
     let result = async {
-        let directory = cwd.display().to_string();
-        harness
-            .start(SpawnSpec {
-                program: program.to_string_lossy().into_owned(),
-                args: vec!["app-server".into()],
-                cwd,
-                ..SpawnSpec::default()
-            })
-            .await?;
+        let directory = spec.cwd.display().to_string();
+        harness.start(spec).await?;
         let config = harness
             .request("config/read", json!({ "cwd": directory }))
             .await?;
@@ -2525,13 +2518,11 @@ done
         std::fs::create_dir(&configured)?;
 
         assert_eq!(
-            project_model(Path::new(&stub), configured)
-                .await?
-                .as_deref(),
+            project_model(spec(&stub, &configured)).await?.as_deref(),
             Some("project-model")
         );
         assert_eq!(
-            project_model(Path::new(&stub), directory.path().to_path_buf())
+            project_model(spec(&stub, directory.path()))
                 .await?
                 .as_deref(),
             Some("catalog-default")
