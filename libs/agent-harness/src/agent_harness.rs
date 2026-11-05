@@ -5,6 +5,7 @@
 //! their protocol into [`HarnessEvent`] values; the core assembles those events
 //! into [`Transcript`] rows and persists settled rows.
 
+pub mod codex;
 pub mod fake_harness;
 
 use std::collections::BTreeMap;
@@ -31,6 +32,14 @@ pub enum HarnessError {
     ScriptExhausted,
     #[error("the harness event channel closed")]
     ChannelClosed,
+    #[error("the `{program}` program was not found")]
+    MissingProgram { program: String },
+    #[error("failed to start `{program}`: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to write {path}: {source}")]
     WriteFile {
         path: String,
