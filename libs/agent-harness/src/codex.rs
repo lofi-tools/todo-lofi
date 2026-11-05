@@ -1944,7 +1944,7 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{"thread":{"id":"thr_1"}}}\n' "$id"
       ;;
     *'"method":"thread/resume"'*)
-      printf 'thread/resume\n' >> "$directory/methods.txt"
+      printf '%s\n' "$line" >> "$directory/methods.txt"
       printf '{"id":%s,"result":{"thread":{"id":"thr_resumed"}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*)
@@ -2504,7 +2504,10 @@ done
 
         let methods = std::fs::read_to_string(directory.path().join("methods.txt"))
             .expect("the stub recorded the resume");
-        assert!(methods.contains("thread/resume"));
+        assert!(
+            methods.contains("thread/resume") && methods.contains("\"threadId\":\"thr_stored\""),
+            "the resume must name the stored thread: {methods}"
+        );
         harness.shutdown().await.expect("the session stops");
     }
 
