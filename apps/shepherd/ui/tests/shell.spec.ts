@@ -604,7 +604,7 @@ test('applies the Send accent from Appearance and restores it after reload', asy
   await expect(composer).toHaveCSS('box-shadow', /inset/)
   await expect(prompt).toHaveCSS('box-shadow', 'none')
   await prompt.fill('Use the new accent')
-  await expect(composer.getByRole('button', { name: 'Send', exact: true })).toHaveCSS('background-color', 'rgb(105, 215, 196)')
+  await expect(composer.getByRole('button', { name: 'Send', exact: true })).toHaveCSS('background-color', 'rgb(128, 233, 214)')
 
   await page.reload()
   await settings.click()

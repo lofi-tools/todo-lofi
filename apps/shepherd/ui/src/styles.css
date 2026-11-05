@@ -627,11 +627,11 @@ textarea {
   box-shadow: 0 0 0 2px var(--background), 0 0 0 3px var(--text);
 }
 
-[data-send-accent='Blue'] { --send-accent: #91a1ff; }
-[data-send-accent='Violet'] { --send-accent: #c1a4fa; }
-[data-send-accent='Teal'] { --send-accent: #69d7c4; }
-[data-send-accent='Amber'] { --send-accent: #f5c477; }
-[data-send-accent='Neutral'] { --send-accent: var(--text); }
+[data-send-accent='Blue'] { --send-accent: #a5b2ff; }
+[data-send-accent='Violet'] { --send-accent: #d0b8ff; }
+[data-send-accent='Teal'] { --send-accent: #80e9d6; }
+[data-send-accent='Amber'] { --send-accent: #ffd68a; }
+[data-send-accent='Neutral'] { --send-accent: #f3f3f6; }
 
 .settings__project {
   display: grid;
@@ -961,6 +961,7 @@ textarea {
   display: flex;
   flex-direction: column;
   margin: 12px;
+  padding-block: 4px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-raised);
@@ -1026,15 +1027,15 @@ textarea {
 .composer__send--icon {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 32px;
+  width: 32px;
+  height: 30px;
   margin-inline-start: auto;
   padding: 0;
 }
 
 .composer__send--icon:disabled {
-  background: color-mix(in srgb, var(--send-accent) 10%, var(--surface-raised));
-  color: color-mix(in srgb, var(--send-accent) 36%, var(--text-disabled));
+  background: color-mix(in srgb, var(--send-accent) 15%, var(--surface-raised));
+  color: color-mix(in srgb, var(--send-accent) 50%, var(--text-disabled));
 }
 
 .composer__send--icon:enabled {
