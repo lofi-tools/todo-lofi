@@ -28,6 +28,7 @@ use shepherd_core::{
     TaskList, TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::time::Instant;
 
 use crate::codex_harness::codex_spawn_spec;
 use crate::pty_terminal::PtyTerminals;
@@ -869,6 +870,7 @@ impl ShellState {
         tauri::async_runtime::spawn(async move {
             let mut previous = None;
             let mut sequence = 0u32;
+            let mut next_send_at = Instant::now();
             loop {
                 let frame = Arc::clone(&receiver.borrow_and_update());
                 if previous.as_deref() != Some(frame.as_ref()) {
@@ -881,6 +883,7 @@ impl ShellState {
                         tracing::debug!(%error, "terminal view detached");
                         break;
                     }
+                    next_send_at = Instant::now() + Duration::from_millis(16);
                     let received = tokio::select! {
                         _ = &mut cancelled => false,
                         result = tokio::time::timeout(
@@ -898,9 +901,12 @@ impl ShellState {
                     _ = &mut cancelled => break,
                     result = receiver.changed() => if result.is_err() { break },
                 }
-                tokio::select! {
-                    _ = &mut cancelled => break,
-                    _ = tokio::time::sleep(Duration::from_millis(16)) => {}
+                // Coalesce bursts without delaying the next frame after idle time.
+                if next_send_at > Instant::now() {
+                    tokio::select! {
+                        _ = &mut cancelled => break,
+                        _ = tokio::time::sleep_until(next_send_at) => {}
+                    }
                 }
             }
             subscriptions.lock().await.remove(&id);
