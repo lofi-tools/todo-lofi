@@ -48,6 +48,7 @@ pub struct HarnessSession {
     transcript: Transcript,
     pending_approval: Option<ApprovalId>,
     failed: bool,
+    closed: bool,
 }
 
 impl HarnessSession {
@@ -59,6 +60,7 @@ impl HarnessSession {
             transcript: Transcript::default(),
             pending_approval: None,
             failed: false,
+            closed: false,
         }
     }
 
@@ -104,6 +106,7 @@ impl HarnessSession {
 
     pub async fn shutdown(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {
         self.harness.shutdown().await?;
+        self.closed = true;
         self.pending_approval = None;
         Ok(self.pump())
     }
@@ -156,6 +159,10 @@ impl HarnessSession {
     ) {
         self.failed = true;
         self.transcript.push_failure(kind, text, detail);
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     pub fn has_failed(&self) -> bool {

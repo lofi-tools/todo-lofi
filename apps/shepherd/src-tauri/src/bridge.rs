@@ -618,6 +618,20 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn review_task(
+        state: State<'_, ShellState>,
+        task_id: String,
+        action: shepherd_core::ReviewAction,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state
+            .workspace(Command::ReviewTask {
+                task_id: TaskId::new(task_id),
+                action,
+            })
+            .await
+    }
+
+    #[tauri::command]
     pub async fn review_snapshot(
         state: State<'_, ShellState>,
         task_id: String,

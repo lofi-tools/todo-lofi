@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use agent_harness::{ApprovalId, Decision};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::projects::ProjectId;
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
@@ -36,9 +36,21 @@ pub enum Command {
     ResumeTask {
         task_id: TaskId,
     },
+    ReviewTask {
+        task_id: TaskId,
+        action: ReviewAction,
+    },
     Quit {
         force: bool,
     },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ReviewAction {
+    Archive,
+    Reopen,
+    SendNote { text: String },
 }
 
 #[derive(Clone, Debug)]

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use agent_harness::{FailureKind, HarnessEvent, SessionId, TurnFinishReason};
 use tokio::sync::mpsc;
 
-pub use commands::{Command, CommandResult, QuitSummary};
+pub use commands::{Command, CommandResult, QuitSummary, ReviewAction};
 pub use events::{Event, ShutdownState};
 pub use input::{Focus, InputMode};
 pub use project_scan::{ProjectNode, ProjectScan};
@@ -317,6 +317,7 @@ impl Core {
             } => self.resolve_approval(&task_id, approval_id, decision).await,
             Command::CancelTask { task_id } => self.cancel_task(&task_id).await,
             Command::ResumeTask { task_id } => self.resume_task(&task_id).await,
+            Command::ReviewTask { task_id, action } => self.review_task(&task_id, action).await,
             Command::Quit { force } => self.quit(force).await,
         }
     }
@@ -339,7 +340,8 @@ impl Core {
         let mut changed = false;
         for task_id in task_ids {
             let events = match self.sessions.get_mut(&task_id) {
-                Some(session) => session.pump(),
+                Some(session) if !session.is_closed() => session.pump(),
+                Some(_) => continue,
                 None => continue,
             };
             if events.is_empty() {
@@ -605,6 +607,58 @@ impl Core {
 
     /// The first prompt creates the worktree and the agent session; later
     /// prompts reuse both.
+    async fn review_task(
+        &mut self,
+        task_id: &TaskId,
+        action: ReviewAction,
+    ) -> Result<CommandResult, CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        match action {
+            ReviewAction::Archive => {
+                task.set_state(TaskState::Done)?;
+                if let Some(session) = self.sessions.get_mut(task_id)
+                    && !session.is_closed()
+                {
+                    let events = session.shutdown().await?;
+                    self.end_session_record(task_id, &events).await?;
+                }
+            }
+            ReviewAction::Reopen => {
+                task.set_state(TaskState::Review)?;
+                self.repair_worktree(task_id).await?;
+            }
+            ReviewAction::SendNote { text } => {
+                if text.trim().is_empty() {
+                    return Err(CoreError::EmptyPrompt);
+                }
+                if task.state != TaskState::Review {
+                    return Err(CoreError::TaskNotReady {
+                        id: task_id.to_string(),
+                        state: task.state.as_str(),
+                    });
+                }
+                let review = self.review_snapshot(task_id)?;
+                let paths = review
+                    .files
+                    .into_iter()
+                    .map(|file| file.path)
+                    .collect::<Vec<_>>();
+                let prompt = if paths.is_empty() {
+                    text
+                } else {
+                    format!(
+                        "{text}\n\nChanged files under review:\n{}",
+                        paths.join("\n")
+                    )
+                };
+                return self.send_prompt(task_id, prompt).await;
+            }
+        }
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
     async fn send_prompt(
         &mut self,
         task_id: &TaskId,
@@ -631,7 +685,23 @@ impl Core {
             self.turn_baselines.insert(task_id.clone(), baseline);
         }
         self.set_task_state(task_id, TaskState::Working)?;
-        if let Err(error) = self.ensure_session(task_id, None).await {
+        let stored = self
+            .sessions
+            .get(task_id)
+            .filter(|session| session.is_closed())
+            .and_then(|_| self.session_records.get(task_id))
+            .and_then(|record| record.adapter_session_id.clone())
+            .map(SessionId::new);
+        let opened = self.ensure_session(task_id, stored).await;
+        if let Ok(SessionOpened::ResumeFailed(reason)) = &opened
+            && let Some(session) = self.sessions.get_mut(task_id)
+        {
+            session.note(
+                format!("Could not resume the previous session: {reason}. Started a new session."),
+                true,
+            );
+        }
+        if let Err(error) = opened {
             // A session that never started leaves the task ready to retry; the
             // failure row is already in its transcript.
             self.set_task_state(task_id, TaskState::Ready)?;
@@ -847,7 +917,9 @@ impl Core {
         resume: Option<SessionId>,
     ) -> Result<SessionOpened, CoreError> {
         let carried = match self.sessions.get(task_id) {
-            Some(session) if !session.has_failed() => return Ok(SessionOpened::Fresh),
+            Some(session) if !session.has_failed() && !session.is_closed() => {
+                return Ok(SessionOpened::Fresh);
+            }
             Some(_) => self
                 .sessions
                 .remove(task_id)

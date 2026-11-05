@@ -23,6 +23,8 @@ export function App() {
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const [showArchived, setShowArchived] = createSignal(false)
+  const visibleTasks = () => tasks().filter((task) => showArchived() || task.state !== 'done')
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
   const [prompt, setPrompt] = createSignal('')
   const [pickerOpen, setPickerOpen] = createSignal(false)
@@ -73,7 +75,7 @@ export function App() {
     const lastTask = project.lastTaskId
       ? listed.find((task) => task.id === project.lastTaskId)
       : undefined
-    if (lastTask) await selectTask(lastTask.id)
+    if (lastTask && (showArchived() || lastTask.state !== 'done')) await selectTask(lastTask.id)
   }
 
   function handleEvent(event: CoreEvent) {
@@ -256,11 +258,15 @@ export function App() {
                       >
                         New task
                       </button>
-                      <Show when={tasks().length === 0}>
+                      <label>
+                        <input type="checkbox" checked={showArchived()} onChange={(event) => setShowArchived(event.currentTarget.checked)} />
+                        Show archived
+                      </label>
+                      <Show when={visibleTasks().length === 0}>
                         <p class="empty empty--tight">No tasks yet.</p>
                       </Show>
                       <ul class="task-list">
-                        <For each={tasks()}>
+                        <For each={visibleTasks()}>
                           {(task) => (
                             <li>
                               <button
@@ -431,14 +437,20 @@ export function App() {
               </Show>
             </Show>
             <Show when={inspectorTab() === 'review'}>
-              <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
-                <ReviewPane taskId={workspace()!.task.id} revision={workspace()!.task.updatedAt} />
+              <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
+                {(taskId) => <ReviewPane
+                  task={workspace()!.task}
+                  onAction={async (action) => {
+                    const updated = await bridge.reviewTask(taskId, action)
+                    if (selectedTaskId() === taskId) setWorkspace(updated)
+                  }}
+                />}
               </Show>
             </Show>
             <Show when={inspectorTab() === 'git'}>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
                 <Show when={workspace()?.task.id} keyed>
-                  {(taskId) => <GitPane taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state)} />}
+                  {(taskId) => <GitPane taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
                 </Show>
               </Show>
             </Show>

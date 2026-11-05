@@ -343,3 +343,9 @@ export type GitMutation =
 export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSnapshot> {
   return invoke('mutate_git', { taskId, mutation })
 }
+
+export type ReviewAction = { type: 'archive' } | { type: 'reopen' } | { type: 'sendNote'; text: string }
+
+export function reviewTask(taskId: string, action: ReviewAction): Promise<TaskWorkspace> {
+  return invoke('review_task', { taskId, action })
+}
