@@ -332,12 +332,71 @@ export function closeTerminal(terminalId: string): Promise<void> {
   return invoke<void>('close_terminal', { terminalId })
 }
 
+function decodeTerminalFrame(buffer: ArrayBuffer): TerminalFrame {
+  const view = new DataView(buffer)
+  let offset = 0
+  const byte = () => view.getUint8(offset++)
+  const short = () => { const value = view.getUint16(offset, true); offset += 2; return value }
+  const integer = () => { const value = view.getUint32(offset, true); offset += 4; return value }
+
+  if (byte() !== 1) throw new Error('Unsupported terminal frame version')
+  const flags = byte()
+  const columns = short()
+  const rows = short()
+  const cursorColumn = short()
+  const cursorRow = short()
+  const displayOffset = integer()
+  const modes = integer()
+  const rowCount = short()
+  if (!(flags & 2) || columns < 2 || columns > 512 || !rows || rows > 256 || rowCount !== rows) {
+    throw new Error('Invalid terminal frame dimensions')
+  }
+
+  const decoder = new TextDecoder()
+  const cells: FrameCell[] = []
+  for (let row = 0; row < rowCount; row++) {
+    const rowIndex = short()
+    const runCount = short()
+    if (rowIndex !== row) throw new Error('Invalid terminal row order')
+    let column = 0
+    for (let run = 0; run < runCount; run++) {
+      const length = short()
+      const attributes = byte()
+      const foreground = integer()
+      const background = integer()
+      const textLength = integer()
+      if (!length || column + length > columns) throw new Error('Invalid terminal cell run')
+      const cell = {
+        text: decoder.decode(new Uint8Array(buffer, offset, textLength)),
+        width: attributes & 3,
+        foreground,
+        background,
+        bold: Boolean(attributes & 4),
+        italic: Boolean(attributes & 8),
+        linked: Boolean(attributes & 16),
+      }
+      offset += textLength
+      for (let index = 0; index < length; index++) cells.push(cell)
+      column += length
+    }
+    if (column !== columns) throw new Error('Incomplete terminal row')
+  }
+  if (offset !== buffer.byteLength) throw new Error('Invalid terminal frame length')
+  return { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), displayOffset, modes, cells }
+}
+
 export async function subscribeTerminal(
   terminalId: string,
   handler: (frame: TerminalFrame) => void,
+  onError: (failure: unknown) => void,
 ): Promise<() => Promise<void>> {
-  const channel = new Channel<TerminalFrame>()
-  channel.onmessage = handler
+  const channel = new Channel<ArrayBuffer>((buffer) => {
+    try {
+      handler(decodeTerminalFrame(buffer))
+    } catch (failure) {
+      onError(failure)
+    }
+  })
   const subscriptionId = await invoke<string>('subscribe_terminal', { terminalId, channel })
   return () => invoke<void>('unsubscribe_terminal', { subscriptionId })
 }

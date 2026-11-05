@@ -233,8 +233,14 @@ test.beforeEach(async ({ page }) => {
           case 'terminal_list':
           case 'start_terminal':
             return [...terminals]
-          case 'terminal_frame':
-            return null
+          case 'subscribe_terminal': {
+            const frame = new Uint8Array([
+              1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0,
+              0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
+            ])
+            callbacks.get(args.channel.id)?.({ index: 0, message: frame.buffer })
+            return `subscription-${args.terminalId}`
+          }
           case 'terminal_write':
             writes.push(args.data)
             return null
@@ -294,7 +300,9 @@ test('encodes typed keys into terminal input', async ({ page }) => {
 
   const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
   await expect(input).toBeVisible()
-  await page.locator('.terminal-view__canvas').click()
+  const canvas = page.locator('.terminal-view__canvas')
+  await expect(canvas).toHaveCSS('height', '17px')
+  await canvas.click()
   await expect(input).toBeFocused()
 
   await input.press('a')

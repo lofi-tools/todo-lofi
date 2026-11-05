@@ -665,10 +665,10 @@ function TerminalCanvas(props: { terminalId: string }) {
       }
       frame = next
       draw()
-    }).then((dispose) => {
+    }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {
       if (detached) void dispose().catch(console.error)
       else unsubscribe = dispose
-    }).catch(console.error)
+    }).catch((failure) => { if (!detached) setError(describe(failure)) })
     onCleanup(() => {
       detached = true
       if (unsubscribe) void unsubscribe().catch(console.error)

@@ -619,7 +619,7 @@ impl ShellState {
     pub async fn subscribe_terminal(
         &self,
         terminal_id: &str,
-        channel: tauri::ipc::Channel<TerminalFrame>,
+        channel: tauri::ipc::Channel<tauri::ipc::Response>,
     ) -> Result<String, BridgeError> {
         let mut receiver = self
             .screens
@@ -641,7 +641,7 @@ impl ShellState {
         tauri::async_runtime::spawn(async move {
             loop {
                 let frame = receiver.borrow_and_update().clone();
-                if let Err(error) = channel.send(frame) {
+                if let Err(error) = channel.send(tauri::ipc::Response::new(frame.encode())) {
                     tracing::debug!(%error, "terminal view detached");
                     break;
                 }
@@ -989,7 +989,7 @@ pub mod commands {
     pub async fn subscribe_terminal(
         state: State<'_, ShellState>,
         terminal_id: String,
-        channel: tauri::ipc::Channel<TerminalFrame>,
+        channel: tauri::ipc::Channel<tauri::ipc::Response>,
     ) -> Result<String, BridgeError> {
         state
             .inner()

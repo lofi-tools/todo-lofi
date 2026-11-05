@@ -184,17 +184,19 @@ not the plan.
 **Frame protocol** (binary, little-endian, version byte first):
 
 ```
-FrameHeader { version: u8, terminal: u32, seq: u64, cols: u16, rows: u16,
-              cursor: { x: u16, y: u16, visible: bool, shape: u8 },
+FrameHeader { version: u8, flags: u8, cols: u16, rows: u16,
+              cursor: { x: u16, y: u16 }, display_offset: u32,
               modes: u32, row_count: u16 }
-StyleTable  { len: u16, entries: [{ fg: u32, bg: u32, attrs: u16, underline: u32 }] }
 RowRun      { row: u16, run_count: u16 }
-CellRun     { start_col: u16, style: u16, text_len: u32, text: [u8] }
+CellRun     { count: u16, attrs: u8, fg: u32, bg: u32,
+              text_len: u32, text: [u8] }
 ```
 
-Only dirty rows are sent; a full frame is requested on attach, resize, theme
-change and scrollback jump. A JSON encoding of the same structs exists for
-fixtures and adapter-free tests, never for the hot path.
+The per-terminal channel identifies the terminal and orders its frames. Header
+flag bits 0 and 1 indicate cursor visibility and a full frame. Each row starts
+at column zero. A run repeats one UTF-8 cell with the same style, with the cell
+width in attribute bits 0–1 and bold, italic and link in bits 2–4. The transport
+currently sends full frames. The row indices also allow sparse updates.
 
 ## Store (Turso)
 

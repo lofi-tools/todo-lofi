@@ -29,7 +29,7 @@ pub struct TerminalFrame {
     pub cells: Vec<FrameCell>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameCell {
     pub text: String,
@@ -39,6 +39,45 @@ pub struct FrameCell {
     pub bold: bool,
     pub italic: bool,
     pub linked: bool,
+}
+
+impl TerminalFrame {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend([1, u8::from(self.cursor_visible) | 2]);
+        bytes.extend((self.columns as u16).to_le_bytes());
+        bytes.extend((self.rows as u16).to_le_bytes());
+        bytes.extend((self.cursor_column as u16).to_le_bytes());
+        bytes.extend((self.cursor_row as u16).to_le_bytes());
+        bytes.extend((self.display_offset as u32).to_le_bytes());
+        bytes.extend(self.modes.to_le_bytes());
+        bytes.extend((self.rows as u16).to_le_bytes());
+
+        for (index, row) in self.cells.chunks_exact(self.columns).enumerate() {
+            bytes.extend((index as u16).to_le_bytes());
+            let count_offset = bytes.len();
+            bytes.extend([0, 0]);
+            let mut run_count = 0u16;
+            let mut remaining = row;
+            while let Some((cell, rest)) = remaining.split_first() {
+                let run_length = 1 + rest.iter().take_while(|next| *next == cell).count();
+                bytes.extend((run_length as u16).to_le_bytes());
+                let flags = cell.width
+                    | (u8::from(cell.bold) << 2)
+                    | (u8::from(cell.italic) << 3)
+                    | (u8::from(cell.linked) << 4);
+                bytes.push(flags);
+                bytes.extend(cell.foreground.to_le_bytes());
+                bytes.extend(cell.background.to_le_bytes());
+                bytes.extend((cell.text.len() as u32).to_le_bytes());
+                bytes.extend(cell.text.as_bytes());
+                remaining = &remaining[run_length..];
+                run_count += 1;
+            }
+            bytes[count_offset..count_offset + 2].copy_from_slice(&run_count.to_le_bytes());
+        }
+        bytes
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -340,6 +379,21 @@ mod tests {
             .iter()
             .map(|cell| cell.text.clone())
             .collect()
+    }
+
+    #[test]
+    fn encodes_a_complete_binary_frame() {
+        let mut screen = Screen::new(2, 1);
+        screen.process(b"AA");
+        let mut frame = screen.frame();
+        frame.modes = 1025;
+        assert_eq!(
+            frame.encode(),
+            [
+                1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 1,
+                234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
+            ],
+        );
     }
 
     #[test]
