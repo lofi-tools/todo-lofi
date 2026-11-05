@@ -363,6 +363,10 @@ export function terminalScroll(terminalId: string, lines: number): Promise<void>
   return invoke('terminal_scroll', { terminalId, lines })
 }
 
+export function terminalFollowOutput(terminalId: string): Promise<void> {
+  return invoke('terminal_follow_output', { terminalId })
+}
+
 export function terminalWrite(terminalId: string, data: string | number[], followOutput = true): Promise<void> {
   return invoke<void>('terminal_write', { terminalId, data, followOutput })
 }

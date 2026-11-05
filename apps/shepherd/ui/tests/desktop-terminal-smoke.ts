@@ -129,8 +129,16 @@ async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaEl
 }
 
 async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {
-  await bridge.terminalWrite(terminalId, "IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
+  await bridge.terminalWrite(terminalId, "index=0; while [ \"$index\" -lt 100 ]; do printf 'history %s\\n' \"$index\"; index=$((index + 1)); done; printf '\\033[6;8HS4_%s> ' IME_READY; IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
+  const ready = () => terminalOutput().includes('S4_IME_READY')
+  await waitFor('composition prompt at a displaced cursor', () => ready() &&
+    parseFloat(input.style.top) > 8 && parseFloat(input.style.left) > 8)
+  const { top, left } = input.style
+  await bridge.terminalScroll(terminalId, 40)
+  await waitFor('scrollback away from the composition prompt', () => !ready() && input.style.top !== top)
   input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  await waitFor('composition returns the input anchor to the live cursor', () =>
+    ready() && input.style.top === top && input.style.left === left)
   input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: 'かな' }))
   input.value = 'かな'
   input.dispatchEvent(new InputEvent('input', { bubbles: true, data: 'かな', inputType: 'insertText' }))

@@ -1051,6 +1051,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         onCompositionStart={() => {
           composing = true
           committedComposition = undefined
+          if (frame?.displayOffset) queueInput(() => bridge.terminalFollowOutput(props.terminalId))
         }}
         onCompositionEnd={(event) => {
           composing = false

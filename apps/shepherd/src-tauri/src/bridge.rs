@@ -149,6 +149,12 @@ impl ScreenSlot {
         }
     }
 
+    fn follow_output(&mut self) {
+        if self.screen.follow_output() {
+            self.publish();
+        }
+    }
+
     fn subscribe(&mut self) -> watch::Receiver<Arc<TerminalFrame>> {
         let first = self.frames.receiver_count() == 0;
         let receiver = self.frames.subscribe();
@@ -731,6 +737,15 @@ impl ShellState {
         Ok(())
     }
 
+    pub async fn terminal_follow_output(&self, terminal_id: &str) -> Result<(), BridgeError> {
+        self.screen_slot(terminal_id)
+            .await?
+            .lock()
+            .await
+            .follow_output();
+        Ok(())
+    }
+
     pub async fn terminal_write(
         &self,
         terminal_id: String,
@@ -748,10 +763,7 @@ impl ShellState {
             .map_err(|_| BridgeError::new("terminal", "the terminal writer stopped"))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         if follow_output && let Ok(slot) = self.screen_slot(&terminal_id).await {
-            let mut slot = slot.lock().await;
-            if slot.screen.follow_output() {
-                slot.publish();
-            }
+            slot.lock().await.follow_output();
         }
         Ok(())
     }
@@ -1286,6 +1298,14 @@ pub mod commands {
         lines: i32,
     ) -> Result<(), BridgeError> {
         state.inner().terminal_scroll(&terminal_id, lines).await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_follow_output(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+    ) -> Result<(), BridgeError> {
+        state.inner().terminal_follow_output(&terminal_id).await
     }
 
     #[tauri::command]
