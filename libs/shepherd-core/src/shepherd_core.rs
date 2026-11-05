@@ -482,6 +482,18 @@ impl Core {
         Ok(GitService.review(path, base)?)
     }
 
+    pub fn review_file_diff(&self, task_id: &TaskId, file: &str) -> Result<String, CoreError> {
+        let (task, _, path) = self.task_git_worktree(task_id)?;
+        let base = task
+            .base_branch
+            .as_deref()
+            .ok_or_else(|| CoreError::TaskNotReady {
+                id: task.id.to_string(),
+                state: task.state.as_str(),
+            })?;
+        Ok(GitService.review_file_diff(path, base, file)?)
+    }
+
     pub async fn mutate_git(
         &mut self,
         task_id: &TaskId,

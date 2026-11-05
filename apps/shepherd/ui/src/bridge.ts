@@ -314,7 +314,10 @@ export interface GitFile {
 
 export interface ReviewSnapshot {
   files: GitFile[]
-  diff: string
+}
+
+export function reviewFileDiff(taskId: string, file: string): Promise<string> {
+  return invoke('review_file_diff', { taskId, file })
 }
 
 export function reviewSnapshot(taskId: string): Promise<ReviewSnapshot> {

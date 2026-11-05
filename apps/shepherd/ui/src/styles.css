@@ -944,3 +944,16 @@ textarea {
 .inspector__tab .review-badge {
   margin-inline-start: 5px;
 }
+
+.git-pane__file {
+  background: transparent;
+  color: inherit;
+  border: 1px solid transparent;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.git-pane__file[aria-pressed='true'] {
+  border-color: var(--border);
+  background: var(--surface-raised);
+}

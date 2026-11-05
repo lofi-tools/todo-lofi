@@ -269,35 +269,52 @@ impl GitService {
     }
 
     pub fn review(&self, path: &Path, base: &str) -> Result<ReviewSnapshot, GitError> {
-        let base_ref = format!("refs/heads/{base}");
-        let ancestor = run_git(path, &["merge-base", "HEAD", &base_ref])?;
+        let ancestor = self.review_base(path, base)?;
         let changed = git_bytes(path, &["diff", "--name-only", "-z", &ancestor, "--"])?;
         let mut files = self.status(path)?;
-        for name in git_paths(&changed) {
-            if !files.iter().any(|file| file.path == name) {
+        for name in changed
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+        {
+            let display_name = String::from_utf8_lossy(name);
+            if !files.iter().any(|file| file.path == display_name) {
                 files.push(GitFile {
-                    path: name,
+                    path: display_name.into_owned(),
                     original_path: None,
-                    actionable: true,
+                    actionable: std::str::from_utf8(name).is_ok(),
                     index: " ".into(),
                     worktree: " ".into(),
                 });
             }
         }
-        let mut diff = run_git(
-            path,
-            &["diff", "--no-ext-diff", "--no-textconv", &ancestor, "--"],
-        )?;
-        for file in files
-            .iter()
-            .filter(|file| file.actionable && file.index == "?" && file.worktree == "?")
-        {
+        Ok(ReviewSnapshot { files })
+    }
+
+    fn review_base(&self, path: &Path, base: &str) -> Result<String, GitError> {
+        let base_ref = format!("refs/heads/{base}");
+        run_git(path, &["merge-base", "HEAD", &base_ref])
+    }
+
+    pub fn review_file_diff(
+        &self,
+        path: &Path,
+        base: &str,
+        name: &str,
+    ) -> Result<String, GitError> {
+        let review = self.review(path, base)?;
+        let file = review
+            .files
+            .into_iter()
+            .find(|file| file.actionable && file.path == name)
+            .ok_or_else(|| GitError::UnknownPath { path: name.into() })?;
+        if file.index == "?" && file.worktree == "?" {
             let output = Command::new("git")
                 .arg("-C")
                 .arg(path)
                 .args([
                     "diff",
                     "--no-index",
+                    "--no-color",
                     "--no-ext-diff",
                     "--no-textconv",
                     "--",
@@ -306,18 +323,29 @@ impl GitService {
                 ])
                 .output()
                 .map_err(|source| GitError::Io { source })?;
-            if output.status.code() == Some(1) {
-                diff.push('\n');
-                diff.push_str(&String::from_utf8_lossy(&output.stdout));
-            } else if !output.status.success() {
-                return Err(GitError::CommandFailed {
+            return match output.status.code() {
+                Some(0 | 1) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+                _ => Err(GitError::CommandFailed {
                     command: "git diff --no-index".into(),
                     status: output.status,
                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                });
-            }
+                }),
+            };
         }
-        Ok(ReviewSnapshot { files, diff })
+        let ancestor = self.review_base(path, base)?;
+        let mut args = vec![
+            "--literal-pathspecs",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            &ancestor,
+            "--",
+            &file.path,
+        ];
+        args.extend(file.original_path.as_deref());
+        let bytes = git_bytes(path, &args)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn snapshot(&self, path: &Path) -> Result<GitSnapshot, GitError> {
@@ -573,7 +601,6 @@ impl GitFile {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSnapshot {
     pub files: Vec<GitFile>,
-    pub diff: String,
 }
 
 #[derive(Debug, Serialize)]

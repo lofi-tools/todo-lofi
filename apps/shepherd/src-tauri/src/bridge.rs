@@ -631,6 +631,19 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn review_file_diff(
+        state: State<'_, ShellState>,
+        task_id: String,
+        file: String,
+    ) -> Result<String, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .review_file_diff(&TaskId::new(task_id), &file)?)
+    }
+
+    #[tauri::command]
     pub async fn review_snapshot(
         state: State<'_, ShellState>,
         task_id: String,

@@ -1,11 +1,20 @@
 import { For, Show, createResource, createSignal } from 'solid-js'
 
-import { reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
+import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
 
 export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewAction) => Promise<void> }) {
   const [review, { refetch }] = createResource(
     () => props.task.worktreePath ? [props.task.id, props.task.updatedAt] as const : false,
     ([taskId]) => reviewSnapshot(taskId),
+  )
+
+  const [selectedFile, setSelectedFile] = createSignal<string | null>(null)
+  const [diff, { refetch: refetchDiff }] = createResource(
+    () => {
+      const path = selectedFile()
+      return path && props.task.worktreePath ? [props.task.id, props.task.updatedAt, path] as const : false
+    },
+    ([taskId, , path]) => reviewFileDiff(taskId, path),
   )
 
   const [note, setNote] = createSignal('')
@@ -29,7 +38,7 @@ export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewA
   return (
     <section class="git-pane" aria-label="Task changes">
       <div class="terminal-pane__bar">
-        <button type="button" onClick={() => void refetch()} disabled={review.loading || !props.task.worktreePath}>Refresh</button>
+        <button type="button" onClick={() => { void refetch(); if (selectedFile()) void refetchDiff() }} disabled={review.loading || !props.task.worktreePath}>Refresh</button>
       </div>
       <Show when={props.task.state === 'done'}>
         <div class="terminal-pane__bar">
@@ -55,11 +64,23 @@ export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewA
             <Show when={snapshot().files.length} fallback={<p class="empty">No changed files.</p>}>
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
-                  <li><code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}</li>
+                  <li>
+                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code>{' '}
+                    <button class="git-pane__file" type="button" disabled={!file.actionable}
+                      aria-pressed={selectedFile() === file.path} onClick={() => setSelectedFile(file.path)}>
+                      {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+                    </button>
+                  </li>
                 )}</For>
               </ul>
             </Show>
-            <Show when={snapshot().diff}><pre class="git-pane__diff">{snapshot().diff}</pre></Show>
+            <Show when={selectedFile()}>
+              <Show when={diff.loading}><p role="status" class="empty">Loading diff…</p></Show>
+              <Show when={diff.error}><p role="alert">{diff.error.message ?? String(diff.error)}</p></Show>
+              <Show when={!diff.error && !diff.loading && diff() !== undefined}>
+                <pre class="git-pane__diff" aria-label="File diff">{diff() || 'No net content change.'}</pre>
+              </Show>
+            </Show>
           </>
         )}
       </Show>
