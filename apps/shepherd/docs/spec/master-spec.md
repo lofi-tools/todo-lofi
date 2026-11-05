@@ -159,7 +159,9 @@ detailed treatment of its controls as the rest of the shell is built.
   and can be reopened from the Terminals tab's instance menu.
 - Terminal layout presets (single, side by side, stacked, quad) are per-project
   starting points a user can apply and then edit; they are shortcuts inside the
-  Terminals tab, not a second layout system.
+  Terminals tab. Single keeps the active pane visible and hides the other
+  visible panes while their terminals keep running. Quad arranges four
+  visible panes in two rows. Both keep the slots of other tasks.
 - Restore validates the task workspace and the project terminal layout: a pane
   whose terminal or file no longer exists becomes a placeholder with a reason,
   and the rest is kept. If the last active task is gone, landing opens a new

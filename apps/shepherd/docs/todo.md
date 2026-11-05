@@ -518,6 +518,8 @@ task-scoped, persistent and fast enough.
   pass.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
+  Single and Quad save through the project layout, preserve slots for other
+  tasks, and keep existing terminal processes available.
 - [x] Add the project terminal layout: slots, sizes, order and scope; save it
   per project.
 - [x] Implement shared terminals (one PTY across tasks) and task terminals

@@ -94,6 +94,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     const node = root()
     return id && terminal(id) && contains(node, id) ? id : firstVisible(node, terminal)
   }
+  const attached = () => paneIds(root())
+  const attachedVisible = () => attached().filter((id) => terminal(id))
 
   async function run(action: () => Promise<void>) {
     if (pending()) return
@@ -117,8 +119,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       const previous = root()
       const added = leaf(terminalId)
       const target = active()
-      const split = (first: bridge.TerminalSplit): bridge.TerminalSplit =>
-        ({ type: 'split', axis, ratio: 500, first, second: added })
+      const split = (first: bridge.TerminalSplit) => splitInHalf(axis, first, added)
       await save(previous ? (target ? replacePane(previous, target, split) : split(previous)) : added)
     }
     setSelectedId(terminalId)
@@ -131,8 +132,37 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
 
   function arrange(axis: bridge.SplitAxis) {
-    const ids = paneIds(root())
+    const ids = attached()
     if (ids.length > 1) void run(() => save(preset(ids, axis)))
+  }
+
+  function single() {
+    const current = root()
+    const id = active()
+    if (!current || !id) return
+    const next = attachedVisible().filter((pane) => pane !== id)
+      .reduce<bridge.TerminalSplit | null>(removePane, current)
+    void run(async () => {
+      await save(next)
+      setFocusRequest({ id })
+    })
+  }
+
+  function quad() {
+    const current = root()
+    const ids = attachedVisible()
+    const [topLeft, topRight, bottomLeft, bottomRight] = ids
+    if (!current || ids.length !== 4) return
+    const retained = ids.slice(1).reduce<bridge.TerminalSplit | null>(removePane, current)
+    if (!retained) return
+    const rows = splitInHalf('vertical',
+      splitInHalf('horizontal', leaf(topLeft), leaf(topRight)),
+      splitInHalf('horizontal', leaf(bottomLeft), leaf(bottomRight)))
+    const id = active()
+    void run(async () => {
+      await save(replacePane(retained, topLeft, () => rows))
+      if (id) setFocusRequest({ id })
+    })
   }
 
   function resizeSplit(path: SplitPath, ratio: number) {
@@ -217,9 +247,15 @@ export function TerminalPane(props: TerminalPaneProps) {
         <button type="button" onClick={() => start(props.taskId, 'vertical')} disabled={pending() || !props.taskHasWorktree}>New task terminal</button>
         <button type="button" onClick={() => splitActive('horizontal')} disabled={pending() || !active()}>Split right</button>
         <button type="button" onClick={() => splitActive('vertical')} disabled={pending() || !active()}>Split down</button>
-        <Show when={paneIds(root()).length > 1}>
+        <Show when={attached().length > 1}>
+          <Show when={attachedVisible().length > 1}>
+            <button type="button" onClick={single} disabled={pending()}>Single</button>
+          </Show>
           <button type="button" onClick={() => arrange('horizontal')} disabled={pending()}>Side by side</button>
           <button type="button" onClick={() => arrange('vertical')} disabled={pending()}>Stack</button>
+          <Show when={attachedVisible().length === 4}>
+            <button type="button" onClick={quad} disabled={pending()}>Quad</button>
+          </Show>
         </Show>
       </div>
       <Show when={error()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
@@ -256,6 +292,10 @@ function leaf(terminalId: string): bridge.TerminalSplit {
   return { type: 'pane', terminalId }
 }
 
+function splitInHalf(axis: bridge.SplitAxis, first: bridge.TerminalSplit, second: bridge.TerminalSplit): bridge.TerminalSplit {
+  return { type: 'split', axis, ratio: 500, first, second }
+}
+
 function contains(node: bridge.TerminalSplit | null, terminalId: string): boolean {
   if (!node) return false
   return node.type === 'pane' ? node.terminalId === terminalId
@@ -267,7 +307,8 @@ function replacePane(node: bridge.TerminalSplit, id: string, replace: (pane: bri
   return { ...node, first: replacePane(node.first, id, replace), second: replacePane(node.second, id, replace) }
 }
 
-function removePane(node: bridge.TerminalSplit, id: string): bridge.TerminalSplit | null {
+function removePane(node: bridge.TerminalSplit | null, id: string): bridge.TerminalSplit | null {
+  if (!node) return null
   if (node.type === 'pane') return node.terminalId === id ? null : node
   const first = removePane(node.first, id)
   const second = removePane(node.second, id)

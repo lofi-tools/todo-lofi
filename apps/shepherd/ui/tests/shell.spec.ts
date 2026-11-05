@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { TerminalLayout, TerminalSnapshot } from '../src/bridge'
+import type { TerminalLayout, TerminalSnapshot, TerminalSplit } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -169,6 +169,19 @@ test.beforeEach(async ({ context }) => {
           first: { type: 'pane', terminalId: 'terminal-1' },
           second: { type: 'pane', terminalId: 'terminal-task' },
         },
+      }
+    }
+    if (options.has('terminal-presets')) {
+      tasks.push({ ...tasks[0], id: 'task-later', title: 'Other task' })
+      terminals.push(
+        { ...terminals[0], id: 'terminal-3', title: 'Terminal 3' },
+        { ...terminals[0], id: 'terminal-4', title: 'Terminal 4' },
+        { ...terminals[0], id: 'terminal-later', title: 'Other shell', scope: 'task', taskId: 'task-later' },
+      )
+      const panes = terminals.map(({ id }): TerminalSplit => ({ type: 'pane', terminalId: id }))
+      terminalLayout = {
+        revision: 1,
+        root: panes.reduceRight((second, first) => ({ type: 'split', axis: 'horizontal', ratio: 500, first, second })),
       }
     }
 
@@ -860,6 +873,27 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   await expect(scoped).toHaveCount(0)
   await page.getByRole('button', { name: /Task shell.*hidden/ }).click()
   await expect(scoped.getByRole('textbox')).toBeFocused()
+})
+
+test('saves Quad and Single layouts while keeping the terminal instances', async ({ page }) => {
+  await page.goto('/?terminal-presets')
+  const readLayout = () => page.evaluate(() =>
+    (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root)
+  const leaf = (number: number | 'later') => ({ type: 'pane', terminalId: `terminal-${number}` })
+  const split = (axis: 'vertical' | 'horizontal', first: unknown, second: unknown) =>
+    ({ type: 'split', axis, ratio: 500, first, second })
+
+  await page.getByRole('button', { name: 'Quad', exact: true }).click()
+  await expect.poll(readLayout).toEqual(split('horizontal', split('vertical',
+    split('horizontal', leaf(1), leaf(2)),
+    split('horizontal', leaf(3), leaf(4))), leaf('later')))
+  await page.getByRole('button', { name: /Terminal 3.*live/ }).click()
+  await page.getByRole('button', { name: 'Single', exact: true }).click()
+  await expect.poll(readLayout).toEqual(split('horizontal', leaf(3), leaf('later')))
+  await expect(page.getByRole('region', { name: 'Terminal 3' }).getByRole('textbox')).toBeFocused()
+  await expect(page.getByRole('button', { name: /Terminal 1.*live.*hidden/ })).toBeVisible()
+  await page.getByRole('button', { name: /Other task/ }).click()
+  await expect(page.getByRole('region', { name: 'Other shell' }).getByRole('textbox')).toBeVisible()
 })
 
 test('reports Kitty key events and keeps a keyboard copy view', async ({ page }) => {
