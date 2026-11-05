@@ -497,9 +497,17 @@ async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridg
     const pane = terminalPane(shared.title)
     return !terminalPane(scoped.title) && pane?.querySelector('canvas') && terminalOutput(pane).includes('S4_VIEW:')
   })
+  await bridge.terminalWrite(scoped.id, "printf '\\007'\r")
+  await waitFor('bell on the hidden terminal’s task row', () =>
+    Array.from(document.querySelectorAll('.task')).some((row) =>
+      row.querySelector('.task__title')?.textContent === task.title && row.querySelector('.terminal-attention')))
+  await openInspectorTab('review')
   await selectTask(task.title)
   await waitFor('scripted transcript after switching back', () =>
     document.querySelector('.entry__permission-decision')?.textContent === 'allow')
+  await waitFor('bell on the task’s Terminals tab', () =>
+    document.querySelector('#inspector-tab-terminals .terminal-attention'))
+  await openInspectorTab('terminals')
   await waitFor('same task terminal output after switching back', () => {
     const pane = terminalPane(scoped.title)
     return pane && terminalOutput(pane).includes(marker)

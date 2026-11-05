@@ -536,6 +536,8 @@ task-scoped, persistent and fast enough.
   selected again or reopened after a relaunch.
 - [x] Route terminal focus and keyboard input. Show bell attention on the
   Terminals tab and on the owning task for task-scoped terminals.
+  The native smoke rings a hidden task terminal. The browser regression
+  verifies that returning to the window clears the badge for its focused PTY.
   Command+Shift+T on macOS and Ctrl+Shift+N on Linux open and focus a new
   terminal in the selected task's worktree.
   Command+Backquote on macOS and Ctrl+Backquote on Linux cycle through the

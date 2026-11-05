@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -421,6 +421,8 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__terminalLayout = () => terminalLayout
+    window.__emitCoreEvent = (event: ShepherdEvent) =>
+      callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
   })
 })
 
@@ -889,6 +891,32 @@ test('keeps the shared terminal attached while switching task terminals', async 
   )
   expect(subscriptions.filter((id) => id === 'terminal-1')).toHaveLength(1)
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
+})
+
+test('clears a terminal bell when its focused window returns', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const input = page.getByRole('region', { name: 'Task shell' }).getByRole('textbox')
+  const attention = page.locator('#inspector-tab-terminals').getByRole('img', { name: 'Terminal needs attention' })
+  await input.focus()
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false })
+    window.dispatchEvent(new FocusEvent('blur'))
+    const fixture = window as unknown as { __emitCoreEvent: (event: ShepherdEvent) => void }
+    fixture.__emitCoreEvent({
+      type: 'terminalBell',
+      data: { projectId: 'project-1', taskId: 'task-1', terminalId: 'terminal-task' },
+    })
+  })
+  await expect(attention).toBeVisible()
+  await expect(input).toBeFocused()
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true })
+    window.dispatchEvent(new FocusEvent('focus'))
+  })
+  await expect(attention).toHaveCount(0)
+  await expect(input).toBeFocused()
 })
 
 test('preserves the other terminal when a saved pane is missing', async ({ page }) => {

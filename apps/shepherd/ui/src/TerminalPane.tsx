@@ -845,6 +845,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     reportFocus(props.shown && document.hasFocus() && input === document.activeElement)
   }
 
+  function onWindowFocus() {
+    if (props.shown && input === document.activeElement) props.onFocus?.(props.terminalId)
+    updateWindowFocus()
+  }
+
   function resetSearch() {
     searchGeneration++
     setSearching(false)
@@ -998,11 +1003,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if (detached) void dispose().catch(console.error)
       else unsubscribe = dispose
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
-    window.addEventListener('focus', updateWindowFocus)
+    window.addEventListener('focus', onWindowFocus)
     window.addEventListener('blur', updateWindowFocus)
     onCleanup(() => {
       reportFocus(false)
-      window.removeEventListener('focus', updateWindowFocus)
+      window.removeEventListener('focus', onWindowFocus)
       window.removeEventListener('blur', updateWindowFocus)
       detached = true
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
