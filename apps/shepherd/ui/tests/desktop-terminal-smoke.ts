@@ -199,6 +199,38 @@ async function prepareTask(projectId: string) {
   return { id: ready.task.id, title: ready.task.title, worktree: waiting.task.worktreePath }
 }
 
+async function exerciseTaskSwitch(projectId: string, shared: bridge.TerminalSnapshot) {
+  const task = await prepareTask(projectId)
+  const start = await waitFor('task terminal action for the worktree', () => {
+    const entry = button('New task terminal')
+    return entry && !entry.disabled && entry
+  })
+  start.click()
+  await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
+  const scoped = (await bridge.terminalList(projectId)).find((entry) => entry.taskId === task.id)
+  if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
+    throw new Error('The task terminal should run in the task worktree')
+  }
+
+  await bridge.terminalWrite(scoped.id, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"\r")
+  const marker = 'S4_TASK:' + task.worktree.split('/').at(-1)
+  await waitFor('worktree output in the task pane', () => {
+    const pane = terminalPane(scoped.title)
+    return pane && terminalOutput(pane).includes(marker)
+  })
+  const other = await bridge.createDraft(projectId, 'Other terminal scope')
+  await selectTask(other.task.title)
+  await waitFor('task pane hidden and shared pane still live', () => {
+    const pane = terminalPane(shared.title)
+    return !terminalPane(scoped.title) && pane?.querySelector('canvas') && terminalOutput(pane).includes('S4_VIEW:')
+  })
+  await selectTask(task.title)
+  await waitFor('same task terminal output after switching back', () => {
+    const pane = terminalPane(scoped.title)
+    return pane && terminalOutput(pane).includes(marker)
+  })
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -229,16 +261,15 @@ async function smoke() {
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
-  await prepareTask(project.id)
-  await waitFor('task terminal action for the worktree', () => button('New task terminal')?.disabled === false)
-  return { ok: true, worktreeReady: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  await exerciseTaskSwitch(project.id, terminal)
+  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 async function restore() {
   const { projects } = await bridge.projectList()
   const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not restored')
-  const terminals = await bridge.terminalList(project.id)
+  const terminals = (await bridge.terminalList(project.id)).filter((entry) => entry.scope === 'project')
   const [first] = terminals
   if (!first || terminals.length !== 2 || terminals.some((entry) => entry.endedAt === null)) {
     throw new Error('Both terminal records should be restored as ended')
