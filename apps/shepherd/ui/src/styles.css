@@ -827,6 +827,8 @@ textarea {
 
 .terminal-view__canvas {
   display: block;
+  user-select: none;
+  cursor: text;
   outline: none;
 }
 

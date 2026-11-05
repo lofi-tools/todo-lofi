@@ -322,6 +322,8 @@ function TerminalCanvas(props: { terminalId: string }) {
   let frame: bridge.TerminalFrame | null = null
   let cellWidth = 7.8
   let lastSent = ''
+  let selection: { start: number; end: number } | undefined
+  let selecting: number | undefined
 
   function draw() {
     if (!canvas || !frame) return
@@ -349,6 +351,13 @@ function TerminalCanvas(props: { terminalId: string }) {
       context.fillStyle = hex(cell.background)
       context.fillRect(x, y, cellWidth, LINE_HEIGHT)
     })
+    if (selection && selection.start !== selection.end) {
+      const [start, end] = selectionRange(current, selection)
+      context.fillStyle = 'rgba(111, 143, 220, 0.5)'
+      for (let index = start; index <= end; index++) {
+        context.fillRect((index % current.columns) * cellWidth, Math.floor(index / current.columns) * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+      }
+    }
     current.cells.forEach((cell, index) => {
       if (!cell.width || !cell.text || cell.text === ' ') return
       const x = (index % current.columns) * cellWidth
@@ -362,6 +371,54 @@ function TerminalCanvas(props: { terminalId: string }) {
       context.fillStyle = 'rgba(230, 230, 234, 0.35)'
       context.fillRect(current.cursorColumn * cellWidth, current.cursorRow * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
     }
+  }
+
+  function cellAt(event: MouseEvent) {
+    if (!frame || !canvas) return null
+    const bounds = canvas.getBoundingClientRect()
+    return {
+      column: Math.max(0, Math.min(frame.columns - 1, Math.floor((event.clientX - bounds.left) / cellWidth))),
+      row: Math.max(0, Math.min(frame.rows - 1, Math.floor((event.clientY - bounds.top) / LINE_HEIGHT))),
+    }
+  }
+
+  function onPointerDown(event: PointerEvent & { currentTarget: HTMLCanvasElement }) {
+    input?.focus({ preventScroll: true })
+    const cell = cellAt(event)
+    if (!cell || !frame || event.button !== 0) return
+    event.preventDefault()
+    const index = cell.row * frame.columns + cell.column
+    selection = { start: index, end: index }
+    selecting = event.pointerId
+    event.currentTarget.setPointerCapture(event.pointerId)
+    draw()
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    const cell = cellAt(event)
+    if (!cell || !frame || !selection || event.pointerId !== selecting) return
+    selection.end = cell.row * frame.columns + cell.column
+    draw()
+  }
+
+  function selectedText(): string {
+    if (!frame || !selection || selection.start === selection.end) return ''
+    const [start, end] = selectionRange(frame, selection)
+    const lines = []
+    for (let first = start; first <= end;) {
+      const after = Math.min(first - first % frame.columns + frame.columns, end + 1)
+      const text = frame.cells.slice(first, after).map((cell) => cell.text).join('')
+      lines.push(after % frame.columns === 0 ? text.trimEnd() : text)
+      first = after
+    }
+    return lines.join('\n')
+  }
+
+  function onCopy(event: ClipboardEvent) {
+    const text = selectedText()
+    if (!text || !event.clipboardData) return
+    event.preventDefault()
+    event.clipboardData.setData('text/plain', text)
   }
 
   function measure() {
@@ -424,8 +481,18 @@ function TerminalCanvas(props: { terminalId: string }) {
 
   function onKeyDown(event: KeyboardEvent) {
     if (composing || event.isComposing || event.keyCode === 229) return
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'c') {
+      const text = selectedText()
+      if (text) {
+        event.preventDefault()
+        void navigator.clipboard.writeText(text).catch((failure) => setError(describe(failure)))
+        return
+      }
+    }
     const data = encodeKey(event)
     if (data === null) return
+    selection = undefined
+    draw()
     event.preventDefault()
     write(data)
   }
@@ -454,6 +521,10 @@ function TerminalCanvas(props: { terminalId: string }) {
     let unsubscribe: (() => Promise<void>) | undefined
     void bridge.subscribeTerminal(props.terminalId, (next) => {
       if (detached) return
+      if (frame && (frame.displayOffset !== next.displayOffset || frame.columns !== next.columns || frame.rows !== next.rows)) {
+        selection = undefined
+        selecting = undefined
+      }
       frame = next
       draw()
     }).then((dispose) => {
@@ -491,7 +562,9 @@ function TerminalCanvas(props: { terminalId: string }) {
         class="terminal-view__canvas"
         ref={canvas}
         aria-hidden="true"
-        onPointerDown={() => input?.focus({ preventScroll: true })}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onLostPointerCapture={() => { selecting = undefined }}
       />
       <textarea
         ref={input}
@@ -502,6 +575,7 @@ function TerminalCanvas(props: { terminalId: string }) {
         spellcheck={false}
         onKeyDown={onKeyDown}
         onPaste={onPaste}
+        onCopy={onCopy}
         onCompositionStart={() => { composing = true }}
         onCompositionEnd={(event) => {
           composing = false
@@ -517,6 +591,14 @@ function TerminalCanvas(props: { terminalId: string }) {
       <Show when={error()}>{(message) => <p class="error terminal-view__error" role="alert">{message()}</p>}</Show>
     </div>
   )
+}
+
+function selectionRange(frame: bridge.TerminalFrame, selection: { start: number; end: number }): [number, number] {
+  let start = Math.min(selection.start, selection.end)
+  let end = Math.max(selection.start, selection.end)
+  if (start % frame.columns !== 0 && frame.cells[start - 1]?.width === 2) start--
+  if (frame.cells[end]?.width === 2) end++
+  return [start, end]
 }
 
 function hex(value: number): string {
