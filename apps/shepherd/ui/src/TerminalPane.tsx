@@ -9,6 +9,13 @@ import { For, Show, batch, createEffect, createSignal, onCleanup, onMount } from
 import * as bridge from './bridge'
 import { encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 
+interface TerminalSize {
+  columns: number
+  rows: number
+}
+
+const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
+
 interface TerminalPaneProps {
   projectId: string
   taskId: string | null
@@ -19,6 +26,7 @@ interface TerminalPaneProps {
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
+  const measuredSizes = new Map<string, TerminalSize>()
   const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
   const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null })
   const [layoutLoaded, setLayoutLoaded] = createSignal(false)
@@ -88,9 +96,13 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
 
   function start(taskId: string | null, axis: bridge.SplitAxis) {
+    const activeId = active()
+    const size = (activeId && measuredSizes.get(activeId)) || DEFAULT_TERMINAL_SIZE
+    const columns = activeId && axis === 'horizontal' ? Math.max(2, Math.floor(size.columns / 2)) : size.columns
+    const rows = activeId && axis === 'vertical' ? Math.max(1, Math.floor(size.rows / 2)) : size.rows
     void run(async () => {
       const before = new Set(terminals().map((terminal) => terminal.id))
-      const list = await bridge.startTerminal(props.projectId, taskId, 80, 24)
+      const list = await bridge.startTerminal(props.projectId, taskId, columns, rows)
       setTerminals(list)
       const created = list.find((terminal) => !before.has(terminal.id))
       if (created) await show(created.id, axis)
@@ -101,6 +113,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     const event = props.listEvent
     if (event?.projectId === props.projectId) setTerminals(event.terminals)
   })
+
+  function restart(id: string) {
+    const { columns, rows } = measuredSizes.get(id) ?? DEFAULT_TERMINAL_SIZE
+    void run(async () => { setTerminals(await bridge.restartTerminal(id, columns, rows)) })
+  }
 
   function splitActive(axis: bridge.SplitAxis) {
     const id = active()
@@ -158,7 +175,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       </details>
       <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
         <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
-          restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
+          restart={restart} measure={(id, size) => measuredSizes.set(id, size)}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
     </div>
@@ -231,6 +248,7 @@ interface TerminalTreeProps {
   onTerminalFocus: (id: string | null) => void
   focusRequest: { id: string } | undefined
   restart: (id: string) => void
+  measure: (id: string, size: TerminalSize) => void
   stop: (id: string) => void
   detach: (id: string) => void
   pending: boolean
@@ -273,7 +291,7 @@ function TerminalTree(props: TerminalTreeProps) {
               </div>
             }>
               <Show when={entry().id} keyed>
-                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} />}
+                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} onMeasure={(size) => props.measure(id, size)} />}
               </Show>
             </Show>
           </section>
@@ -344,7 +362,7 @@ const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
-function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void }) {
+function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined; onFocus: (id: string | null) => void; onMeasure: (size: TerminalSize) => void }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -546,7 +564,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     event.clipboardData.setData('text/plain', text)
   }
 
-  function measure() {
+  function measure(): TerminalSize {
     const padding = container && window.getComputedStyle(container)
     const width = (container?.clientWidth ?? 640) - (padding ? parseFloat(padding.paddingLeft) + parseFloat(padding.paddingRight) : 0)
     const height = (container?.clientHeight ?? 320) - (padding ? parseFloat(padding.paddingTop) + parseFloat(padding.paddingBottom) : 0)
@@ -570,6 +588,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         try {
           await bridge.terminalResize(props.terminalId, size.columns, size.rows)
           lastSent = key
+          props.onMeasure(size)
         } catch (failure) {
           setError(describe(failure))
         }
