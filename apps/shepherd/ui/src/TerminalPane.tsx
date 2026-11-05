@@ -381,6 +381,9 @@ function formatExit(exitCode: number | null): string {
 const FONT = '13px ui-monospace, SFMono-Regular, Menlo, monospace'
 const LINE_HEIGHT = 17
 const DEFAULT_BACKGROUND = 0x131316
+const APP_CURSOR = 1 << 1
+const ALT_SCREEN = 1 << 12
+const ALTERNATE_SCROLL = 1 << 15
 const MOUSE_CLICK = 1 << 3
 const BRACKETED_PASTE = 1 << 4
 const MOUSE_SGR = 1 << 5
@@ -420,6 +423,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let selecting: number | undefined
   let mouseButton: number | undefined
   let mousePosition = ''
+  let wheelRemainder = 0
 
   createEffect(() => {
     if (props.focusRequest?.id === props.terminalId) input?.focus({ preventScroll: true })
@@ -538,7 +542,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move'): boolean {
+  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1): boolean {
     const current = frame
     const cell = cellAt(event)
     if (!current || !cell || current.displayOffset || event.shiftKey || !(current.modes & MOUSE_REPORTING)) return false
@@ -553,7 +557,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const column = cell.column + 1
     const row = cell.row + 1
     if (current.modes & MOUSE_SGR) {
-      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`)
+      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat))
     } else {
       const utf8 = (current.modes & MOUSE_UTF8) !== 0
       const limit = utf8 ? 2015 : 223
@@ -563,7 +567,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         const coordinates = utf8
           ? Array.from(new TextEncoder().encode(String.fromCodePoint(column + 32, row + 32)))
           : [column + 32, row + 32]
-        write([...prefix, ...coordinates])
+        write(Array.from({ length: repeat }, () => [...prefix, ...coordinates]).flat())
       }
     }
     return true
@@ -803,10 +807,21 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     function wheel(event: WheelEvent) {
       if (!event.deltaY || !frame) return
       event.preventDefault()
-      if (reportMouse(event, event.deltaY < 0 ? 64 : 65, 'press')) return
-      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY : event.deltaY / LINE_HEIGHT
-      const count = Math.max(1, Math.round(Math.abs(lines)))
-      void bridge.terminalScroll(props.terminalId, -Math.sign(lines) * count).catch(console.error)
+      const scale = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? frame.rows
+        : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 1 : 1 / LINE_HEIGHT
+      wheelRemainder += event.deltaY * scale
+      const steps = Math.trunc(wheelRemainder)
+      wheelRemainder -= steps
+      const count = Math.min(120, Math.abs(steps))
+      if (!count) return
+      if (reportMouse(event, steps < 0 ? 64 : 65, 'press', count)) return
+      if (!event.shiftKey && (frame.modes & (ALT_SCREEN | ALTERNATE_SCROLL)) === (ALT_SCREEN | ALTERNATE_SCROLL)) {
+        const prefix = frame.modes & APP_CURSOR ? '\x1bO' : '\x1b['
+        write((prefix + (steps < 0 ? 'A' : 'B')).repeat(count))
+      } else {
+        void bridge.terminalScroll(props.terminalId, -Math.sign(steps) * count)
+          .catch((failure) => setError(describe(failure)))
+      }
     }
     container?.addEventListener('wheel', wheel, { passive: false })
     onCleanup(() => container?.removeEventListener('wheel', wheel))
