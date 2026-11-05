@@ -336,6 +336,28 @@ test.beforeEach(async ({ context }) => {
   })
 })
 
+test('puts the macOS window controls and history buttons in one header row', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isTauri', { value: true })
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel' })
+  })
+  await page.goto('/')
+
+  const header = page.getByRole('banner', { name: 'Workspace header' })
+  const [windowControls, previous, next] = await Promise.all([
+    header.locator('.shell__window-controls').boundingBox(),
+    header.getByRole('button', { name: 'Previous' }).boundingBox(),
+    header.getByRole('button', { name: 'Next' }).boundingBox(),
+  ])
+  if (!windowControls || !previous || !next) throw new Error('The window and history controls should be visible')
+
+  const windowControlsCenter = windowControls.y + windowControls.height / 2
+  expect(previous.y + previous.height / 2).toBeCloseTo(windowControlsCenter)
+  expect(next.y + next.height / 2).toBeCloseTo(windowControlsCenter)
+  expect(previous.x).toBeGreaterThanOrEqual(windowControls.x + windowControls.width)
+  expect(next.x).toBeGreaterThanOrEqual(previous.x + previous.width)
+})
+
 test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 

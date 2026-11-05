@@ -50,18 +50,19 @@ textarea {
 }
 
 .shell__header {
+  display: flex;
   flex: none;
 }
 
-.shell__window-drag {
+.shell__header--mac {
   height: 42px;
 }
 
-.shell__toolbar {
-  display: flex;
+.shell__window-controls {
+  flex: 0 0 76px;
 }
 
-.shell__toolbar-drag {
+.shell__header-drag {
   flex: 1;
 }
 
@@ -355,24 +356,25 @@ textarea {
 }
 
 .project-row {
-  --project-row-background: var(--background);
+  --project-row-background: var(--surface);
   position: relative;
   display: flex;
   align-items: center;
   padding-inline-end: 4px;
   border: 1px solid transparent;
   border-radius: 6px;
-  background: var(--project-row-background);
+  background: transparent;
   color: var(--text-muted);
 }
 
 .project-row--selected {
-  --project-row-background: var(--surface);
   color: var(--text-secondary);
 }
 
+.project-row--selected,
 .project-row:hover {
   --project-row-background: var(--surface-raised);
+  background: var(--project-row-background);
 }
 
 .project-row:hover:not(.project-row--selected) {
@@ -1474,8 +1476,6 @@ textarea {
   gap: 8px;
   height: var(--status-height);
   padding: 0 12px;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
   color: var(--text-muted);
   font-size: 12px;
 }

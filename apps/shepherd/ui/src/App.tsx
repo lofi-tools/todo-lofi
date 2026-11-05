@@ -824,27 +824,25 @@ function WorkspaceFrame(props: { children: JSX.Element }) {
 
   return (
     <>
-      <header class="shell__header" aria-label="Workspace header">
+      <header class="shell__header" classList={{ 'shell__header--mac': macWindow }} aria-label="Workspace header">
         <Show when={macWindow}>
-          <div class="shell__window-drag" data-tauri-drag-region="" aria-hidden="true" />
+          <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
         </Show>
-        <div class="shell__toolbar">
-          <div class="shell__history" role="group" aria-label="Navigation history">
-            <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="m14 6-6 6 6 6" />
-              </svg>
-            </button>
-            <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="m10 6 6 6-6 6" />
-              </svg>
-            </button>
-          </div>
-          <Show when={macWindow}>
-            <div class="shell__toolbar-drag" data-tauri-drag-region="" aria-hidden="true" />
-          </Show>
+        <div class="shell__history" role="group" aria-label="Navigation history">
+          <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m14 6-6 6 6 6" />
+            </svg>
+          </button>
+          <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m10 6 6 6-6 6" />
+            </svg>
+          </button>
         </div>
+        <Show when={macWindow}>
+          <div class="shell__header-drag" data-tauri-drag-region="" aria-hidden="true" />
+        </Show>
       </header>
       <div class="shell__workspace">
         <nav class="shell__rail" aria-label="Quick navigation">

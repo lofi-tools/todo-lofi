@@ -16,17 +16,18 @@ current layout and give future changes a point of comparison.
 - Group the Projects sidebar, conversation pane, and context multipane in one
   rounded wrapper. Use a slightly lighter surface than the surrounding window
   and a subtle border. The current wrapper radius is 10 px.
-- Place a slim icon rail to the left, outside the wrapper. Put Previous and Next
-  at the left of the header above it. The rail and the header's left control
-  group share a 52 px width and 6 px padding. The rail currently has placeholder
-  icons for Workspace, Conversations, and Tools. Previous and Next are also
-  placeholders until navigation history is implemented.
+- Place a slim icon rail to the left, outside the wrapper. The rail and the
+  Previous and Next control group share a 52 px width and 6 px padding. The
+  rail currently has placeholder icons for Workspace, Conversations, and Tools.
+  Previous and Next are also placeholders until navigation history is implemented.
 - On macOS, show the native window controls on the app's surface, with the
-  title hidden. Keep room above the header buttons for the traffic lights and
-  a draggable area. The current window reserves 42 px above the header on
-  macOS. Quit uses the system window or app controls.
+  title hidden. Put Previous and Next directly to their right on the same
+  horizontal line in a single 42 px header. The free header space is draggable.
+  Quit uses the system window or app controls.
 - Keep the inspector on the right with its vertical tab strip. Settings can
   occupy the middle pane while the sidebar and inspector remain in place.
+- Place the status bar below the wrapper on the window background. Its
+  transparent, borderless surface keeps it visually separate from the panes.
 
 ## Projects sidebar and settings
 
@@ -68,8 +69,10 @@ current layout and give future changes a point of comparison.
 - Show a small line folder icon, project name, and an icon-only Compose action.
   Add a small branch badge to the folder for Git working trees. Use compact
   icons with light strokes. The text and icons share a colour. Use muted text
-  for unselected projects and slightly brighter text for the selected project,
-  with a borderless selection. Compose opens a draft in that project.
+  for unselected projects and slightly brighter text for the selected project.
+  Unselected rows rest on the sidebar's background with a transparent fill.
+  The selected row has a raised fill and no visible border. Compose opens a
+  draft in that project.
 - Show task rows beneath the selected project only when more than one task is
   visible after applying the archive filter. A sole visible task opens directly
   in the conversation pane. Reserve the expanded area for task rows. Compose
