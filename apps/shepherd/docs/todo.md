@@ -3,8 +3,10 @@
 Status: proposed, 2026-11-04.
 
 Specs: [goal.md](./spec/goal.md), [master-spec.md](./spec/master-spec.md),
-[stack.md](./spec/stack.md). This file is the working order; the specs remain the
-source of truth for behaviour and technology.
+[stack.md](./spec/stack.md), [workspace-ui.md](./spec/workspace-ui.md). This
+file gives the working order. The specs govern behaviour and technology.
+Check the workspace UI decisions when implementing a slice that touches the
+shell.
 
 ## Next feature
 

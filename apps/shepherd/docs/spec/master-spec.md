@@ -3,6 +3,7 @@
 Status: draft, revised after the product interview of 2026-11-04.
 Product goal: [goal.md](./goal.md).
 Reference evidence: [`../references/`](../references/README.md).
+Workspace UI decisions: [workspace-ui.md](./workspace-ui.md).
 
 Shepherd is a desktop app that multiplexes coding agents and terminals around
 persistent local projects, and reviews what they produce — files, diffs,
@@ -101,26 +102,10 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 
 ### 2.1 Window shell
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ toolbar: project ▾  branch ▾  [New task]  workspace ▾  search  ⌘K    ⚙      │
-├──────────────┬─────────────────────────────────────────────┬────────────────┤
-│ sidebar      │ chat                                        │ inspector      │
-│              │ ┌─────────────────────────────────────────┐ │ tabs           │
-│ Projects     │ │ task: fix flaky test                    │ │  Terminals     │
-│  ▾ repo-a ✎  │ │ transcript                              │ │  Preview       │
-│    · task 1 ●│ │                                         │ │  Review        │
-│    · task 2 ✓│ │ composer                                │ │  Git           │
-│  ▸ repo-b ✎  │ └─────────────────────────────────────────┘ │  Files         │
-│              │                                             │ ┌────────────┐ │
-│              │                                             │ │ term 1     │ │
-│              │                                             │ ├────────────┤ │
-│              │                                             │ │ term 2     │ │
-│              │                                             │ └────────────┘ │
-├──────────────┴─────────────────────────────────────────────┴────────────────┤
-│ status: codex working 32s · 2 tasks running · main · 3 changed              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+The header and left icon rail sit outside a shared rounded surface containing
+the Projects sidebar, conversation, and inspector. The status bar sits below.
+The [workspace UI decisions](./workspace-ui.md) govern this layout and the
+detailed treatment of its controls as the rest of the shell is built.
 
 - The sidebar shows task rows for the selected project when it has more than
   one visible task. A sole visible task opens directly in the chat pane.
@@ -158,9 +143,9 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
   inspector's selected tab is project-level, so switching tasks keeps the
   Terminals tab and its shared terminals in place; task-specific slots swap to the
   active task. The project remembers its last active task.
-- Regions are fixed. The chat is required and always visible; the inspector is
-  always present; terminal splits live only inside the Terminals tab. No pane is
-  torn out or moved between regions.
+- Regions are fixed. The middle region shows the task's chat or Settings. The
+  inspector is always present, and terminal splits live only inside its
+  Terminals tab. No pane is torn out or moved between regions.
 - Inspector tabs: **Terminals**, **Preview**, **Review**, **Git**, **Files**.
   Each tab has one pane except Terminals, which holds a split tree of terminal
   panes. Diff views live in Review and Git; there is no standalone diff tab.
@@ -228,10 +213,12 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 
 ### 2.4 First run
 
-1. Empty state: **Add project** (directory picker or drop).
-2. Adding a project opens a draft task workspace (chat plus a Terminals tab with
-   one project-shared terminal), reads Git metadata, and lists detected agents
-   with their adapter tier.
+1. The empty Projects sidebar offers **New project** and one batch import
+   button per source. The header's folder-plus button also opens the directory
+   picker. See the [sidebar and picker decisions](./workspace-ui.md#projects-sidebar-and-settings).
+2. Selecting a project with no visible tasks opens its empty conversation with
+   the composer ready for input. Typing creates a draft, and sending the first
+   prompt starts the agent. The inspector hosts the project's Terminals tab.
 3. If an agent is missing, the chat explains the install command per adapter and
    offers a terminal in the Terminals tab as the working alternative.
 
@@ -1116,16 +1103,14 @@ all UI follow-up answers are recorded here for traceability.
 - **Worktree base:** create from the project's default branch, not the currently
   checked-out branch (§7.2).
 
-**UI organization (2026-11-04):**
+**UI organization**
 
-- **Project list:** expandable projects with a flat task list; every non-archived
-  task is a row, `done` is archived behind the filter; only one project expands
-  and switching collapses every other; the count excludes `done` and `cancelled`
-  (§2.1).
-- **Task workspace:** fixed chat and inspector regions; the chat is required and
-  always visible; no pane is torn out or moved between regions; switching tasks
-  swaps chat and task-specific terminal slots while the inspector tab and shared
-  terminals stay mounted (§2.2).
+- The project list shows a flat task list under the selected project when more
+  than one task is visible. **Show archived** includes `done` tasks in that list.
+  The unfinished count excludes `done` and `cancelled` (§2.1).
+- The workspace has a fixed middle region for chat or Settings and a fixed
+  inspector on the right. Switching tasks swaps chat and task-specific terminal
+  slots while the inspector tab and shared terminals stay mounted (§2.2).
 - **Inspector:** always-on right region, resizable but never closed; tabs are
   Terminals, Preview, Review, Git and Files; terminal splits live only inside
   Terminals (§2.1, §2.2).

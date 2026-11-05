@@ -224,3 +224,13 @@ Release Notes:
 For named reference repositories, use
 [reference-repos](docs/agent_skills/reference-repos.md). Run `skills` in the Nix
 dev shell to install repository skills under `.agents/skills`.
+
+# Shepherd workspace UI
+
+Before changing Shepherd's desktop UI, read the agreed
+[workspace UI decisions](apps/shepherd/docs/spec/workspace-ui.md). Preserve
+them while completing the implementation task list. If a task requires a
+substantial change to a documented element's layout, visual hierarchy, controls,
+or default behaviour, describe the proposed change and ask the user before
+implementing it, unless the user has already requested that specific change.
+Update the spec when the agreed behaviour changes.
