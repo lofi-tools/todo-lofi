@@ -1024,12 +1024,14 @@ textarea {
 }
 
 .composer {
+  --composer-control-inset: 4px;
+
   display: flex;
   flex-direction: column;
   margin: 12px;
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--surface-raised);
   box-shadow: inset 0 0 64px 10px #0003;
 }
@@ -1039,7 +1041,7 @@ textarea {
 }
 
 .composer > .composer__input {
-  padding: 0;
+  padding: var(--composer-control-inset) var(--composer-control-inset) 0;
   border: 0;
   border-radius: 9px 9px 0 0;
   background: transparent;
@@ -1062,7 +1064,7 @@ textarea {
   gap: 4px;
   min-width: 0;
   min-height: 28px;
-  padding: 0 4px;
+  padding: 0 var(--composer-control-inset);
   border: 0;
   border-radius: 6px;
   background: transparent;
