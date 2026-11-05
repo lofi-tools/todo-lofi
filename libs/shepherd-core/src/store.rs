@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::projects::{Project, ProjectId};
 use crate::session::SessionRecord;
+use crate::snapshots::WorkspaceLayout;
 use crate::tasks::{AgentTier, Task, TaskId, TaskState};
 use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
 
@@ -40,6 +41,12 @@ pub trait Store: Send + Sync {
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
+    async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError>;
+    async fn save_workspace_layout(
+        &self,
+        task_id: &TaskId,
+        layout: WorkspaceLayout,
+    ) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
     async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError>;
@@ -301,6 +308,49 @@ impl Store for TursoStore {
         .bind(terminal.created_at as i64)
         .bind(ended_at)
         .bind(exit_code)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+
+    async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query("SELECT task_id, workspace_json FROM layouts")
+            .column_types([Type::String, Type::String])
+            .exec(&mut *db)
+            .await?;
+        let mut layouts = Vec::new();
+        for row in rows {
+            let Value::Record(fields) = row else {
+                return Err(StoreError::InvalidRow(
+                    "expected a workspace layout record".into(),
+                ));
+            };
+            let task = TaskId::new(required_string(fields.first())?);
+            let json = required_string(fields.get(1))?;
+            match serde_json::from_str(&json) {
+                Ok(layout) => layouts.push((task, layout)),
+                Err(error) => tracing::warn!(%task, %error, "ignored unreadable workspace layout"),
+            }
+        }
+        Ok(layouts)
+    }
+
+    async fn save_workspace_layout(
+        &self,
+        task_id: &TaskId,
+        layout: WorkspaceLayout,
+    ) -> Result<(), StoreError> {
+        let json = serde_json::to_string(&layout)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "INSERT INTO layouts (task_id, workspace_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (task_id) DO UPDATE SET workspace_json = excluded.workspace_json, updated_at = excluded.updated_at",
+        )
+        .bind(task_id.as_str())
+        .bind(json)
+        .bind(crate::projects::now_millis() as i64)
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -622,6 +672,7 @@ fn optional_path(path: Option<&PathBuf>) -> String {
 pub struct MemoryStore {
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
+    workspace_layouts: RwLock<BTreeMap<TaskId, WorkspaceLayout>>,
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
     terminal_layouts: RwLock<BTreeMap<ProjectId, TerminalLayout>>,
     sessions: RwLock<Vec<SessionRecord>>,
@@ -660,6 +711,29 @@ impl Store for MemoryStore {
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
         tasks.remove(task_id.as_str());
+        self.workspace_layouts.write().await.remove(task_id);
+        Ok(())
+    }
+
+    async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError> {
+        Ok(self
+            .workspace_layouts
+            .read()
+            .await
+            .iter()
+            .map(|(task, layout)| (task.clone(), *layout))
+            .collect())
+    }
+
+    async fn save_workspace_layout(
+        &self,
+        task_id: &TaskId,
+        layout: WorkspaceLayout,
+    ) -> Result<(), StoreError> {
+        self.workspace_layouts
+            .write()
+            .await
+            .insert(task_id.clone(), layout);
         Ok(())
     }
 

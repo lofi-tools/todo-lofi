@@ -31,7 +31,7 @@ pub use events::{Event, ShutdownState};
 pub use input::{Focus, InputMode};
 pub use project_scan::{ProjectNode, ProjectScan};
 pub use projects::{Project, ProjectId, ProjectSnapshot};
-pub use snapshots::{ProjectList, TaskList, TaskWorkspace};
+pub use snapshots::{ProjectList, TaskList, TaskWorkspace, WorkspaceLayout};
 pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
 use crate::git::{GitError, GitService, TurnBaseline};
@@ -58,6 +58,8 @@ pub enum CoreError {
     InvalidTerminalLayout,
     #[error("the terminal layout changed; reload it before editing")]
     TerminalLayoutChanged,
+    #[error("the inspector width must be between 240 and 1600 pixels")]
+    InvalidWorkspaceLayout,
     #[error("terminal not found: {id}")]
     TerminalNotFound { id: String },
     #[error("task title cannot be empty")]
@@ -132,6 +134,7 @@ pub struct Core {
     projects: BTreeMap<ProjectId, Project>,
     project_order: Vec<ProjectId>,
     tasks: BTreeMap<TaskId, Task>,
+    workspace_layouts: BTreeMap<TaskId, WorkspaceLayout>,
     sessions: BTreeMap<TaskId, HarnessSession>,
     turn_baselines: BTreeMap<TaskId, TurnBaseline>,
     review_notes: BTreeMap<TaskId, QueuedReviewNote>,
@@ -171,6 +174,7 @@ impl Core {
             projects: BTreeMap::new(),
             project_order: Vec::new(),
             tasks: BTreeMap::new(),
+            workspace_layouts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             turn_baselines: BTreeMap::new(),
             review_notes: BTreeMap::new(),
@@ -208,6 +212,14 @@ impl Core {
 
         for task in core.store.load_tasks().await? {
             core.tasks.insert(task.id.clone(), task);
+        }
+
+        for (task, layout) in core.store.load_workspace_layouts().await? {
+            if core.tasks.contains_key(&task) && layout.is_valid() {
+                core.workspace_layouts.insert(task, layout);
+            } else {
+                tracing::warn!(%task, "ignored invalid workspace layout");
+            }
         }
 
         for mut record in core.store.load_sessions().await? {
@@ -703,6 +715,11 @@ impl Core {
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
+            layout: self
+                .workspace_layouts
+                .get(task_id)
+                .copied()
+                .unwrap_or_default(),
             cancelling: session.is_some_and(HarnessSession::is_cancelling),
             queued_review_note: self.review_notes.get(task_id).map(|note| note.text.clone()),
             transcript: session
@@ -710,6 +727,25 @@ impl Core {
                 .unwrap_or_default(),
             diagnostics: session.map(HarnessSession::diagnostics),
         })
+    }
+
+    pub async fn save_workspace_layout(
+        &mut self,
+        task_id: &TaskId,
+        layout: WorkspaceLayout,
+    ) -> Result<WorkspaceLayout, CoreError> {
+        if self.shutdown != ShutdownState::Running {
+            return Err(CoreError::NotRunning {
+                state: self.shutdown,
+            });
+        }
+        self.task(task_id)?;
+        if !layout.is_valid() {
+            return Err(CoreError::InvalidWorkspaceLayout);
+        }
+        self.store.save_workspace_layout(task_id, layout).await?;
+        self.workspace_layouts.insert(task_id.clone(), layout);
+        Ok(layout)
     }
 
     async fn add_project(&mut self, path: PathBuf) -> Result<CommandResult, CoreError> {
@@ -804,6 +840,7 @@ impl Core {
         let project_id = task.project_id.clone();
         self.store.delete_task(task_id).await?;
         self.tasks.remove(task_id);
+        self.workspace_layouts.remove(task_id);
         self.sessions.remove(task_id);
 
         let mut updated_project = None;
@@ -3183,6 +3220,56 @@ mod tests {
                 .contains("resumed the previous agent session"),
             "unexpected resume note: {:?}",
             workspace.transcript[0].summary()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_width_is_saved_per_task_and_restored()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let database = directory.join("shepherd.db");
+        let store = TursoStore::open_at(&database).await?;
+        let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
+        let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
+        let first = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project_id.clone(),
+                title: "Wide inspector".into(),
+            })
+            .await?,
+        );
+        let second = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Default inspector".into(),
+            })
+            .await?,
+        );
+        let first = TaskId::new(first.task.id);
+        let second = TaskId::new(second.task.id);
+        let layout = WorkspaceLayout {
+            inspector_width: Some(760),
+        };
+        core.save_workspace_layout(&first, layout).await?;
+        assert!(matches!(
+            core.save_workspace_layout(
+                &first,
+                WorkspaceLayout {
+                    inspector_width: Some(0)
+                }
+            )
+            .await,
+            Err(CoreError::InvalidWorkspaceLayout)
+        ));
+        drop(core);
+
+        let store = TursoStore::open_at(&database).await?;
+        let core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.task_workspace(&first)?.layout, layout);
+        assert_eq!(
+            core.task_workspace(&second)?.layout,
+            WorkspaceLayout::default()
         );
         Ok(())
     }

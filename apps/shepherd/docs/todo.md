@@ -522,6 +522,9 @@ task-scoped, persistent and fast enough.
   tasks, and keep existing terminal processes available.
 - [x] Add the project terminal layout: slots, sizes, order and scope; save it
   per project.
+- [x] Store the inspector width independently for each task using its workspace
+  layout. The Turso round-trip covers an existing layout and a task with default
+  dimensions.
 - [x] Implement shared terminals (one PTY across tasks) and task terminals
   (swap with the active task; keep running while hidden).
 - [x] Add **New task terminal**, **New shared terminal**, the instance menu,

@@ -24,7 +24,7 @@ use shepherd_core::terminal::{
 };
 use shepherd_core::{
     Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary, TaskId,
-    TaskList, TaskWorkspace,
+    TaskList, TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
@@ -1180,6 +1180,20 @@ pub mod commands {
         task_id: String,
     ) -> Result<TaskWorkspace, BridgeError> {
         state.inner().task_workspace(task_id).await
+    }
+
+    #[tauri::command]
+    pub async fn save_workspace_layout(
+        state: State<'_, ShellState>,
+        task_id: String,
+        layout: WorkspaceLayout,
+    ) -> Result<WorkspaceLayout, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .save_workspace_layout(&TaskId::new(task_id), layout)
+            .await?)
     }
 
     #[tauri::command]

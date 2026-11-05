@@ -89,6 +89,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::codex_project_model,
             bridge::commands::task_list,
             bridge::commands::task_workspace,
+            bridge::commands::save_workspace_layout,
             bridge::commands::review_file_diff,
             bridge::commands::review_snapshot,
             bridge::commands::review_task,
