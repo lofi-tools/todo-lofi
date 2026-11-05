@@ -377,7 +377,8 @@ review and merge gate is tracked separately.
   single parent, commit subject and retained task branch.
 - [x] Dirty and off-base roots refuse squash-merge with distinct reasons. The
   fixture also checks that the untracked file survives the refusal.
-- [ ] conflict paths are listed;
+- [x] Squash-merge reports conflict paths. The Git fixture checks the unresolved
+  path and verifies the base tip stays in place.
 - [ ] missing and dirty worktrees are not silently removed.
 
 Manual script on a throwaway repository:
