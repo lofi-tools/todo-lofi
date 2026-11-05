@@ -451,8 +451,17 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         if (cell.linked) context.fillRect(x, y + LINE_HEIGHT - 2, cell.width * cellWidth, 1)
       }
       if (current.cursorVisible && row === current.cursorRow) {
-        context.fillStyle = 'rgba(230, 230, 234, 0.35)'
-        context.fillRect(current.cursorColumn * cellWidth, y, cellWidth, LINE_HEIGHT)
+        const x = current.cursorColumn * cellWidth
+        context.fillStyle = 'rgba(230, 230, 234, 0.6)'
+        if (current.cursorStyle === 1) context.fillRect(x, y + LINE_HEIGHT - 2, cellWidth, 2)
+        else if (current.cursorStyle === 2) context.fillRect(x, y, 2, LINE_HEIGHT)
+        else if (current.cursorStyle === 3) {
+          context.strokeStyle = context.fillStyle
+          context.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, LINE_HEIGHT - 1)
+        } else {
+          context.fillStyle = 'rgba(230, 230, 234, 0.35)'
+          context.fillRect(x, y, cellWidth, LINE_HEIGHT)
+        }
       }
     }
   }
@@ -702,7 +711,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         selecting = undefined
       }
       const rows = changedRows && new Set(changedRows)
-      if (rows && previous && (previous.cursorRow !== next.cursorRow || previous.cursorColumn !== next.cursorColumn || previous.cursorVisible !== next.cursorVisible)) {
+      if (rows && previous && (previous.cursorRow !== next.cursorRow || previous.cursorColumn !== next.cursorColumn || previous.cursorVisible !== next.cursorVisible || previous.cursorStyle !== next.cursorStyle)) {
         if (previous.cursorVisible) rows.add(previous.cursorRow)
         if (next.cursorVisible) rows.add(next.cursorRow)
       }

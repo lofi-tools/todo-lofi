@@ -190,6 +190,7 @@ export interface TerminalFrame {
   cursorColumn: number
   cursorRow: number
   cursorVisible: boolean
+  cursorStyle: number
   displayOffset: number
   modes: number
   cells: FrameCell[]
@@ -393,7 +394,7 @@ function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | unde
     if (column !== columns) throw new Error('Incomplete terminal row')
   }
   if (offset !== buffer.byteLength) throw new Error('Invalid terminal frame length')
-  const frame: TerminalFrame = { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), displayOffset, modes, cells }
+  const frame: TerminalFrame = { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells }
   return { frame, changedRows: full ? null : changedRows }
 }
 

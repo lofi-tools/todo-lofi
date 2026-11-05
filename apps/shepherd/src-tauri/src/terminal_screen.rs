@@ -14,7 +14,7 @@ use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{BuildError, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,7 @@ pub struct TerminalFrame {
     pub cursor_column: usize,
     pub cursor_row: usize,
     pub cursor_visible: bool,
+    pub cursor_style: u8,
     pub display_offset: usize,
     pub modes: u32,
     pub cells: Vec<FrameCell>,
@@ -53,7 +54,10 @@ impl TerminalFrame {
         });
         let full = previous.is_none();
         let mut bytes = Vec::new();
-        bytes.extend([1, u8::from(self.cursor_visible) | (u8::from(full) << 1)]);
+        bytes.extend([
+            1,
+            u8::from(self.cursor_visible) | (u8::from(full) << 1) | (self.cursor_style << 2),
+        ]);
         bytes.extend((self.columns as u16).to_le_bytes());
         bytes.extend((self.rows as u16).to_le_bytes());
         bytes.extend((self.cursor_column as u16).to_le_bytes());
@@ -384,8 +388,16 @@ impl Screen {
         let viewport_row = usize::try_from(cursor.line.0)
             .unwrap_or(0)
             .saturating_add(display_offset);
-        let cursor_visible =
-            viewport_row < self.rows && self.term.mode().contains(TermMode::SHOW_CURSOR);
+        let shape = self.term.cursor_style().shape;
+        let cursor_style = match shape {
+            CursorShape::Block | CursorShape::Hidden => 0,
+            CursorShape::Underline => 1,
+            CursorShape::Beam => 2,
+            CursorShape::HollowBlock => 3,
+        };
+        let cursor_visible = viewport_row < self.rows
+            && self.term.mode().contains(TermMode::SHOW_CURSOR)
+            && shape != CursorShape::Hidden;
         let mut cells = Vec::with_capacity(self.columns * self.rows);
 
         for indexed in grid.display_iter() {
@@ -433,6 +445,7 @@ impl Screen {
             cursor_column: cursor.column.0.min(self.columns.saturating_sub(1)),
             cursor_row: viewport_row.min(self.rows.saturating_sub(1)),
             cursor_visible,
+            cursor_style,
             display_offset,
             modes: self.term.mode().bits()
                 | (u32::from(self.keyboards[self.keyboard_index()].flags) << 18),
@@ -646,6 +659,15 @@ mod tests {
         screen.process(b"\x07\x07");
         assert!(screen.take_bell());
         assert!(!screen.take_bell());
+    }
+
+    #[test]
+    fn cursor_style_survives_binary_encoding() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b[6 q");
+        assert_eq!(screen.frame().encode(None).get(1), Some(&11));
+        screen.process(b"\x1b[4 q");
+        assert_eq!(screen.frame().encode(None).get(1), Some(&7));
     }
 
     #[test]
