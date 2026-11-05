@@ -40,21 +40,84 @@ textarea {
 }
 
 .shell {
+  --rail-width: 52px;
+  --rail-padding: 6px;
+
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
 }
 
+.shell__header {
+  flex: none;
+}
+
 .shell__window-drag {
-  flex: 0 0 42px;
+  height: 42px;
+}
+
+.shell__toolbar {
+  display: flex;
+}
+
+.shell__toolbar-drag {
+  flex: 1;
+}
+
+.shell__history,
+.shell__rail {
+  display: flex;
+  align-items: center;
+  width: var(--rail-width);
+  padding: var(--rail-padding);
+}
+
+.shell__history {
+  justify-content: center;
+  gap: 2px;
+}
+
+.shell__rail {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shell__icon-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.shell__history .shell__icon-button {
+  width: 19px;
+  height: 24px;
+  color: var(--text-disabled);
+}
+
+.shell__workspace {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  padding: 0 8px 8px 0;
 }
 
 .shell__body {
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
-  flex: 1;
-  min-height: 0;
+  grid-template-columns: min(var(--sidebar-width), 27%) minmax(0, 1fr) min(var(--inspector-width), 38%);
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
 }
 
 .sidebar {

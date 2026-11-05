@@ -426,10 +426,7 @@ export function App() {
 
   return (
     <div class="shell">
-      <Show when={isTauri() && navigator.platform.startsWith('Mac')}>
-        <div class="shell__window-drag" data-tauri-drag-region="" aria-hidden="true" />
-      </Show>
-      <div class="shell__body">
+      <WorkspaceFrame>
         <aside class="sidebar" aria-label="Workspace navigation">
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
@@ -761,7 +758,7 @@ export function App() {
             </Show>
           </div>
         </aside>
-      </div>
+      </WorkspaceFrame>
 
       <Show when={pickerOpen()}>
         <ProjectPicker
@@ -819,6 +816,59 @@ export function App() {
         </Show>
       </footer>
     </div>
+  )
+}
+
+function WorkspaceFrame(props: { children: JSX.Element }) {
+  const macWindow = isTauri() && navigator.platform.startsWith('Mac')
+
+  return (
+    <>
+      <header class="shell__header" aria-label="Workspace header">
+        <Show when={macWindow}>
+          <div class="shell__window-drag" data-tauri-drag-region="" aria-hidden="true" />
+        </Show>
+        <div class="shell__toolbar">
+          <div class="shell__history" role="group" aria-label="Navigation history">
+            <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m14 6-6 6 6 6" />
+              </svg>
+            </button>
+            <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m10 6 6 6-6 6" />
+              </svg>
+            </button>
+          </div>
+          <Show when={macWindow}>
+            <div class="shell__toolbar-drag" data-tauri-drag-region="" aria-hidden="true" />
+          </Show>
+        </div>
+      </header>
+      <div class="shell__workspace">
+        <nav class="shell__rail" aria-label="Quick navigation">
+          <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M9 4v16" />
+            </svg>
+          </button>
+          <button class="shell__icon-button" type="button" aria-label="Conversations" title="Conversations" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+              <path d="M6 4h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3a3 3 0 0 1-2-3V7a3 3 0 0 1 3-3Z" />
+            </svg>
+          </button>
+          <button class="shell__icon-button" type="button" aria-label="Tools" title="Tools" disabled>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="m7 9 3 3-3 3m6 0h4" />
+            </svg>
+          </button>
+        </nav>
+        <div class="shell__body">{props.children}</div>
+      </div>
+    </>
   )
 }
 
