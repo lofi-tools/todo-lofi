@@ -106,6 +106,7 @@ textarea {
   width: 26px;
   height: 26px;
   padding: 0;
+  border: 0;
   background: transparent;
 }
 
