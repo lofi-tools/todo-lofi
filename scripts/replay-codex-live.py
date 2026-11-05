@@ -22,15 +22,20 @@ def main():
     cache_file, session, cwd, *gate = sys.argv[1:]
     cache = json.loads(Path(cache_file).read_text())
     placeholder = "__SHEPHERD_TEST_WORKTREE__"
-    patch = None
-    if os.environ.get("SHEPHERD_REPLAY_WORKTREE_PATCH") == "1":
+    patches = []
+    patch_mode = os.environ.get("SHEPHERD_REPLAY_WORKTREE_PATCH")
+    if patch_mode in ("1", "sequence"):
         test_root = Path(__file__).resolve().parent.parent / ".cache/test-db"
         if not Path(cwd).resolve().is_relative_to(test_root.resolve()):
             raise ValueError("worktree patch replay requires a disposable project")
-        patch = cache.get("note")
-        if not isinstance(patch, str) or not patch:
+        note = cache.get("note")
+        if not isinstance(note, str) or not note:
             raise ValueError("the cached run has no worktree patch")
+        patches = [note] if patch_mode == "1" else json.loads(note)
+        if not isinstance(patches, list) or not patches or not all(isinstance(patch, str) and patch for patch in patches):
+            raise ValueError("the cached worktree patches are invalid")
 
+    previous_patch = None
     for entry in cache["sessions"][session]:
         kind = entry["kind"]
         value = entry["data"]
@@ -42,9 +47,12 @@ def main():
             if actual != value:
                 raise ValueError(f"cached request mismatch in {session} ({value.get('method', 'response')})")
         elif kind == "response":
-            if patch is not None and value.get("method") == "turn/completed":
-                subprocess.run(["git", "apply", "-"], cwd=cwd, input=patch, text=True, check=True)
-                patch = None
+            if patches and value.get("method") == "turn/completed":
+                command = ["git", f"--work-tree={cwd}", "apply"]
+                if previous_patch is not None:
+                    subprocess.run([*command, "--reverse", "-"], cwd=cwd, input=previous_patch, text=True, check=True)
+                previous_patch = patches.pop(0)
+                subprocess.run([*command, "-"], cwd=cwd, input=previous_patch, text=True, check=True)
             print(json.dumps(replace_path(value, placeholder, cwd)), flush=True)
         elif kind == "exit":
             if gate:
@@ -57,6 +65,9 @@ def main():
             return 1
         else:
             raise ValueError(f"invalid cached Codex message kind: {kind}")
+
+    if patches:
+        raise ValueError("the cached turns ended before all worktree patches were applied")
 
     # The fixture ended normally only when the adapter shut it down.
     for _ in sys.stdin:

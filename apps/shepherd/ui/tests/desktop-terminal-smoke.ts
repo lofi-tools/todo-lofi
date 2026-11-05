@@ -465,6 +465,63 @@ async function exerciseCodexEdit() {
   return { ok: true, streamedText: true, toolRow: true, reviewedWorktreeEdit: true, replay }
 }
 
+async function openInspectorTab(tab: 'review' | 'git') {
+  const control = await waitFor(`${tab} tab`, () =>
+    document.querySelector<HTMLButtonElement>(`#inspector-tab-${tab}`))
+  control.click()
+}
+
+async function reviewedFilePatch(path: string, addedLine: string) {
+  const file = await waitFor(`${path} among the two review files`, () => {
+    const files = Array.from(document.querySelectorAll<HTMLButtonElement>('.git-pane__file'))
+    return files.length === 2 && files.find((entry) => entry.textContent?.trim() === path)
+  })
+  file.click()
+  return waitFor(`review diff adding ${addedLine}`, () => {
+    const patch = document.querySelector('[aria-label="File diff"]')?.textContent
+    return chatState() === 'review' && patch?.split('\n').includes(`+${addedLine}`) && patch
+  }, CODEX_WAIT)
+}
+
+async function fillGitText(label: 'Review note' | 'Commit message', text: string) {
+  const input = await waitFor(label, () =>
+    document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`))
+  input.value = text
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }))
+}
+
+async function exerciseCodexReviewMerge() {
+  await openFixtureProject()
+  await sendPrompt('Append exactly `first pass from shepherd` to note.txt and `outline from shepherd` to outline.txt, each as a new line. Keep the existing lines and change no other files.')
+  await waitFor('review state after the two-file edit', () => chatState() === 'review', CODEX_WAIT)
+  await openInspectorTab('review')
+  const first = await reviewedFilePatch('note.txt', 'first pass from shepherd')
+  const outline = await reviewedFilePatch('outline.txt', 'outline from shepherd')
+  await fillGitText('Review note', 'In note.txt replace only the line `first pass from shepherd` with `reviewed by shepherd`. Leave all other lines and files unchanged.')
+  const sendNote = await enabledButton('Send review note')
+  sendNote.click()
+  const revised = await reviewedFilePatch('note.txt', 'reviewed by shepherd')
+  const unchangedOutline = await reviewedFilePatch('outline.txt', 'outline from shepherd')
+  if (outline !== unchangedOutline) throw new Error('The review note unexpectedly changed outline.txt')
+
+  await openInspectorTab('git')
+  const stage = await enabledButton('Stage all')
+  stage.click()
+  await fillGitText('Commit message', 'Apply the review feedback')
+  const commit = await enabledButton('Commit staged changes')
+  commit.click()
+  await waitFor('task commit in Git history', () =>
+    document.querySelector('[aria-label="Git worktree"]')?.textContent?.includes('Apply the review feedback'))
+  const merge = await enabledButton('Squash-merge into base')
+  merge.click()
+  await waitFor('squash-merge confirmation in the Git pane', () =>
+    document.querySelector('[aria-label="Git worktree"] [role="status"]')?.textContent === 'Squash-merged into main.')
+
+  const worktreePatch = JSON.stringify([first + outline, revised + unchangedOutline])
+  const replay = await invoke<boolean>('finish_codex_smoke', { worktreePatch })
+  return { ok: true, reviewedTwoFiles: true, reviewNoteApplied: true, committed: true, squashMerged: true, replay }
+}
+
 async function requestQuitWithLiveTask() {
   await enabledButton('Add project')
   await getCurrentWindow().close()
@@ -640,6 +697,9 @@ void (async () => {
         break
       case 'codex-exit':
         result = await exerciseCodexExit()
+        break
+      case 'codex-review-merge':
+        result = await exerciseCodexReviewMerge()
         break
       default:
         result = await smoke()

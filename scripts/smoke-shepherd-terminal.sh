@@ -35,8 +35,14 @@ case "${1:-}" in
     phases=(codex-exit)
     export SHEPHERD_DEV_CODEX_SMOKE=mid-turn-exit
     ;;
+  --codex-review-merge)
+    command -v python3 >/dev/null
+    phases=(codex-review-merge)
+    duration=240s
+    export SHEPHERD_DEV_CODEX_SMOKE=review-merge
+    ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit]" >&2
+    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac
@@ -54,9 +60,17 @@ trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"
 git -C "$fixture/project" -c init.templateDir= init --quiet -b main
-if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == worktree-edit ]]; then
+if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == worktree-edit || ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
   printf '%s\n' 'first line' > "$fixture/project/note.txt"
   git -C "$fixture/project" add -- note.txt
+fi
+if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
+  printf '%s\n' 'outline start' > "$fixture/project/outline.txt"
+  git -C "$fixture/project" add -- outline.txt
+  git -C "$fixture/project" config --local user.name "Shepherd Review Smoke"
+  git -C "$fixture/project" config --local user.email "smoke@example.invalid"
+  git -C "$fixture/project" config --local commit.gpgsign false
+  git -C "$fixture/project" config --local core.hooksPath /dev/null
 fi
 git -C "$fixture/project" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
   -c user.name="Shepherd Terminal Smoke" -c user.email="smoke@example.invalid" \
@@ -90,3 +104,11 @@ for phase in "${phases[@]}"; do
   SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s "$duration" "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
 done
+if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
+  [[ $(git -C "$fixture/project" rev-list --count main) == 2 ]]
+  [[ $(git -C "$fixture/project" show -s --format=%P main) == "$(git -C "$fixture/project" rev-parse main~1)" ]]
+  [[ $(git -C "$fixture/project" show main:note.txt) == $'first line\nreviewed by shepherd' ]]
+  [[ $(git -C "$fixture/project" show main:outline.txt) == $'outline start\noutline from shepherd' ]]
+  branch=$(git -C "$fixture/project" for-each-ref --format='%(refname)' refs/heads/shepherd)
+  [[ -n $branch && $(git -C "$fixture/project" show -s --format=%s "$branch") == 'Apply the review feedback' ]]
+fi

@@ -23,12 +23,14 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   )
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal('')
+  const [notice, setNotice] = createSignal('')
   const disabled = () => props.live || pending() || git.loading
 
   async function apply(operation: GitMutation) {
     if (disabled()) return
     setPending(true)
     setError('')
+    setNotice('')
     try {
       const snapshot = await mutateGit(props.taskId, operation)
       mutate(snapshot)
@@ -38,6 +40,9 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
       if (operation.type === 'commit' || operation.type === 'amend') { setMessage(''); setAmendRequested(null) }
       if (operation.type === 'createBranch') setNewBranch('')
       if (operation.type === 'checkout') setBranch('')
+      if (operation.type === 'squashMerge') {
+        setNotice(`Squash-merged into ${snapshot.projectRoot?.branch ?? 'the base branch'}.`)
+      }
     } catch (failure) {
       setError((failure as { message?: string })?.message ?? String(failure))
       void refetch()
@@ -175,6 +180,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
                 onClick={() => void apply({ type: 'squashMerge' })}>Squash-merge into base</button>
             </div>
             <Show when={snapshot().mergeBlocked}>{(reason) => <p class="empty">{reason()}</p>}</Show>
+            <Show when={notice()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
             <details>
               <summary>Recent commits</summary>
               <ol class="git-pane__files">

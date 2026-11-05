@@ -852,6 +852,7 @@ unit-tested against fixtures.
   no in-app conflict editor. The commit uses the task title and the user's hooks
   and signing, and the task branch is not deleted.
 - Before merging, the task branch tip is recorded in `branch_tip_sha`.
+- After a successful squash merge, the Git pane confirms the destination branch.
 - No push, pull, rebase, reset --hard or force operations in v1.
 - Mutations are serialized per project; the commit form refreshes status before
   committing and offers to include files changed since it opened.

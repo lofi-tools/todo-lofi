@@ -51,6 +51,7 @@ fn codex_smoke_factory(
         "approval-replay" => "network-approval",
         "approval-cancel" => "desktop-approval-cancel",
         "worktree-edit" => "desktop-worktree-edit",
+        "review-merge" => "desktop-review-merge",
         "mid-turn-exit" => "desktop-mid-turn-exit",
         "restart" => match std::env::var("SHEPHERD_DESKTOP_SMOKE_PHASE").as_deref() {
             Ok("codex-before-restart") => "desktop-before-restart",
@@ -67,7 +68,15 @@ fn codex_smoke_factory(
         (run, "desktop")
     };
     let run = run.map_err(|error| std::io::Error::other(error.to_string()))?;
-    let apply_patch = mode == "worktree-edit" && run.is_replay();
+    let patch_replay = if run.is_replay() {
+        match mode.as_str() {
+            "worktree-edit" => Some("1"),
+            "review-merge" => Some("sequence"),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let exit_gate = (mode == "mid-turn-exit").then(|| data_directory.join("codex-exit"));
     if let Some(gate) = &exit_gate {
         app.manage(CodexExitGate(gate.clone()));
@@ -76,7 +85,7 @@ fn codex_smoke_factory(
     Ok(Some(Box::new(CodexSmoke {
         run,
         session,
-        apply_patch,
+        patch_replay,
         exit_gate,
     })))
 }
@@ -111,7 +120,7 @@ pub fn finish_codex_smoke(
 struct CodexSmoke {
     run: LiveCodexRun,
     session: &'static str,
-    apply_patch: bool,
+    patch_replay: Option<&'static str>,
     exit_gate: Option<std::path::PathBuf>,
 }
 
@@ -128,9 +137,9 @@ impl HarnessFactory for CodexSmoke {
             return self.run.spec_with_exit_gate(cwd, self.session, gate);
         }
         let mut spec = self.run.spec(cwd, self.session, None);
-        if self.apply_patch {
+        if let Some(mode) = self.patch_replay {
             spec.environment
-                .insert("SHEPHERD_REPLAY_WORKTREE_PATCH".into(), "1".into());
+                .insert("SHEPHERD_REPLAY_WORKTREE_PATCH".into(), mode.into());
         }
         spec
     }

@@ -477,6 +477,17 @@ Manual script on a throwaway repository:
 **Pass:** one real task goes prompt → review → commit → squash-merge, and the
 result is visible without leaving Shepherd.
 
+The native macOS smoke drives both Codex turns, opens the two worktree diffs,
+sends the review note, stages and commits in the Git pane, and checks the
+confirmation after squash-merging. The fixture checks both file contents on
+`main`, the squash commit's single parent, and the retained task commit.
+The first successful run captures GPT-6.1 Terra at `low` effort and the two
+worktree patches in `desktop-review-merge.json` for replay.
+
+```sh
+direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-review-merge
+```
+
 **If it fails:** stop. Do not add terminal breadth or adapters until the review
 and merge path is correct. This is the product’s main differentiator.
 
@@ -719,7 +730,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shepherd-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
 | 2026-11-05 | S1 | Pass | The two-launch macOS smoke added the repository through the picker, created a draft with no branch or worktree, displayed scripted text and a tool row, ran `pwd` and `printf`, and sent Ctrl+C to a foreground command. Task switching preserved the draft, transcript, and shared terminal. Closing the window warned about one waiting task. After confirming and relaunching, the task was interrupted, terminal records were ended, and **Resume** reattached the scripted session. The 18-test browser suite also passed. |
 | 2026-11-05 | S2 | Pass | The native macOS window ran the installed Codex CLI at GPT-6.1 Terra low effort on disposable repositories. It streamed a one-file edit into Review, allowed an approval, interrupted a running command, accepted a follow-up, rendered the failure row and stderr after a mid-turn SIGKILL, and resumed the same thread and worktree after relaunch. All four native scenarios replayed their captures in fresh disposable data. The headless adapter and core suites also cover protocol probing, tool mapping, fallback, failure, and session recovery. |
-|  | S3 |  |  |
+| 2026-11-05 | S3 | Partial | The live desktop reviewed two files, applied a review note in a second turn, staged and committed, and confirmed the squash merge in the Git pane. The fixture verified the base contents, single parent, and retained task commit. Native archive and worktree recreation are still to verify. |
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim and less, distinguished Ctrl+I from Tab in interactive fish, and checked composition events, bracketed paste and SGR mouse reports. It verified PTY size changes, preserved a shared terminal across task switches, and restarted both shared and task terminals after relaunch. The latest run painted the tail of a 1 MiB burst in 185 ms and all 24 paced markers, with a 93 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. System IME, Ubuntu and the manual workday gate remain open. |
 |  | S5 |  |  |
 |  | S6 |  |  |
