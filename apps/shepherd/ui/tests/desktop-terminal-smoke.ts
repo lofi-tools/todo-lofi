@@ -1,5 +1,6 @@
 import * as bridge from '../src/bridge'
 
+declare const __SHEPHERD_SMOKE_FISH__: boolean
 declare const __SHEPHERD_SMOKE_PROJECT__: string
 declare const __SHEPHERD_SMOKE_PHASE__: string
 
@@ -140,6 +141,25 @@ os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
     }))
   }
   await waitFor('Kitty key press and release in the PTY', () => terminalOutput().includes('S4_KITTY_PASS'))
+}
+
+async function exerciseFish(terminalId: string, input: HTMLTextAreaElement) {
+  const setup = [
+    'bind ctrl-i ' + shellQuote("printf 'S4_%s\\n' FISH_CTRL"),
+    'bind tab ' + shellQuote("printf 'S4_%s\\n' FISH_TAB"),
+    "function fish_prompt; printf 'S4_%s ' FISH_READY; end",
+  ].join('; ')
+  await bridge.terminalWrite(terminalId, 'fish --no-config -i -C ' + shellQuote(setup) + "; printf 'S4_%s\\n' FISH_EXIT\r")
+  await waitFor('interactive fish prompt', () => terminalOutput().includes('S4_FISH_READY'))
+  for (const key of [{ key: 'i', code: 'KeyI', ctrlKey: true }, { key: 'Tab', code: 'Tab' }]) {
+    for (const type of ['keydown', 'keyup']) {
+      input.dispatchEvent(new KeyboardEvent(type, { ...key, bubbles: true, cancelable: true }))
+    }
+  }
+  await waitFor('distinct Ctrl+I and Tab bindings in fish', () =>
+    terminalOutput().includes('S4_FISH_CTRL') && terminalOutput().includes('S4_FISH_TAB'))
+  await bridge.terminalWrite(terminalId, 'exit\r')
+  await waitFor('return from fish to the fixture shell', () => terminalOutput().includes('S4_FISH_EXIT'))
 }
 
 async function exerciseBracketedPaste(terminalId: string, input: HTMLTextAreaElement) {
@@ -295,6 +315,7 @@ async function smoke() {
   await exerciseAlternateScreen(terminal.id, input)
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
+  if (__SHEPHERD_SMOKE_FISH__) await exerciseFish(terminal.id, input)
   await exerciseBracketedPaste(terminal.id, input)
   await exerciseMouse(terminal.id)
   const burstPaintMs = await measureBurst(terminal.id)
@@ -302,7 +323,7 @@ async function smoke() {
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project.id, terminal)
-  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {

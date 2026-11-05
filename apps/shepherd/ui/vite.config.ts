@@ -9,6 +9,7 @@ function desktopSmoke(project: string): Plugin {
     apply: 'serve',
     config: () => ({
       define: {
+        __SHEPHERD_SMOKE_FISH__: process.env.SHEPHERD_DESKTOP_SMOKE_FISH === '1',
         __SHEPHERD_SMOKE_PROJECT__: JSON.stringify(project),
         __SHEPHERD_SMOKE_PHASE__: JSON.stringify(process.env.SHEPHERD_DESKTOP_SMOKE_PHASE ?? 'prepare'),
       },

@@ -17,6 +17,10 @@ export SHEPHERD_DEV_SCRIPTED_HARNESS=1
 export SHEPHERD_DEV_DATA_DIR="$fixture/data"
 export SHEPHERD_DEV_PROJECT_ROOT="$fixture"
 export SHEPHERD_DESKTOP_SMOKE_PROJECT="$fixture/project"
+export SHEPHERD_DESKTOP_SMOKE_FISH=0
+if fish_version=$(fish --version 2>/dev/null) && [[ $fish_version =~ ^fish,\ version\ ([0-9]+)\. ]] && (( BASH_REMATCH[1] >= 4 )); then
+  export SHEPHERD_DESKTOP_SMOKE_FISH=1
+fi
 export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
 
