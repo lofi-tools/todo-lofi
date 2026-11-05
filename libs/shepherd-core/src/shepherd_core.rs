@@ -517,6 +517,9 @@ impl Core {
             git::GitMutation::Commit { message, expected } => {
                 GitService.commit(path, &message, &expected)?
             }
+            git::GitMutation::Amend { message, expected } => {
+                GitService.amend(path, &message, &expected)?
+            }
             git::GitMutation::Checkout { branch } => GitService.checkout(path, &branch)?,
             git::GitMutation::CreateBranch { branch } => GitService.create_branch(path, &branch)?,
             git::GitMutation::SquashMerge => {

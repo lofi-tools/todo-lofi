@@ -462,12 +462,27 @@ impl GitService {
         if self.staged_revision(path)? != expected {
             return Err(GitError::StagingChanged);
         }
-        commit_with_message(path, message)
+        commit_with_message(path, message, false)
+    }
+
+    pub fn amend(&self, path: &Path, message: &str, expected: &str) -> Result<(), GitError> {
+        if message.trim().is_empty() {
+            return Err(GitError::EmptyCommitMessage);
+        }
+        if self.staged_revision(path)? != expected {
+            return Err(GitError::StagingChanged);
+        }
+        run_git(path, &["symbolic-ref", "--quiet", "HEAD"])?;
+        commit_with_message(path, message, true)
     }
 
     fn staged_revision(&self, path: &Path) -> Result<String, GitError> {
         let mut hash = Sha256::new();
         hash.update(git_bytes(path, &["rev-parse", "HEAD"])?);
+        hash.update(git_bytes(
+            path,
+            &["rev-parse", "--symbolic-full-name", "HEAD"],
+        )?);
         hash.update(git_bytes(path, &["ls-files", "--stage", "-z"])?);
         Ok(hash
             .finalize()
@@ -579,7 +594,7 @@ impl GitService {
             }
             return Err(error);
         }
-        commit_with_message(root, message)
+        commit_with_message(root, message, false)
     }
 
     fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
@@ -700,16 +715,21 @@ pub enum GitMutation {
     Stage { path: Option<String> },
     Unstage { path: String },
     Commit { message: String, expected: String },
+    Amend { message: String, expected: String },
     Checkout { branch: String },
     CreateBranch { branch: String },
     SquashMerge,
 }
 
-fn commit_with_message(path: &Path, message: &str) -> Result<(), GitError> {
+fn commit_with_message(path: &Path, message: &str, amend: bool) -> Result<(), GitError> {
+    let mut arguments = vec!["commit", "-F", "-"];
+    if amend {
+        arguments.push("--amend");
+    }
     let mut child = Command::new("git")
         .arg("-C")
         .arg(path)
-        .args(["commit", "-F", "-"])
+        .args(&arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -725,7 +745,7 @@ fn commit_with_message(path: &Path, message: &str) -> Result<(), GitError> {
         .map_err(|source| GitError::Io { source })?;
     if !output.status.success() {
         return Err(GitError::CommandFailed {
-            command: "git commit -F -".into(),
+            command: format!("git {}", arguments.join(" ")),
             status: output.status,
             stderr: format!(
                 "{}{}",

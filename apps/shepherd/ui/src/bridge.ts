@@ -345,6 +345,7 @@ export type GitMutation =
   | { type: 'stage'; path: string | null }
   | { type: 'unstage'; path: string }
   | { type: 'commit'; message: string; expected: string }
+  | { type: 'amend'; message: string; expected: string }
   | { type: 'checkout'; branch: string }
   | { type: 'createBranch'; branch: string }
   | { type: 'squashMerge' }

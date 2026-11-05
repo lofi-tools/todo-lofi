@@ -11,6 +11,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   const [branch, setBranch] = createSignal('')
   const [newBranch, setNewBranch] = createSignal('')
   const [message, setMessage] = createSignal('')
+  const [amendRequested, setAmendRequested] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal('')
   const disabled = () => props.live || pending() || git.loading
@@ -21,7 +22,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
     setError('')
     try {
       mutate(await mutateGit(props.taskId, operation))
-      if (operation.type === 'commit') setMessage('')
+      if (operation.type === 'commit' || operation.type === 'amend') { setMessage(''); setAmendRequested(null) }
       if (operation.type === 'createBranch') setNewBranch('')
       if (operation.type === 'checkout') setBranch('')
     } catch (failure) {
@@ -105,6 +106,18 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
             }}>
               <textarea class="composer__input" aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
               <button class="composer__send" type="submit" disabled={disabled() || !message().trim() || !snapshot().stagedDiff}>Commit staged changes</button>
+              <Show when={amendRequested() !== snapshot().stagedRevision} fallback={
+                <div class="terminal-pane__bar">
+                  <button type="button" disabled={disabled() || !message().trim() || !snapshot().branch}
+                    onClick={() => void apply({ type: 'amend', message: message(), expected: snapshot().stagedRevision })}>
+                    Replace tip on {snapshot().branch}
+                  </button>
+                  <button type="button" onClick={() => setAmendRequested(null)}>Cancel</button>
+                </div>
+              }>
+                <button type="button" class="composer__send" disabled={disabled() || !snapshot().branch || !message().trim()}
+                  onClick={() => setAmendRequested(snapshot().stagedRevision)}>Amend tip…</button>
+              </Show>
             </form>
             <div class="terminal-pane__bar">
               <button type="button" disabled={disabled() || !!snapshot().mergeBlocked}
