@@ -176,6 +176,7 @@ impl TerminalService for PtyTerminals {
                             break;
                         }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(error) => {
                         tracing::debug!(%error, "terminal reader stopped");
                         break;
