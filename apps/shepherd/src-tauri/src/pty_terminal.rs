@@ -29,9 +29,44 @@ struct Session {
     /// The waiting thread owns the child, so closing goes through a cloned killer.
     killer: Box<dyn ChildKiller + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
+    #[cfg(unix)]
+    session_id: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+struct TerminalProcessGroup {
+    group: libc::pid_t,
+    session: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl TerminalProcessGroup {
+    fn still_owned(&self) -> bool {
+        self.group > 1
+            && unsafe {
+                self.group != libc::getpgrp()
+                    && libc::getsid(self.group) == self.session
+                    && libc::getpgid(self.group) == self.group
+            }
+    }
 }
 
 impl Session {
+    #[cfg(unix)]
+    fn process_groups(&self) -> impl Iterator<Item = TerminalProcessGroup> {
+        self.session_id.into_iter().flat_map(|session| {
+            let foreground = self
+                .master
+                .process_group_leader()
+                .filter(|group| *group != session);
+            [Some(session), foreground]
+                .into_iter()
+                .flatten()
+                .map(move |group| TerminalProcessGroup { group, session })
+                .filter(TerminalProcessGroup::still_owned)
+        })
+    }
+
     fn hangup(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(group) = self
@@ -84,9 +119,34 @@ impl PtyTerminals {
                 std::mem::take(&mut *error.into_inner())
             }
         };
+        #[cfg(unix)]
+        let mut groups: Vec<_> = sessions
+            .values()
+            .flat_map(Session::process_groups)
+            .collect();
         for (terminal_id, mut session) in sessions {
             if let Err(error) = session.hangup() {
                 tracing::warn!(%terminal_id, %error, "could not stop terminal process");
+            }
+        }
+        #[cfg(unix)]
+        {
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            groups.retain(TerminalProcessGroup::still_owned);
+            while !groups.is_empty() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                groups.retain(TerminalProcessGroup::still_owned);
+            }
+            for group in groups {
+                // The PTY may already have detached from the surviving job. Check
+                // its leader still belongs to the original session before signaling.
+                if group.still_owned() && unsafe { libc::killpg(group.group, libc::SIGKILL) } == -1
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(%error, process_group = group.group, "could not stop terminal process group");
+                    }
+                }
             }
         }
     }
@@ -237,6 +297,10 @@ impl TerminalService for PtyTerminals {
         });
 
         let killer = child.clone_killer();
+        #[cfg(unix)]
+        let session_id = child
+            .process_id()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok());
         self.sessions()?.insert(
             terminal_id.as_str().to_string(),
             Session {
@@ -244,6 +308,8 @@ impl TerminalService for PtyTerminals {
                 closing: false,
                 killer,
                 master: pair.master,
+                #[cfg(unix)]
+                session_id,
             },
         );
 

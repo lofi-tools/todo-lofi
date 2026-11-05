@@ -765,7 +765,7 @@ async function requestQuitWithLiveTask(liveTerminals = 0) {
 }
 
 async function startForegroundQuitProbe(terminal: bridge.TerminalSnapshot) {
-  const program = 'import os, sys, time; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); print("S4_" + "FOREGROUND_READY"); time.sleep(60)'
+  const program = 'import os, signal, sys, time; from pathlib import Path; signal.signal(signal.SIGHUP, signal.SIG_IGN); Path(sys.argv[1]).write_text(str(os.getpid())); print("S4_" + "FOREGROUND_READY"); time.sleep(60)'
   const pidFile = `${__SHEPHERD_SMOKE_PROJECT__}/../foreground.pid`
   await bridge.terminalWrite(terminal.id, `python3 -u -c ${shellQuote(program)} ${shellQuote(pidFile)}\r`)
   await waitFor('foreground job ready before quit', () => {

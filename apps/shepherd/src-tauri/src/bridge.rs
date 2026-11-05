@@ -397,7 +397,12 @@ impl ShellState {
         let _guard = self.terminal_lifecycle.lock().await;
         match self.execute(Command::Quit { force }).await? {
             CommandResult::Quit(summary) => {
-                self.engine.lock().await.terminate_all();
+                let mut engine = std::mem::take(&mut *self.engine.lock().await);
+                if let Err(error) =
+                    tokio::task::spawn_blocking(move || engine.terminate_all()).await
+                {
+                    tracing::error!(%error, "terminal shutdown worker failed");
+                }
                 Ok(summary)
             }
 

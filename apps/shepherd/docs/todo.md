@@ -579,7 +579,9 @@ Automated:
   SGR mouse input, OSC 8 hyperlinks, burst and paced paint, scrollback search, PTY split
   resize, task and project switching, reattachment, quit and restart of shared
   and task terminals. The quit warning counts the live task and all three
-  running terminals, and a foreground PTY job exits before relaunch.
+  running terminals. A foreground PTY job that ignores SIGHUP exits before
+  relaunch. Quit gives terminal groups a 200 ms grace period, then stops
+  groups whose leaders still belong to their original PTY sessions.
   Switching projects preserves the original PTY's shell
   state and output received while hidden. The hyperlink check verifies the
   exact URL passed to a test-only desktop opener.
