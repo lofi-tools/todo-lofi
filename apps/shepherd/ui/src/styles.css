@@ -1027,7 +1027,7 @@ textarea {
   display: flex;
   flex-direction: column;
   margin: 12px;
-  padding-block: 4px;
+  padding: 8px;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface-raised);
@@ -1039,6 +1039,7 @@ textarea {
 }
 
 .composer > .composer__input {
+  padding: 0;
   border: 0;
   border-radius: 9px 9px 0 0;
   background: transparent;
@@ -1053,7 +1054,6 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 8px 8px;
 }
 
 .composer__picker {
