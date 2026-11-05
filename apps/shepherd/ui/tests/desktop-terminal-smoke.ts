@@ -51,7 +51,10 @@ void (async () => {
   try {
     result = await smoke()
   } catch (error) {
-    result = { ok: false, error: error instanceof Error ? error.message : String(error) }
+    const message = typeof error === 'object' && error !== null && 'message' in error
+      ? String(error.message)
+      : String(error)
+    result = { ok: false, error: message }
   }
   try {
     await fetch('/__shepherd-terminal-smoke', { method: 'POST', body: JSON.stringify(result) })
