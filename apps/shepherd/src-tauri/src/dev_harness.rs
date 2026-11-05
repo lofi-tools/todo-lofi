@@ -4,8 +4,8 @@
 //! so the command bridge, transcript and approval flow need no installed CLI. The
 //! scripted text says what it is; this factory never pretends to be a real agent.
 
-use agent_harness::AgentHarness;
 use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
+use agent_harness::{AgentHarness, ToolStatus};
 use shepherd_core::CoreError;
 use shepherd_core::harness::HarnessFactory;
 
@@ -52,6 +52,14 @@ fn script() -> Vec<FakeTurn> {
     vec![
         FakeTurn::new(vec![
             FakeStep::Message("Scripted adapter: this turn uses a local fixture.".to_string()),
+            FakeStep::ToolCall {
+                tool_call_id: "fixture-inspection".into(),
+                title: "Inspect the scripted workspace".into(),
+                kind: "shell".into(),
+                status: ToolStatus::Completed,
+                output: None,
+                diffs: Vec::new(),
+            },
             FakeStep::approval("approval-1", "Run the scripted tool"),
             FakeStep::Message("Scripted turn complete.".to_string()),
         ]),

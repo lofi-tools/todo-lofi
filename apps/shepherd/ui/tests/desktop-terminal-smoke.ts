@@ -6,6 +6,8 @@ declare const __SHEPHERD_SMOKE_FISH__: boolean
 declare const __SHEPHERD_SMOKE_PROJECT__: string
 declare const __SHEPHERD_SMOKE_PHASE__: string
 
+const INTERRUPTED_TASK = 'Other terminal scope'
+
 export function button(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll('button'))
     .find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent?.trim()) === label)
@@ -19,6 +21,28 @@ export async function waitFor<T>(label: string, read: () => T | null | undefined
     await new Promise((resolve) => window.setTimeout(resolve, 25))
   }
   throw new Error(`Timed out waiting for ${label}`)
+}
+
+function enabledButton(label: string) {
+  return waitFor(label, () => {
+    const entry = button(label)
+    return entry && !entry.disabled && entry
+  })
+}
+
+function chatState() {
+  return document.querySelector('.chat__state')?.textContent
+}
+
+async function sendPrompt(text: string) {
+  const input = await waitFor('active composer', () => {
+    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')
+    return textarea && !textarea.disabled && textarea
+  })
+  input.value = text
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  const send = await enabledButton('Send')
+  send.click()
 }
 
 function terminalOutput(scope: ParentNode = document): string {
@@ -77,6 +101,16 @@ async function measurePacing(terminalId: string) {
 
 function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+}
+
+async function exerciseShellInterrupt(terminalId: string, input: HTMLTextAreaElement) {
+  const script = 'import time; print("S1_" + "WAIT"); time.sleep(60)'
+  await bridge.terminalWrite(terminalId, `python3 -u -c ${shellQuote(script)}\r`)
+  await waitFor('foreground command in the terminal', () => terminalOutput().includes('S1_WAIT'))
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'c', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true,
+  }))
+  await waitFor('Ctrl+C interrupts the foreground command', () => terminalOutput().includes('KeyboardInterrupt'))
 }
 
 async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaElement) {
@@ -275,30 +309,42 @@ async function selectTask(title: string) {
     return Array.from(document.querySelectorAll<HTMLButtonElement>('.task'))
       .find((entry) => entry.querySelector('.task__title')?.textContent === title)
   })
-  if (task !== true) task.click()
-}
-
-async function prepareTask(projectId: string) {
-  const draft = await bridge.createDraft(projectId, 'Terminal scope')
-  const waiting = await bridge.sendPrompt(draft.task.id, 'Prepare the disposable terminal worktree')
-  if (waiting.task.state !== 'waiting' || !waiting.task.worktreePath) {
-    throw new Error('The scripted task should have a worktree and await approval')
+  if (task !== true) {
+    task.click()
+    await waitFor(`selected task ${title}`, () => document.querySelector('.chat__title')?.textContent === title)
   }
-  const ready = await bridge.resolveApproval(draft.task.id, 'approval-1', 'allow')
-  if (ready.task.state !== 'ready') throw new Error('The scripted task should finish after approval')
-  await selectTask(ready.task.title)
-  return { id: ready.task.id, title: ready.task.title, worktree: waiting.task.worktreePath }
 }
 
-async function exerciseTaskSwitch(projectId: string, shared: bridge.TerminalSnapshot) {
-  const task = await prepareTask(projectId)
+async function prepareTask(project: bridge.ProjectSnapshot) {
+  const compose = await enabledButton(`New chat in ${project.name}`)
+  compose.click()
+  await waitFor('draft worktree proposal', () => chatState() === 'draft' && document.querySelector('.draft__facts'))
+  const [draft] = (await bridge.taskList(project.id)).tasks
+  if (draft?.state !== 'draft' || draft.branch !== null || draft.worktreePath !== null) {
+    throw new Error('Creating a draft should leave its branch and worktree uncreated')
+  }
+
+  await sendPrompt('Prepare the disposable terminal worktree')
+  await waitFor('scripted text and tool row', () => chatState() === 'waiting' &&
+    document.querySelector('.entry__agent')?.textContent?.includes('local fixture') &&
+    document.querySelector('.entry__tool-title')?.textContent === 'Inspect the scripted workspace')
+  const allow = await enabledButton('Allow')
+  allow.click()
+  await waitFor('ready after the scripted approval', () => chatState() === 'ready')
+  const { task } = await bridge.taskWorkspace(draft.id)
+  if (!task.worktreePath) throw new Error('Sending the first prompt should create a worktree')
+  return { id: task.id, title: task.title, worktree: task.worktreePath }
+}
+
+async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridge.TerminalSnapshot) {
+  const task = await prepareTask(project)
   const start = await waitFor('task terminal action for the worktree', () => {
     const entry = button('New task terminal')
     return entry && !entry.disabled && entry
   })
   start.click()
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
-  const scoped = (await bridge.terminalList(projectId)).find((entry) => entry.taskId === task.id)
+  const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.taskId === task.id)
   if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
     throw new Error('The task terminal should run in the task worktree')
   }
@@ -309,13 +355,16 @@ async function exerciseTaskSwitch(projectId: string, shared: bridge.TerminalSnap
     const pane = terminalPane(scoped.title)
     return pane && terminalOutput(pane).includes(marker)
   })
-  const other = await bridge.createDraft(projectId, 'Other terminal scope')
+  const other = await bridge.createDraft(project.id, INTERRUPTED_TASK)
   await selectTask(other.task.title)
+  await waitFor('second task is still a draft', () => chatState() === 'draft')
   await waitFor('task pane hidden and shared pane still live', () => {
     const pane = terminalPane(shared.title)
     return !terminalPane(scoped.title) && pane?.querySelector('canvas') && terminalOutput(pane).includes('S4_VIEW:')
   })
   await selectTask(task.title)
+  await waitFor('scripted transcript after switching back', () =>
+    document.querySelector('.entry__permission-decision')?.textContent === 'allow')
   await waitFor('same task terminal output after switching back', () => {
     const pane = terminalPane(scoped.title)
     return pane && terminalOutput(pane).includes(marker)
@@ -323,34 +372,23 @@ async function exerciseTaskSwitch(projectId: string, shared: bridge.TerminalSnap
 }
 
 async function openFixtureProject() {
-  await waitFor('shell startup', () => {
-    const add = button('Add project')
-    return add && !add.disabled
-  })
-  const projects = await bridge.addProject(__SHEPHERD_SMOKE_PROJECT__)
-  const project = projects.projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
+  const add = await enabledButton('Add project')
+  add.click()
+  const directory = await waitFor('disposable project in the picker', () =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.picker__row'))
+      .find((entry) => entry.title === __SHEPHERD_SMOKE_PROJECT__))
+  directory.click()
+  await waitFor('registered project in the sidebar', () => document.querySelector('.project'))
+  const { projects } = await bridge.projectList()
+  const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not registered')
-  const projectButton = await waitFor('fixture project', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.project'))
-    .find((entry) => entry.querySelector('.project__name')?.textContent === project.name))
-  projectButton.click()
   return project
 }
 
 async function replayCodexApproval() {
   await openFixtureProject()
-  const input = await waitFor('active composer', () => {
-    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')
-    return textarea && !textarea.disabled && textarea
-  })
-  input.value = "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"
-  input.dispatchEvent(new InputEvent('input', { bubbles: true }))
-  const send = await waitFor('enabled Send', () => {
-    const entry = button('Send')
-    return entry && !entry.disabled && entry
-  })
-  send.click()
+  await sendPrompt("Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com")
 
-  const chatState = () => document.querySelector('.chat__state')?.textContent
   const card = await waitFor('waiting Codex approval with command arguments', () => {
     if (chatState() === 'failed') {
       throw new Error(document.querySelector('.diagnostics pre')?.textContent ?? 'The Codex replay failed')
@@ -388,8 +426,10 @@ async function smoke() {
   const [terminal] = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
   input.focus()
-  await bridge.terminalWrite(terminal.id, "printf '\nS4_%s\n' READY\r")
-  await waitFor('PTY output in the webview', () => terminalOutput().includes('S4_READY'))
+  await bridge.terminalWrite(terminal.id, "pwd; printf '\nS4_%s\n' READY\r")
+  await waitFor('project cwd and PTY output in the webview', () =>
+    terminalOutput().includes(project.path) && terminalOutput().includes('S4_READY'))
+  await exerciseShellInterrupt(terminal.id, input)
   await exerciseAlternateScreen(terminal.id, input)
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
@@ -400,8 +440,17 @@ async function smoke() {
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
-  await exerciseTaskSwitch(project.id, terminal)
-  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  await exerciseTaskSwitch(project, terminal)
+  await selectTask(INTERRUPTED_TASK)
+  await sendPrompt('Wait for approval while quitting')
+  await waitFor('live task awaiting approval', () => chatState() === 'waiting')
+  await enabledButton('Add project')
+  await getCurrentWindow().close()
+  const confirm = await enabledButton('Quit anyway')
+  if (!confirm.closest('.banner')?.textContent?.includes('Quit will stop 1 live task')) {
+    throw new Error('The quit warning should count the waiting task')
+  }
+  return { ok: true, quitWarning: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {
@@ -431,9 +480,9 @@ async function restore() {
     const pane = terminalPane(first.title)
     return pane && terminalOutput(pane).includes('S4_RESTORED')
   })
-  const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.title === 'Terminal scope')
   const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.scope === 'task')
-  if (!task?.worktreePath || !scoped || scoped.taskId !== task.id || scoped.cwd !== task.worktreePath || scoped.endedAt === null) {
+  const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.id === scoped?.taskId)
+  if (!task?.worktreePath || !scoped || scoped.cwd !== task.worktreePath || scoped.endedAt === null) {
     throw new Error('The task terminal should restore as ended with its worktree')
   }
   await selectTask(task.title)
@@ -449,7 +498,13 @@ async function restore() {
     const pane = terminalPane(scoped.title)
     return pane && terminalOutput(pane).includes(marker)
   })
-  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true }
+  await selectTask(INTERRUPTED_TASK)
+  await waitFor('interrupted task after relaunch', () => chatState() === 'interrupted')
+  const resume = await enabledButton('Resume')
+  resume.click()
+  await waitFor('resumed session in the native transcript', () => chatState() === 'ready' &&
+    document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'))
+  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true, resumedInterruptedTask: true }
 }
 
 void (async () => {
@@ -474,6 +529,8 @@ void (async () => {
   try {
     await fetch('/__shepherd-terminal-smoke', { method: 'POST', body: JSON.stringify(result) })
   } finally {
-    await getCurrentWindow().close()
+    const confirm = button('Quit anyway')
+    if (confirm) confirm.click()
+    else await getCurrentWindow().close()
   }
 })()
