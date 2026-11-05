@@ -517,9 +517,39 @@ async function exerciseCodexReviewMerge() {
   await waitFor('squash-merge confirmation in the Git pane', () =>
     document.querySelector('[aria-label="Git worktree"] [role="status"]')?.textContent === 'Squash-merged into main.')
 
+  await openInspectorTab('review')
+  const archive = await enabledButton('Mark reviewed and archive')
+  archive.click()
+  await waitFor('archived task', () => chatState() === 'done')
   const worktreePatch = JSON.stringify([first + outline, revised + unchangedOutline])
   const replay = await invoke<boolean>('finish_codex_smoke', { worktreePatch })
-  return { ok: true, reviewedTwoFiles: true, reviewNoteApplied: true, committed: true, squashMerged: true, replay }
+  return { ok: true, reviewedTwoFiles: true, reviewNoteApplied: true, committed: true, squashMerged: true, archived: true, replay }
+}
+
+async function reopenArchivedTask() {
+  const selected = await waitFor('restored fixture project', () =>
+    document.querySelector('.project[aria-current="true"]')?.closest('.project-row'))
+  selected.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }))
+  const showArchived = await enabledButton('Show archived')
+  showArchived.click()
+  await waitFor('selected archived task', () => chatState() === 'done')
+
+  const { projects } = await bridge.projectList()
+  const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
+  if (!project) throw new Error('The archived task project was not restored')
+  const [archived] = (await bridge.taskList(project.id)).tasks
+  if (archived?.state !== 'done' || !archived.worktreePath || !archived.branch) {
+    throw new Error('The archived task no longer records its branch and worktree')
+  }
+  await openInspectorTab('review')
+  const reopen = await enabledButton('Reopen')
+  reopen.click()
+  await waitFor('reopened task returns to review', () => chatState() === 'review')
+  const { task } = await bridge.taskWorkspace(archived.id)
+  if (task.branch !== archived.branch || task.worktreePath !== archived.worktreePath) {
+    throw new Error('Reopen did not restore the original task branch and worktree')
+  }
+  return { ok: true, reopenedArchivedTask: true }
 }
 
 async function requestQuitWithLiveTask() {
@@ -701,6 +731,9 @@ void (async () => {
       case 'codex-review-merge':
         result = await exerciseCodexReviewMerge()
         break
+      case 'reopen-archived':
+        result = await reopenArchivedTask()
+        break
       default:
         result = await smoke()
     }
@@ -716,6 +749,7 @@ void (async () => {
     const confirm = button('Quit anyway')
     if (confirm) confirm.click()
     else {
+      await enabledButton('Add project').catch(() => undefined)
       await getCurrentWindow().close()
       if (!result.ok) {
         const confirm = await enabledButton('Quit anyway').catch(() => undefined)

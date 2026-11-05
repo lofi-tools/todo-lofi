@@ -37,7 +37,7 @@ case "${1:-}" in
     ;;
   --codex-review-merge)
     command -v python3 >/dev/null
-    phases=(codex-review-merge)
+    phases=(codex-review-merge reopen-archived)
     duration=240s
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
@@ -103,6 +103,15 @@ fi
 for phase in "${phases[@]}"; do
   SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s "$duration" "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
+  if [[ $phase == codex-review-merge ]]; then
+    worktrees=("$fixture/project/.git/shepherd/worktrees/"*)
+    [[ ${#worktrees[@]} == 1 && -d ${worktrees[0]} ]]
+    task_worktree=${worktrees[0]}
+    task_branch=$(git -C "$task_worktree" symbolic-ref HEAD)
+    task_tip=$(git -C "$task_worktree" rev-parse HEAD)
+    git -C "$fixture/project" worktree remove -- "$task_worktree"
+    [[ ! -e $task_worktree && $(git -C "$fixture/project" rev-parse "$task_branch") == "$task_tip" ]]
+  fi
 done
 if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
   [[ $(git -C "$fixture/project" rev-list --count main) == 2 ]]
@@ -110,5 +119,7 @@ if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
   [[ $(git -C "$fixture/project" show main:note.txt) == $'first line\nreviewed by shepherd' ]]
   [[ $(git -C "$fixture/project" show main:outline.txt) == $'outline start\noutline from shepherd' ]]
   branch=$(git -C "$fixture/project" for-each-ref --format='%(refname)' refs/heads/shepherd)
-  [[ -n $branch && $(git -C "$fixture/project" show -s --format=%s "$branch") == 'Apply the review feedback' ]]
+  [[ $branch == "$task_branch" && $(git -C "$fixture/project" show -s --format=%s "$branch") == 'Apply the review feedback' ]]
+  [[ $(git -C "$task_worktree" symbolic-ref HEAD) == "$task_branch" ]]
+  [[ $(git -C "$task_worktree" rev-parse HEAD) == "$task_tip" ]]
 fi
