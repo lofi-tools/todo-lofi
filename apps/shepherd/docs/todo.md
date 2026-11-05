@@ -188,6 +188,7 @@ fake task, read the stream and use one terminal.
   text input with an **Add project** button that opens a picker. Scan `~` for
   Git repositories as the app starts, on a background task: bounded depth,
   skipping junk (`node_modules`, `target`, `.cargo`, `Library`, `.Trash`, …),
+  excluding the home directories `~/.claude`, `~/.codex` and `~/ComfyUI-Installs`,
   and stopping at a repository root so repos nested inside a checkout are not
   listed twice. Cluster the results into a tree rather than a flat list:
   collapse chains of single-child directories, and keep each level to roughly

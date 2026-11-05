@@ -81,6 +81,12 @@ pub fn scan(root: &Path) -> ProjectScan {
     let mut tree = Vec::new();
     if let Some((_, subdirectories)) = read_directory(root) {
         for subdirectory in subdirectories {
+            if matches!(
+                subdirectory.file_name().and_then(|name| name.to_str()),
+                Some(".claude" | ".codex" | "ComfyUI-Installs")
+            ) {
+                continue;
+            }
             if let Some(node) = walk(&subdirectory, 1, &mut repositories) {
                 tree.push(collapse(node));
             }
@@ -294,15 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn skipping_the_home_folders_keeps_media_out() -> Result<(), Box<dyn std::error::Error>> {
+    fn skips_home_media_and_tool_directories() -> Result<(), Box<dyn std::error::Error>> {
         let root = TestDirectory::new()?;
         repository(&root, "Pictures/holiday");
+        repository(&root, ".claude/cache/plugin");
+        repository(&root, ".codex/worktrees/project");
+        repository(&root, "ComfyUI-Installs/ComfyUI");
+        repository(&root, "work/.codex/project");
         repository(&root, "work/real");
 
         let scan = scan(root.path());
-        assert_eq!(scan.repositories, 1);
+        assert_eq!(scan.repositories, 2);
         assert_eq!(scan.tree.len(), 1);
-        assert_eq!(scan.tree[0].name, "work/real");
+        let work = node(&scan.tree, "work");
+        assert!(node(&work.children, ".codex/project").repository);
+        assert!(node(&work.children, "real").repository);
         Ok(())
     }
 }
