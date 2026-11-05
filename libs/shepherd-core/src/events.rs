@@ -34,6 +34,11 @@ pub enum Event {
         task_id: Option<String>,
         message: String,
     },
+    TerminalBell {
+        project_id: crate::projects::ProjectId,
+        task_id: Option<String>,
+        terminal_id: String,
+    },
     TerminalListChanged {
         project_id: crate::projects::ProjectId,
         terminals: Vec<TerminalSnapshot>,

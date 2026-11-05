@@ -4,6 +4,7 @@
 //! documented fallback engine is used: `alacritty_terminal` behind the core's
 //! terminal boundary.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -135,15 +136,21 @@ impl Dimensions for ScreenSize {
 }
 
 #[derive(Clone, Default)]
-struct PtyReplies(Arc<Mutex<Vec<u8>>>);
+struct PtyReplies {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    bell: Arc<AtomicBool>,
+}
 
 impl EventListener for PtyReplies {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.0
+        match event {
+            Event::PtyWrite(text) => self
+                .bytes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(text.as_bytes());
+                .extend_from_slice(text.as_bytes()),
+            Event::Bell => self.bell.store(true, Ordering::Relaxed),
+            _ => {}
         }
     }
 }
@@ -177,10 +184,14 @@ impl Screen {
         std::mem::take(
             &mut *self
                 .replies
-                .0
+                .bytes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    pub fn take_bell(&self) -> bool {
+        self.replies.bell.swap(false, Ordering::Relaxed)
     }
 
     pub fn resize(&mut self, columns: usize, rows: usize) {
@@ -455,6 +466,15 @@ mod tests {
         screen.process(b"abc\x1b[6n");
         assert_eq!(screen.take_replies(), b"\x1b[1;4R");
         assert!(screen.take_replies().is_empty());
+    }
+
+    #[test]
+    fn reports_a_bell_once_per_batch() {
+        let mut screen = Screen::new(10, 3);
+        assert!(!screen.take_bell());
+        screen.process(b"\x07\x07");
+        assert!(screen.take_bell());
+        assert!(!screen.take_bell());
     }
 
     #[test]

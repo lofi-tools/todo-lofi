@@ -196,6 +196,7 @@ export interface TerminalFrame {
 
 export type Event =
   | { type: 'projectListChanged'; data: ProjectList }
+  | { type: 'terminalBell'; data: { projectId: string; taskId: string | null; terminalId: string } }
   | { type: 'terminalListChanged'; data: { projectId: string; terminals: TerminalSnapshot[] } }
   | { type: 'taskListChanged'; data: TaskList }
   | { type: 'taskChanged'; data: TaskSummary }

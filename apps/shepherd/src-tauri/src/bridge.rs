@@ -407,6 +407,8 @@ impl ShellState {
             return Err(CoreError::NotRunning { state }.into());
         }
         let project_id = record.project_id.clone();
+        let bell_project = project_id.clone();
+        let bell_task = record.task_id.as_ref().map(|id| id.as_str().to_owned());
         let (output, mut receiver) = mpsc::unbounded_channel();
         let terminal_id = self
             .engine
@@ -459,7 +461,7 @@ impl ShellState {
                 };
                 match event {
                     TerminalEvent::Output(bytes) => {
-                        let replies = {
+                        let (replies, bell) = {
                             let mut screens = screens.lock().await;
                             let Some(slot) = screens.get_mut(&id) else {
                                 continue;
@@ -476,8 +478,17 @@ impl ShellState {
                                 }
                             }
                             slot.frames.send_replace(Arc::new(slot.screen.frame()));
-                            slot.screen.take_replies()
+                            (slot.screen.take_replies(), slot.screen.take_bell())
                         };
+                        if bell
+                            && let Err(error) = shell_events.send(Event::TerminalBell {
+                                project_id: bell_project.clone(),
+                                task_id: bell_task.clone(),
+                                terminal_id: id.clone(),
+                            })
+                        {
+                            tracing::debug!(%error, "no shell is subscribed to terminal bells");
+                        }
                         if !replies.is_empty()
                             && let Err(error) = engine.lock().await.write(&terminal_id, &replies)
                         {
