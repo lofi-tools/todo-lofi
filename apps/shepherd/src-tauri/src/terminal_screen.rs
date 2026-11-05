@@ -43,6 +43,8 @@ pub struct FrameCell {
     pub italic: bool,
     pub linked: bool,
     pub wraps: bool,
+    pub underline: bool,
+    pub strikeout: bool,
 }
 
 impl TerminalFrame {
@@ -87,7 +89,9 @@ impl TerminalFrame {
                     | (u8::from(cell.bold) << 2)
                     | (u8::from(cell.italic) << 3)
                     | (u8::from(cell.linked) << 4)
-                    | (u8::from(cell.wraps) << 5);
+                    | (u8::from(cell.wraps) << 5)
+                    | (u8::from(cell.underline) << 6)
+                    | (u8::from(cell.strikeout) << 7);
                 bytes.push(flags);
                 bytes.extend(cell.foreground.to_le_bytes());
                 bytes.extend(cell.background.to_le_bytes());
@@ -436,6 +440,8 @@ impl Screen {
                 italic: cell.flags.contains(Flags::ITALIC),
                 linked: cell.hyperlink().is_some(),
                 wraps: cell.flags.contains(Flags::WRAPLINE),
+                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                strikeout: cell.flags.contains(Flags::STRIKEOUT),
             });
         }
 

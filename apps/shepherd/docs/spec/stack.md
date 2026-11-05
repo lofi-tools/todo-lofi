@@ -196,7 +196,7 @@ The per-terminal channel identifies the terminal and orders its frames. Header
 flag bits 0 and 1 indicate cursor visibility and a full frame. Bits 2–3
 encode block, underline, beam and hollow block cursor shapes. Each row starts
 at column zero. A run repeats one UTF-8 cell with the same style, with the cell
-width in attribute bits 0–1, bold, italic and link in bits 2–4, and soft wrap in bit 5. Attach,
+width in attribute bits 0–1, bold, italic and link in bits 2–4, soft wrap in bit 5, and underline and strikeout in bits 6–7. Attach,
 resize and scrollback jumps send full frames. Subsequent frames include only
 rows that differ from the last frame sent on that subscription. A cursor or
 mode change can arrive with zero rows. The canvas repaints changed rows and any

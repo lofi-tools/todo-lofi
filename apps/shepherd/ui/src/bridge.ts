@@ -182,6 +182,8 @@ export interface FrameCell {
   italic: boolean
   linked: boolean
   wraps: boolean
+  underline: boolean
+  strikeout: boolean
 }
 
 export interface TerminalFrame {
@@ -386,6 +388,8 @@ function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | unde
         italic: Boolean(attributes & 8),
         linked: Boolean(attributes & 16),
         wraps: Boolean(attributes & 32),
+        underline: Boolean(attributes & 64),
+        strikeout: Boolean(attributes & 128),
       }
       offset += textLength
       cells.fill(cell, rowIndex * columns + column, rowIndex * columns + column + length)

@@ -442,13 +442,17 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       }
       for (let column = 0; column < columns; column++) {
         const cell = current.cells[start + column]
-        if (!cell.width || !cell.text || cell.text === ' ') continue
+        if (!cell.width) continue
         const x = column * cellWidth
-        const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
-        if (context.font !== font) context.font = font
+        const width = cell.width * cellWidth
         context.fillStyle = hex(cell.foreground)
-        context.fillText(cell.text, x, y + 1, cell.width * cellWidth)
-        if (cell.linked) context.fillRect(x, y + LINE_HEIGHT - 2, cell.width * cellWidth, 1)
+        if (cell.text && cell.text !== ' ') {
+          const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
+          if (context.font !== font) context.font = font
+          context.fillText(cell.text, x, y + 1, width)
+        }
+        if (cell.linked || cell.underline) context.fillRect(x, y + LINE_HEIGHT - 2, width, 1)
+        if (cell.strikeout) context.fillRect(x, y + Math.floor(LINE_HEIGHT / 2), width, 1)
       }
       if (current.cursorVisible && row === current.cursorRow) {
         const x = current.cursorColumn * cellWidth
