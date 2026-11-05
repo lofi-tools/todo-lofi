@@ -357,9 +357,11 @@ squash-merge into the base from inside Shepherd.
 Automated, all in temporary repositories. Coverage is in the core and Git
 service tests, including one workflow that reviews two files, sends a note,
 stages, commits, squash-merges, archives, and reopens a collected worktree.
-The fixtures still need to run before closing the proof checklist.
+The automated core suite ran on 2026-11-05 with 52 passes. The desktop
+review and merge gate is tracked separately.
 
-- [ ] edit-then-revert stays `ready`;
+- [x] Edit-then-revert stays `ready`. The core fixture edits and restores a
+  file during the same turn.
 - [ ] a commit, branch change or content change in an already-dirty file enters
   `review`;
 - [ ] worktree creation appears in `git worktree list` and uses the default
