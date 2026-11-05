@@ -1094,7 +1094,6 @@ textarea {
 .composer__picker .picker-caret {
   width: 9px;
   height: 9px;
-  rotate: 180deg;
 }
 
 .composer__input {
