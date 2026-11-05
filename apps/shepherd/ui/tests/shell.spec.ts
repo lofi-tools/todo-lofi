@@ -292,14 +292,15 @@ test('shows an approval with its tool, arguments and diff', async ({ page }) => 
 test('encodes typed keys into terminal input', async ({ page }) => {
   await page.goto('/')
 
-  const canvas = page.getByLabel('Terminal', { exact: true })
-  await expect(canvas).toBeVisible()
-  await canvas.click()
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(input).toBeVisible()
+  await page.locator('.terminal-view__canvas').click()
+  await expect(input).toBeFocused()
 
-  await canvas.press('a')
-  await canvas.press('Control+c')
-  await canvas.press('Enter')
-  await canvas.press('ArrowUp')
+  await input.press('a')
+  await input.press('Control+c')
+  await input.press('Enter')
+  await input.press('ArrowUp')
 
   await expect
     .poll(() =>

@@ -311,8 +311,12 @@ function formatExit(exitCode: number | null): string {
 const FONT = '13px ui-monospace, SFMono-Regular, Menlo, monospace'
 const LINE_HEIGHT = 17
 const DEFAULT_BACKGROUND = 0x131316
+const BRACKETED_PASTE = 1 << 4
 
 function TerminalCanvas(props: { terminalId: string }) {
+  const [error, setError] = createSignal<string | null>(null)
+  let input: HTMLTextAreaElement | undefined
+  let composing = false
   let canvas: HTMLCanvasElement | undefined
   let container: HTMLDivElement | undefined
   let frame: bridge.TerminalFrame | null = null
@@ -383,7 +387,8 @@ function TerminalCanvas(props: { terminalId: string }) {
   }
 
   function encodeKey(event: KeyboardEvent): string | null {
-    if (event.metaKey) return null
+    if (event.metaKey || event.getModifierState('AltGraph')) return null
+    if (event.ctrlKey && event.key.toLowerCase() === 'v') return null
     const key = event.key
     if (key.length === 1) {
       if (event.ctrlKey) {
@@ -411,11 +416,29 @@ function TerminalCanvas(props: { terminalId: string }) {
     return sequences[key] ?? null
   }
 
+  function write(data: string) {
+    if (!data) return
+    setError(null)
+    void bridge.terminalWrite(props.terminalId, data).catch((failure) => setError(describe(failure)))
+  }
+
   function onKeyDown(event: KeyboardEvent) {
+    if (composing || event.isComposing || event.keyCode === 229) return
     const data = encodeKey(event)
     if (data === null) return
     event.preventDefault()
-    void bridge.terminalWrite(props.terminalId, data).catch(() => undefined)
+    write(data)
+  }
+
+  function onPaste(event: ClipboardEvent) {
+    const text = event.clipboardData?.getData('text/plain')
+    if (!text) return
+    event.preventDefault()
+    if ((frame?.modes ?? 0) & BRACKETED_PASTE) {
+      write(`\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}\x1b[201~`)
+    } else {
+      write(text.replace(/\r?\n/g, '\r'))
+    }
   }
 
   onMount(() => {
@@ -467,10 +490,31 @@ function TerminalCanvas(props: { terminalId: string }) {
       <canvas
         class="terminal-view__canvas"
         ref={canvas}
-        tabindex={0}
-        aria-label="Terminal"
-        onKeyDown={onKeyDown}
+        aria-hidden="true"
+        onPointerDown={() => input?.focus({ preventScroll: true })}
       />
+      <textarea
+        ref={input}
+        class="terminal-view__input"
+        aria-label="Terminal"
+        autocapitalize="off"
+        autocomplete="off"
+        spellcheck={false}
+        onKeyDown={onKeyDown}
+        onPaste={onPaste}
+        onCompositionStart={() => { composing = true }}
+        onCompositionEnd={(event) => {
+          composing = false
+          event.currentTarget.value = ''
+          write(event.data)
+        }}
+        onInput={(event) => {
+          if (composing || (event as InputEvent).isComposing) return
+          write(event.currentTarget.value)
+          event.currentTarget.value = ''
+        }}
+      />
+      <Show when={error()}>{(message) => <p class="error terminal-view__error" role="alert">{message()}</p>}</Show>
     </div>
   )
 }
