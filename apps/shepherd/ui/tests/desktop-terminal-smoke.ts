@@ -155,6 +155,22 @@ os.write(1, b'\r\nS4_' + b'PASTE_PASS\r\n')
   await waitFor('chunked UTF-8 bracketed paste in the PTY', () => terminalOutput().includes('S4_PASTE_PASS'))
 }
 
+async function exerciseMouse(terminalId: string) {
+  await runPtyProbe(terminalId, String.raw`
+os.write(1, b'\x1b[?1000h\x1b[?1006h\r\nS4_' + b'MOUSE_READY\r\n')
+expect(b'\x1b[<65;1;1M')
+os.write(1, b'\r\nS4_' + b'MOUSE_PASS\r\n')
+`, '1b5b3f313030306c1b5b3f313030366c')
+  await waitFor('PTY SGR mouse mode', () => terminalOutput().includes('S4_MOUSE_READY'))
+  const canvas = await waitFor('terminal mouse surface', () => document.querySelector('.terminal-view__canvas'))
+  const { left, top } = canvas.getBoundingClientRect()
+  canvas.dispatchEvent(new WheelEvent('wheel', {
+    bubbles: true, cancelable: true, deltaMode: WheelEvent.DOM_DELTA_LINE, deltaY: 1,
+    clientX: left + 1, clientY: top + 1,
+  }))
+  await waitFor('SGR wheel report in the PTY', () => terminalOutput().includes('S4_MOUSE_PASS'))
+}
+
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
   const split = await waitFor('split action', () => {
     const entry = button('Split right')
@@ -280,12 +296,13 @@ async function smoke() {
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
   await exerciseBracketedPaste(terminal.id, input)
+  await exerciseMouse(terminal.id)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project.id, terminal)
-  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, bracketedPaste: true, burstPaintMs }
+  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {
