@@ -2490,6 +2490,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn editing_then_restoring_a_file_does_not_enter_review()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::WriteFile {
+                    path: "README.md".into(),
+                    contents: "temporary\n".into(),
+                },
+                FakeStep::WriteFile {
+                    path: "README.md".into(),
+                    contents: "initial\n".into(),
+                },
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Try an edit".into(),
+            })
+            .await?,
+        );
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: TaskId::new(draft.task.id),
+                text: "Try an edit and restore it".into(),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_completed_turn_with_changes_enters_review() -> Result<(), Box<dyn std::error::Error>>
     {
         let repository = TestRepository::new()?;
