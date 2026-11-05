@@ -764,6 +764,16 @@ async function requestQuitWithLiveTask(liveTerminals = 0) {
   }
 }
 
+async function startForegroundQuitProbe(terminal: bridge.TerminalSnapshot) {
+  const program = 'import os, sys, time; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); print("S4_" + "FOREGROUND_READY"); time.sleep(60)'
+  const pidFile = `${__SHEPHERD_SMOKE_PROJECT__}/../foreground.pid`
+  await bridge.terminalWrite(terminal.id, `python3 -u -c ${shellQuote(program)} ${shellQuote(pidFile)}\r`)
+  await waitFor('foreground job ready before quit', () => {
+    const pane = terminalPane(terminal.title)
+    return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_FOREGROUND_READY')
+  })
+}
+
 async function quitDuringCodexTurn() {
   await openFixtureProject()
   await startCodexSleep()
@@ -854,6 +864,7 @@ async function smoke() {
   await selectTask(INTERRUPTED_TASK)
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
+  await startForegroundQuitProbe(terminal)
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }

@@ -579,7 +579,8 @@ Automated:
   SGR mouse input, OSC 8 hyperlinks, burst and paced paint, scrollback search, PTY split
   resize, task and project switching, reattachment, quit and restart of shared
   and task terminals. The quit warning counts the live task and all three
-  running terminals. Switching projects preserves the original PTY's shell
+  running terminals, and a foreground PTY job exits before relaunch.
+  Switching projects preserves the original PTY's shell
   state and output received while hidden. The hyperlink check verifies the
   exact URL passed to a test-only desktop opener.
   The find bar navigates literal matches in both directions and returns
