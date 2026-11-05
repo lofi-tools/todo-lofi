@@ -11,12 +11,14 @@ then loads it automatically):
 
 ```sh
 pnpm install
-pnpm dev:shepherd
+shep
 ```
 
-`pnpm dev:shepherd` runs the Tauri CLI from this directory, which starts the Vite
-dev server in `ui/` on port 1420 and then opens the desktop window. Non-interactive
-runners need the wrapper: `direnv exec . pnpm dev:shepherd`.
+`shep` runs `pnpm dev:shepherd`, which starts Vite on port 1420 and opens the
+desktop window. Tauri relaunches the app when the shell, its local Rust
+dependencies, or the frontend source and configuration change. Vite keeps
+running between app restarts. Non-interactive runners can use
+`direnv exec . shep`.
 
 Until the Codex adapter lands in S2, the shell runs a scripted adapter
 (`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
