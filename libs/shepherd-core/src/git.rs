@@ -748,6 +748,46 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn file_staging_and_commit_use_git_and_its_hooks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = TestRepository::new()?;
+        let hook = fixture.repository().git_dir.join("hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nprintf ran > hook-ran\n")?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        fixture.write_file("README.md", "edited\n")?;
+        fixture.write_file("other.txt", "leave untracked\n")?;
+
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        let staged = GitService.snapshot(fixture.path())?;
+        assert!(staged.staged_diff.contains("+edited"));
+        GitService.unstage(fixture.path(), "README.md")?;
+        assert!(GitService.snapshot(fixture.path())?.staged_diff.is_empty());
+        assert!(matches!(
+            GitService.commit(fixture.path(), "Wrong index", &staged.staged_revision),
+            Err(GitError::StagingChanged),
+        ));
+
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        let staged = GitService.snapshot(fixture.path())?;
+        GitService.commit(fixture.path(), "Edit readme", &staged.staged_revision)?;
+        assert_eq!(
+            run_git(fixture.path(), &["log", "-1", "--format=%s"])?,
+            "Edit readme"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("hook-ran"))?,
+            "ran"
+        );
+        assert_eq!(
+            run_git(fixture.path(), &["ls-files", "--", "other.txt"])?,
+            ""
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
