@@ -84,6 +84,14 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
                 onClick={() => void apply({ type: 'squashMerge' })}>Squash-merge into base</button>
             </div>
             <Show when={snapshot().mergeBlocked}>{(reason) => <p class="empty">{reason()}</p>}</Show>
+            <details>
+              <summary>Recent commits</summary>
+              <ol class="git-pane__files">
+                <For each={snapshot().history}>{(commit) => (
+                  <li><code title={commit.id}>{commit.id.slice(0, 7)}</code> {commit.subject} <small>{commit.author} · {commit.time}</small></li>
+                )}</For>
+              </ol>
+            </details>
             <Show when={snapshot().stagedDiff}>
               <details><summary>Staged diff</summary><pre class="git-pane__diff">{snapshot().stagedDiff}</pre></details>
             </Show>

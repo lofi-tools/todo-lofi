@@ -360,12 +360,35 @@ impl GitService {
             merge_blocked: None,
             branches: branches.lines().map(str::to_string).collect(),
             files: self.status(path)?,
+            history: self.history(path)?,
             staged_diff: run_git(
                 path,
                 &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--"],
             )?,
             unstaged_diff: run_git(path, &["diff", "--no-ext-diff", "--no-textconv", "--"])?,
         })
+    }
+
+    fn history(&self, path: &Path) -> Result<Vec<GitCommit>, GitError> {
+        let bytes = git_bytes(
+            path,
+            &["log", "-z", "-n", "50", "--format=%H%x00%an%x00%ar%x00%s"],
+        )?;
+        let fields = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+        Ok(fields
+            .chunks_exact(4)
+            .filter_map(|entry| {
+                let [id, author, time, subject] = entry else {
+                    return None;
+                };
+                Some(GitCommit {
+                    id: String::from_utf8_lossy(id).into_owned(),
+                    author: String::from_utf8_lossy(author).into_owned(),
+                    time: String::from_utf8_lossy(time).into_owned(),
+                    subject: String::from_utf8_lossy(subject).into_owned(),
+                })
+            })
+            .collect())
     }
 
     pub fn stage(&self, path: &Path, file: Option<&str>) -> Result<(), GitError> {
@@ -604,10 +627,19 @@ pub struct ReviewSnapshot {
 }
 
 #[derive(Debug, Serialize)]
+pub struct GitCommit {
+    pub id: String,
+    pub author: String,
+    pub time: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitSnapshot {
     pub branch: Option<String>,
     pub branches: Vec<String>,
+    pub history: Vec<GitCommit>,
     pub files: Vec<GitFile>,
     pub staged_diff: String,
     pub staged_revision: String,
