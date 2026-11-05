@@ -16,7 +16,8 @@ export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
 
 cd "$repo"
-timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri dev --no-watch --config '{
+for phase in prepare restore; do
+  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri dev --no-watch --config '{
   "build": {
     "beforeDevCommand": "pnpm --dir ui run dev --port 1432",
     "devUrl": "http://localhost:1432"
@@ -29,5 +30,6 @@ timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri d
       "height": 820
     }]
   }
-}' 2>&1 | tee "$fixture/run.log"
-rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/run.log"
+}' 2>&1 | tee "$fixture/$phase.log"
+  rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
+done

@@ -1,6 +1,7 @@
 import * as bridge from '../src/bridge'
 
 declare const __SHEPHERD_SMOKE_PROJECT__: string
+declare const __SHEPHERD_SMOKE_PHASE__: string
 
 export function button(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === label)
@@ -199,10 +200,40 @@ async function smoke() {
   return { ok: true, roundTrip: true, splitReattach: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
+async function restore() {
+  const { projects } = await bridge.projectList()
+  const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
+  if (!project) throw new Error('The fixture project was not restored')
+  const terminals = await bridge.terminalList(project.id)
+  const [first] = terminals
+  if (!first || terminals.length !== 2 || terminals.some((entry) => entry.endedAt === null)) {
+    throw new Error('Both terminal records should be restored as ended')
+  }
+  const layout = await bridge.terminalLayout(project.id)
+  if (layout.root?.type !== 'split') throw new Error('The split layout was not restored')
+
+  const restart = await waitFor('restored terminal restart action', () => {
+    const pane = terminalPane(first.title)
+    return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
+  })
+  restart.click()
+  await waitFor('restarted terminal frame', () => terminalPane(first.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
+  const reopened = await bridge.terminalList(project.id)
+  if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
+    throw new Error('Restart should reuse the restored terminal ID')
+  }
+  await bridge.terminalWrite(first.id, "printf 'S4_%s\\n' RESTORED\r")
+  await waitFor('fresh PTY output after restore', () => {
+    const pane = terminalPane(first.title)
+    return pane && terminalOutput(pane).includes('S4_RESTORED')
+  })
+  return { ok: true, restoredLayout: true, restartedTerminal: true }
+}
+
 void (async () => {
   let result
   try {
-    result = await smoke()
+    result = __SHEPHERD_SMOKE_PHASE__ === 'restore' ? await restore() : await smoke()
   } catch (error) {
     const message = typeof error === 'object' && error !== null && 'message' in error
       ? String(error.message)

@@ -7,7 +7,12 @@ function desktopSmoke(project: string): Plugin {
   return {
     name: 'shepherd-terminal-smoke',
     apply: 'serve',
-    config: () => ({ define: { __SHEPHERD_SMOKE_PROJECT__: JSON.stringify(project) } }),
+    config: () => ({
+      define: {
+        __SHEPHERD_SMOKE_PROJECT__: JSON.stringify(project),
+        __SHEPHERD_SMOKE_PHASE__: JSON.stringify(process.env.SHEPHERD_DESKTOP_SMOKE_PHASE ?? 'prepare'),
+      },
+    }),
     transformIndexHtml: () => [
       { tag: 'script', attrs: { type: 'module', src: '/tests/desktop-terminal-smoke.ts' }, injectTo: 'body' },
     ],
