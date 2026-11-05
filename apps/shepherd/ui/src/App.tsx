@@ -859,14 +859,16 @@ function ComposerPickers() {
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
         <PlusIcon />
       </PickerMenu>
-      <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker composer__picker--approval" above>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
-          <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
-        </svg>
-        <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
-        <PickerCaret />
-      </PickerMenu>
+      <div class="composer__approval-slot">
+        <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
+            <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
+          </svg>
+          <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
+          <PickerCaret />
+        </PickerMenu>
+      </div>
       <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={AGENT_OPTIONS} triggerClass="composer__picker" above>
         <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
         <PickerCaret />

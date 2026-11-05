@@ -1084,7 +1084,8 @@ textarea {
   cursor: pointer;
 }
 
-.composer__picker--approval {
+.composer__approval-slot {
+  display: flex;
   flex: 0 0 128px;
 }
 
