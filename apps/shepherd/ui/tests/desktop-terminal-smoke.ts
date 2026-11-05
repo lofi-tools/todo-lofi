@@ -106,6 +106,16 @@ function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
+async function pressPaneShortcut(title: string, key: string, shiftKey: boolean) {
+  const input = await waitFor(`input in ${title}`, () =>
+    terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
+  const mac = navigator.platform.startsWith('Mac')
+  input.focus()
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key, shiftKey, metaKey: mac, ctrlKey: !mac, bubbles: true, cancelable: true,
+  }))
+}
+
 async function typeIntoFocusedTerminal(title: string, command: string) {
   const input = await waitFor(`focused input in ${title}`, () => {
     const field = terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input')
@@ -123,6 +133,21 @@ async function exerciseShellInterrupt(terminalId: string, input: HTMLTextAreaEle
     key: 'c', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true,
   }))
   await waitFor('Ctrl+C interrupts the foreground command', () => terminalOutput().includes('KeyboardInterrupt'))
+}
+
+async function exerciseUnclaimedControlKey(terminalId: string, input: HTMLTextAreaElement) {
+  const mac = navigator.platform.startsWith('Mac')
+  const byte = mac ? '05' : '17'
+  await runPtyProbe(terminalId, String.raw`
+os.write(1, b'\r\nS4_' + b'CONTROL_READY\r\n')
+expect(bytes.fromhex('${byte}'))
+os.write(1, b'\r\nS4_' + b'CONTROL_PASS\r\n')
+`, '')
+  await waitFor('raw PTY input before checking control keys', () => terminalOutput().includes('S4_CONTROL_READY'))
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: mac ? 'E' : 'w', shiftKey: mac, ctrlKey: true, bubbles: true, cancelable: true,
+  }))
+  await waitFor('unclaimed control key received by the PTY', () => terminalOutput().includes('S4_CONTROL_PASS'))
 }
 
 async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaElement) {
@@ -322,11 +347,8 @@ async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
   const initialWidth = await waitFor('painted terminal before splitting', () => paneWidth(title))
   const initialColumns = await ptyColumns(terminalId, title, 'INITIAL_SIZE')
-  const split = await waitFor('split action', () => {
-    const entry = button('Split right')
-    return entry && !entry.disabled && entry
-  })
-  split.click()
+  await enabledButton('Split right')
+  await pressPaneShortcut(title, 'D', true)
   const divider = await waitFor('live split divider', () => document.querySelector<HTMLElement>('.terminal-divider'))
   await waitFor('both canvases in the split', () => document.querySelectorAll('.terminal-view__canvas').length === 2)
   await waitFor('split layout save', () => !button('Split right')?.disabled)
@@ -348,10 +370,8 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
     const pane = terminalPane(title)
     return pane && terminalOutput(pane).match(/S4_VIEW:\d+/)?.[0]
   })
-  const first = await waitFor('first pane', () => terminalPane(title))
-  const hide = Array.from(first.querySelectorAll('button')).find((entry) => entry.textContent === 'Hide pane')
-  if (!hide) throw new Error('The first pane has no Hide action')
-  hide.click()
+  const mac = navigator.platform.startsWith('Mac')
+  await pressPaneShortcut(title, mac ? 'w' : 'W', !mac)
   await waitFor('first pane detached', () => !terminalPane(title))
   const reopen = await waitFor('hidden terminal instance', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.terminal-list__item'))
     .find((entry) => !entry.disabled && entry.querySelector('span')?.textContent === title))
@@ -746,6 +766,7 @@ async function smoke() {
   await exerciseShellInterrupt(terminal.id, input)
   await exerciseAlternateScreen(terminal.id, input)
   await exerciseFuzzyFinder(terminal.id, input)
+  await exerciseUnclaimedControlKey(terminal.id, input)
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
   if (__SHEPHERD_SMOKE_FISH__) await exerciseFish(terminal.id, input)

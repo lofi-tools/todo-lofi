@@ -541,6 +541,9 @@ task-scoped, persistent and fast enough.
   Command+Backquote on macOS and Ctrl+Backquote on Linux cycle through the
   Terminals tab and live splits. Shift reverses the cycle. Up and Down move
   between enabled inspector tabs.
+  The split and hide shortcuts use the platform's documented modifier. The
+  native smoke checks those actions and reads an unclaimed control chord
+  directly from the PTY.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
   Restart returns keyboard focus to the terminal. The native smoke types
   directly into both restarted PTYs.

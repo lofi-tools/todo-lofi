@@ -191,11 +191,8 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   function handleTaskTerminalShortcut(event: KeyboardEvent) {
     if (!props.shortcutsEnabled || !props.taskHasWorktree || !props.taskId || event.defaultPrevented ||
-        event.altKey || !event.shiftKey || event.isComposing || event.keyCode === 229) return
-    const key = event.key.toLowerCase()
-    const matches = mac ? event.metaKey && !event.ctrlKey && key === 't'
-      : event.ctrlKey && !event.metaKey && key === 'n'
-    if (!matches) return
+        event.altKey || !event.shiftKey || event.isComposing || event.keyCode === 229 ||
+        !hasPaneModifier(event) || event.key.toLowerCase() !== (mac ? 't' : 'n')) return
     event.preventDefault()
     if (!event.repeat) startTaskTerminal()
   }
@@ -222,7 +219,7 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   function handleShortcut(event: KeyboardEvent) {
     if (event.defaultPrevented || event.altKey || event.isComposing || event.keyCode === 229 ||
-        !props.shortcutsEnabled || !(event.metaKey || event.ctrlKey)) return
+        !props.shortcutsEnabled || !hasPaneModifier(event)) return
     const target = event.target
     if (!(target instanceof HTMLElement) || !target.matches('.terminal-view__input')) return
     const id = active()
@@ -231,10 +228,14 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (event.shiftKey && (letter === 'd' || letter === 'e')) {
       event.preventDefault()
       if (!event.repeat) splitActive(letter === 'd' ? 'horizontal' : 'vertical')
-    } else if (letter === 'w' && (event.metaKey ? !event.shiftKey : event.shiftKey)) {
+    } else if (letter === 'w' && event.shiftKey === !mac) {
       event.preventDefault()
       if (!event.repeat) detach(id)
     }
+  }
+
+  function hasPaneModifier(event: KeyboardEvent) {
+    return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
   }
 
   onMount(() => {
