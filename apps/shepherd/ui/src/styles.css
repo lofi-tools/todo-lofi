@@ -957,3 +957,46 @@ textarea {
   border-color: var(--border);
   background: var(--surface-raised);
 }
+
+.terminal-tab {
+  height: 100%;
+}
+
+.terminal-pane__bar {
+  flex-wrap: wrap;
+}
+
+.terminal-split,
+.terminal-tile {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-split--vertical,
+.terminal-tile {
+  flex-direction: column;
+}
+
+.terminal-split__child {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-tile {
+  overflow: hidden;
+  min-height: 80px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.terminal-tile--active {
+  border-color: var(--accent, #6f8fdc);
+}
+
+.terminal-tile > .terminal-pane__bar {
+  padding: 4px 8px;
+}

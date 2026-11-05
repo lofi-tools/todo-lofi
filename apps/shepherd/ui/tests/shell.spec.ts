@@ -226,6 +226,10 @@ test.beforeEach(async ({ page }) => {
             ]
             return workspace(task.id)
           }
+          case 'terminal_layout':
+            return { revision: 0, root: null }
+          case 'save_terminal_layout':
+            return { ...args.layout, revision: args.layout.revision + 1 }
           case 'terminal_list':
           case 'start_terminal':
             return [...terminals]

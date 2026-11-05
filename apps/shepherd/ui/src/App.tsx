@@ -451,11 +451,11 @@ export function App() {
             role="tabpanel"
             aria-labelledby={`inspector-tab-${inspectorTab()}`}
           >
-            <Show when={inspectorTab() === 'terminals'}>
-              <Show when={selectedProjectId()} fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId()} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} />}
+            <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
+              <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
+                {(projectId) => <TerminalPane projectId={projectId} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} />}
               </Show>
-            </Show>
+            </div>
             <Show when={inspectorTab() === 'review'}>
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
                 {(taskId) => <ReviewPane
