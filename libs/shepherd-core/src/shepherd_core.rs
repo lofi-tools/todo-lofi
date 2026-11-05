@@ -2526,6 +2526,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn later_turns_compare_content_in_an_already_dirty_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let edit = |contents: &str| {
+            FakeTurn::new(vec![FakeStep::WriteFile {
+                path: "README.md".into(),
+                contents: contents.into(),
+            }])
+        };
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![
+                edit("first edit\n"),
+                FakeTurn::new(vec![]),
+                edit("second edit\n"),
+            ]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Iterate on an edit".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        for (text, expected) in [
+            ("Edit", TaskState::Review),
+            ("Explain", TaskState::Ready),
+            ("Edit again", TaskState::Review),
+        ] {
+            let workspace = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    text: text.into(),
+                })
+                .await?,
+            );
+            assert_eq!(workspace.task.state, expected, "{text}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_completed_turn_with_changes_enters_review() -> Result<(), Box<dyn std::error::Error>>
     {
         let repository = TestRepository::new()?;
