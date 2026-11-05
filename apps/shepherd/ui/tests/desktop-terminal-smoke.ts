@@ -260,6 +260,26 @@ async function ptyColumns(terminalId: string, title: string, marker: string): Pr
   return Number(match[2])
 }
 
+async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
+  const divider = await waitFor('inspector resize control', () =>
+    document.querySelector<HTMLElement>('[aria-label="Resize inspector"]'))
+  const initialWidth = await waitFor('terminal frame fitted to the inspector', () => {
+    const view = terminalPane(terminal.title)?.querySelector<HTMLElement>('.terminal-view')
+    const width = paneWidth(terminal.title)
+    return view && width > 0 && Math.abs(view.clientWidth - 16 - width) <= 8 && width
+  })
+  const initialColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_BEFORE')
+  const inspectorWidth = Number(divider.getAttribute('aria-valuenow'))
+  press(divider, 'ArrowLeft')
+  await waitFor('wider inspector', () => Number(divider.getAttribute('aria-valuenow')) > inspectorWidth)
+  await waitFor('wider terminal frame', () => paneWidth(terminal.title) > initialWidth)
+  const expandedColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_AFTER')
+  if (expandedColumns <= initialColumns) throw new Error('The PTY did not widen with the inspector')
+  press(divider, 'ArrowRight')
+  await waitFor('terminal frame after restoring the inspector width', () =>
+    paneWidth(terminal.title) === initialWidth)
+}
+
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
   const initialWidth = paneWidth(title)
   const initialColumns = await ptyColumns(terminalId, title, 'INITIAL_SIZE')
@@ -640,6 +660,7 @@ async function smoke() {
   await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
   const [terminal] = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
+  await exerciseInspectorResize(terminal)
   input.focus()
   await bridge.terminalWrite(terminal.id, "pwd; printf '\nS4_%s\n' READY\r")
   await waitFor('project cwd and PTY output in the webview', () =>

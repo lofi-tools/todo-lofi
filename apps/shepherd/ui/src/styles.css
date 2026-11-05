@@ -112,13 +112,34 @@ textarea {
 }
 
 .shell__body {
+  --sidebar-track: min(var(--sidebar-width), 27%);
+  --inspector-track: min(
+    var(--workspace-inspector-width, min(var(--inspector-width), 38%)),
+    clamp(var(--inspector-min-width), calc(100% - var(--sidebar-track) - var(--chat-min-width)), var(--inspector-max-width))
+  );
+  position: relative;
   display: grid;
-  grid-template-columns: min(var(--sidebar-width), 27%) minmax(0, 1fr) min(var(--inspector-width), 38%);
+  grid-template-columns: var(--sidebar-track) minmax(0, 1fr) var(--inspector-track);
   grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
+}
+
+.workspace-divider {
+  position: absolute;
+  inset-block: 0;
+  right: calc(var(--inspector-track) - 4px);
+  width: 8px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-divider:hover,
+.workspace-divider:focus-visible {
+  background: var(--border);
 }
 
 .sidebar {

@@ -92,6 +92,25 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
+  const [emptyInspectorWidth, setEmptyInspectorWidth] = createSignal<number | null>(null)
+  const inspectorWidth = () => selectedTaskId()
+    ? workspace()?.layout.inspectorWidth ?? null
+    : emptyInspectorWidth()
+
+  async function resizeInspector(width: number) {
+    const taskId = selectedTaskId()
+    if (!taskId) {
+      setEmptyInspectorWidth(width)
+      return
+    }
+    setError(null)
+    try {
+      const layout = await bridge.saveWorkspaceLayout(taskId, { inspectorWidth: width })
+      setWorkspace((current) => current?.task.id === taskId ? { ...current, layout } : current)
+    } catch (failure) {
+      setError(describe(failure))
+    }
+  }
   const [terminalAttention, setTerminalAttention] = createSignal<TerminalBell[]>([])
   const [focusedTerminal, setFocusedTerminal] = createSignal<string | null>(null)
   const projectAttention = () => terminalAttention().filter((bell) => bell.projectId === selectedProjectId())
@@ -489,7 +508,7 @@ export function App() {
 
   return (
     <div class="shell">
-      <WorkspaceFrame>
+      <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}>
         <aside class="sidebar" aria-label="Workspace navigation">
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
@@ -776,7 +795,7 @@ export function App() {
           </div>
         </section>
 
-        <aside class="inspector" aria-label="Inspector">
+        <aside class="inspector" id="workspace-inspector" aria-label="Inspector">
           <div
             class="inspector__tabs"
             role="tablist"
@@ -901,8 +920,55 @@ export function App() {
   )
 }
 
-function WorkspaceFrame(props: { children: JSX.Element }) {
+const INSPECTOR_MIN_WIDTH = 240
+const INSPECTOR_MAX_WIDTH = 1600
+const CHAT_MIN_WIDTH = 220
+
+function WorkspaceFrame(props: {
+  children: JSX.Element
+  taskId: string | null
+  inspectorWidth: number | null
+  onInspectorWidthChange: (width: number) => Promise<void>
+}) {
   const macWindow = isTauri() && navigator.platform.startsWith('Mac')
+  const [metrics, setMetrics] = createSignal({ width: 360, limit: INSPECTOR_MAX_WIDTH })
+  const [preview, setPreview] = createSignal<{ taskId: string | null; width: number }>()
+  const [saving, setSaving] = createSignal(false)
+  let body: HTMLDivElement | undefined
+  let drag: { pointerId: number; taskId: string | null; x: number; width: number } | undefined
+  const requestedWidth = () => {
+    const current = preview()
+    return current && current.taskId === props.taskId ? current.width : props.inspectorWidth
+  }
+  const clampWidth = (width: number) => Math.max(INSPECTOR_MIN_WIDTH, Math.min(metrics().limit, Math.round(width)))
+
+  onMount(() => {
+    const host = body
+    const sidebar = host?.querySelector('.sidebar')
+    const inspector = host?.querySelector('.inspector')
+    if (!host || !sidebar || !inspector) return
+    const measure = () => setMetrics({
+      width: Math.round(inspector.getBoundingClientRect().width),
+      limit: Math.max(INSPECTOR_MIN_WIDTH, Math.min(INSPECTOR_MAX_WIDTH,
+        Math.floor(host.clientWidth - sidebar.getBoundingClientRect().width - CHAT_MIN_WIDTH))),
+    })
+    const observer = new ResizeObserver(measure)
+    observer.observe(host)
+    observer.observe(inspector)
+    measure()
+    onCleanup(() => observer.disconnect())
+  })
+
+  async function saveWidth(width: number) {
+    setPreview({ taskId: props.taskId, width })
+    setSaving(true)
+    try {
+      await props.onInspectorWidthChange(width)
+    } finally {
+      setPreview(undefined)
+      setSaving(false)
+    }
+  }
 
   return (
     <>
@@ -946,7 +1012,50 @@ function WorkspaceFrame(props: { children: JSX.Element }) {
             </svg>
           </button>
         </nav>
-        <div class="shell__body">{props.children}</div>
+        <div class="shell__body" ref={body} style={{
+          '--workspace-inspector-width': requestedWidth() === null ? undefined : `${requestedWidth()}px`,
+          '--inspector-min-width': `${INSPECTOR_MIN_WIDTH}px`,
+          '--inspector-max-width': `${INSPECTOR_MAX_WIDTH}px`,
+          '--chat-min-width': `${CHAT_MIN_WIDTH}px`,
+        }}>
+          {props.children}
+          <div class="workspace-divider" role="separator" aria-label="Resize inspector"
+            aria-controls="workspace-inspector" aria-orientation="vertical" tabIndex={0}
+            aria-valuemin={INSPECTOR_MIN_WIDTH} aria-valuemax={metrics().limit}
+            aria-valuenow={Math.max(INSPECTOR_MIN_WIDTH, metrics().width)}
+            onPointerDown={(event) => {
+              if (event.button !== 0 || saving() || drag) return
+              event.preventDefault()
+              event.currentTarget.focus({ preventScroll: true })
+              event.currentTarget.setPointerCapture(event.pointerId)
+              drag = { pointerId: event.pointerId, taskId: props.taskId, x: event.clientX, width: metrics().width }
+            }}
+            onPointerMove={(event) => {
+              if (drag?.pointerId !== event.pointerId || drag.taskId !== props.taskId) return
+              setPreview({ taskId: drag.taskId, width: clampWidth(drag.width + drag.x - event.clientX) })
+            }}
+            onPointerUp={(event) => {
+              if (drag?.pointerId !== event.pointerId) return
+              const start = drag
+              drag = undefined
+              const width = clampWidth(start.width + start.x - event.clientX)
+              if (start.taskId === props.taskId && width !== start.width) void saveWidth(width)
+              else setPreview(undefined)
+            }}
+            onLostPointerCapture={() => {
+              if (!drag) return
+              drag = undefined
+              setPreview(undefined)
+            }}
+            onKeyDown={(event) => {
+              if (saving() || drag) return
+              const step = event.key === 'ArrowLeft' ? 32 : event.key === 'ArrowRight' ? -32 : 0
+              if (!step) return
+              event.preventDefault()
+              const width = clampWidth(metrics().width + step)
+              if (width !== metrics().width) void saveWidth(width)
+            }} />
+        </div>
       </div>
     </>
   )

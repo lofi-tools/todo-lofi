@@ -160,11 +160,16 @@ export interface AgentDiagnostics {
   stderrTail: string
 }
 
+export interface WorkspaceLayout {
+  inspectorWidth: number | null
+}
+
 export interface TaskWorkspace {
   cancelling: boolean
   queuedReviewNote?: string
   project: ProjectSnapshot
   task: TaskDetail
+  layout: WorkspaceLayout
   transcript: Entry[]
   diagnostics: AgentDiagnostics | null
 }
@@ -294,6 +299,10 @@ export function taskList(projectId: string): Promise<TaskList> {
 
 export function taskWorkspace(taskId: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('task_workspace', { taskId })
+}
+
+export function saveWorkspaceLayout(taskId: string, layout: WorkspaceLayout): Promise<WorkspaceLayout> {
+  return invoke('save_workspace_layout', { taskId, layout })
 }
 
 export type SplitAxis = 'horizontal' | 'vertical'

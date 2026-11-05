@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { TerminalLayout, TerminalSnapshot, TerminalSplit } from '../src/bridge'
+import type { TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -145,6 +145,7 @@ test.beforeEach(async ({ context }) => {
     ]
 
     let terminalLayout: TerminalLayout = { revision: 0, root: null }
+    const workspaceLayouts = new Map<string, WorkspaceLayout>()
     const subscriptions: string[] = []
     if (new URLSearchParams(window.location.search).has('scoped-terminals')) {
       terminals.push({
@@ -207,6 +208,7 @@ test.beforeEach(async ({ context }) => {
       return {
         project: projects.find((candidate) => candidate.id === task.projectId),
         task: detail(task),
+        layout: workspaceLayouts.get(taskId) ?? { inspectorWidth: null },
         cancelling: false,
         transcript: transcripts[taskId] ?? [],
         diagnostics: task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
@@ -282,6 +284,9 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'save_workspace_layout':
+            workspaceLayouts.set(args.taskId, args.layout)
+            return args.layout
           case 'cancel_task': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task || task.state !== 'waiting') throw new Error('No active turn to cancel')
@@ -873,6 +878,28 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   await expect(scoped).toHaveCount(0)
   await page.getByRole('button', { name: /Task shell.*hidden/ }).click()
   await expect(scoped.getByRole('textbox')).toBeFocused()
+})
+
+test('resizes the inspector and restores the saved width for the selected task', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const divider = page.getByRole('separator', { name: 'Resize inspector' })
+  const width = async () => Number(await divider.getAttribute('aria-valuenow'))
+  await expect.poll(width).toBe(360)
+  await divider.press('ArrowLeft')
+  await expect.poll(width).toBe(392)
+  const handle = await divider.boundingBox()
+  if (!handle) throw new Error('Inspector divider has no bounds')
+  const x = handle.x + handle.width / 2
+  const y = handle.y + handle.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x - 64, y, { steps: 4 })
+  await page.mouse.up()
+  await expect.poll(width).toBe(456)
+  await page.getByRole('button', { name: /Other task/ }).click()
+  await expect.poll(width).toBe(360)
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect.poll(width).toBe(456)
 })
 
 test('saves Quad and Single layouts while keeping the terminal instances', async ({ page }) => {

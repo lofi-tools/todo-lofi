@@ -26,6 +26,8 @@ current layout and give future changes a point of comparison.
   Quit uses the system window or app controls.
 - Keep the inspector on the right with its vertical tab strip. Settings can
   occupy the middle pane while the sidebar and inspector remain in place.
+  Resize the inspector at its left edge by dragging or with the arrow keys
+  while the separator is focused. Save the chosen width with the task.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 
