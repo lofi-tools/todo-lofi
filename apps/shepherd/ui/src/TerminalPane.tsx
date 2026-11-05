@@ -425,6 +425,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let mouseCapture: { pointerId: number; button: number } | undefined
   let mousePosition = ''
   let wheelRemainder = 0
+  let reportedFocus: boolean | undefined
 
   createEffect(() => {
     if (props.focusRequest?.id === props.terminalId) input?.focus({ preventScroll: true })
@@ -704,6 +705,20 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (data.length) queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput))
   }
 
+  function reportFocus(focused: boolean) {
+    if (!((frame?.modes ?? 0) & FOCUS_REPORTING)) {
+      reportedFocus = undefined
+      return
+    }
+    if (reportedFocus === focused) return
+    reportedFocus = focused
+    write(focused ? '\x1b[I' : '\x1b[O', false)
+  }
+
+  function updateWindowFocus() {
+    reportFocus(props.shown && document.hasFocus() && input === document.activeElement)
+  }
+
   function resetSearch() {
     searchGeneration++
     setSearching(false)
@@ -845,6 +860,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         if (next.cursorVisible) rows.add(next.cursorRow)
       }
       frame = next
+      updateWindowFocus()
       scheduleDraw(rows)
       if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
         mirrorTimer = window.setTimeout(() => {
@@ -856,7 +872,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if (detached) void dispose().catch(console.error)
       else unsubscribe = dispose
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
+    window.addEventListener('focus', updateWindowFocus)
+    window.addEventListener('blur', updateWindowFocus)
     onCleanup(() => {
+      reportFocus(false)
+      window.removeEventListener('focus', updateWindowFocus)
+      window.removeEventListener('blur', updateWindowFocus)
       detached = true
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       window.clearTimeout(mirrorTimer)
@@ -928,12 +949,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         onKeyUp={onKeyUp}
         onFocus={() => {
           props.onFocus(props.terminalId)
-          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I', false)
+          updateWindowFocus()
         }}
         onBlur={() => {
           props.onFocus(null)
           reportedKeys.clear()
-          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O', false)
+          reportFocus(false)
         }}
         onPaste={onPaste}
         onCopy={onCopy}
