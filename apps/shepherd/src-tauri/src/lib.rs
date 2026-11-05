@@ -59,6 +59,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::task_workspace,
             bridge::commands::review_snapshot,
             bridge::commands::git_snapshot,
+            bridge::commands::mutate_git,
             bridge::commands::terminal_list,
             bridge::commands::start_terminal,
             bridge::commands::terminal_write,

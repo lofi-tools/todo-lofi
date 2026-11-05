@@ -432,7 +432,9 @@ export function App() {
             </Show>
             <Show when={inspectorTab() === 'git'}>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
-                <GitPane taskId={workspace()!.task.id} revision={workspace()!.task.updatedAt} />
+                <Show when={workspace()?.task.id} keyed>
+                  {(taskId) => <GitPane taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state)} />}
+                </Show>
               </Show>
             </Show>
           </div>

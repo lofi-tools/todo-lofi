@@ -421,6 +421,33 @@ impl Core {
         Ok(GitService.review(path, base)?)
     }
 
+    pub fn mutate_git(
+        &mut self,
+        task_id: &TaskId,
+        mutation: git::GitMutation,
+    ) -> Result<git::GitSnapshot, CoreError> {
+        let (task, _, path) = self.task_git_worktree(task_id)?;
+        if self.shutdown != ShutdownState::Running {
+            return Err(CoreError::NotRunning {
+                state: self.shutdown,
+            });
+        }
+        if task.state.is_live() {
+            return Err(CoreError::TaskNotReady {
+                id: task_id.to_string(),
+                state: task.state.as_str(),
+            });
+        }
+        match mutation {
+            git::GitMutation::Stage { path: file } => GitService.stage(path, file.as_deref())?,
+            git::GitMutation::Unstage { path: file } => GitService.unstage(path, &file)?,
+            git::GitMutation::Commit { message, expected } => {
+                GitService.commit(path, &message, &expected)?
+            }
+        }
+        self.git_snapshot(task_id)
+    }
+
     pub fn git_snapshot(&self, task_id: &TaskId) -> Result<git::GitSnapshot, CoreError> {
         let (_, _, path) = self.task_git_worktree(task_id)?;
         Ok(GitService.snapshot(path)?)

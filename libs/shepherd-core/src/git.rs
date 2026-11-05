@@ -4,11 +4,11 @@
 //! The user's `git` binary is authoritative: hooks, signing, sparse checkout and
 //! worktree bookkeeping must behave as they do in a terminal.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +39,12 @@ pub enum GitError {
     DirtyWorktree { path: PathBuf },
     #[error("task branch {branch} is missing and has no recorded tip")]
     MissingBranch { branch: String },
+    #[error("file is no longer in Git status: {path}")]
+    UnknownPath { path: String },
+    #[error("enter a commit message")]
+    EmptyCommitMessage,
+    #[error("staging changed; refresh Git status before committing")]
+    StagingChanged,
     #[error("Git is in detached HEAD state at {path}")]
     DetachedHead { path: String },
 }
@@ -308,6 +314,7 @@ impl GitService {
         )?;
         Ok(GitSnapshot {
             branch: (head != "HEAD").then_some(head),
+            staged_revision: self.staged_revision(path)?,
             branches: branches.lines().map(str::to_string).collect(),
             files: self.status(path)?,
             staged_diff: run_git(
@@ -316,6 +323,59 @@ impl GitService {
             )?,
             unstaged_diff: run_git(path, &["diff", "--no-ext-diff", "--no-textconv", "--"])?,
         })
+    }
+
+    pub fn stage(&self, path: &Path, file: Option<&str>) -> Result<(), GitError> {
+        if let Some(file) = file {
+            self.require_changed_path(path, file)?;
+        }
+        run_git(
+            path,
+            &[
+                "--literal-pathspecs",
+                "add",
+                "-A",
+                "--",
+                file.unwrap_or("."),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn unstage(&self, path: &Path, file: &str) -> Result<(), GitError> {
+        self.require_changed_path(path, file)?;
+        run_git(
+            path,
+            &["--literal-pathspecs", "restore", "--staged", "--", file],
+        )?;
+        Ok(())
+    }
+
+    fn require_changed_path(&self, path: &Path, file: &str) -> Result<(), GitError> {
+        if self.status(path)?.iter().any(|entry| entry.path == file) {
+            Ok(())
+        } else {
+            Err(GitError::UnknownPath {
+                path: file.to_string(),
+            })
+        }
+    }
+
+    pub fn commit(&self, path: &Path, message: &str, expected: &str) -> Result<(), GitError> {
+        if message.trim().is_empty() {
+            return Err(GitError::EmptyCommitMessage);
+        }
+        if self.staged_revision(path)? != expected {
+            return Err(GitError::StagingChanged);
+        }
+        commit_with_message(path, message)
+    }
+
+    fn staged_revision(&self, path: &Path) -> Result<String, GitError> {
+        let mut hash = Sha256::new();
+        hash.update(git_bytes(path, &["rev-parse", "HEAD"])?);
+        hash.update(git_bytes(path, &["ls-files", "--stage", "-z"])?);
+        Ok(format!("{:x}", hash.finalize()))
     }
 
     fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
@@ -373,7 +433,48 @@ pub struct GitSnapshot {
     pub branches: Vec<String>,
     pub files: Vec<GitFile>,
     pub staged_diff: String,
+    pub staged_revision: String,
     pub unstaged_diff: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum GitMutation {
+    Stage { path: Option<String> },
+    Unstage { path: String },
+    Commit { message: String, expected: String },
+}
+
+fn commit_with_message(path: &Path, message: &str) -> Result<(), GitError> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["commit", "-F", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| GitError::Io { source })?;
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("git commit has no stdin"))
+        .and_then(|mut stdin| stdin.write_all(message.as_bytes()));
+    let output = child
+        .wait_with_output()
+        .map_err(|source| GitError::Io { source })?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            command: "git commit -F -".into(),
+            status: output.status,
+            stderr: format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+    write_result.map_err(|source| GitError::Io { source })
 }
 
 fn git_paths(bytes: &[u8]) -> impl Iterator<Item = String> + '_ {

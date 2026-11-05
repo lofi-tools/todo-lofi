@@ -322,10 +322,20 @@ export interface GitSnapshot {
   branch: string | null
   branches: string[]
   files: GitFile[]
+  stagedRevision: string
   stagedDiff: string
   unstagedDiff: string
 }
 
 export function gitSnapshot(taskId: string): Promise<GitSnapshot> {
   return invoke('git_snapshot', { taskId })
+}
+
+export type GitMutation =
+  | { type: 'stage'; path: string | null }
+  | { type: 'unstage'; path: string }
+  | { type: 'commit'; message: string; expected: string }
+
+export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSnapshot> {
+  return invoke('mutate_git', { taskId, mutation })
 }
