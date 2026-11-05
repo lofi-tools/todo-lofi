@@ -1,4 +1,4 @@
-//! The scripted adapter used by the shell's tests.
+//! The scripted adapter used in tests and isolated development runs.
 //!
 //! The app itself runs the live Codex adapter. Tests use this deterministic fake
 //! so the command bridge, transcript and approval flow need no installed CLI. The
@@ -20,7 +20,7 @@ impl HarnessFactory for ScriptedHarnessFactory {
 fn script() -> Vec<FakeTurn> {
     vec![
         FakeTurn::new(vec![
-            FakeStep::Message("Scripted adapter: the real Codex agent arrives in S2.".to_string()),
+            FakeStep::Message("Scripted adapter: this turn uses a local fixture.".to_string()),
             FakeStep::approval("approval-1", "Run the scripted tool"),
             FakeStep::Message("Scripted turn complete.".to_string()),
         ]),
