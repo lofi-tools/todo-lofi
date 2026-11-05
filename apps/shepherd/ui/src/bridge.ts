@@ -175,6 +175,7 @@ export interface TerminalSnapshot {
 
 export interface FrameCell {
   text: string
+  width: number
   foreground: number
   background: number
   bold: boolean

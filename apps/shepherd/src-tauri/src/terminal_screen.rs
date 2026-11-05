@@ -29,6 +29,7 @@ pub struct TerminalFrame {
 #[serde(rename_all = "camelCase")]
 pub struct FrameCell {
     pub text: String,
+    pub width: u8,
     pub foreground: u32,
     pub background: u32,
     pub bold: bool,
@@ -114,7 +115,28 @@ impl Screen {
                 std::mem::swap(&mut foreground, &mut background);
             }
             cells.push(FrameCell {
-                text: cell.c.to_string(),
+                text: if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    String::new()
+                } else {
+                    let mut text = cell.c.to_string();
+                    if let Some(combining) = cell.zerowidth() {
+                        text.extend(combining.iter().copied());
+                    }
+                    text
+                },
+                width: if cell.flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    0
+                } else {
+                    1
+                },
                 foreground,
                 background,
                 bold: cell.flags.contains(Flags::BOLD),
@@ -250,6 +272,19 @@ mod tests {
         assert!(row(&screen.frame(), 0).starts_with("alternate"));
         screen.process(b"\x1b[?1049l");
         assert!(row(&screen.frame(), 2).starts_with("fourth"));
+    }
+
+    #[test]
+    fn wide_and_combining_glyphs_keep_their_cell_widths() {
+        let mut screen = Screen::new(12, 3);
+        screen.process("界é".as_bytes());
+        let frame = screen.frame();
+        let [wide, spacer, combining, ..] = frame.cells.as_slice() else {
+            panic!("expected a complete grid");
+        };
+        assert_eq!((&*wide.text, wide.width), ("界", 2));
+        assert_eq!((&*spacer.text, spacer.width), ("", 0));
+        assert_eq!((&*combining.text, combining.width), ("é", 1));
     }
 
     #[test]

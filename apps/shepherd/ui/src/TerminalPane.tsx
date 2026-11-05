@@ -339,24 +339,25 @@ function TerminalCanvas(props: { terminalId: string }) {
 
     const current = frame
     current.cells.forEach((cell, index) => {
-      const column = index % current.columns
-      const row = Math.floor(index / current.columns)
-      const x = column * cellWidth
-      const y = row * LINE_HEIGHT
-
-      if (cell.background !== DEFAULT_BACKGROUND) {
-        context.fillStyle = hex(cell.background)
-        context.fillRect(x, y, cellWidth, LINE_HEIGHT)
-      }
-      if (cell.text !== ' ') {
-        context.fillStyle = hex(cell.foreground)
-        context.fillText(cell.text, x, y + 1)
-      }
-      if (current.cursorVisible && row === current.cursorRow && column === current.cursorColumn) {
-        context.fillStyle = 'rgba(230, 230, 234, 0.35)'
-        context.fillRect(x, y, cellWidth, LINE_HEIGHT)
-      }
+      if (cell.background === DEFAULT_BACKGROUND) return
+      const x = (index % current.columns) * cellWidth
+      const y = Math.floor(index / current.columns) * LINE_HEIGHT
+      context.fillStyle = hex(cell.background)
+      context.fillRect(x, y, cellWidth, LINE_HEIGHT)
     })
+    current.cells.forEach((cell, index) => {
+      if (!cell.width || !cell.text || cell.text === ' ') return
+      const x = (index % current.columns) * cellWidth
+      const y = Math.floor(index / current.columns) * LINE_HEIGHT
+      const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
+      if (context.font !== font) context.font = font
+      context.fillStyle = hex(cell.foreground)
+      context.fillText(cell.text, x, y + 1, cell.width * cellWidth)
+    })
+    if (current.cursorVisible) {
+      context.fillStyle = 'rgba(230, 230, 234, 0.35)'
+      context.fillRect(current.cursorColumn * cellWidth, current.cursorRow * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+    }
   }
 
   function measure() {
