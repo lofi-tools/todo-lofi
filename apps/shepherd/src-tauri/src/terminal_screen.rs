@@ -385,7 +385,7 @@ impl Screen {
 
     pub fn scroll(&mut self, lines: i32) {
         self.term
-            .scroll_display(Scroll::Delta(lines.clamp(-120, 120)));
+            .scroll_display(Scroll::Delta(lines.clamp(-256, 256)));
     }
 
     pub fn search(

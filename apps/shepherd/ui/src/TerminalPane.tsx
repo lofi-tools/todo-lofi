@@ -739,6 +739,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   function onKeyDown(event: KeyboardEvent) {
     if (event.defaultPrevented || composing || event.isComposing || event.keyCode === 229) return
     committedComposition = undefined
+    if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && frame
+      && (event.key === 'PageUp' || event.key === 'PageDown')) {
+      event.preventDefault()
+      const step = Math.max(1, frame.rows - 1)
+      void bridge.terminalScroll(props.terminalId, event.key === 'PageUp' ? step : -step)
+        .catch((failure) => setError(describe(failure)))
+      return
+    }
     if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && event.key.toLowerCase() === 'f') {
       event.preventDefault()
       setFinding(true)
