@@ -10,7 +10,8 @@ if [[ ! $port =~ ^[1-9][0-9]{3,4}$ ]] || (( port < 1024 || port > 65535 )); then
 fi
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-fixture=$(mktemp -d)
+mkdir -p "$repo/.cache/test-db"
+fixture=$(mktemp -d "$repo/.cache/test-db/smoke.XXXXXX")
 trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"
@@ -36,14 +37,6 @@ config=$(cat <<EOF
   "build": {
     "beforeDevCommand": "pnpm --dir ui run dev --port $port",
     "devUrl": "http://localhost:$port"
-  },
-  "app": {
-    "windows": [{
-      "label": "main",
-      "title": "Shepherd Terminal Smoke",
-      "width": 1280,
-      "height": 820
-    }]
   }
 }
 EOF

@@ -324,6 +324,13 @@ async function smoke() {
     const add = button('Add project')
     return add && !add.disabled
   })
+  if (navigator.platform.startsWith('Mac')) {
+    const dragRegion = document.querySelector('[data-tauri-drag-region]')?.getBoundingClientRect()
+    const projectHeading = document.querySelector('.sidebar__header')?.getBoundingClientRect()
+    if (!dragRegion?.height || !projectHeading || projectHeading.top < dragRegion.bottom) {
+      throw new Error('The project header overlaps the macOS window controls')
+    }
+  }
   const projects = await bridge.addProject(__SHEPHERD_SMOKE_PROJECT__)
   const project = projects.projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not registered')

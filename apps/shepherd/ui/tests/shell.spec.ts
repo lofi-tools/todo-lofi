@@ -13,6 +13,7 @@ test.beforeEach(async ({ page }) => {
     const callbacks = new Map()
     let nextCallbackId = 1
     let nextTask = 2
+    let desktopProjectReads = 0
 
     const project = {
       id: 'project-1',
@@ -214,6 +215,7 @@ test.beforeEach(async ({ page }) => {
               { name: 'Desktop notes', path: '/tmp/outside-scan/notes' },
               { name: 'Desktop service', path: '/tmp/outside-scan/service' },
               { name: 'Desktop website', path: '/tmp/outside-scan/website' },
+              ...(desktopProjectReads++ ? [{ name: 'Desktop tools', path: '/tmp/outside-scan/tools' }] : []),
             ]
           case 'add_project': {
             const name = args.path.split('/').filter(Boolean).pop() ?? 'project'
@@ -421,6 +423,15 @@ test('batch imports local Codex projects from the empty Projects list', async ({
   await expect(page.getByRole('button', { name: /^service/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /^website/ })).toBeVisible()
   await expect(importProjects).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
+  const settingsImport = page.getByRole('region', { name: 'Projects' }).getByRole('button', { name: 'ChatGPT app' })
+  await settingsImport.click()
+  await expect(page.getByRole('button', { name: /^tools/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^notes/ })).toHaveCount(1)
+  await settingsImport.click()
+  await expect(page.getByRole('status')).toHaveText('No new local Codex project folders to import.')
 
   await page.goto('/?empty-projects&no-codex')
   await expect(importProjects).toBeDisabled()

@@ -5,10 +5,11 @@
  */
 
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
+import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
-import { ProjectPicker } from './ProjectPicker'
+import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SettingsPane } from './SettingsPane'
@@ -18,7 +19,6 @@ type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
-const UPCOMING_IMPORT_SOURCES = ['OpenCode', 'Pi', 'Claude Code', 'Freebuff']
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
@@ -142,7 +142,7 @@ export function App() {
       setProjects(list.projects)
       setProjectsLoaded(true)
       if (list.projects[0]) await selectProject(list.projects[0])
-      else setCodexAvailable(await bridge.localCodexAvailable())
+      setCodexAvailable(await bridge.localCodexAvailable())
     })
   })
 
@@ -186,19 +186,22 @@ export function App() {
   }
 
   function importProjects() {
-    if (pending() || !codexAvailable() || projects().length > 0) return
+    if (pending() || !codexAvailable()) return
+    const fromSettings = settingsOpen()
     setImportNote(null)
     void run(async () => {
       const available = await bridge.localCodexProjects()
-      if (available.length === 0) {
-        setImportNote('No local Codex project folders to import.')
+      const registered = new Set(projects().map((project) => project.path))
+      const paths = available.map((project) => project.path).filter((path) => !registered.has(path))
+      if (paths.length === 0) {
+        setImportNote('No new local Codex project folders to import.')
         return
       }
-      await addProjects(available.map((project) => project.path))
+      await addProjects(paths, !fromSettings)
     })
   }
 
-  async function addProjects(paths: string[]) {
+  async function addProjects(paths: string[], selectAdded = true) {
     let target: bridge.ProjectSnapshot | undefined
     const errors: string[] = []
     for (const path of paths) {
@@ -210,8 +213,8 @@ export function App() {
         errors.push(describe(failure))
       }
     }
-    if (target) {
-      setSettingsOpen(false)
+    if (target && (selectAdded || !selectedProjectId())) {
+      if (selectAdded) setSettingsOpen(false)
       await selectProject(target)
     }
     if (errors.length) setError(errors.join(' · '))
@@ -293,6 +296,9 @@ export function App() {
 
   return (
     <div class="shell">
+      <Show when={isTauri() && navigator.platform.startsWith('Mac')}>
+        <div class="shell__window-drag" data-tauri-drag-region="" aria-hidden="true" />
+      </Show>
       <div class="shell__body">
         <aside class="sidebar" aria-label="Workspace navigation">
           <header class="sidebar__header">
@@ -317,17 +323,7 @@ export function App() {
                   New project
                 </button>
                 <p class="empty">or import all from</p>
-                <div class="projects__sources" role="group" aria-label="Project import sources">
-                  <button type="button" class="project-action" onClick={importProjects} disabled={pending() || !codexAvailable()}>
-                    ChatGPT app
-                  </button>
-                  <For each={UPCOMING_IMPORT_SOURCES}>
-                    {(source) => <button type="button" class="project-action" disabled>{source}</button>}
-                  </For>
-                </div>
-                <Show when={importNote()}>
-                  {(note) => <p class="empty" role="status">{note()}</p>}
-                </Show>
+                <ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />
               </li>
             </Show>
             <For each={projects()}>
@@ -421,6 +417,7 @@ export function App() {
             onShowArchived={setShowArchived}
             onAddProject={openPicker}
             pending={pending()}
+            projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
           />
         </Show>
 

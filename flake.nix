@@ -120,6 +120,14 @@
             shep = with bash; ''
               set -euo pipefail
               cd "${wd}"
+              case "$*" in
+                "") ;;
+                --test)
+                  export SHEPHERD_DEV_DATA_DIR="$PWD/.cache/test-db"
+                  exec pnpm dev:shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
+                  ;;
+                *) printf '%s\n' 'Usage: shep [--test]' >&2; exit 2 ;;
+              esac
               exec pnpm dev:shepherd
             '';
             ccheck = ''set -ex;

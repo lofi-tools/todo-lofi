@@ -45,6 +45,10 @@ textarea {
   overflow: hidden;
 }
 
+.shell__window-drag {
+  flex: 0 0 42px;
+}
+
 .shell__body {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
@@ -100,6 +104,11 @@ textarea {
   width: 26px;
   height: 26px;
   padding: 0;
+  background: transparent;
+}
+
+.project-action--icon:hover:enabled {
+  background: var(--surface-raised);
 }
 
 .picker-backdrop {

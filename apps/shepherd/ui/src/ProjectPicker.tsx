@@ -2,6 +2,32 @@ import { For, Show, createEffect, createMemo, createSignal, createUniqueId } fro
 
 import type { ProjectNode, ProjectScan } from './bridge'
 
+const upcomingImportSources = ['OpenCode', 'Pi', 'Claude Code', 'Freebuff']
+
+interface ProjectImportSourcesProps {
+  codexDisabled: boolean
+  note: string | null
+  onImportCodex: () => void
+}
+
+export function ProjectImportSources(props: ProjectImportSourcesProps) {
+  return (
+    <>
+      <div class="projects__sources" role="group" aria-label="Project import sources">
+        <button type="button" class="project-action" onClick={props.onImportCodex} disabled={props.codexDisabled}>
+          ChatGPT app
+        </button>
+        <For each={upcomingImportSources}>
+          {(source) => <button type="button" class="project-action" disabled>{source}</button>}
+        </For>
+      </div>
+      <Show when={props.note}>
+        {(note) => <p class="empty" role="status">{note()}</p>}
+      </Show>
+    </>
+  )
+}
+
 interface ProjectPickerProps {
   scan: ProjectScan | null
   loading: boolean

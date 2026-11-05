@@ -21,3 +21,4 @@ test-results/
 # Local reference repository checkouts
 /.cache/checkout/
 /.cache/shepherd-live/
+/.cache/test-db/

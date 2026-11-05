@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from 'solid-js'
+import { For, Show, createSignal, type JSX } from 'solid-js'
 
 const categories = ['Workspace', 'Projects'] as const
 
@@ -7,6 +7,7 @@ interface SettingsPaneProps {
   onShowArchived: (value: boolean) => void
   onAddProject: () => void
   pending: boolean
+  projectImports: JSX.Element
 }
 
 export function SettingsPane(props: SettingsPaneProps) {
@@ -46,6 +47,8 @@ export function SettingsPane(props: SettingsPaneProps) {
           </Show>
           <Show when={category() === 'Projects'}>
             <button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button>
+            <p class="empty">Import all from</p>
+            {props.projectImports}
           </Show>
         </section>
       </div>
