@@ -394,7 +394,8 @@ task-scoped, persistent and fast enough.
 
 - [ ] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
-  hyperlinks. Kitty keyboard support and reflow verification are outstanding.
+  hyperlinks. Kitty modes negotiate independently for each screen. Reflow and
+  live keyboard compatibility still need verification.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
 - [x] Add the project terminal layout: slots, sizes, order and scope; save it

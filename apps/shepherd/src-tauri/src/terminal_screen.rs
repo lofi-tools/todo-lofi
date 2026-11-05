@@ -4,6 +4,7 @@
 //! documented fallback engine is used: `alacritty_terminal` behind the core's
 //! terminal boundary.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +15,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{BuildError, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -155,10 +157,62 @@ impl EventListener for PtyReplies {
     }
 }
 
+const KITTY_STACK_LIMIT: usize = 64;
+const KITTY_FLAGS: u16 = 0b1_1111;
+
+#[derive(Default)]
+struct KeyboardModes {
+    flags: u16,
+    stack: VecDeque<u16>,
+}
+
+enum KeyboardCommand {
+    Query,
+    Set { flags: u16, operation: u16 },
+    Push(u16),
+    Pop(u16),
+    Reset,
+}
+
+#[derive(Default)]
+struct KeyboardSequence(Option<KeyboardCommand>);
+
+impl Perform for KeyboardSequence {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if ignore || action != 'u' {
+            return;
+        }
+        let mut params = params.iter().filter_map(|param| param.first().copied());
+        let first = params.next().unwrap_or(0);
+        self.0 = match intermediates {
+            b"?" => Some(KeyboardCommand::Query),
+            b"=" => Some(KeyboardCommand::Set {
+                flags: first & KITTY_FLAGS,
+                operation: params.next().unwrap_or(1),
+            }),
+            b">" => Some(KeyboardCommand::Push(first & KITTY_FLAGS)),
+            b"<" => Some(KeyboardCommand::Pop(first.max(1))),
+            _ => None,
+        };
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        if !ignore && intermediates.is_empty() && byte == b'c' {
+            self.0 = Some(KeyboardCommand::Reset);
+        }
+    }
+
+    fn terminated(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 pub struct Screen {
     term: Term<PtyReplies>,
     replies: PtyReplies,
     parser: Processor,
+    keyboard_parser: Parser,
+    keyboards: [KeyboardModes; 2],
     columns: usize,
     rows: usize,
 }
@@ -171,13 +225,67 @@ impl Screen {
             term: Term::new(Config::default(), &size, replies.clone()),
             replies,
             parser: Processor::new(),
+            keyboard_parser: Parser::new(),
+            keyboards: Default::default(),
             columns,
             rows,
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+    pub fn process(&mut self, mut bytes: &[u8]) {
+        // Alacritty 0.26 can panic when its keyboard stack fills. Parse just
+        // these commands separately until a release includes the upstream fix.
+        while !bytes.is_empty() {
+            let mut sequence = KeyboardSequence::default();
+            let consumed = self
+                .keyboard_parser
+                .advance_until_terminated(&mut sequence, bytes);
+            let (parsed, remaining) = bytes.split_at(consumed);
+            self.parser.advance(&mut self.term, parsed);
+            if let Some(command) = sequence.0 {
+                self.apply_keyboard_command(command);
+            }
+            bytes = remaining;
+        }
+    }
+
+    fn keyboard_index(&self) -> usize {
+        usize::from(self.term.mode().contains(TermMode::ALT_SCREEN))
+    }
+
+    fn apply_keyboard_command(&mut self, command: KeyboardCommand) {
+        let index = self.keyboard_index();
+        let keyboard = &mut self.keyboards[index];
+        match command {
+            KeyboardCommand::Query => {
+                self.replies
+                    .send_event(Event::PtyWrite(format!("\x1b[?{}u", keyboard.flags)));
+            }
+            KeyboardCommand::Set { flags, operation } => {
+                keyboard.flags = match operation {
+                    2 => keyboard.flags | flags,
+                    3 => keyboard.flags & !flags,
+                    _ => flags,
+                };
+            }
+            KeyboardCommand::Push(flags) => {
+                if keyboard.stack.len() == KITTY_STACK_LIMIT {
+                    keyboard.stack.pop_front();
+                }
+                keyboard.stack.push_back(keyboard.flags);
+                keyboard.flags = flags;
+            }
+            KeyboardCommand::Pop(count) => {
+                for _ in 0..count {
+                    keyboard.flags = keyboard.stack.pop_back().unwrap_or(0);
+                    if keyboard.stack.is_empty() {
+                        keyboard.flags = 0;
+                        break;
+                    }
+                }
+            }
+            KeyboardCommand::Reset => self.keyboards = Default::default(),
+        }
     }
 
     pub fn take_replies(&self) -> Vec<u8> {
@@ -323,7 +431,8 @@ impl Screen {
             cursor_row: viewport_row.min(self.rows.saturating_sub(1)),
             cursor_visible,
             display_offset,
-            modes: self.term.mode().bits(),
+            modes: self.term.mode().bits()
+                | (u32::from(self.keyboards[self.keyboard_index()].flags) << 18),
             cells,
         }
     }
@@ -466,6 +575,30 @@ mod tests {
         screen.process(b"abc\x1b[6n");
         assert_eq!(screen.take_replies(), b"\x1b[1;4R");
         assert!(screen.take_replies().is_empty());
+    }
+
+    #[test]
+    fn negotiates_kitty_modes_in_pty_reply_order() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b[>1");
+        screen.process(b"u\x1b[?u\x1b[c");
+        assert!(screen.frame().modes & (1 << 18) != 0);
+        assert_eq!(screen.take_replies(), b"\x1b[?1u\x1b[?6c");
+
+        screen.process(b"\x1b[?1049h\x1b[?u\x1b[>31u\x1b[?u\x1b[?1049l\x1b[?u");
+        assert_eq!(screen.take_replies(), b"\x1b[?0u\x1b[?31u\x1b[?1u");
+
+        screen.process(b"\x1b[=2;2u\x1b[?u\x1b[=1;3u\x1b[?u\x1b[<u\x1b[?u");
+        assert_eq!(screen.take_replies(), b"\x1b[?3u\x1b[?2u\x1b[?0u");
+    }
+
+    #[test]
+    fn bounds_the_kitty_mode_stack() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(&b"\x1b[>1u".repeat(4100));
+        assert_eq!(screen.keyboards[0].stack.len(), KITTY_STACK_LIMIT);
+        screen.process(b"\x1b[<65535u\x1b[?u");
+        assert_eq!(screen.take_replies(), b"\x1b[?0u");
     }
 
     #[test]
