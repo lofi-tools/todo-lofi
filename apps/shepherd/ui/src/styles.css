@@ -924,11 +924,28 @@ textarea {
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  margin: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
+.composer > .composer__input {
+  border: 0;
+  border-radius: 9px 9px 0 0;
+}
+
+.composer > .composer__input:focus-visible {
+  outline-offset: -2px;
+}
+
+.composer__actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  align-items: end;
-  padding: 12px;
+  padding: 6px 8px 8px;
 }
 
 .composer__input {
@@ -967,6 +984,26 @@ textarea {
 
 .composer__send:disabled {
   color: var(--text-disabled);
+}
+
+.composer__send--icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 32px;
+  margin-inline-start: auto;
+  padding: 0;
+}
+
+.composer__send--icon:enabled {
+  border-color: transparent;
+  background: var(--text);
+  color: var(--background);
+  cursor: pointer;
+}
+
+.composer__send--icon:hover:enabled {
+  background: var(--text-secondary);
 }
 
 .inspector {

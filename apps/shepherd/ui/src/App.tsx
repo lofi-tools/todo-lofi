@@ -604,14 +604,20 @@ export function App() {
                 }
               }}
             />
-            <button
-              type="button"
-              class="composer__send"
-              onClick={sendPrompt}
-              disabled={!canCompose() || pending() || !prompt().trim()}
-            >
-              Send
-            </button>
+            <div class="composer__actions">
+              <button
+                type="button"
+                class="composer__send composer__send--icon"
+                aria-label="Send"
+                title="Send"
+                onClick={sendPrompt}
+                disabled={!canCompose() || pending() || !prompt().trim()}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />
+                </svg>
+              </button>
+            </div>
           </div>
         </section>
 
