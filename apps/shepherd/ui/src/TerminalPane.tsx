@@ -64,6 +64,8 @@ interface TerminalPaneProps {
   taskId: string | null
   taskHasWorktree: boolean
   shown: boolean
+  shortcutsEnabled: boolean
+  onShow: () => void
   attention: string[]
   onTerminalFocus: (id: string | null) => void
   listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
@@ -79,6 +81,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
+  const mac = navigator.platform.startsWith('Mac')
 
   const visible = () => terminals().filter((terminal) =>
     terminal.scope === 'project' || terminal.taskId === props.taskId)
@@ -184,6 +187,24 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }
 
+  function startTaskTerminal() {
+    const taskId = props.taskId
+    if (!taskId || !props.taskHasWorktree || pending()) return
+    props.onShow()
+    start(taskId, 'vertical')
+  }
+
+  function handleTaskTerminalShortcut(event: KeyboardEvent) {
+    if (!props.shortcutsEnabled || !props.taskHasWorktree || !props.taskId || event.defaultPrevented ||
+        event.altKey || !event.shiftKey || event.isComposing || event.keyCode === 229) return
+    const key = event.key.toLowerCase()
+    const matches = mac ? event.metaKey && !event.ctrlKey && key === 't'
+      : event.ctrlKey && !event.metaKey && key === 'n'
+    if (!matches) return
+    event.preventDefault()
+    if (!event.repeat) startTaskTerminal()
+  }
+
   createEffect(() => {
     const event = props.listEvent
     if (event?.projectId === props.projectId) setTerminals(event.terminals)
@@ -229,7 +250,9 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   onMount(() => {
     region?.addEventListener('keydown', handleShortcut, true)
+    window.addEventListener('keydown', handleTaskTerminalShortcut, true)
     onCleanup(() => region?.removeEventListener('keydown', handleShortcut, true))
+    onCleanup(() => window.removeEventListener('keydown', handleTaskTerminalShortcut, true))
     let disposed = false
     const initialEvent = props.listEvent
     void run(async () => {
@@ -248,7 +271,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     <div class="terminal-pane" ref={region}>
       <div class="terminal-pane__bar">
         <button type="button" onClick={() => start(null, 'vertical')} disabled={pending()}>New shared terminal</button>
-        <button type="button" onClick={() => start(props.taskId, 'vertical')} disabled={pending() || !props.taskHasWorktree}>New task terminal</button>
+        <button type="button" onClick={startTaskTerminal} disabled={pending() || !props.taskHasWorktree}
+          aria-keyshortcuts={mac ? 'Meta+Shift+T' : 'Control+Shift+N'}>New task terminal</button>
         <button type="button" onClick={() => splitActive('horizontal')} disabled={pending() || !active()}>Split right</button>
         <button type="button" onClick={() => splitActive('vertical')} disabled={pending() || !active()}>Split down</button>
         <Show when={attached().length > 1}>

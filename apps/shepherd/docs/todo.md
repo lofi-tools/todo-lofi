@@ -535,6 +535,8 @@ task-scoped, persistent and fast enough.
   across task switches.
 - [x] Route terminal focus and keyboard input. Show bell attention on the
   Terminals tab and on the owning task for task-scoped terminals.
+  Command+Shift+T on macOS and Ctrl+Shift+N on Linux open and focus a new
+  terminal in the selected task's worktree.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
   Restart returns keyboard focus to the terminal. The native smoke types
   directly into both restarted PTYs.

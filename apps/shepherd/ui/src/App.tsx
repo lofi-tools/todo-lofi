@@ -132,6 +132,8 @@ export function App() {
   const [pending, setPending] = createSignal(false)
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
+  const workspaceShortcutsEnabled = () =>
+    !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !quitRequired()
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
@@ -462,7 +464,7 @@ export function App() {
     const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
     if (event.defaultPrevented || event.isComposing || event.key !== '.'
       || event.altKey || event.shiftKey || !modifier
-      || settingsOpen() || freebuffProjectId() || pickerOpen() || quitRequired()
+      || !workspaceShortcutsEnabled()
       || !canCancel()) return
     event.preventDefault()
     if (!event.repeat) cancelTurn()
@@ -835,7 +837,12 @@ export function App() {
           >
             <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'} attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal} />}
+                {(projectId) => <TerminalPane
+                  projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
+                  listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
+                  shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
+                  attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal}
+                />}
               </Show>
             </div>
             <Show when={inspectorTab() === 'review'}>

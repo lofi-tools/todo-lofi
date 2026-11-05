@@ -106,8 +106,8 @@ function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
-async function typeIntoRestartedTerminal(title: string, command: string) {
-  const input = await waitFor('focused input in the restarted terminal', () => {
+async function typeIntoFocusedTerminal(title: string, command: string) {
+  const input = await waitFor(`focused input in ${title}`, () => {
     const field = terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input')
     return field && document.activeElement === field && field
   })
@@ -392,18 +392,26 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
 
 async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridge.TerminalSnapshot) {
   const task = await prepareTask(project)
-  const start = await waitFor('task terminal action for the worktree', () => {
-    const entry = button('New task terminal')
-    return entry && !entry.disabled && entry
+  await openInspectorTab('review')
+  const composer = await waitFor('active conversation input', () =>
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]:enabled'))
+  composer.focus()
+  const mac = navigator.platform.startsWith('Mac')
+  composer.dispatchEvent(new KeyboardEvent('keydown', {
+    key: mac ? 'T' : 'N', metaKey: mac, ctrlKey: !mac, shiftKey: true,
+    bubbles: true, cancelable: true,
+  }))
+  await waitFor('shortcut opens the Terminals tab', () => {
+    const tab = document.querySelector('#inspector-tab-terminals')
+    return tab?.getAttribute('aria-selected') === 'true'
   })
-  start.click()
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
   const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.taskId === task.id)
   if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
     throw new Error('The task terminal should run in the task worktree')
   }
 
-  await bridge.terminalWrite(scoped.id, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"\r")
+  await typeIntoFocusedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"")
   const marker = 'S4_TASK:' + task.worktree.split('/').at(-1)
   await waitFor('worktree output in the task pane', () => {
     const pane = terminalPane(scoped.title)
@@ -724,7 +732,7 @@ async function restore() {
   if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
     throw new Error('Restart should reuse the restored terminal ID')
   }
-  await typeIntoRestartedTerminal(first.title, 'echo S4_RESTORED')
+  await typeIntoFocusedTerminal(first.title, 'echo S4_RESTORED')
   await waitFor('fresh PTY output after restore', () => {
     const pane = terminalPane(first.title)
     return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_RESTORED')
@@ -741,7 +749,7 @@ async function restore() {
   })
   restartTask.click()
   await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  await typeIntoRestartedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
+  await typeIntoFocusedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
   const marker = 'S4_TASK_RESTORED:' + task.worktreePath.split('/').at(-1)
   await waitFor('worktree output after task terminal restart', () => {
     const pane = terminalPane(scoped.title)
