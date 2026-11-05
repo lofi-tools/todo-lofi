@@ -148,6 +148,17 @@ test.beforeEach(async ({ context }) => {
     const otherInspectorTabs = new Map<string, InspectorTab>()
     const workspaceLayouts = new Map<string, WorkspaceLayout>()
     const subscriptions: string[] = []
+    if (options.has('missing-terminal')) {
+      terminalLayout = {
+        ...terminalLayout,
+        revision: 1,
+        root: {
+          type: 'split', axis: 'horizontal', ratio: 650,
+          first: { type: 'pane', terminalId: 'terminal-1' },
+          second: { type: 'pane', terminalId: 'terminal-missing' },
+        },
+      }
+    }
     if (new URLSearchParams(window.location.search).has('scoped-terminals')) {
       terminals.push({
         ...terminals[0],
@@ -878,6 +889,22 @@ test('keeps the shared terminal attached while switching task terminals', async 
   )
   expect(subscriptions.filter((id) => id === 'terminal-1')).toHaveLength(1)
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
+})
+
+test('preserves the other terminal when a saved pane is missing', async ({ page }) => {
+  await page.goto('/?missing-terminal')
+
+  const live = page.getByRole('region', { name: 'Terminal 1' })
+  const unavailable = page.getByRole('region', { name: 'Unavailable terminal' })
+  await expect(live.getByRole('textbox')).toBeVisible()
+  await expect(unavailable).toContainText('The saved terminal no longer exists.')
+  await expect(page.getByRole('separator', { name: 'Resize terminal split' })).toHaveAttribute('aria-valuenow', '65')
+  await unavailable.getByRole('button', { name: 'Hide pane' }).click()
+  await expect(unavailable).toHaveCount(0)
+  await expect(live.getByRole('textbox')).toBeVisible()
+  expect(await page.evaluate(() =>
+    (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root,
+  )).toEqual({ type: 'pane', terminalId: 'terminal-1' })
 })
 
 test('resizes a split and reopens a hidden terminal from the instance list', async ({ page }) => {

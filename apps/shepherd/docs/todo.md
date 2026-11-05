@@ -546,7 +546,8 @@ task-scoped, persistent and fast enough.
   directly from the PTY.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
   Restart returns keyboard focus to the terminal. The native smoke types
-  directly into both restarted PTYs.
+  directly into both restarted PTYs. A missing terminal record restores as a
+  removable placeholder alongside the other panes in the saved split.
 - [x] Measure parser and encoder throughput on a 1 MiB output burst.
 - [x] Measure delivery and paint latency for a 1 MiB burst in the desktop
   webview before considering WebGL.

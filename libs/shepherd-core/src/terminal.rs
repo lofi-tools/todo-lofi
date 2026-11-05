@@ -170,6 +170,13 @@ pub enum TerminalSplit {
 }
 
 impl TerminalSplit {
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            Self::Pane { terminal_id } => terminal_id == id,
+            Self::Split { first, second, .. } => first.contains(id) || second.contains(id),
+        }
+    }
+
     pub fn validate(&self, mut belongs_to_project: impl FnMut(&str) -> bool) -> bool {
         let mut panes = std::collections::BTreeSet::new();
         let mut remaining = vec![(self, 0)];

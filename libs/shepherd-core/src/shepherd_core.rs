@@ -260,7 +260,7 @@ impl Core {
         }
 
         for (project, layout) in core.store.load_terminal_layouts().await? {
-            if core.valid_terminal_layout(&project, &layout) {
+            if core.valid_terminal_layout(&project, &layout, |_| true) {
                 core.terminal_layouts.insert(project, layout);
             } else {
                 tracing::warn!(%project, "ignored invalid terminal layout");
@@ -366,13 +366,17 @@ impl Core {
         Ok(path.to_path_buf())
     }
 
-    fn valid_terminal_layout(&self, project_id: &ProjectId, layout: &TerminalLayout) -> bool {
+    fn valid_terminal_layout(
+        &self,
+        project_id: &ProjectId,
+        layout: &TerminalLayout,
+        allow_missing: impl Fn(&str) -> bool,
+    ) -> bool {
         self.projects.contains_key(project_id)
             && layout.root.as_ref().is_none_or(|root| {
-                root.validate(|id| {
-                    self.terminals
-                        .get(&TerminalId::new(id))
-                        .is_some_and(|terminal| &terminal.project_id == project_id)
+                root.validate(|id| match self.terminals.get(&TerminalId::new(id)) {
+                    Some(terminal) => &terminal.project_id == project_id,
+                    None => allow_missing(id),
                 })
             })
     }
@@ -400,10 +404,16 @@ impl Core {
                 state: self.shutdown,
             });
         }
-        if !self.valid_terminal_layout(project_id, &layout) {
+        let current = self
+            .terminal_layouts
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default();
+        if !self.valid_terminal_layout(project_id, &layout, |id| {
+            current.root.as_ref().is_some_and(|root| root.contains(id))
+        }) {
             return Err(CoreError::InvalidTerminalLayout);
         }
-        let current = self.terminal_layout(project_id)?;
         if current.revision != layout.revision {
             return Err(CoreError::TerminalLayoutChanged);
         }
@@ -3385,6 +3395,83 @@ mod tests {
             reopened.terminal_layout(&foreign)?,
             TerminalLayout::default()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restoring_a_missing_terminal_keeps_the_other_panes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::terminal::{SplitAxis, TerminalSplit};
+
+        let directory = TestDirectory::new()?;
+        let database = directory.join("shepherd.db");
+        let store = TursoStore::open_at(&database).await?;
+        let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
+        let project = add_project(&mut core, directory.path().to_path_buf()).await?;
+        core.record_terminal(&TerminalRecord::project_shared(
+            TerminalId::new("kept"),
+            project.clone(),
+            "Kept",
+            directory.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        ))
+        .await?;
+        let pane = |id: &str| TerminalSplit::Pane {
+            terminal_id: id.into(),
+        };
+        let split = |ratio| TerminalSplit::Split {
+            axis: SplitAxis::Horizontal,
+            ratio,
+            first: Box::new(pane("kept")),
+            second: Box::new(pane("missing")),
+        };
+        let saved = TerminalLayout {
+            root: Some(split(650)),
+            inspector_tab: InspectorTab::Review,
+            ..TerminalLayout::default()
+        };
+        assert!(matches!(
+            core.save_terminal_layout(&project, saved.clone()).await,
+            Err(CoreError::InvalidTerminalLayout)
+        ));
+        core.store.save_terminal_layout(&project, &saved).await?;
+        drop(core);
+
+        let store = TursoStore::open_at(&database).await?;
+        let mut core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.terminal_layout(&project)?, saved);
+        let resized = core
+            .save_terminal_layout(
+                &project,
+                TerminalLayout {
+                    root: Some(split(700)),
+                    ..saved
+                },
+            )
+            .await?;
+        let cleaned = core
+            .save_terminal_layout(
+                &project,
+                TerminalLayout {
+                    root: Some(pane("kept")),
+                    ..resized
+                },
+            )
+            .await?;
+        assert_eq!(cleaned.root, Some(pane("kept")));
+        assert_eq!(cleaned.inspector_tab, InspectorTab::Review);
+        assert!(matches!(
+            core.save_terminal_layout(
+                &project,
+                TerminalLayout {
+                    root: Some(split(700)),
+                    ..cleaned
+                },
+            )
+            .await,
+            Err(CoreError::InvalidTerminalLayout)
+        ));
         Ok(())
     }
 

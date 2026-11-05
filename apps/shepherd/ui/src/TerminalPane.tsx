@@ -81,6 +81,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   const visible = () => terminals().filter((terminal) =>
     terminal.scope === 'project' || terminal.taskId === props.taskId)
   const terminal = (id: string) => visible().find((entry) => entry.id === id)
+  const paneVisible = (id: string) => !terminals().some((entry) =>
+    entry.id === id && entry.scope === 'task' && entry.taskId !== props.taskId)
   const root = () => {
     if (!layoutLoaded()) return null
     const saved = layout()
@@ -90,7 +92,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const active = () => {
     const id = selectedId()
     const node = root()
-    return id && terminal(id) && contains(node, id) ? id : firstVisible(node, terminal)
+    return id && terminal(id) && contains(node, id) ? id : firstMatchingPane(node, (pane) => !!terminal(pane))
   }
   const attached = () => paneIds(root())
   const attachedVisible = () => attached().filter((id) => terminal(id))
@@ -298,8 +300,8 @@ export function TerminalPane(props: TerminalPaneProps) {
         </For>
         </ul>
       </details>
-      <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
-        <TerminalTree node={root()!} terminal={terminal} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+      <Show when={firstMatchingPane(root(), paneVisible)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
+        <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={restart} measure={(id, size) => measuredSizes.set(id, size)}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
@@ -352,11 +354,11 @@ function preset(ids: string[], axis: bridge.SplitAxis): bridge.TerminalSplit | n
 
 type TerminalLookup = (id: string) => bridge.TerminalSnapshot | undefined
 
-function firstVisible(node: bridge.TerminalSplit | null, terminal: TerminalLookup): string | null {
+function firstMatchingPane(node: bridge.TerminalSplit | null, matches: (id: string) => boolean): string | null {
   if (!node) return null
   return node.type === 'pane'
-    ? (terminal(node.terminalId) ? node.terminalId : null)
-    : firstVisible(node.first, terminal) ?? firstVisible(node.second, terminal)
+    ? (matches(node.terminalId) ? node.terminalId : null)
+    : firstMatchingPane(node.first, matches) ?? firstMatchingPane(node.second, matches)
 }
 
 type SplitSide = 'first' | 'second'
@@ -373,6 +375,7 @@ interface TerminalTreeProps {
   path: SplitPath
   resize: (path: SplitPath, ratio: number) => void
   terminal: TerminalLookup
+  paneVisible: (id: string) => boolean
   active: string | null
   shown: boolean
   select: (id: string) => void
@@ -402,7 +405,21 @@ function TerminalTree(props: TerminalTreeProps) {
   const pane = () => props.node.type === 'pane' ? props.terminal(props.node.terminalId) : undefined
   return (
     <Show when={split()} fallback={
-      <Show when={pane()}>
+      <Show when={pane()} fallback={
+        <Show when={props.node.type === 'pane' ? props.node.terminalId : undefined} keyed>
+          {(id) => (
+            <section class="terminal-tile" aria-label="Unavailable terminal">
+              <div class="terminal-pane__bar">
+                <span>Unavailable terminal</span>
+                <button type="button" onClick={() => props.detach(id)} disabled={props.pending}>Hide pane</button>
+              </div>
+              <div class="terminal-ended">
+                <p>The saved terminal no longer exists.</p>
+              </div>
+            </section>
+          )}
+        </Show>
+      }>
         {(entry) => (
           <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
             aria-label={entry().title} onFocusIn={() => props.select(entry().id)}>
@@ -431,12 +448,12 @@ function TerminalTree(props: TerminalTreeProps) {
     }>
       {(branch) => (
         <div class={`terminal-split terminal-split--${branch().axis}`}>
-          <Show when={firstVisible(branch().first, props.terminal)}>
+          <Show when={firstMatchingPane(branch().first, props.paneVisible)}>
             <div class="terminal-split__child" style={{ flex: preview() ?? branch().ratio }}>
               <TerminalTree {...props} node={branch().first} path={[...props.path, 'first']} />
             </div>
           </Show>
-          <Show when={firstVisible(branch().first, props.terminal) && firstVisible(branch().second, props.terminal)}>
+          <Show when={firstMatchingPane(branch().first, props.paneVisible) && firstMatchingPane(branch().second, props.paneVisible)}>
             <div class="terminal-divider" role="separator" tabIndex={0} aria-label="Resize terminal split"
               aria-orientation={branch().axis === 'horizontal' ? 'vertical' : 'horizontal'}
               aria-valuemin={10} aria-valuemax={90} aria-valuenow={Math.round((preview() ?? branch().ratio) / 10)}
@@ -465,7 +482,7 @@ function TerminalTree(props: TerminalTreeProps) {
                 props.resize(props.path, Math.max(100, Math.min(900, branch().ratio + (direction ? 50 : -50))))
               }} />
           </Show>
-          <Show when={firstVisible(branch().second, props.terminal)}>
+          <Show when={firstMatchingPane(branch().second, props.paneVisible)}>
             <div class="terminal-split__child" style={{ flex: 1000 - (preview() ?? branch().ratio) }}>
               <TerminalTree {...props} node={branch().second} path={[...props.path, 'second']} />
             </div>
