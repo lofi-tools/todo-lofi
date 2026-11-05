@@ -8,7 +8,12 @@ fixture=$(mktemp -d)
 trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"
+git -C "$fixture/project" -c init.templateDir= init --quiet -b main
+git -C "$fixture/project" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
+  -c user.name="Shepherd Terminal Smoke" -c user.email="smoke@example.invalid" \
+  commit --quiet --allow-empty -m "Seed disposable repository"
 
+export SHEPHERD_DEV_SCRIPTED_HARNESS=1
 export SHEPHERD_DEV_DATA_DIR="$fixture/data"
 export SHEPHERD_DEV_PROJECT_ROOT="$fixture"
 export SHEPHERD_DESKTOP_SMOKE_PROJECT="$fixture/project"
