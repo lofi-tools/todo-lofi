@@ -148,23 +148,32 @@ impl Dimensions for ScreenSize {
     }
 }
 
+enum PtyReply {
+    Text(String),
+    Color(usize, Arc<dyn Fn(Rgb) -> String + Sync + Send>),
+}
+
 #[derive(Clone, Default)]
 struct PtyReplies {
-    bytes: Arc<Mutex<Vec<u8>>>,
+    pending: Arc<Mutex<Vec<PtyReply>>>,
     bell: Arc<AtomicBool>,
 }
 
 impl EventListener for PtyReplies {
     fn send_event(&self, event: Event) {
-        match event {
-            Event::PtyWrite(text) => self
-                .bytes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(text.as_bytes()),
-            Event::Bell => self.bell.store(true, Ordering::Relaxed),
-            _ => {}
-        }
+        let reply = match event {
+            Event::PtyWrite(text) => PtyReply::Text(text),
+            Event::ColorRequest(index, format) => PtyReply::Color(index, format),
+            Event::Bell => {
+                self.bell.store(true, Ordering::Relaxed);
+                return;
+            }
+            _ => return,
+        };
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(reply);
     }
 }
 
@@ -183,6 +192,7 @@ enum KeyboardCommand {
     Push(u16),
     Pop(u16),
     Reset,
+    ColorQuery,
 }
 
 #[derive(Default)]
@@ -207,6 +217,15 @@ impl Perform for KeyboardSequence {
         };
     }
 
+    fn osc_dispatch(&mut self, params: &[&[u8]], _: bool) {
+        if let [command, rest @ ..] = params
+            && matches!(*command, b"4" | b"10" | b"11" | b"12")
+            && rest.contains(&b"?".as_slice())
+        {
+            self.0 = Some(KeyboardCommand::ColorQuery);
+        }
+    }
+
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         if !ignore && intermediates.is_empty() && byte == b'c' {
             self.0 = Some(KeyboardCommand::Reset);
@@ -221,6 +240,7 @@ impl Perform for KeyboardSequence {
 pub struct Screen {
     term: Term<PtyReplies>,
     replies: PtyReplies,
+    ready_replies: Vec<u8>,
     parser: Processor,
     keyboard_parser: Parser,
     keyboards: [KeyboardModes; 2],
@@ -235,6 +255,7 @@ impl Screen {
         Self {
             term: Term::new(Config::default(), &size, replies.clone()),
             replies,
+            ready_replies: Vec::new(),
             parser: Processor::new(),
             keyboard_parser: Parser::new(),
             keyboards: Default::default(),
@@ -296,17 +317,44 @@ impl Screen {
                 }
             }
             KeyboardCommand::Reset => self.keyboards = Default::default(),
+            KeyboardCommand::ColorQuery => self.resolve_replies(),
         }
     }
 
-    pub fn take_replies(&self) -> Vec<u8> {
-        std::mem::take(
+    fn resolve_replies(&mut self) {
+        let pending = std::mem::take(
             &mut *self
                 .replies
-                .bytes
+                .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        );
+        for reply in pending {
+            let text = match reply {
+                PtyReply::Text(text) => text,
+                PtyReply::Color(index, format) => {
+                    let color = match index {
+                        0..=255 => Color::Indexed(index as u8),
+                        256 => Color::Named(NamedColor::Foreground),
+                        257 => Color::Named(NamedColor::Background),
+                        258 => Color::Named(NamedColor::Cursor),
+                        _ => continue,
+                    };
+                    let value = color_to_rgb(self.term.colors(), color);
+                    format(Rgb {
+                        r: (value >> 16) as u8,
+                        g: (value >> 8) as u8,
+                        b: value as u8,
+                    })
+                }
+            };
+            self.ready_replies.extend_from_slice(text.as_bytes());
+        }
+    }
+
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        self.resolve_replies();
+        std::mem::take(&mut self.ready_replies)
     }
 
     pub fn take_bell(&self) -> bool {
@@ -682,6 +730,15 @@ mod tests {
         assert_eq!(screen.frame().encode(None).get(1), Some(&11));
         screen.process(b"\x1b[4 q");
         assert_eq!(screen.frame().encode(None).get(1), Some(&7));
+    }
+
+    #[test]
+    fn osc_color_queries_observe_the_palette_at_the_query() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b]10;#123456\x07\x1b]10;?\x07\x1b]10;#abcdef\x07");
+        let replies = screen.take_replies();
+        assert!(String::from_utf8_lossy(&replies).contains("rgb:1212/3434/5656"));
+        assert!(screen.take_replies().is_empty());
     }
 
     #[test]
