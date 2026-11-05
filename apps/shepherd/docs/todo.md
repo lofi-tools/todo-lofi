@@ -190,6 +190,8 @@ fake task, read the stream and use one terminal.
   traces.
 - [x] Implement quit confirmation for a working/waiting fake task; mark
   interrupted on restart; show a terminal as ended with a restart action.
+- [x] Offer **Resume** in the conversation header for an interrupted task.
+  The browser smoke verifies the state change and the composer becoming ready.
 - [x] Add a project directory picker, modeled on taskstream's
   (`apps/taskstream-desktop/src/projects.rs` for the scan,
   `src/ui_parts/project_picker.rs` for the dialog). Replace the sidebar's path

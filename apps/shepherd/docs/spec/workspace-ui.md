@@ -108,6 +108,11 @@ current layout and give future changes a point of comparison.
   close it. Other unavailable agents are disabled until their integrations
   are ready.
 
+## Interrupted conversations
+
+- Show **Resume** beside the state in the conversation header when the task is
+  interrupted. Enable the composer when the core reports the task is ready.
+
 ## Conversation composer
 
 - The text area and its controls share one card at the bottom of the chat.

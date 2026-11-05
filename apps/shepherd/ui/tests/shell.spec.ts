@@ -59,7 +59,7 @@ test.beforeEach(async ({ context }) => {
         id: 'task-1',
         projectId: 'project-1',
         title: 'Ship it',
-        state: 'ready',
+        state: options.has('interrupted-task') ? 'interrupted' : 'ready',
         tier: 'native',
         branch: 'shepherd/ship-it',
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
@@ -263,6 +263,15 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'resume_task': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task || task.state !== 'interrupted') throw new Error('Task cannot be resumed')
+            task.state = 'ready'
+            transcripts[task.id] = [
+              entry('resumed', 1, { type: 'notice', data: { text: 'resumed the previous agent session', isError: false } }),
+            ]
+            return workspace(task.id)
+          }
           case 'create_draft': {
             const id = `task-${nextTask}`
             nextTask += 1
@@ -381,6 +390,20 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('resumes an interrupted task from its conversation header', async ({ page }) => {
+  await page.goto('/?interrupted-task')
+
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const resume = chat.getByRole('button', { name: 'Resume' })
+  await expect(chat.locator('.chat__state')).toHaveText('interrupted')
+  await expect(chat.getByLabel('Prompt')).toBeDisabled()
+  await resume.click()
+  await expect(chat.locator('.chat__state')).toHaveText('ready')
+  await expect(chat.getByText('resumed the previous agent session')).toBeVisible()
+  await expect(chat.getByLabel('Prompt')).toBeEnabled()
+  await expect(resume).toHaveCount(0)
 })
 
 test('shows an approval with its tool, arguments and diff', async ({ page }) => {

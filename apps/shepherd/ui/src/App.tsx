@@ -412,6 +412,16 @@ export function App() {
     })
   }
 
+  function resumeTask() {
+    const task = workspace()?.task
+    if (!task || task.state !== 'interrupted' || pending()) return
+    void run(async () => {
+      const resumed = await bridge.resumeTask(task.id)
+      if (selectedTaskId() === task.id) setWorkspace(resumed)
+      await loadTasks(task.projectId)
+    })
+  }
+
   function quit() {
     void run(async () => {
       try {
@@ -578,6 +588,11 @@ export function App() {
               <header class="pane-header">
                 <span class="chat__title">{current().task.title}</span>
                 <span class="chat__state">{current().task.state}</span>
+                <Show when={current().task.state === 'interrupted'}>
+                  <button type="button" class="project-action" onClick={resumeTask} disabled={pending()}>
+                    Resume
+                  </button>
+                </Show>
               </header>
             )}
           </Show>
