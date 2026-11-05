@@ -558,7 +558,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const column = cell.column + 1
     const row = cell.row + 1
     if (current.modes & MOUSE_SGR) {
-      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat))
+      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat), false)
     } else {
       const utf8 = (current.modes & MOUSE_UTF8) !== 0
       const limit = utf8 ? 2015 : 223
@@ -568,7 +568,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         const coordinates = utf8
           ? Array.from(new TextEncoder().encode(String.fromCodePoint(column + 32, row + 32)))
           : [column + 32, row + 32]
-        write(Array.from({ length: repeat }, () => [...prefix, ...coordinates]).flat())
+        write(Array.from({ length: repeat }, () => [...prefix, ...coordinates]).flat(), false)
       }
     }
     return true
@@ -700,8 +700,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     inputWrites = inputWrites.then(send).catch((failure) => { setError(describe(failure)) })
   }
 
-  function write(data: string | number[]) {
-    if (data.length) queueInput(() => bridge.terminalWrite(props.terminalId, data))
+  function write(data: string | number[], followOutput = true) {
+    if (data.length) queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput))
   }
 
   function resetSearch() {
@@ -788,7 +788,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (!key) return
     reportedKeys.delete(event.code)
     const data = encodeKittyKey(event, frame?.modes ?? 0, key)
-    if (data) write(data)
+    if (data) write(data, false)
   }
 
   function onPaste(event: ClipboardEvent) {
@@ -802,7 +802,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     queueInput(async () => {
       const chunkSize = 16 * 1024
       for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)))
+        await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)), offset === 0)
       }
     })
   }
@@ -928,12 +928,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         onKeyUp={onKeyUp}
         onFocus={() => {
           props.onFocus(props.terminalId)
-          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I')
+          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[I', false)
         }}
         onBlur={() => {
           props.onFocus(null)
           reportedKeys.clear()
-          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O')
+          if ((frame?.modes ?? 0) & FOCUS_REPORTING) write('\x1b[O', false)
         }}
         onPaste={onPaste}
         onCopy={onCopy}

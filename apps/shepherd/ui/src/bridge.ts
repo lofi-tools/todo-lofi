@@ -319,8 +319,8 @@ export function terminalScroll(terminalId: string, lines: number): Promise<void>
   return invoke('terminal_scroll', { terminalId, lines })
 }
 
-export function terminalWrite(terminalId: string, data: string | number[]): Promise<void> {
-  return invoke<void>('terminal_write', { terminalId, data })
+export function terminalWrite(terminalId: string, data: string | number[], followOutput = true): Promise<void> {
+  return invoke<void>('terminal_write', { terminalId, data, followOutput })
 }
 
 export function openTerminalLink(terminalId: string, row: number, column: number): Promise<void> {

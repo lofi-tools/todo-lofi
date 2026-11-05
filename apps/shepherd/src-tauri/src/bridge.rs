@@ -595,6 +595,7 @@ impl ShellState {
         &self,
         terminal_id: String,
         data: TerminalInput,
+        follow_output: bool,
     ) -> Result<(), BridgeError> {
         let completion = self
             .engine
@@ -606,7 +607,7 @@ impl ShellState {
             .await
             .map_err(|_| BridgeError::new("terminal", "the terminal writer stopped"))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        if let Ok(slot) = self.screen_slot(&terminal_id).await {
+        if follow_output && let Ok(slot) = self.screen_slot(&terminal_id).await {
             let mut slot = slot.lock().await;
             if slot.screen.follow_output() {
                 slot.publish();
@@ -1059,8 +1060,12 @@ pub mod commands {
         state: State<'_, ShellState>,
         terminal_id: String,
         data: TerminalInput,
+        follow_output: bool,
     ) -> Result<(), BridgeError> {
-        state.inner().terminal_write(terminal_id, data).await
+        state
+            .inner()
+            .terminal_write(terminal_id, data, follow_output)
+            .await
     }
 
     #[tauri::command]
