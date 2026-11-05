@@ -375,7 +375,8 @@ review and merge gate is tracked separately.
   for retry. The Git pane clears the draft message after a successful commit.
 - [x] Squash-merge from a clean root. The Git fixture checks the merged contents,
   single parent, commit subject and retained task branch.
-- [ ] dirty root and off-base root refuse with a reason;
+- [x] Dirty and off-base roots refuse squash-merge with distinct reasons. The
+  fixture also checks that the untracked file survives the refusal.
 - [ ] conflict paths are listed;
 - [ ] missing and dirty worktrees are not silently removed.
 
