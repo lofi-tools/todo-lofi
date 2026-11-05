@@ -150,7 +150,7 @@ export function App() {
   const [error, setError] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
-  const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
+  const [quitRequired, setQuitRequired] = createSignal<bridge.QuitConfirmation | null>(null)
   const workspaceShortcutsEnabled = () =>
     !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !quitRequired()
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
@@ -542,11 +542,11 @@ export function App() {
         allowClose = true
         await getCurrentWindow().close()
       } catch (failure) {
-        const message = describe(failure)
-        if (message.includes('requires confirmation')) {
-          setQuitRequired(Number(message.match(/(\d+) live task/)?.[1] ?? 1))
+        const confirmation = (failure as bridge.BridgeError | null)?.quitConfirmation
+        if (confirmation) {
+          setQuitRequired(confirmation)
         } else {
-          setError(message)
+          setError(describe(failure))
         }
       }
     })
@@ -939,17 +939,23 @@ export function App() {
       </Show>
 
       <Show when={quitRequired()}>
-        <div class="banner" role="alert">
-          <span>
-            Quit will stop {quitRequired()} live task{quitRequired() === 1 ? '' : 's'}. Quit anyway?
-          </span>
-          <button type="button" onClick={forceQuit} disabled={pending()}>
-            Quit anyway
-          </button>
-          <button type="button" class="banner__quiet" onClick={() => setQuitRequired(null)}>
-            Keep working
-          </button>
-        </div>
+        {(confirmation) => (
+          <div class="banner" role="alert">
+            <span>
+              Quit will stop {confirmation().liveTasks} live task{confirmation().liveTasks === 1 ? '' : 's'}
+              <Show when={confirmation().liveTerminals}>
+                {(count) => ` and ${count()} terminal${count() === 1 ? '' : 's'}`}
+              </Show>
+              . Quit anyway?
+            </span>
+            <button type="button" onClick={forceQuit} disabled={pending()}>
+              Quit anyway
+            </button>
+            <button type="button" class="banner__quiet" onClick={() => setQuitRequired(null)}>
+              Keep working
+            </button>
+          </div>
+        )}
       </Show>
 
       <Show when={error()}>

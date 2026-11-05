@@ -179,6 +179,11 @@ export interface QuitSummary {
   liveTerminals: number
 }
 
+export interface QuitConfirmation {
+  liveTasks: number
+  liveTerminals: number
+}
+
 export interface TerminalSnapshot {
   id: string
   projectId: string
@@ -231,6 +236,7 @@ export type Event =
 export interface BridgeError {
   code: string
   message: string
+  quitConfirmation?: QuitConfirmation
 }
 
 export function addProject(path: string): Promise<ProjectList> {

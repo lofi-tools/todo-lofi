@@ -752,12 +752,13 @@ async function reopenArchivedTask() {
   return { ok: true, reopenedArchivedTask: true }
 }
 
-async function requestQuitWithLiveTask() {
+async function requestQuitWithLiveTask(liveTerminals = 0) {
   await enabledButton('Add project')
   await getCurrentWindow().close()
   const confirm = await enabledButton('Quit anyway')
-  if (!confirm.closest('.banner')?.textContent?.includes('Quit will stop 1 live task')) {
-    throw new Error('The quit warning should count one live task')
+  const terminals = liveTerminals ? ` and ${liveTerminals} terminal${liveTerminals === 1 ? '' : 's'}` : ''
+  if (!confirm.closest('.banner')?.textContent?.includes(`Quit will stop 1 live task${terminals}.`)) {
+    throw new Error(`The quit warning should count one live task and ${liveTerminals} live terminals`)
   }
 }
 
@@ -852,7 +853,7 @@ async function smoke() {
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
   await openInspectorTab('git')
-  await requestQuitWithLiveTask()
+  await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 

@@ -39,6 +39,15 @@ use crate::terminal_screen::{Screen, SearchDirection, SearchMatch, SearchPoint, 
 pub struct BridgeError {
     code: &'static str,
     message: String,
+    #[serde(rename = "quitConfirmation", skip_serializing_if = "Option::is_none")]
+    quit_confirmation: Option<QuitConfirmation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuitConfirmation {
+    live_tasks: usize,
+    live_terminals: usize,
 }
 
 #[derive(Serialize)]
@@ -52,13 +61,25 @@ impl BridgeError {
         Self {
             code,
             message: message.into(),
+            quit_confirmation: None,
         }
     }
 }
 
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
-        Self::new("core", error.to_string())
+        let mut bridge_error = Self::new("core", error.to_string());
+        if let CoreError::QuitConfirmationRequired {
+            live_tasks,
+            live_terminals,
+        } = error
+        {
+            bridge_error.quit_confirmation = Some(QuitConfirmation {
+                live_tasks,
+                live_terminals,
+            });
+        }
+        bridge_error
     }
 }
 

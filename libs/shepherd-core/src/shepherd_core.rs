@@ -93,7 +93,10 @@ pub enum CoreError {
         to: &'static str,
     },
     #[error("quit requires confirmation: {live_tasks} live task(s); retry with force to stop them")]
-    QuitConfirmationRequired { live_tasks: usize },
+    QuitConfirmationRequired {
+        live_tasks: usize,
+        live_terminals: usize,
+    },
     #[error("the core is not running; shutdown state is {state:?}")]
     NotRunning { state: ShutdownState },
     #[error("the core was built without an agent harness")]
@@ -1558,9 +1561,15 @@ impl Core {
             .filter(|task| task.state.is_live())
             .map(|task| task.id.clone())
             .collect();
+        let live_terminals = self
+            .terminals
+            .values()
+            .filter(|terminal| terminal.ended_at.is_none())
+            .count();
         if !live_tasks.is_empty() && !force {
             return Err(CoreError::QuitConfirmationRequired {
                 live_tasks: live_tasks.len(),
+                live_terminals,
             });
         }
 
@@ -1633,11 +1642,7 @@ impl Core {
 
         Ok(CommandResult::Quit(QuitSummary {
             interrupted_tasks,
-            live_terminals: self
-                .terminals
-                .values()
-                .filter(|terminal| terminal.ended_at.is_none())
-                .count(),
+            live_terminals,
         }))
     }
 
@@ -2456,7 +2461,10 @@ mod tests {
         let refused = core.execute(Command::Quit { force: false }).await;
         assert!(matches!(
             refused,
-            Err(CoreError::QuitConfirmationRequired { live_tasks: 1 })
+            Err(CoreError::QuitConfirmationRequired {
+                live_tasks: 1,
+                live_terminals: 0
+            })
         ));
         assert_eq!(core.shutdown_state(), ShutdownState::Running);
         assert_eq!(
@@ -2652,7 +2660,10 @@ mod tests {
         let refused = scenario.execute(Command::Quit { force: false }).await;
         assert!(matches!(
             refused,
-            Err(CoreError::QuitConfirmationRequired { live_tasks: 1 })
+            Err(CoreError::QuitConfirmationRequired {
+                live_tasks: 1,
+                live_terminals: 0
+            })
         ));
         let result = scenario.execute(Command::Quit { force: true }).await?;
         let CommandResult::Quit(summary) = result else {
@@ -3221,7 +3232,10 @@ mod tests {
         let refused = scenario.execute(Command::Quit { force: false }).await;
         assert!(matches!(
             refused,
-            Err(CoreError::QuitConfirmationRequired { live_tasks: 1 })
+            Err(CoreError::QuitConfirmationRequired {
+                live_tasks: 1,
+                live_terminals: 0
+            })
         ));
         let result = scenario.execute(Command::Quit { force: true }).await?;
         let CommandResult::Quit(summary) = result else {
