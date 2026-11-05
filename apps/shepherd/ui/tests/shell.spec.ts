@@ -239,6 +239,11 @@ test.beforeEach(async ({ page }) => {
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
             ])
             callbacks.get(args.channel.id)?.({ index: 0, message: frame.buffer })
+            const update = new Uint8Array([
+              1, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 4, 0, 0, 1, 0,
+              0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 66,
+            ])
+            callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
             return `subscription-${args.terminalId}`
           }
           case 'terminal_write':
@@ -314,7 +319,7 @@ test('encodes typed keys into terminal input', async ({ page }) => {
     .poll(() =>
       page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
     )
-    .toEqual(['a', '\u0003', '\r', '\u001b[A'])
+    .toEqual(['a', '\u0003', '\r', '\u001bOA'])
 })
 
 test('opens the project picker, filters, and adds a project', async ({ page }) => {

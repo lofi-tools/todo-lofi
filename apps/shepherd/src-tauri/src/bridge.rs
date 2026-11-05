@@ -74,7 +74,7 @@ impl TerminalInput {
 
 struct ScreenSlot {
     screen: Screen,
-    frames: watch::Sender<TerminalFrame>,
+    frames: watch::Sender<Arc<TerminalFrame>>,
 }
 
 /// The state Tauri manages for the window: one core, one event broadcaster, the
@@ -427,7 +427,7 @@ impl ShellState {
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
 
         let screen = Screen::new(usize::from(columns), usize::from(rows));
-        let (frames, _) = watch::channel(screen.frame());
+        let (frames, _) = watch::channel(Arc::new(screen.frame()));
         self.screens.lock().await.insert(
             terminal_id.as_str().to_string(),
             ScreenSlot { screen, frames },
@@ -448,7 +448,15 @@ impl ShellState {
         let shell_events = self.events.clone();
         let id = terminal_id.as_str().to_string();
         tauri::async_runtime::spawn(async move {
-            while let Some(event) = receiver.recv().await {
+            let mut pending = None;
+            loop {
+                let event = match pending.take() {
+                    Some(event) => event,
+                    None => match receiver.recv().await {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 match event {
                     TerminalEvent::Output(bytes) => {
                         let replies = {
@@ -457,7 +465,17 @@ impl ShellState {
                                 continue;
                             };
                             slot.screen.process(&bytes);
-                            slot.frames.send_replace(slot.screen.frame());
+                            for _ in 0..31 {
+                                match receiver.try_recv() {
+                                    Ok(TerminalEvent::Output(bytes)) => slot.screen.process(&bytes),
+                                    Ok(event) => {
+                                        pending = Some(event);
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            slot.frames.send_replace(Arc::new(slot.screen.frame()));
                             slot.screen.take_replies()
                         };
                         if !replies.is_empty()
@@ -510,7 +528,7 @@ impl ShellState {
             .search(query, before)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         if found.is_some() {
-            slot.frames.send_replace(slot.screen.frame());
+            slot.frames.send_replace(Arc::new(slot.screen.frame()));
         }
         Ok(found)
     }
@@ -521,7 +539,7 @@ impl ShellState {
             .get_mut(terminal_id)
             .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
         slot.screen.scroll(lines);
-        slot.frames.send_replace(slot.screen.frame());
+        slot.frames.send_replace(Arc::new(slot.screen.frame()));
         Ok(())
     }
 
@@ -538,7 +556,7 @@ impl ShellState {
         if let Some(slot) = self.screens.lock().await.get_mut(&terminal_id)
             && slot.screen.follow_output()
         {
-            slot.frames.send_replace(slot.screen.frame());
+            slot.frames.send_replace(Arc::new(slot.screen.frame()));
         }
         Ok(())
     }
@@ -603,7 +621,7 @@ impl ShellState {
         let mut screens = self.screens.lock().await;
         if let Some(slot) = screens.get_mut(&terminal_id) {
             slot.screen.resize(usize::from(columns), usize::from(rows));
-            slot.frames.send_replace(slot.screen.frame());
+            slot.frames.send_replace(Arc::new(slot.screen.frame()));
         }
         Ok(())
     }
@@ -639,15 +657,24 @@ impl ShellState {
         let subscriptions = self.terminal_subscriptions.clone();
         let id = subscription_id.clone();
         tauri::async_runtime::spawn(async move {
+            let mut previous = None;
             loop {
-                let frame = receiver.borrow_and_update().clone();
-                if let Err(error) = channel.send(tauri::ipc::Response::new(frame.encode())) {
-                    tracing::debug!(%error, "terminal view detached");
-                    break;
+                let frame = Arc::clone(&receiver.borrow_and_update());
+                if previous.as_deref() != Some(frame.as_ref()) {
+                    let response = tauri::ipc::Response::new(frame.encode(previous.as_deref()));
+                    if let Err(error) = channel.send(response) {
+                        tracing::debug!(%error, "terminal view detached");
+                        break;
+                    }
+                    previous = Some(frame);
                 }
                 tokio::select! {
                     _ = &mut cancelled => break,
                     result = receiver.changed() => if result.is_err() { break },
+                }
+                tokio::select! {
+                    _ = &mut cancelled => break,
+                    _ = tokio::time::sleep(Duration::from_millis(16)) => {}
                 }
             }
             subscriptions.lock().await.remove(&id);

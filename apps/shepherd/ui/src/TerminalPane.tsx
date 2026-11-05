@@ -343,60 +343,67 @@ function TerminalCanvas(props: { terminalId: string }) {
   let mouseButton: number | undefined
   let mousePosition = ''
 
-  function draw() {
-    if (!canvas || !frame) return
+  function draw(changedRows: Iterable<number> | null = null) {
+    const current = frame
+    if (!canvas || !current) return
     const context = canvas.getContext('2d')
     if (!context) return
 
     const ratio = window.devicePixelRatio || 1
-    const width = Math.ceil(frame.columns * cellWidth)
-    const height = frame.rows * LINE_HEIGHT
-    canvas.width = Math.ceil(width * ratio)
-    canvas.height = Math.ceil(height * ratio)
+    const width = Math.ceil(current.columns * cellWidth)
+    const height = current.rows * LINE_HEIGHT
+    const pixelWidth = Math.ceil(width * ratio)
+    const pixelHeight = Math.ceil(height * ratio)
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth
+      canvas.height = pixelHeight
+      changedRows = null
+    }
     canvas.style.width = `${width}px`
     canvas.style.height = `${height}px`
     context.setTransform(ratio, 0, 0, ratio, 0, 0)
-    context.fillStyle = '#131316'
-    context.fillRect(0, 0, width, height)
-    context.font = FONT
     context.textBaseline = 'top'
 
-    const current = frame
-    current.cells.forEach((cell, index) => {
-      if (cell.background === DEFAULT_BACKGROUND) return
-      const x = (index % current.columns) * cellWidth
-      const y = Math.floor(index / current.columns) * LINE_HEIGHT
-      context.fillStyle = hex(cell.background)
-      context.fillRect(x, y, cellWidth, LINE_HEIGHT)
-    })
-    if (match) {
-      const first = (match.start.line + current.displayOffset) * current.columns + match.start.column
-      const last = (match.end.line + current.displayOffset) * current.columns + match.end.column
-      context.fillStyle = 'rgba(217, 176, 106, 0.45)'
-      for (let index = Math.max(0, first); index <= Math.min(last, current.cells.length - 1); index++) {
-        context.fillRect((index % current.columns) * cellWidth, Math.floor(index / current.columns) * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+    const columns = current.columns
+    const highlight = match ? [
+      (match.start.line + current.displayOffset) * columns + match.start.column,
+      (match.end.line + current.displayOffset) * columns + match.end.column,
+    ] : null
+    const selected = selection && selection.start !== selection.end ? selectionRange(current, selection) : null
+    const rows = changedRows ?? Array.from({ length: current.rows }, (_, row) => row)
+    for (const row of rows) {
+      const y = row * LINE_HEIGHT
+      const start = row * columns
+      context.fillStyle = hex(DEFAULT_BACKGROUND)
+      context.fillRect(0, y, width, LINE_HEIGHT)
+      for (let column = 0; column < columns; column++) {
+        const cell = current.cells[start + column]
+        if (cell.background === DEFAULT_BACKGROUND) continue
+        context.fillStyle = hex(cell.background)
+        context.fillRect(column * cellWidth, y, cellWidth, LINE_HEIGHT)
       }
-    }
-    if (selection && selection.start !== selection.end) {
-      const [start, end] = selectionRange(current, selection)
-      context.fillStyle = 'rgba(111, 143, 220, 0.5)'
-      for (let index = start; index <= end; index++) {
-        context.fillRect((index % current.columns) * cellWidth, Math.floor(index / current.columns) * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+      for (const [range, color] of [[highlight, 'rgba(217, 176, 106, 0.45)'], [selected, 'rgba(111, 143, 220, 0.5)']] as const) {
+        if (!range) continue
+        const first = Math.max(0, range[0] - start)
+        const last = Math.min(columns - 1, range[1] - start)
+        if (first > last) continue
+        context.fillStyle = color
+        context.fillRect(first * cellWidth, y, (last - first + 1) * cellWidth, LINE_HEIGHT)
       }
-    }
-    current.cells.forEach((cell, index) => {
-      if (!cell.width || !cell.text || cell.text === ' ') return
-      const x = (index % current.columns) * cellWidth
-      const y = Math.floor(index / current.columns) * LINE_HEIGHT
-      const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
-      if (context.font !== font) context.font = font
-      context.fillStyle = hex(cell.foreground)
-      context.fillText(cell.text, x, y + 1, cell.width * cellWidth)
-      if (cell.linked) context.fillRect(x, y + LINE_HEIGHT - 2, cell.width * cellWidth, 1)
-    })
-    if (current.cursorVisible) {
-      context.fillStyle = 'rgba(230, 230, 234, 0.35)'
-      context.fillRect(current.cursorColumn * cellWidth, current.cursorRow * LINE_HEIGHT, cellWidth, LINE_HEIGHT)
+      for (let column = 0; column < columns; column++) {
+        const cell = current.cells[start + column]
+        if (!cell.width || !cell.text || cell.text === ' ') continue
+        const x = column * cellWidth
+        const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
+        if (context.font !== font) context.font = font
+        context.fillStyle = hex(cell.foreground)
+        context.fillText(cell.text, x, y + 1, cell.width * cellWidth)
+        if (cell.linked) context.fillRect(x, y + LINE_HEIGHT - 2, cell.width * cellWidth, 1)
+      }
+      if (current.cursorVisible && row === current.cursorRow) {
+        context.fillStyle = 'rgba(230, 230, 234, 0.35)'
+        context.fillRect(current.cursorColumn * cellWidth, y, cellWidth, LINE_HEIGHT)
+      }
     }
   }
 
@@ -499,11 +506,12 @@ function TerminalCanvas(props: { terminalId: string }) {
   }
 
   function measure() {
-    const width = container?.clientWidth ?? 640
-    const height = container?.clientHeight ?? 320
+    const padding = container && window.getComputedStyle(container)
+    const width = (container?.clientWidth ?? 640) - (padding ? parseFloat(padding.paddingLeft) + parseFloat(padding.paddingRight) : 0)
+    const height = (container?.clientHeight ?? 320) - (padding ? parseFloat(padding.paddingTop) + parseFloat(padding.paddingBottom) : 0)
     return {
-      columns: Math.max(20, Math.floor(width / cellWidth)),
-      rows: Math.max(5, Math.floor(height / LINE_HEIGHT)),
+      columns: Math.max(2, Math.min(512, Math.floor(width / cellWidth))),
+      rows: Math.max(1, Math.min(256, Math.floor(height / LINE_HEIGHT))),
     }
   }
 
@@ -515,8 +523,11 @@ function TerminalCanvas(props: { terminalId: string }) {
     lastSent = key
     try {
       await bridge.terminalResize(props.terminalId, size.columns, size.rows)
-    } catch {
-      if (lastSent === key) lastSent = '' 
+    } catch (failure) {
+      if (lastSent === key) {
+        lastSent = ''
+        setError(describe(failure))
+      }
     }
   }
 
@@ -657,14 +668,20 @@ function TerminalCanvas(props: { terminalId: string }) {
 
     let detached = false
     let unsubscribe: (() => Promise<void>) | undefined
-    void bridge.subscribeTerminal(props.terminalId, (next) => {
+    void bridge.subscribeTerminal(props.terminalId, (next, changedRows) => {
       if (detached) return
-      if (frame && (frame.displayOffset !== next.displayOffset || frame.columns !== next.columns || frame.rows !== next.rows)) {
+      const previous = frame
+      if (previous && (previous.displayOffset !== next.displayOffset || previous.columns !== next.columns || previous.rows !== next.rows)) {
         selection = undefined
         selecting = undefined
       }
+      const rows = changedRows && new Set(changedRows)
+      if (rows && previous && (previous.cursorRow !== next.cursorRow || previous.cursorColumn !== next.cursorColumn || previous.cursorVisible !== next.cursorVisible)) {
+        if (previous.cursorVisible) rows.add(previous.cursorRow)
+        if (next.cursorVisible) rows.add(next.cursorRow)
+      }
       frame = next
-      draw()
+      draw(rows)
     }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {
       if (detached) void dispose().catch(console.error)
       else unsubscribe = dispose

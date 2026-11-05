@@ -2,8 +2,7 @@
 //!
 //! `libghostty-vt` needs a Zig toolchain that this machine does not have, so the
 //! documented fallback engine is used: `alacritty_terminal` behind the core's
-//! terminal boundary. Frames are the whole visible grid; dirty-row runs are a
-//! later optimisation, not a correctness requirement.
+//! terminal boundary.
 
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +15,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalFrame {
     pub columns: usize,
@@ -42,18 +41,32 @@ pub struct FrameCell {
 }
 
 impl TerminalFrame {
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self, previous: Option<&Self>) -> Vec<u8> {
+        let previous = previous.filter(|frame| {
+            frame.columns == self.columns
+                && frame.rows == self.rows
+                && frame.display_offset == self.display_offset
+        });
+        let full = previous.is_none();
         let mut bytes = Vec::new();
-        bytes.extend([1, u8::from(self.cursor_visible) | 2]);
+        bytes.extend([1, u8::from(self.cursor_visible) | (u8::from(full) << 1)]);
         bytes.extend((self.columns as u16).to_le_bytes());
         bytes.extend((self.rows as u16).to_le_bytes());
         bytes.extend((self.cursor_column as u16).to_le_bytes());
         bytes.extend((self.cursor_row as u16).to_le_bytes());
         bytes.extend((self.display_offset as u32).to_le_bytes());
         bytes.extend(self.modes.to_le_bytes());
-        bytes.extend((self.rows as u16).to_le_bytes());
+        let row_count_offset = bytes.len();
+        bytes.extend([0, 0]);
 
+        let mut row_count = 0u16;
         for (index, row) in self.cells.chunks_exact(self.columns).enumerate() {
+            let start = index * self.columns;
+            if previous.and_then(|frame| frame.cells.get(start..start + self.columns)) == Some(row)
+            {
+                continue;
+            }
+            row_count += 1;
             bytes.extend((index as u16).to_le_bytes());
             let count_offset = bytes.len();
             bytes.extend([0, 0]);
@@ -76,6 +89,7 @@ impl TerminalFrame {
             }
             bytes[count_offset..count_offset + 2].copy_from_slice(&run_count.to_le_bytes());
         }
+        bytes[row_count_offset..row_count_offset + 2].copy_from_slice(&row_count.to_le_bytes());
         bytes
     }
 }
@@ -388,12 +402,40 @@ mod tests {
         let mut frame = screen.frame();
         frame.modes = 1025;
         assert_eq!(
-            frame.encode(),
+            frame.encode(None),
             [
                 1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 1,
                 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
             ],
         );
+    }
+
+    #[test]
+    fn sends_only_rows_changed_since_the_subscriber_frame() {
+        let mut screen = Screen::new(10, 3);
+        let previous = screen.frame();
+        screen.process(b"\r\nX");
+        let current = screen.frame();
+        let delta = current.encode(Some(&previous));
+        assert_eq!(delta.get(1), Some(&1));
+        assert_eq!(delta.get(18..22), Some([1, 0, 1, 0].as_slice()));
+        assert!(delta.len() < current.encode(None).len());
+
+        screen.resize(12, 3);
+        let resized = screen.frame().encode(Some(&current));
+        assert_eq!(resized.get(1), Some(&3));
+        assert_eq!(resized.get(18..20), Some([3, 0].as_slice()));
+    }
+
+    #[test]
+    fn retains_the_tail_of_a_megabyte_of_output() {
+        let mut screen = Screen::new(80, 24);
+        let output = b"1234567890\r\n".repeat(87_382);
+        for chunk in output.chunks(8192) {
+            screen.process(chunk);
+        }
+        screen.process(b"END");
+        assert!(row(&screen.frame(), 23).starts_with("END"));
     }
 
     #[test]

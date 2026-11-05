@@ -393,19 +393,19 @@ task-scoped, persistent and fast enough.
 
 - [ ] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
-  hyperlinks.
-- [ ] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
-- [ ] Build the Terminals tab split tree, resize, focus and presets.
-- [ ] Add the project terminal layout: slots, sizes, order and scope; save it
+  hyperlinks. Kitty keyboard support and reflow verification are outstanding.
+- [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
+- [x] Build the Terminals tab split tree, resize, focus and presets.
+- [x] Add the project terminal layout: slots, sizes, order and scope; save it
   per project.
-- [ ] Implement shared terminals (one PTY across tasks) and task terminals
+- [x] Implement shared terminals (one PTY across tasks) and task terminals
   (swap with the active task; keep running while hidden).
-- [ ] Add **New task terminal**, **New shared terminal**, the instance menu,
+- [x] Add **New task terminal**, **New shared terminal**, the instance menu,
   ended-terminal restart and close/reopen.
-- [ ] Make the inspector tab project-level so shared terminals stay in view
+- [x] Make the inspector tab project-level so shared terminals stay in view
   across task switches.
-- [ ] Add attention dots, terminal focus routing and keyboard passthrough.
-- [ ] Persist terminal metadata and layout; restore ended terminals honestly.
+- [ ] Add attention dots. Pane focus and application keyboard modes are wired.
+- [x] Persist terminal metadata and layout; restore ended terminals honestly.
 - [ ] Measure frame throughput before considering WebGL; keep the 1 MB burst
   budget and dirty-row coalescing.
 

@@ -332,7 +332,7 @@ export function closeTerminal(terminalId: string): Promise<void> {
   return invoke<void>('close_terminal', { terminalId })
 }
 
-function decodeTerminalFrame(buffer: ArrayBuffer): TerminalFrame {
+function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | undefined) {
   const view = new DataView(buffer)
   let offset = 0
   const byte = () => view.getUint8(offset++)
@@ -348,16 +348,24 @@ function decodeTerminalFrame(buffer: ArrayBuffer): TerminalFrame {
   const displayOffset = integer()
   const modes = integer()
   const rowCount = short()
-  if (!(flags & 2) || columns < 2 || columns > 512 || !rows || rows > 256 || rowCount !== rows) {
+  const full = Boolean(flags & 2)
+  if (columns < 2 || columns > 512 || !rows || rows > 256 || rowCount > rows || cursorRow >= rows || cursorColumn >= columns) {
     throw new Error('Invalid terminal frame dimensions')
+  }
+  if (full ? rowCount !== rows : previous?.columns !== columns || previous.rows !== rows || previous.displayOffset !== displayOffset) {
+    throw new Error('Terminal frame is missing its base')
   }
 
   const decoder = new TextDecoder()
-  const cells: FrameCell[] = []
+  const cells = full ? new Array<FrameCell>(columns * rows) : previous!.cells.slice()
+  const changedRows: number[] = []
+  let previousRow = -1
   for (let row = 0; row < rowCount; row++) {
     const rowIndex = short()
     const runCount = short()
-    if (rowIndex !== row) throw new Error('Invalid terminal row order')
+    if (rowIndex <= previousRow || rowIndex >= rows) throw new Error('Invalid terminal row order')
+    changedRows.push(rowIndex)
+    previousRow = rowIndex
     let column = 0
     for (let run = 0; run < runCount; run++) {
       const length = short()
@@ -376,23 +384,27 @@ function decodeTerminalFrame(buffer: ArrayBuffer): TerminalFrame {
         linked: Boolean(attributes & 16),
       }
       offset += textLength
-      for (let index = 0; index < length; index++) cells.push(cell)
+      cells.fill(cell, rowIndex * columns + column, rowIndex * columns + column + length)
       column += length
     }
     if (column !== columns) throw new Error('Incomplete terminal row')
   }
   if (offset !== buffer.byteLength) throw new Error('Invalid terminal frame length')
-  return { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), displayOffset, modes, cells }
+  const frame: TerminalFrame = { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), displayOffset, modes, cells }
+  return { frame, changedRows: full ? null : changedRows }
 }
 
 export async function subscribeTerminal(
   terminalId: string,
-  handler: (frame: TerminalFrame) => void,
+  handler: (frame: TerminalFrame, changedRows: number[] | null) => void,
   onError: (failure: unknown) => void,
 ): Promise<() => Promise<void>> {
+  let previous: TerminalFrame | undefined
   const channel = new Channel<ArrayBuffer>((buffer) => {
     try {
-      handler(decodeTerminalFrame(buffer))
+      const update = decodeTerminalFrame(buffer, previous)
+      previous = update.frame
+      handler(update.frame, update.changedRows)
     } catch (failure) {
       onError(failure)
     }
