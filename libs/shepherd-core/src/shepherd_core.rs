@@ -2810,6 +2810,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_commit_merge_archive_and_reopen_a_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::git::GitMutation;
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![
+                FakeTurn::new(vec![
+                    FakeStep::WriteFile {
+                        path: "README.md".into(),
+                        contents: "first pass\n".into(),
+                    },
+                    FakeStep::WriteFile {
+                        path: "notes.txt".into(),
+                        contents: "review context\n".into(),
+                    },
+                ]),
+                FakeTurn::new(vec![FakeStep::WriteFile {
+                    path: "README.md".into(),
+                    contents: "reviewed result\n".into(),
+                }]),
+            ]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Improve the readme".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let review = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "Edit the readme and leave notes".into(),
+            })
+            .await?,
+        );
+        assert_eq!(review.task.state, TaskState::Review);
+        let path = PathBuf::from(review.task.worktree_path.ok_or("missing worktree")?);
+        let branch = review.task.branch.ok_or("missing task branch")?;
+        let files = core.review_snapshot(&task_id)?.files;
+        assert!(files.iter().any(|file| file.path == "README.md"));
+        assert!(files.iter().any(|file| file.path == "notes.txt"));
+        let diff = core.review_file_diff(&task_id, "README.md")?;
+        assert!(diff.contains("+first pass"));
+        assert!(!diff.contains("review context"));
+
+        let reviewed = workspace_of(
+            core.execute(Command::ReviewTask {
+                task_id: task_id.clone(),
+                action: ReviewAction::SendNote {
+                    text: "Revise the first line".into(),
+                },
+            })
+            .await?,
+        );
+        assert_eq!(reviewed.task.state, TaskState::Review);
+        assert!(summaries(&reviewed).iter().any(|entry| {
+            entry.contains("Revise the first line") && entry.contains("notes.txt")
+        }));
+
+        let staged = core
+            .mutate_git(&task_id, GitMutation::Stage { path: None })
+            .await?;
+        let committed = core
+            .mutate_git(
+                &task_id,
+                GitMutation::Commit {
+                    message: "Apply the review feedback".into(),
+                    expected: staged.staged_revision,
+                },
+            )
+            .await?;
+        assert!(committed.files.is_empty());
+        let tip = crate::git::run_git(&path, &["rev-parse", "HEAD"])?;
+        core.mutate_git(&task_id, GitMutation::SquashMerge).await?;
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md"))?,
+            "reviewed result\n"
+        );
+
+        let archived = workspace_of(
+            core.execute(Command::ReviewTask {
+                task_id: task_id.clone(),
+                action: ReviewAction::Archive,
+            })
+            .await?,
+        );
+        assert_eq!(archived.task.state, TaskState::Done);
+        let mut archived_record = core.task(&task_id)?.clone();
+        archived_record.updated_at =
+            projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        core.store.save_task(&archived_record).await?;
+        drop(core);
+
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert!(!path.exists());
+        assert!(
+            reopened
+                .task_workspace(&task_id)?
+                .task
+                .worktree_path
+                .is_none()
+        );
+        assert_eq!(
+            git_in(&repository, &["rev-parse", &format!("refs/heads/{branch}")]),
+            tip
+        );
+        crate::git::run_git(repository.path(), &["branch", "-D", &branch])?;
+        let restored = workspace_of(
+            reopened
+                .execute(Command::ReviewTask {
+                    task_id,
+                    action: ReviewAction::Reopen,
+                })
+                .await?,
+        );
+        assert_eq!(restored.task.state, TaskState::Review);
+        assert_eq!(crate::git::run_git(&path, &["rev-parse", "HEAD"])?, tip);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn the_walking_skeleton_runs_from_project_to_restart()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;

@@ -344,7 +344,10 @@ squash-merge into the base from inside Shepherd.
 
 ### Proof
 
-Automated, all in temporary repositories:
+Automated, all in temporary repositories. Coverage is in the core and Git
+service tests, including one workflow that reviews two files, sends a note,
+stages, commits, squash-merges, archives, and reopens a collected worktree.
+The fixtures still need to run before closing the proof checklist.
 
 - [ ] edit-then-revert stays `ready`;
 - [ ] a commit, branch change or content change in an already-dirty file enters
