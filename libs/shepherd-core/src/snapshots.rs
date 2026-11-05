@@ -24,6 +24,7 @@ pub struct TaskList {
 pub struct TaskWorkspace {
     pub project: ProjectSnapshot,
     pub task: TaskDetail,
+    pub cancelling: bool,
     pub transcript: Vec<Entry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_review_note: Option<String>,

@@ -294,6 +294,9 @@ an approval, a cancel and a resume inside Shepherd.
   detection report when no usable installation is found.
 - [x] Stream adapter events between commands (a core pump plus a shell tick), so
   a live turn paints without waiting for another invoke.
+- [x] Keep the turn live after the adapter accepts cancellation, until the
+  adapter reports that the turn ended. Publish cancellation progress in the
+  workspace snapshot.
 
 ### Proof
 

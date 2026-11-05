@@ -47,6 +47,7 @@ pub struct HarnessSession {
     session_id: Option<SessionId>,
     transcript: Transcript,
     pending_approval: Option<ApprovalId>,
+    cancelling: bool,
     failed: bool,
     closed: bool,
 }
@@ -59,6 +60,7 @@ impl HarnessSession {
             session_id: None,
             transcript: Transcript::default(),
             pending_approval: None,
+            cancelling: false,
             failed: false,
             closed: false,
         }
@@ -87,11 +89,10 @@ impl HarnessSession {
     }
 
     pub async fn cancel(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {
-        if self.failed {
-            return Ok(Vec::new());
+        if !self.failed && !self.closed && !self.cancelling {
+            self.harness.cancel().await?;
+            self.cancelling = true;
         }
-        self.harness.cancel().await?;
-        self.pending_approval = None;
         Ok(self.pump())
     }
 
@@ -124,6 +125,10 @@ impl HarnessSession {
                     if self.pending_approval.as_ref() == Some(approval_id) {
                         self.pending_approval = None;
                     }
+                }
+                HarnessEvent::TurnFinished { .. } | HarnessEvent::Exited { .. } => {
+                    self.cancelling = false;
+                    self.pending_approval = None;
                 }
                 _ => {}
             }
@@ -182,7 +187,11 @@ impl HarnessSession {
     }
 
     pub fn pending_approval(&self) -> Option<&ApprovalId> {
-        self.pending_approval.as_ref()
+        self.pending_approval.as_ref().filter(|_| !self.cancelling)
+    }
+
+    pub fn is_cancelling(&self) -> bool {
+        self.cancelling
     }
 }
 

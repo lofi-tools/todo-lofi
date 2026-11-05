@@ -699,19 +699,16 @@ impl Core {
                 .ok_or_else(|| CoreError::ProjectNotFound {
                     id: task.project_id.as_str().to_string(),
                 })?;
+        let session = self.sessions.get(task_id);
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
+            cancelling: session.is_some_and(HarnessSession::is_cancelling),
             queued_review_note: self.review_notes.get(task_id).map(|note| note.text.clone()),
-            transcript: self
-                .sessions
-                .get(task_id)
+            transcript: session
                 .map(|session| session.transcript().entries().to_vec())
                 .unwrap_or_default(),
-            diagnostics: self
-                .sessions
-                .get(task_id)
-                .map(|session| session.diagnostics()),
+            diagnostics: session.map(HarnessSession::diagnostics),
         })
     }
 
@@ -1063,21 +1060,20 @@ impl Core {
     /// the user can send a new prompt without paying for a fresh worktree.
     async fn cancel_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
         let state = self.task(task_id)?.state;
-        if !state.is_live() && state != TaskState::Review {
+        if state == TaskState::Review {
+            return self.publish_task(task_id).map(CommandResult::TaskWorkspace);
+        }
+        if !state.is_live() {
             return Err(CoreError::TaskNotCancellable {
                 id: task_id.as_str().to_string(),
                 state: state.as_str(),
             });
         }
 
-        let events = match self.sessions.get_mut(task_id) {
-            Some(session) => session.cancel().await?,
-            None => Vec::new(),
-        };
-        self.apply_events(task_id, &events)?;
-
-        let state = self.task(task_id)?.state;
-        if state.is_live() {
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            let events = session.cancel().await?;
+            self.apply_events(task_id, &events)?;
+        } else {
             self.set_task_state(task_id, TaskState::Ready)?;
         }
         self.save_task(task_id).await?;
@@ -1320,7 +1316,8 @@ impl Core {
                     }
                 },
                 HarnessEvent::Exited { code, stderr } => {
-                    if *code != Some(0) {
+                    let turn_in_progress = next_state.map_or(started_live, TaskState::is_live);
+                    if *code != Some(0) || turn_in_progress {
                         // Only a turn that was still running when the process
                         // died is a mid-turn exit; quitting is a separate path.
                         if started_live {
@@ -2121,6 +2118,57 @@ mod streaming {
                 .any(|event| matches!(event, Event::TaskWorkspaceChanged(_))),
             "the pump must publish the changed workspace"
         );
+
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            text: "Cancel this turn".to_owned(),
+        })
+        .await?;
+        let CommandResult::TaskWorkspace(cancelling) = core
+            .execute(Command::CancelTask {
+                task_id: task_id.clone(),
+            })
+            .await?
+        else {
+            return Err("expected a task workspace".into());
+        };
+        assert!(cancelling.cancelling);
+        assert_eq!(cancelling.task.state, TaskState::Working);
+        assert!(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "Too soon".to_owned(),
+            })
+            .await
+            .is_err()
+        );
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Cancelled,
+        })?;
+        assert!(core.pump().await?);
+        let finished = core.task_workspace(&task_id)?;
+        assert!(!finished.cancelling);
+        assert_eq!(finished.task.state, TaskState::Ready);
+        assert_eq!(finished.task.worktree_path, cancelling.task.worktree_path);
+
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            text: "Cancel before the process exits".to_owned(),
+        })
+        .await?;
+        core.execute(Command::CancelTask {
+            task_id: task_id.clone(),
+        })
+        .await?;
+        sender.send(HarnessEvent::Exited {
+            code: Some(0),
+            stderr: String::new(),
+        })?;
+        assert!(core.pump().await?);
+        let exited = core.task_workspace(&task_id)?;
+        assert!(!exited.cancelling);
+        assert_eq!(exited.task.state, TaskState::Failed);
         Ok(())
     }
 }
