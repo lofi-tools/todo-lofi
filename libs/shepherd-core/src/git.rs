@@ -816,6 +816,57 @@ mod tests {
         Ok(())
     }
 
+    fn task_worktree(fixture: &TestRepository) -> Result<PathBuf, GitError> {
+        let repository = fixture.repository();
+        let path = repository.git_dir.join("shepherd/worktrees/example");
+        GitService.create_worktree(repository, &path, "shepherd/example", "main")?;
+        Ok(path)
+    }
+
+    #[test]
+    fn squash_merge_commits_to_the_base_and_keeps_the_task_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let task = task_worktree(&fixture)?;
+        let original = run_git(fixture.path(), &["rev-parse", "HEAD"])?;
+        std::fs::write(task.join("README.md"), "task content\n")?;
+        GitService.stage(&task, None)?;
+        GitService.commit(
+            &task,
+            "Task commit",
+            &GitService.snapshot(&task)?.staged_revision,
+        )?;
+        let tip = run_git(&task, &["rev-parse", "HEAD"])?;
+
+        GitService.squash_merge(
+            fixture.path(),
+            &task,
+            "main",
+            "shepherd/example",
+            "Task result",
+        )?;
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("README.md"))?,
+            "task content\n"
+        );
+        assert_eq!(
+            run_git(fixture.path(), &["log", "-1", "--format=%P"])?,
+            original
+        );
+        assert_eq!(
+            run_git(fixture.path(), &["log", "-1", "--format=%s"])?,
+            "Task result"
+        );
+        assert_eq!(
+            run_git(
+                fixture.path(),
+                &["rev-parse", "refs/heads/shepherd/example"]
+            )?,
+            tip
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
