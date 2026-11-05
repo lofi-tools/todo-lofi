@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -139,7 +140,7 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
     let stderr_state = Arc::new(Mutex::new(VecDeque::new()));
     let stderr_task = spawn_stderr_reader(stderr, Arc::clone(&stderr_state), None);
 
-    let request = json!({ "method": "initialize", "id": 1, "params": initialize_params() });
+    let request = json!({ "method": "initialize", "id": 1, "params": initialize_params(false) });
     let mut line = serde_json::to_string(&request)
         .map_err(|error| HarnessError::Protocol(error.to_string()))?;
     line.push('\n');
@@ -219,14 +220,14 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
     }
 }
 
-fn initialize_params() -> Value {
+fn initialize_params(experimental_api: bool) -> Value {
     json!({
         "clientInfo": {
             "name": "shepherd",
             "title": "Shepherd",
             "version": env!("CARGO_PKG_VERSION"),
         },
-        "capabilities": {},
+        "capabilities": if experimental_api { json!({"experimentalApi": true}) } else { json!({}) },
     })
 }
 
@@ -479,6 +480,88 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+pub struct CodexProject {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectPage {
+    data: Vec<Project>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Project {
+    name: String,
+    roots: Vec<ProjectRoot>,
+}
+
+#[derive(Deserialize)]
+struct ProjectRoot {
+    path: PathBuf,
+}
+
+pub async fn desktop_projects() -> HarnessResult<Vec<CodexProject>> {
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+    let mut candidates = codex_candidates(None, &path_env, &[PathBuf::from("/Applications")]);
+    // A CLI on PATH may predate project/list while the installed desktop build supports it.
+    candidates.sort_by_key(|(_, kind)| *kind != CodexInstallKind::AppBundle);
+    let (program, _) = candidates
+        .into_iter()
+        .find(|(path, _)| path.is_file() && is_executable(path))
+        .ok_or_else(|| HarnessError::MissingProgram {
+            program: "codex".into(),
+        })?;
+    list_projects(SpawnSpec {
+        program: program.to_string_lossy().into_owned(),
+        args: vec!["app-server".into()],
+        cwd: std::env::temp_dir(),
+        ..SpawnSpec::default()
+    })
+    .await
+}
+
+async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
+    let mut harness = CodexHarness::new();
+    let result = async {
+        harness.connect(spec, true).await?;
+        let mut projects = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        loop {
+            let response = harness
+                .request("project/list", json!({ "cursor": cursor, "limit": 100 }))
+                .await?;
+            let page: ProjectPage = serde_json::from_value(response).map_err(|error| {
+                HarnessError::Protocol(format!("invalid Codex project list: {error}"))
+            })?;
+            projects.extend(page.data.into_iter().filter_map(|project| {
+                let root = project.roots.into_iter().next()?;
+                Some(CodexProject {
+                    name: project.name,
+                    path: root.path,
+                })
+            }));
+            let Some(next) = page.next_cursor else {
+                return Ok(projects);
+            };
+            if !seen_cursors.insert(next.clone()) {
+                return Err(HarnessError::Protocol(
+                    "Codex repeated a project list cursor".into(),
+                ));
+            }
+            cursor = Some(next);
+        }
+    }
+    .await;
+    let shutdown = harness.shutdown().await;
+    let projects = result?;
+    shutdown?;
+    Ok(projects)
+}
+
 #[derive(Default)]
 struct Pending {
     responses: HashMap<i64, oneshot::Sender<Result<Value, String>>>,
@@ -609,29 +692,12 @@ impl CodexHarness {
             Ok(Ok(Ok(value))) => Ok(value),
         }
     }
-}
 
-impl Default for CodexHarness {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl AgentHarness for CodexHarness {
-    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
-        &mut self.receiver
-    }
-
-    fn diagnostics(&self) -> AgentDiagnostics {
-        AgentDiagnostics {
-            command: self.command.clone(),
-            protocol: self.protocol.clone(),
-            stderr_tail: stderr_tail(&self.stderr),
-        }
-    }
-
-    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+    async fn connect(
+        &mut self,
+        spec: SpawnSpec,
+        experimental_api: bool,
+    ) -> HarnessResult<Capabilities> {
         if self.started {
             return Err(HarnessError::Protocol(
                 "the codex session is already started".to_string(),
@@ -705,7 +771,9 @@ impl AgentHarness for CodexHarness {
         self.outgoing = Some(outgoing);
         self.started = true;
 
-        let result = self.request("initialize", initialize_params()).await?;
+        let result = self
+            .request("initialize", initialize_params(experimental_api))
+            .await?;
         if let Some(advertised) = advertised_methods(&result) {
             self.supported = SUPPORTED_METHODS
                 .iter()
@@ -725,6 +793,31 @@ impl AgentHarness for CodexHarness {
             .map_err(|_| HarnessError::ChannelClosed)?;
 
         Ok(self.capabilities())
+    }
+}
+
+impl Default for CodexHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl AgentHarness for CodexHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.receiver
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        AgentDiagnostics {
+            command: self.command.clone(),
+            protocol: self.protocol.clone(),
+            stderr_tail: stderr_tail(&self.stderr),
+        }
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        self.connect(spec, false).await
     }
 
     async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
@@ -2142,6 +2235,46 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn lists_primary_folders_across_codex_project_pages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-projects",
+            r#"#!/usr/bin/env bash
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*'"experimentalApi":true'*)
+      printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"initialized"'*)
+      initialized=1 ;;
+    *'"method":"project/list"'*'"cursor":null'*)
+      [ "${initialized:-0}" = 1 ] || exit 1
+      printf '{"id":%s,"result":{"data":[{"name":"App","roots":[{"path":"/tmp/app"},{"path":"/tmp/related"}]},{"name":"No folder","roots":[]}],"nextCursor":"page-2"}}\n' "$id" ;;
+    *'"method":"project/list"'*'"cursor":"page-2"'*)
+      printf '{"id":%s,"result":{"data":[{"name":"Docs","roots":[{"path":"/tmp/docs"}]}],"nextCursor":null}}\n' "$id" ;;
+    *) exit 1 ;;
+  esac
+done
+"#,
+        );
+        let projects = list_projects(spec(&stub, directory.path())).await?;
+        let folders: Vec<_> = projects
+            .iter()
+            .map(|project| (project.name.as_str(), project.path.as_path()))
+            .collect();
+        assert_eq!(
+            folders,
+            [
+                ("App", Path::new("/tmp/app")),
+                ("Docs", Path::new("/tmp/docs"))
+            ]
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -9,7 +9,7 @@
 //! short pump tick ([`ShellState::start_event_pump`]) and broadcast the same way,
 //! so a streaming turn paints without waiting for the next invoke.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,12 @@ use crate::terminal_screen::{Screen, SearchDirection, SearchMatch, SearchPoint, 
 pub struct BridgeError {
     code: &'static str,
     message: String,
+}
+
+#[derive(Serialize)]
+pub struct LocalCodexProject {
+    name: String,
+    path: String,
 }
 
 impl BridgeError {
@@ -890,6 +896,49 @@ pub mod commands {
         rescan: bool,
     ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
         state.inner().project_scan(rescan).await
+    }
+
+    #[tauri::command]
+    pub async fn local_codex_projects() -> Result<Vec<LocalCodexProject>, BridgeError> {
+        let projects = agent_harness::codex::desktop_projects()
+            .await
+            .map_err(|error| {
+                BridgeError::new(
+                    "project_import",
+                    format!("Could not read projects from the ChatGPT app: {error}"),
+                )
+            })?;
+        let mut paths = BTreeSet::new();
+        let mut folders = Vec::new();
+        for project in projects {
+            if !project.path.is_absolute() {
+                continue;
+            }
+            let path = match tokio::fs::canonicalize(&project.path).await {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::debug!(%error, "could not resolve a Codex project folder");
+                    continue;
+                }
+            };
+            match tokio::fs::metadata(&path).await {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::debug!(%error, "could not inspect a Codex project folder");
+                    continue;
+                }
+            }
+            if let Ok(path) = path.into_os_string().into_string()
+                && paths.insert(path.clone())
+            {
+                folders.push(LocalCodexProject {
+                    name: project.name,
+                    path,
+                });
+            }
+        }
+        Ok(folders)
     }
 
     #[tauri::command]

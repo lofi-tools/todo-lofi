@@ -6,6 +6,13 @@ Specs: [goal.md](./spec/goal.md), [master-spec.md](./spec/master-spec.md),
 [stack.md](./spec/stack.md). This file is the working order; the specs remain the
 source of truth for behaviour and technology.
 
+## Next feature
+
+- [x] Import local Codex projects from the ChatGPT desktop app. Offer each
+  project's primary folder in the project picker and let users import one or all
+  available folders. A protocol fixture covers pagination, and the browser smoke
+  covers individual import, bulk import and already registered folders.
+
 ## The ordering rule
 
 This plan is ordered for **evidence**, not for architecture layers.

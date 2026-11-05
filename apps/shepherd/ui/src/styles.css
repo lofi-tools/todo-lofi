@@ -209,6 +209,13 @@ textarea {
   font-size: 11px;
 }
 
+.picker__path {
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .picker__hint {
   padding: 8px 12px;
   border-top: 1px solid var(--border);

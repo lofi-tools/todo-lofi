@@ -207,6 +207,13 @@ test.beforeEach(async ({ page }) => {
             return { projects: [...projects] }
           case 'project_scan':
             return scan
+          case 'local_codex_projects':
+            return [
+              { name: 'Already registered', path: '/tmp/demo' },
+              { name: 'Desktop notes', path: '/tmp/outside-scan/notes' },
+              { name: 'Desktop service', path: '/tmp/outside-scan/service' },
+              { name: 'Desktop website', path: '/tmp/outside-scan/website' },
+            ]
           case 'add_project': {
             const name = args.path.split('/').filter(Boolean).pop() ?? 'project'
             if (!projects.some((candidate) => candidate.path === args.path)) {
@@ -388,6 +395,35 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   await page.getByRole('treeitem', { name: /alpha/ }).click()
   await expect(picker).toHaveCount(0)
   await expect(page.getByRole('button', { name: /alpha/ })).toBeVisible()
+})
+
+test('imports one or all new local Codex project folders from the ChatGPT app', async ({ page }) => {
+  await page.goto('/')
+  const picker = page.getByRole('dialog', { name: 'Add project' })
+  async function openDesktopProjects() {
+    await page.getByRole('button', { name: 'Add project' }).click()
+    await picker.getByRole('button', { name: 'From ChatGPT app' }).click()
+  }
+
+  await openDesktopProjects()
+  await expect(picker.getByRole('treeitem')).toHaveCount(3)
+  const filter = picker.getByRole('combobox', { name: 'Filter ChatGPT projects' })
+  await filter.fill('desktop notes')
+  await expect(picker.getByRole('treeitem')).toHaveCount(1)
+  await filter.press('Enter')
+  await expect(picker).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^notes/ })).toBeVisible()
+
+  await openDesktopProjects()
+  await expect(picker.getByRole('treeitem')).toHaveCount(2)
+  await picker.getByRole('button', { name: 'Import all' }).click()
+  await expect(page.getByRole('button', { name: /^service/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^website/ })).toBeVisible()
+
+  await openDesktopProjects()
+  await expect(picker.getByText('No new local folders to import.')).toBeVisible()
+  await picker.getByRole('button', { name: 'Browse repositories' }).click()
+  await expect(picker.getByRole('treeitem', { name: /alpha/ })).toBeVisible()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

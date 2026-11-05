@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
@@ -42,6 +42,15 @@ export function App() {
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
   const [scanning, setScanning] = createSignal(false)
   const [scanError, setScanError] = createSignal<string | null>(null)
+  const [fromChatGpt, setFromChatGpt] = createSignal(false)
+  const [desktopProjects, setDesktopProjects] = createSignal<bridge.LocalCodexProject[]>([])
+  const [loadingDesktopProjects, setLoadingDesktopProjects] = createSignal(false)
+  const [desktopProjectsError, setDesktopProjectsError] = createSignal<string | null>(null)
+  const importableProjects = createMemo(() => {
+    if (!fromChatGpt()) return undefined
+    const registered = new Set(projects().map((project) => project.path))
+    return desktopProjects().filter((project) => !registered.has(project.path))
+  })
   const [error, setError] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
@@ -151,8 +160,28 @@ export function App() {
   }
 
   function openPicker() {
+    setFromChatGpt(false)
     setPickerOpen(true)
     if (!scan() && !scanning()) void scanProjects(false)
+  }
+
+  async function loadDesktopProjects() {
+    if (loadingDesktopProjects()) return
+    setLoadingDesktopProjects(true)
+    setDesktopProjectsError(null)
+    setDesktopProjects([])
+    try {
+      setDesktopProjects(await bridge.localCodexProjects())
+    } catch (failure) {
+      setDesktopProjectsError(describe(failure))
+    } finally {
+      setLoadingDesktopProjects(false)
+    }
+  }
+
+  function switchPickerSource() {
+    setFromChatGpt(!fromChatGpt())
+    if (fromChatGpt()) void loadDesktopProjects()
   }
 
   onMount(() => {
@@ -172,14 +201,22 @@ export function App() {
     })
   })
 
-  function addProject(path: string) {
+  function addProjects(paths: string[]) {
     setPickerOpen(false)
     void run(async () => {
-      const list = await bridge.addProject(path)
-      setProjects(list.projects)
-      const added = list.projects.find((project) => project.path === path)
-      const target = added ?? list.projects[list.projects.length - 1]
+      let target: bridge.ProjectSnapshot | undefined
+      const errors: string[] = []
+      for (const path of paths) {
+        try {
+          const list = await bridge.addProject(path)
+          setProjects(list.projects)
+          target ??= list.projects.find((project) => project.path === path) ?? list.projects.at(-1)
+        } catch (failure) {
+          errors.push(describe(failure))
+        }
+      }
       if (target) await selectProject(target)
+      if (errors.length) setError(errors.join(' · '))
     })
   }
 
@@ -509,11 +546,13 @@ export function App() {
       <Show when={pickerOpen()}>
         <ProjectPicker
           scan={scan()}
-          loading={scanning()}
-          error={scanError()}
-          onRescan={() => void scanProjects(true)}
+          desktopProjects={importableProjects()}
+          loading={fromChatGpt() ? loadingDesktopProjects() : scanning()}
+          error={fromChatGpt() ? desktopProjectsError() : scanError()}
+          onSwitchSource={switchPickerSource}
+          onRescan={() => void (fromChatGpt() ? loadDesktopProjects() : scanProjects(true))}
           onCancel={() => setPickerOpen(false)}
-          onSelect={addProject}
+          onSelect={addProjects}
         />
       </Show>
 

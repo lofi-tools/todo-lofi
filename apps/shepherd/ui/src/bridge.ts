@@ -54,6 +54,11 @@ export interface ProjectScan {
   tree: ProjectNode[]
 }
 
+export interface LocalCodexProject {
+  name: string
+  path: string
+}
+
 export interface TaskSummary {
   id: string
   projectId: string
@@ -256,6 +261,10 @@ export function projectList(): Promise<ProjectList> {
 
 export function scanProjects(rescan: boolean): Promise<ProjectScan> {
   return invoke<ProjectScan>('project_scan', { rescan })
+}
+
+export function localCodexProjects(): Promise<LocalCodexProject[]> {
+  return invoke('local_codex_projects')
 }
 
 export function taskList(projectId: string): Promise<TaskList> {

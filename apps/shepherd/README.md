@@ -39,6 +39,16 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh
 The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
+## Import projects from the ChatGPT app
+
+Choose **Add project → From ChatGPT app**. Select a project to add its primary
+folder, or choose **Import all** to add all available folders. Shepherd skips
+folders that are missing or already registered. Imported projects use the
+folder name in Shepherd, and agent tasks still require a Git repository.
+
+The import uses the installed Codex app server's local project list. It works
+with a Codex installation that supports `project/list`.
+
 ## Bridge
 
 Every core command has one `#[tauri::command]`, and the window receives core
