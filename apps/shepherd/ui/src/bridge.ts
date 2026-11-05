@@ -160,6 +160,7 @@ export interface AgentDiagnostics {
 }
 
 export interface TaskWorkspace {
+  cancelling: boolean
   queuedReviewNote?: string
   project: ProjectSnapshot
   task: TaskDetail

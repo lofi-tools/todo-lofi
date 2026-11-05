@@ -14,6 +14,8 @@ test.beforeEach(async ({ context }) => {
     let nextCallbackId = 1
     let nextTask = 2
     let desktopProjectReads = 0
+    let eventChannel
+    let eventIndex = 0
     const options = new URLSearchParams(window.location.search)
 
     const project = {
@@ -192,6 +194,7 @@ test.beforeEach(async ({ context }) => {
       return {
         project: projects.find((candidate) => candidate.id === task.projectId),
         task: detail(task),
+        cancelling: false,
         transcript: transcripts[taskId] ?? [],
         diagnostics: task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
       }
@@ -218,6 +221,9 @@ test.beforeEach(async ({ context }) => {
       },
       invoke: async (command, args) => {
         switch (command) {
+          case 'subscribe':
+            eventChannel = args.channel.id
+            return null
           case 'plugin:path|resolve_directory':
             return '/tmp/home/'
           case 'project_list':
@@ -263,6 +269,18 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'cancel_task': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task || task.state !== 'waiting') throw new Error('No active turn to cancel')
+            window.addEventListener('test-cancel-finished', () => {
+              task.state = 'ready'
+              callbacks.get(eventChannel)?.({
+                index: eventIndex++,
+                message: { type: 'taskWorkspaceChanged', data: workspace(task.id) },
+              })
+            }, { once: true })
+            return { ...workspace(task.id), cancelling: true }
+          }
           case 'resume_task': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task || task.state !== 'interrupted') throw new Error('Task cannot be resumed')
@@ -404,6 +422,26 @@ test('resumes an interrupted task from its conversation header', async ({ page }
   await expect(chat.getByText('resumed the previous agent session')).toBeVisible()
   await expect(chat.getByLabel('Prompt')).toBeEnabled()
   await expect(resume).toHaveCount(0)
+})
+
+test('cancels an active turn and waits for the settled workspace', async ({ page }) => {
+  await page.goto('/')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const prompt = chat.getByLabel('Prompt')
+  for (const shortcut of [false, true]) {
+    await prompt.fill('wait for a decision')
+    await chat.getByRole('button', { name: 'Send' }).click()
+    const cancel = chat.getByRole('button', { name: 'Cancel turn' })
+    await expect(cancel).toBeEnabled()
+    if (shortcut) await page.keyboard.press('ControlOrMeta+.')
+    else await cancel.click()
+    await expect(chat.getByRole('button', { name: 'Cancelling…' })).toBeDisabled()
+    await expect(chat.locator('.chat__state')).toHaveText('waiting')
+    await expect(prompt).toBeDisabled()
+    await page.evaluate(() => window.dispatchEvent(new Event('test-cancel-finished')))
+    await expect(chat.locator('.chat__state')).toHaveText('ready')
+    await expect(prompt).toBeEnabled()
+  }
 })
 
 test('shows an approval with its tool, arguments and diff', async ({ page }) => {

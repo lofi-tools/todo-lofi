@@ -111,6 +111,7 @@ export function App() {
   const [importNote, setImportNote] = createSignal<string | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
+  const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
@@ -149,6 +150,15 @@ export function App() {
     return state === 'draft' || state === 'ready' || canStartTask()
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
+  const canCancel = () => {
+    const task = workspace()?.task
+    return !!task && LIVE_STATES.includes(task.state)
+  }
+  const cancellingTurn = () => {
+    const current = workspace()
+    return !!current && (current.cancelling || cancelRequestTaskId() === current.task.id)
+  }
+  const mac = navigator.platform.startsWith('Mac')
 
   async function run(action: () => Promise<void>) {
     setPending(true)
@@ -279,6 +289,7 @@ export function App() {
   onMount(() => {
     let disposed = false
     let detach: (() => void) | undefined
+    window.addEventListener('keydown', onCancelShortcut, true)
     void getCurrentWindow().onCloseRequested((event) => {
       if (allowClose) return
       event.preventDefault()
@@ -290,6 +301,7 @@ export function App() {
     onCleanup(() => {
       disposed = true
       detach?.()
+      window.removeEventListener('keydown', onCancelShortcut, true)
     })
   })
 
@@ -404,12 +416,37 @@ export function App() {
 
   function decide(approvalId: string, decision: bridge.Decision) {
     const current = workspace()
-    if (!current) return
+    if (!current || cancellingTurn()) return
     void run(async () => {
       setWorkspace(await bridge.resolveApproval(current.task.id, approvalId, decision))
       const projectId = selectedProjectId()
       if (projectId) await loadTasks(projectId)
     })
+  }
+
+  function cancelTurn() {
+    const current = workspace()
+    if (!current || !canCancel() || current.cancelling || cancelRequestTaskId()) return
+    setError(null)
+    setCancelRequestTaskId(current.task.id)
+    void bridge.cancelTask(current.task.id).then((updated) => {
+      // A newer snapshot from the event channel may already show the turn ended.
+      setWorkspace((previous) => previous === current ? updated : previous)
+    }).catch((failure) => {
+      setError(describe(failure))
+    }).finally(() => {
+      setCancelRequestTaskId(undefined)
+    })
+  }
+
+  function onCancelShortcut(event: KeyboardEvent) {
+    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    if (event.defaultPrevented || event.isComposing || event.key !== '.'
+      || event.altKey || event.shiftKey || !modifier
+      || settingsOpen() || freebuffProjectId() || pickerOpen() || quitRequired()
+      || !canCancel()) return
+    event.preventDefault()
+    if (!event.repeat) cancelTurn()
   }
 
   function resumeTask() {
@@ -588,6 +625,13 @@ export function App() {
               <header class="pane-header">
                 <span class="chat__title">{current().task.title}</span>
                 <span class="chat__state">{current().task.state}</span>
+                <Show when={canCancel()}>
+                  <button type="button" class="project-action" onClick={cancelTurn}
+                    aria-keyshortcuts={mac ? 'Meta+.' : 'Control+.'}
+                    disabled={cancellingTurn() || !!cancelRequestTaskId()}>
+                    {cancellingTurn() ? 'Cancelling…' : 'Cancel turn'}
+                  </button>
+                </Show>
                 <Show when={current().task.state === 'interrupted'}>
                   <button type="button" class="project-action" onClick={resumeTask} disabled={pending()}>
                     Resume
@@ -680,7 +724,7 @@ export function App() {
                 >
                   <ol class="transcript">
                     <For each={current().transcript}>
-                      {(entry) => <li class="entry">{entryBody(entry, decide)}</li>}
+                      {(entry) => <li class="entry">{entryBody(entry, decide, cancellingTurn)}</li>}
                     </For>
                   </ol>
                 </Show>
@@ -1203,6 +1247,7 @@ function DiffBlock(props: { patch: bridge.FileDiff }) {
 function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
+  cancelling: () => boolean,
 ) {
   const kind = entry.kind
   const failureLabels: Record<string, string> = {
@@ -1268,10 +1313,10 @@ function entryBody(
             fallback={<span class="entry__permission-decision">{permission.decision}</span>}
           >
             <div class="entry__actions">
-              <button type="button" onClick={() => decide(permission.approvalId, 'allow')}>
+              <button type="button" disabled={cancelling()} onClick={() => decide(permission.approvalId, 'allow')}>
                 Allow
               </button>
-              <button type="button" onClick={() => decide(permission.approvalId, 'deny')}>
+              <button type="button" disabled={cancelling()} onClick={() => decide(permission.approvalId, 'deny')}>
                 Deny
               </button>
             </div>

@@ -297,6 +297,9 @@ an approval, a cancel and a resume inside Shepherd.
 - [x] Keep the turn live after the adapter accepts cancellation, until the
   adapter reports that the turn ended. Publish cancellation progress in the
   workspace snapshot.
+- [x] Expose **Cancel turn** in the conversation header and through its
+  keyboard shortcut. The browser smoke verifies the transition through
+  **Cancelling…** and the composer re-enabling after the turn ends.
 
 ### Proof
 

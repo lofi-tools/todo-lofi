@@ -108,8 +108,12 @@ current layout and give future changes a point of comparison.
   close it. Other unavailable agents are disabled until their integrations
   are ready.
 
-## Interrupted conversations
+## Conversation lifecycle
 
+- Show **Cancel turn** in the conversation header during an active turn. The
+  shortcut is Command+. on macOS and Ctrl+. on Linux. Show **Cancelling…**
+  until the adapter settles the turn, and pause approval actions during that
+  interval.
 - Show **Resume** beside the state in the conversation header when the task is
   interrupted. Enable the composer when the core reports the task is ready.
 
