@@ -548,6 +548,8 @@ task-scoped, persistent and fast enough.
   Restart returns keyboard focus to the terminal. The native smoke types
   directly into both restarted PTYs. A missing terminal record restores as a
   removable placeholder alongside the other panes in the saved split.
+  An unreadable layout falls back to the default for that project and leaves
+  other projects available. The startup warning identifies the affected layout.
 - [x] Measure parser and encoder throughput on a 1 MiB output burst.
 - [x] Measure delivery and paint latency for a 1 MiB burst in the desktop
   webview before considering WebGL.

@@ -362,20 +362,23 @@ impl Store for TursoStore {
             .column_types([Type::String, Type::String])
             .exec(&mut *db)
             .await?;
-        rows.into_iter()
-            .map(|row| {
-                let Value::Record(fields) = row else {
-                    return Err(StoreError::InvalidRow(
-                        "expected a terminal layout record".into(),
-                    ));
-                };
-                let project = ProjectId::new(required_string(fields.first())?);
-                let json = required_string(fields.get(1))?;
-                let layout = serde_json::from_str(&json)
-                    .map_err(|error| StoreError::InvalidRow(error.to_string()))?;
-                Ok((project, layout))
-            })
-            .collect()
+        let mut layouts = Vec::new();
+        for row in rows {
+            let Value::Record(fields) = row else {
+                return Err(StoreError::InvalidRow(
+                    "expected a terminal layout record".into(),
+                ));
+            };
+            let project = ProjectId::new(required_string(fields.first())?);
+            let json = required_string(fields.get(1))?;
+            match serde_json::from_str(&json) {
+                Ok(layout) => layouts.push((project, layout)),
+                Err(error) => {
+                    tracing::warn!(%project, %error, "ignored unreadable terminal layout")
+                }
+            }
+        }
+        Ok(layouts)
     }
 
     async fn save_terminal_layout(
@@ -852,6 +855,46 @@ mod tests {
         assert_eq!(tasks[0].tier, AgentTier::Native);
         assert_eq!(tasks[0].proposed_branch, task.proposed_branch);
         assert!(tasks[0].worktree_path.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unreadable_terminal_layouts_do_not_block_valid_projects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::harness::UnavailableHarnessFactory;
+        use crate::terminal::InspectorTab;
+
+        let directory = TestDirectory::new()?;
+        let database = directory.join("shepherd.db");
+        let unreadable = Project::new(directory.join("unreadable"));
+        let valid = Project::new(directory.join("valid"));
+        let saved = TerminalLayout {
+            inspector_tab: InspectorTab::Review,
+            ..TerminalLayout::default()
+        };
+        {
+            let store = TursoStore::open_at(&database).await?;
+            store.save_project(&unreadable).await?;
+            store.save_project(&valid).await?;
+            store.save_terminal_layout(&valid.id, &saved).await?;
+            let mut db = store.db.lock().await;
+            toasty::sql::statement(
+                "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) VALUES (?1, ?2, 0)",
+            )
+            .bind(unreadable.id.as_str())
+            .bind("{")
+            .exec(&mut *db)
+            .await?;
+        }
+
+        let store = TursoStore::open_at(&database).await?;
+        let core = crate::Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.project_list().projects.len(), 2);
+        assert_eq!(
+            core.terminal_layout(&unreadable.id)?,
+            TerminalLayout::default()
+        );
+        assert_eq!(core.terminal_layout(&valid.id)?, saved);
         Ok(())
     }
 
