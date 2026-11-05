@@ -731,6 +731,24 @@ mod tests {
     }
 
     #[test]
+    fn baseline_detects_branch_switch_and_commit_without_file_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let path = fixture.path();
+        let before_switch = GitService.turn_baseline(path)?;
+        run_git(path, &["switch", "-c", "another-branch"])?;
+        let before_commit = GitService.turn_baseline(path)?;
+        assert!(before_switch != before_commit);
+        run_git(
+            path,
+            &["commit", "--allow-empty", "-m", "Record a decision"],
+        )?;
+        assert!(before_commit != GitService.turn_baseline(path)?);
+        assert!(!GitService.has_changes(path)?);
+        Ok(())
+    }
+
+    #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");

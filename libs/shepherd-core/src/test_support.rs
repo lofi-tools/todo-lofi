@@ -57,6 +57,11 @@ impl TestRepository {
             &["config", "user.email", "shepherd@example.com"],
         )?;
         std::fs::write(directory.join("README.md"), "initial\n")?;
+        run_git(directory.path(), &["config", "commit.gpgsign", "false"])?;
+        run_git(
+            directory.path(),
+            &["config", "core.hooksPath", ".git/hooks"],
+        )?;
         run_git(directory.path(), &["add", "README.md"])?;
         run_git(directory.path(), &["commit", "-m", "initial"])?;
         let repository = GitService::discover(directory.path())?;
