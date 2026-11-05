@@ -368,7 +368,9 @@ review and merge gate is tracked separately.
 - [x] Worktree creation appears in `git worktree list` and uses the default
   branch even when the root is on another branch. Both behaviours pass in
   temporary Git repositories.
-- [ ] stage, unstage, commit with hooks and signing disabled;
+- [x] Stage, unstage and commit in a temporary repository. Signing is disabled
+  and hooks are isolated to the fixture. The workflow covers a normal commit
+  and the Git test checks a fixture hook and rejection of a stale staging revision.
 - [ ] failing hook preserves the commit message;
 - [ ] squash-merge from a clean root;
 - [ ] dirty root and off-base root refuse with a reason;
