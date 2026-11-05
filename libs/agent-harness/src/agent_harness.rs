@@ -348,6 +348,11 @@ pub struct Entry {
     /// Stable per-session order.
     pub sequence: u64,
     pub kind: EntryKind,
+    /// The adapter item this row came from, when it has one. Persisted with the
+    /// row so a restored transcript re-attaches later updates to it instead of
+    /// appending a duplicate.
+    #[serde(default)]
+    pub source_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -473,6 +478,48 @@ impl Transcript {
         self.next_sequence = 0;
     }
 
+    /// Rebuild from persisted rows. Canonical IDs, sequence numbers and adapter
+    /// keys come back, so order holds after a reconnect and an update for an
+    /// already-seen adapter item lands on its original row.
+    pub fn restore(&mut self, entries: impl IntoIterator<Item = Entry>) {
+        self.reset();
+        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.sequence);
+
+        for entry in entries {
+            let index = self.entries.len();
+            match &entry.kind {
+                EntryKind::AgentText { .. } => {
+                    if let Some(source) = entry.source_id.as_ref() {
+                        let key = format!("{:?}:{source}", DeltaKind::Message);
+                        self.item_rows.insert(key, index);
+                    }
+                }
+                EntryKind::Thought { .. } => {
+                    if let Some(source) = entry.source_id.as_ref() {
+                        let key = format!("{:?}:{source}", DeltaKind::Thought);
+                        self.item_rows.insert(key, index);
+                    }
+                }
+                EntryKind::ToolCall { tool_call_id, .. } => {
+                    self.tool_rows.insert(tool_call_id.clone(), index);
+                }
+                EntryKind::Permission { approval_id, .. } => {
+                    self.approval_rows.insert(approval_id.clone(), index);
+                }
+                EntryKind::Plan { .. } => {
+                    self.item_rows.insert("plan".to_string(), index);
+                }
+                EntryKind::Usage { .. } => {
+                    self.item_rows.insert("usage".to_string(), index);
+                }
+                EntryKind::UserMessage { .. } | EntryKind::Notice { .. } => {}
+            }
+            self.next_sequence = self.next_sequence.max(entry.sequence + 1);
+            self.entries.push(entry);
+        }
+    }
+
     /// Record the user's prompt. Agents normally echo it back; the transcript
     /// deliberately ignores those echoes.
     pub fn push_user_message(&mut self, text: impl Into<String>) -> TranscriptChange {
@@ -558,7 +605,7 @@ impl Transcript {
                 text: text.to_string(),
             },
         };
-        let change = self.append(entry_kind);
+        let change = self.append_from(entry_kind, Some(item_id.to_string()));
         if let Some(index) = change.changed {
             self.item_rows.insert(key, index);
         }
@@ -593,15 +640,18 @@ impl Transcript {
             };
         }
 
-        let change = self.append(EntryKind::ToolCall {
-            tool_call_id: tool_call_id.to_string(),
-            title: title.to_string(),
-            kind: kind.to_string(),
-            status,
-            output,
-            diffs,
-            terminal_id,
-        });
+        let change = self.append_from(
+            EntryKind::ToolCall {
+                tool_call_id: tool_call_id.to_string(),
+                title: title.to_string(),
+                kind: kind.to_string(),
+                status,
+                output,
+                diffs,
+                terminal_id,
+            },
+            Some(tool_call_id.to_string()),
+        );
         if let Some(index) = change.changed {
             self.tool_rows.insert(tool_call_id.to_string(), index);
         }
@@ -667,18 +717,21 @@ impl Transcript {
             };
         }
 
-        let change = self.append(EntryKind::Permission {
-            approval_id: key.clone(),
-            title: request.title,
-            arguments: request.arguments,
-            paths: request
-                .paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            patch: request.patch,
-            decision: None,
-        });
+        let change = self.append_from(
+            EntryKind::Permission {
+                approval_id: key.clone(),
+                title: request.title,
+                arguments: request.arguments,
+                paths: request
+                    .paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+                patch: request.patch,
+                decision: None,
+            },
+            Some(key.clone()),
+        );
         if let Some(index) = change.changed {
             self.approval_rows.insert(key, index);
         }
@@ -701,6 +754,10 @@ impl Transcript {
     }
 
     fn append(&mut self, kind: EntryKind) -> TranscriptChange {
+        self.append_from(kind, None)
+    }
+
+    fn append_from(&mut self, kind: EntryKind, source_id: Option<String>) -> TranscriptChange {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         let index = self.entries.len();
@@ -708,6 +765,7 @@ impl Transcript {
             id: format!("entry-{sequence}"),
             sequence,
             kind,
+            source_id,
         });
         TranscriptChange {
             appended: true,
@@ -784,6 +842,68 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert_eq!(
             transcript.entry(0).map(Entry::summary),
+            Some("Edit file (Completed)".to_string())
+        );
+    }
+
+    #[test]
+    fn a_restored_transcript_keeps_order_and_continues_numbering() {
+        let mut transcript = Transcript::default();
+        transcript.push_user_message("go");
+        transcript.apply(&HarnessEvent::Delta {
+            item_id: ItemId::new("message-1"),
+            kind: DeltaKind::Message,
+            text: "hello".to_string(),
+        });
+        transcript.apply(&tool_event("Edit file", ToolStatus::Completed));
+
+        let mut restored = Transcript::default();
+        restored.restore(transcript.entries().to_vec());
+
+        assert_eq!(restored.len(), 3);
+        let sequences = restored
+            .entries()
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, vec![0, 1, 2]);
+        assert_eq!(
+            restored.entry(0).map(|entry| entry.id.clone()),
+            Some("entry-0".to_string())
+        );
+
+        let change = restored.apply(&HarnessEvent::Delta {
+            item_id: ItemId::new("message-1"),
+            kind: DeltaKind::Message,
+            text: " again".to_string(),
+        });
+        assert!(!change.appended, "a restored message keeps its row");
+        assert_eq!(restored.len(), 3);
+        assert_eq!(
+            restored.entry(1).map(Entry::summary),
+            Some("agent: hello again".to_string())
+        );
+
+        restored.push_user_message("next");
+        assert_eq!(
+            restored.entry(3).map(|entry| entry.id.clone()),
+            Some("entry-3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_restored_tool_row_takes_later_updates() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&tool_event("Edit file", ToolStatus::Running));
+
+        let mut restored = Transcript::default();
+        restored.restore(transcript.entries().to_vec());
+        let change = restored.apply(&tool_event("Edit file", ToolStatus::Completed));
+
+        assert!(!change.appended);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored.entry(0).map(Entry::summary),
             Some("Edit file (Completed)".to_string())
         );
     }

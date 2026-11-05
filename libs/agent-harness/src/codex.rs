@@ -1874,6 +1874,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::{Entry, Transcript};
 
     /// Answers the handshake, starts a thread, streams a delta and a tool item,
     /// completes the turn, and records a resume so the test can see the method.
@@ -2403,6 +2404,54 @@ sleep 30
             Some(HarnessEvent::TurnFinished {
                 reason: TurnFinishReason::Cancelled
             })
+        ));
+        harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn a_restored_transcript_reattaches_a_codex_item() {
+        let directory = TempDir::new().expect("temp dir");
+        let stub = write_stub(&directory, "codex.sh", PROTOCOL_STUB);
+        let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
+
+        harness
+            .prompt(PromptInput {
+                text: "run the tests".to_string(),
+            })
+            .await
+            .expect("the turn starts");
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+
+        let mut live = Transcript::default();
+        for event in &events {
+            live.apply(event);
+        }
+        let mut restored = Transcript::default();
+        restored.restore(live.entries().to_vec());
+        assert_eq!(restored.len(), live.len());
+        for (restored, live) in restored.entries().iter().zip(live.entries()) {
+            assert_eq!(restored.id, live.id);
+            assert_eq!(restored.sequence, live.sequence);
+        }
+
+        let change = restored.apply(&HarnessEvent::Delta {
+            item_id: ItemId::new("item_1"),
+            kind: DeltaKind::Message,
+            text: " again".to_string(),
+        });
+        assert!(
+            !change.appended,
+            "a known codex item must land on its original row"
+        );
+        assert_eq!(restored.len(), live.len());
+        assert!(matches!(
+            restored.entry(0).map(Entry::summary),
+            Some(summary) if summary == "agent: working again"
         ));
         harness.shutdown().await.expect("the session stops");
     }
