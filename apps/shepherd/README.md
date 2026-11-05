@@ -28,10 +28,11 @@ Until the Codex adapter lands in S2, the shell runs a scripted adapter
 (`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
 real agent.
 
-The native terminal smoke uses a disposable project and database, starts a
-separate dev server on port 1432, and closes its window after reporting the
-result. It exercises Vim, less and a 1 MiB PTY burst through the webview.
-Run it from an active desktop session with `vim` and `less` on your path.
+The native terminal smoke uses a disposable project and database and a
+separate dev server on port 1432. The first launch exercises Vim, less, Kitty
+key reports, scrollback search, split resizing and output bursts. The second
+launch checks layout restoration and terminal restart. Run it from an active
+desktop session with `vim`, `less` and `python3` on your path.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh

@@ -168,6 +168,19 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
   }
 }
 
+async function exerciseSearch(terminalId: string) {
+  const latest = await bridge.searchTerminal(terminalId, 'S4_T0', null, 'previous')
+  if (!latest) throw new Error('Paced output was missing from scrollback')
+  const previous = await bridge.searchTerminal(terminalId, 'S4_T0', latest.start, 'previous')
+  if (!previous || previous.start.line >= latest.start.line) {
+    throw new Error('Searching backward should select an earlier marker')
+  }
+  const next = await bridge.searchTerminal(terminalId, 'S4_T0', previous.end, 'next')
+  if (!next || next.start.line !== latest.start.line || next.start.column !== latest.start.column) {
+    throw new Error('Searching forward should return to the later marker')
+  }
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -196,8 +209,9 @@ async function smoke() {
   await exerciseKitty(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
+  await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
-  return { ok: true, roundTrip: true, splitReattach: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  return { ok: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 async function restore() {
