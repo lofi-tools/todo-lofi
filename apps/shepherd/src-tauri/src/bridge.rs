@@ -97,10 +97,15 @@ impl ScreenSlot {
 /// The state Tauri manages for the window: one core, one event broadcaster, the
 /// PTY engine, one parsed screen per live terminal, and the cached project scan
 /// shared with the startup scan task.
+struct TerminalSubscription {
+    _cancel: oneshot::Sender<()>,
+    acknowledgements: watch::Sender<u32>,
+}
+
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     events: broadcast::Sender<Event>,
-    terminal_subscriptions: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
+    terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
     engine: Arc<Mutex<PtyTerminals>>,
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
@@ -689,21 +694,40 @@ impl ShellState {
         let slot = self.screen_slot(terminal_id).await?;
         let mut receiver = slot.lock().await.subscribe();
         let (cancel, mut cancelled) = oneshot::channel();
+        let (acknowledgements, mut acknowledged) = watch::channel(0);
         let subscription_id = uuid::Uuid::new_v4().to_string();
-        self.terminal_subscriptions
-            .lock()
-            .await
-            .insert(subscription_id.clone(), cancel);
+        self.terminal_subscriptions.lock().await.insert(
+            subscription_id.clone(),
+            TerminalSubscription {
+                _cancel: cancel,
+                acknowledgements,
+            },
+        );
         let subscriptions = self.terminal_subscriptions.clone();
         let id = subscription_id.clone();
         tauri::async_runtime::spawn(async move {
             let mut previous = None;
+            let mut sequence = 0u32;
             loop {
                 let frame = Arc::clone(&receiver.borrow_and_update());
                 if previous.as_deref() != Some(frame.as_ref()) {
-                    let response = tauri::ipc::Response::new(frame.encode(previous.as_deref()));
+                    sequence = sequence.wrapping_add(1);
+                    let mut payload = frame.encode(previous.as_deref());
+                    payload.extend(sequence.to_le_bytes());
+                    let response = tauri::ipc::Response::new(payload);
                     if let Err(error) = channel.send(response) {
                         tracing::debug!(%error, "terminal view detached");
+                        break;
+                    }
+                    let received = tokio::select! {
+                        _ = &mut cancelled => false,
+                        result = tokio::time::timeout(
+                            Duration::from_secs(30),
+                            acknowledged.wait_for(|value| *value == sequence),
+                        ) => matches!(result, Ok(Ok(_))),
+                    };
+                    if !received {
+                        tracing::debug!(%id, sequence, "terminal frame was not acknowledged");
                         break;
                     }
                     previous = Some(frame);
@@ -720,6 +744,19 @@ impl ShellState {
             subscriptions.lock().await.remove(&id);
         });
         Ok(subscription_id)
+    }
+
+    pub async fn acknowledge_terminal_frame(
+        &self,
+        subscription_id: &str,
+        sequence: u32,
+    ) -> Result<(), BridgeError> {
+        let subscriptions = self.terminal_subscriptions.lock().await;
+        let subscription = subscriptions
+            .get(subscription_id)
+            .ok_or_else(|| BridgeError::new("terminal", "terminal frame subscription ended"))?;
+        subscription.acknowledgements.send_replace(sequence);
+        Ok(())
     }
 
     pub async fn unsubscribe_terminal(&self, subscription_id: &str) {
@@ -1067,6 +1104,18 @@ pub mod commands {
         state
             .inner()
             .subscribe_terminal(&terminal_id, channel)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn acknowledge_terminal_frame(
+        state: State<'_, ShellState>,
+        subscription_id: String,
+        sequence: u32,
+    ) -> Result<(), BridgeError> {
+        state
+            .inner()
+            .acknowledge_terminal_frame(&subscription_id, sequence)
             .await
     }
 

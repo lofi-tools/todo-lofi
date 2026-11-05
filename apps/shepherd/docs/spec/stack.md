@@ -192,7 +192,9 @@ CellRun     { count: u16, attrs: u8, fg: u32, bg: u32,
               text_len: u32, text: [u8] }
 ```
 
-The per-terminal channel identifies the terminal and orders its frames. Header
+The per-terminal channel identifies the terminal and orders its frames. Each
+channel message ends with a little-endian `u32` sequence. The webview
+acknowledges each decoded update before the shell sends another frame. Header
 flag bits 0 and 1 indicate cursor visibility and a full frame. Bits 2–3
 encode block, underline, beam and hollow block cursor shapes. Each row starts
 at column zero. A run repeats one UTF-8 cell with the same style, with the cell

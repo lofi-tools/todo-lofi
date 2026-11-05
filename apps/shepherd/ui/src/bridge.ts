@@ -338,7 +338,10 @@ export function closeTerminal(terminalId: string): Promise<void> {
 }
 
 function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | undefined) {
-  const view = new DataView(buffer)
+  const payloadLength = buffer.byteLength - 4
+  if (payloadLength < 20) throw new Error('Truncated terminal frame')
+  const sequence = new DataView(buffer).getUint32(payloadLength, true)
+  const view = new DataView(buffer, 0, payloadLength)
   let offset = 0
   const byte = () => view.getUint8(offset++)
   const short = () => { const value = view.getUint16(offset, true); offset += 2; return value }
@@ -397,9 +400,9 @@ function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | unde
     }
     if (column !== columns) throw new Error('Incomplete terminal row')
   }
-  if (offset !== buffer.byteLength) throw new Error('Invalid terminal frame length')
+  if (offset !== payloadLength) throw new Error('Invalid terminal frame length')
   const frame: TerminalFrame = { columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells }
-  return { frame, changedRows: full ? null : changedRows }
+  return { frame, sequence, changedRows: full ? null : changedRows }
 }
 
 export async function subscribeTerminal(
@@ -408,17 +411,34 @@ export async function subscribeTerminal(
   onError: (failure: unknown) => void,
 ): Promise<() => Promise<void>> {
   let previous: TerminalFrame | undefined
+  let closed = false
+  let subscription: Promise<string>
+  async function dispose() {
+    if (closed) return
+    closed = true
+    await invoke<void>('unsubscribe_terminal', { subscriptionId: await subscription })
+  }
+  function failed(failure: unknown) {
+    if (closed) return
+    onError(failure)
+    void dispose().catch(console.error)
+  }
   const channel = new Channel<ArrayBuffer>((buffer) => {
+    if (closed) return
     try {
       const update = decodeTerminalFrame(buffer, previous)
       previous = update.frame
       handler(update.frame, update.changedRows)
+      void Promise.resolve().then(() => subscription).then((subscriptionId) => {
+        if (!closed) return invoke<void>('acknowledge_terminal_frame', { subscriptionId, sequence: update.sequence })
+      }).catch(failed)
     } catch (failure) {
-      onError(failure)
+      queueMicrotask(() => failed(failure))
     }
   })
-  const subscriptionId = await invoke<string>('subscribe_terminal', { terminalId, channel })
-  return () => invoke<void>('unsubscribe_terminal', { subscriptionId })
+  subscription = invoke<string>('subscribe_terminal', { terminalId, channel })
+  await subscription
+  return dispose
 }
 
 /** Subscribe the window to the core's single event stream. */
