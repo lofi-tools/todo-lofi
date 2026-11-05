@@ -85,6 +85,17 @@ if fish_version=$(fish --version 2>/dev/null) && [[ $fish_version =~ ^fish,\ ver
 fi
 export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
+if [[ -z ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
+  mkdir "$fixture/bin"
+  cat > "$fixture/bin/open" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$SHEPHERD_SMOKE_OPEN_LOG"
+EOF
+  chmod +x "$fixture/bin/open"
+  ln -s open "$fixture/bin/xdg-open"
+  export SHEPHERD_SMOKE_OPEN_LOG="$fixture/open.log"
+  export PATH="$fixture/bin:$PATH"
+fi
 
 cd "$repo"
 config=$(cat <<EOF
@@ -113,6 +124,9 @@ for phase in "${phases[@]}"; do
     [[ ! -e $task_worktree && $(git -C "$fixture/project" rev-parse "$task_branch") == "$task_tip" ]]
   fi
 done
+if [[ -z ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
+  [[ $(cat "$SHEPHERD_SMOKE_OPEN_LOG") == 'https://example.invalid/shepherd-terminal' ]]
+fi
 if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
   [[ $(git -C "$fixture/project" rev-list --count main) == 2 ]]
   [[ $(git -C "$fixture/project" show -s --format=%P main) == "$(git -C "$fixture/project" rev-parse main~1)" ]]

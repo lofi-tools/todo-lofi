@@ -231,6 +231,20 @@ os.write(1, b'\r\nS4_' + b'MOUSE_PASS\r\n')
   await waitFor('SGR wheel report in the PTY', () => terminalOutput().includes('S4_MOUSE_PASS'))
 }
 
+async function exerciseHyperlink(terminalId: string) {
+  const program = String.raw`import os; os.write(1, b'\x1b[H\x1b]8;;https://example.invalid/shepherd-terminal\x1b\\S4_' + b'LINK\x1b]8;;\x1b\\\x1b[6;1H')`
+  await bridge.terminalWrite(terminalId, `python3 -c ${shellQuote(program)}\r`)
+  await waitFor('OSC 8 hyperlink in terminal output', () => terminalOutput().startsWith('S4_LINK'))
+  const canvas = await waitFor('terminal link surface', () => document.querySelector('.terminal-view__canvas'))
+  await new Promise(requestAnimationFrame)
+  const { left, top } = canvas.getBoundingClientRect()
+  const mac = navigator.platform.startsWith('Mac')
+  canvas.dispatchEvent(new PointerEvent('pointerdown', {
+    bubbles: true, cancelable: true, button: 0, metaKey: mac, ctrlKey: !mac,
+    clientX: left + 1, clientY: top + 1,
+  }))
+}
+
 function paneWidth(title: string): number {
   const canvas = terminalPane(title)?.querySelector('canvas')
   return parseFloat(canvas?.style.width ?? '') || 0
@@ -637,6 +651,7 @@ async function smoke() {
   if (__SHEPHERD_SMOKE_FISH__) await exerciseFish(terminal.id, input)
   await exerciseBracketedPaste(terminal.id, input)
   await exerciseMouse(terminal.id)
+  await exerciseHyperlink(terminal.id)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
