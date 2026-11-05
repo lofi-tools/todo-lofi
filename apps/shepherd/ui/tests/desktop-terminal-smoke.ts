@@ -142,6 +142,19 @@ os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
   await waitFor('Kitty key press and release in the PTY', () => terminalOutput().includes('S4_KITTY_PASS'))
 }
 
+async function exerciseBracketedPaste(terminalId: string, input: HTMLTextAreaElement) {
+  await runPtyProbe(terminalId, String.raw`
+os.write(1, b'\x1b[?2004h\r\nS4_' + b'PASTE_READY\r\n')
+expect(b'\x1b[200~a' + 'é'.encode() * 9000 + b'\nend\x1b[201~')
+os.write(1, b'\r\nS4_' + b'PASTE_PASS\r\n')
+`, '1b5b3f323030346c')
+  await waitFor('PTY bracketed paste mode', () => terminalOutput().includes('S4_PASTE_READY'))
+  const clipboard = new DataTransfer()
+  clipboard.setData('text/plain', 'a' + 'é'.repeat(9000) + '\n\x1b\x9bend')
+  input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+  await waitFor('chunked UTF-8 bracketed paste in the PTY', () => terminalOutput().includes('S4_PASTE_PASS'))
+}
+
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
   const split = await waitFor('split action', () => {
     const entry = button('Split right')
@@ -266,12 +279,13 @@ async function smoke() {
   await exerciseAlternateScreen(terminal.id, input)
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
+  await exerciseBracketedPaste(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project.id, terminal)
-  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, bracketedPaste: true, burstPaintMs }
 }
 
 async function restore() {
