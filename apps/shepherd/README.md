@@ -30,7 +30,8 @@ real agent.
 
 The native terminal smoke uses a disposable project and database, starts a
 separate dev server on port 1432, and closes its window after reporting the
-result. Run it from an active desktop session.
+result. It exercises Vim, less and a 1 MiB PTY burst through the webview.
+Run it from an active desktop session with `vim` and `less` on your path.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh

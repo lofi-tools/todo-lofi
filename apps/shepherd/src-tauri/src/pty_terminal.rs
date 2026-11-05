@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 struct Session {
     writer: Box<dyn Write + Send>,
+    closing: bool,
     /// The waiting thread owns the child, so closing goes through a cloned killer.
     killer: Box<dyn ChildKiller + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
@@ -142,6 +143,7 @@ impl TerminalService for PtyTerminals {
             terminal_id.as_str().to_string(),
             Session {
                 writer,
+                closing: false,
                 killer,
                 master: pair.master,
             },
@@ -176,9 +178,12 @@ impl TerminalService for PtyTerminals {
 
     fn write(&mut self, terminal_id: &TerminalId, bytes: &[u8]) -> Result<(), TerminalError> {
         let mut sessions = self.sessions()?;
-        let session = sessions.get_mut(terminal_id.as_str()).ok_or_else(|| {
-            TerminalError::Backend(format!("no terminal {}", terminal_id.as_str()))
-        })?;
+        let session = sessions
+            .get_mut(terminal_id.as_str())
+            .filter(|session| !session.closing)
+            .ok_or_else(|| {
+                TerminalError::Backend(format!("no live terminal {}", terminal_id.as_str()))
+            })?;
         session
             .writer
             .write_all(bytes)
@@ -194,9 +199,12 @@ impl TerminalService for PtyTerminals {
     ) -> Result<(), TerminalError> {
         validate_size(columns, rows)?;
         let sessions = self.sessions()?;
-        let session = sessions.get(terminal_id.as_str()).ok_or_else(|| {
-            TerminalError::Backend(format!("no terminal {}", terminal_id.as_str()))
-        })?;
+        let session = sessions
+            .get(terminal_id.as_str())
+            .filter(|session| !session.closing)
+            .ok_or_else(|| {
+                TerminalError::Backend(format!("no live terminal {}", terminal_id.as_str()))
+            })?;
         session
             .master
             .resize(Self::size(columns, rows))
@@ -206,13 +214,18 @@ impl TerminalService for PtyTerminals {
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
         let mut sessions = self.sessions()?;
         // The waiter owns removal so a failed signal can be retried.
-        let Some(session) = sessions.get_mut(terminal_id.as_str()) else {
+        let Some(session) = sessions
+            .get_mut(terminal_id.as_str())
+            .filter(|session| !session.closing)
+        else {
             return Ok(());
         };
         session
             .killer
             .kill()
-            .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))
+            .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
+        session.closing = true;
+        Ok(())
     }
 }
 

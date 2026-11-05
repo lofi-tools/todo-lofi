@@ -136,6 +136,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (event.code === 'Backquote') {
       event.preventDefault()
       const ids = paneIds(root()).filter((pane) => terminal(pane)?.endedAt === null)
+      if (ids.length === 0) return
       const index = ids.indexOf(id)
       const next = ids[(index + (event.shiftKey ? -1 : 1) + ids.length) % ids.length]
       if (next) setFocusRequest({ id: next })
@@ -671,7 +672,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   }
 
   function onKeyDown(event: KeyboardEvent) {
-    if (composing || event.isComposing || event.keyCode === 229) return
+    if (event.defaultPrevented || composing || event.isComposing || event.keyCode === 229) return
     committedComposition = undefined
     if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && event.key.toLowerCase() === 'f') {
       event.preventDefault()

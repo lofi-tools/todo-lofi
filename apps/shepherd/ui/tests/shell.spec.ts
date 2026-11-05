@@ -428,6 +428,9 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   })).toBe(550)
 
   const scoped = page.getByRole('region', { name: 'Task shell' })
+  await page.getByRole('region', { name: 'Terminal 1' }).getByRole('textbox').press('Control+Backquote')
+  await expect(scoped.getByRole('textbox')).toBeFocused()
+  expect(await page.evaluate(() => (window as unknown as { __writes: string[] }).__writes)).toEqual([])
   await scoped.getByRole('button', { name: 'Hide pane' }).click()
   await expect(scoped).toHaveCount(0)
   await page.getByRole('button', { name: /Task shell.*hidden/ }).click()
