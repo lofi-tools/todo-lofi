@@ -341,6 +341,8 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   let frame: bridge.TerminalFrame | null = null
   let cellWidth = 7.8
   let lastSent = ''
+  let resizing = false
+  let queuedSize: ReturnType<typeof measure> | undefined
   let inputWrites = Promise.resolve()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
@@ -525,17 +527,24 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
 
   async function applySize() {
     if (!container?.clientWidth || !container.clientHeight) return
-    const size = measure()
-    const key = `${size.columns}x${size.rows}`
-    if (key === lastSent) return
-    lastSent = key
+    queuedSize = measure()
+    if (resizing) return
+    resizing = true
     try {
-      await bridge.terminalResize(props.terminalId, size.columns, size.rows)
-    } catch (failure) {
-      if (lastSent === key) {
-        lastSent = ''
-        setError(describe(failure))
+      while (queuedSize) {
+        const size = queuedSize
+        queuedSize = undefined
+        const key = `${size.columns}x${size.rows}`
+        if (key === lastSent) continue
+        try {
+          await bridge.terminalResize(props.terminalId, size.columns, size.rows)
+          lastSent = key
+        } catch (failure) {
+          setError(describe(failure))
+        }
       }
+    } finally {
+      resizing = false
     }
   }
 
@@ -717,7 +726,11 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     })
     if (container) observer.observe(container)
 
-    onCleanup(() => { observer.disconnect(); window.clearTimeout(resizeTimer) })
+    onCleanup(() => {
+      observer.disconnect()
+      window.clearTimeout(resizeTimer)
+      queuedSize = undefined
+    })
   })
 
   return (
