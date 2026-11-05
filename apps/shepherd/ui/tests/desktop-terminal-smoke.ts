@@ -322,11 +322,55 @@ async function exerciseTaskSwitch(projectId: string, shared: bridge.TerminalSnap
   })
 }
 
-async function smoke() {
+async function openFixtureProject() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
     return add && !add.disabled
   })
+  const projects = await bridge.addProject(__SHEPHERD_SMOKE_PROJECT__)
+  const project = projects.projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
+  if (!project) throw new Error('The fixture project was not registered')
+  const projectButton = await waitFor('fixture project', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.project'))
+    .find((entry) => entry.querySelector('.project__name')?.textContent === project.name))
+  projectButton.click()
+  return project
+}
+
+async function replayCodexApproval() {
+  await openFixtureProject()
+  const input = await waitFor('active composer', () => {
+    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')
+    return textarea && !textarea.disabled && textarea
+  })
+  input.value = "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  const send = await waitFor('enabled Send', () => {
+    const entry = button('Send')
+    return entry && !entry.disabled && entry
+  })
+  send.click()
+
+  const chatState = () => document.querySelector('.chat__state')?.textContent
+  const card = await waitFor('waiting Codex approval with command arguments', () => {
+    if (chatState() === 'failed') {
+      throw new Error(document.querySelector('.diagnostics pre')?.textContent ?? 'The Codex replay failed')
+    }
+    const entry = document.querySelector('.entry__permission')
+    const argumentsText = entry?.querySelector('.entry__arguments')?.textContent ?? ''
+    return chatState() === 'waiting' && argumentsText.includes('curl') &&
+      argumentsText.includes('https://example.com') && entry
+  })
+  const deny = Array.from(card.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === 'Deny')
+  if (!deny) throw new Error('The approval card has no Deny button')
+  deny.click()
+  await waitFor('recorded denial and completed turn', () =>
+    chatState() === 'ready' &&
+    document.querySelector('.entry__permission-decision')?.textContent === 'deny')
+  return { ok: true, codexApprovalReplay: true }
+}
+
+async function smoke() {
+  const project = await openFixtureProject()
   if (navigator.platform.startsWith('Mac')) {
     const dragRegion = document.querySelector('[data-tauri-drag-region]')?.getBoundingClientRect()
     const projectHeading = document.querySelector('.sidebar__header')?.getBoundingClientRect()
@@ -334,12 +378,6 @@ async function smoke() {
       throw new Error('The project header overlaps the macOS window controls')
     }
   }
-  const projects = await bridge.addProject(__SHEPHERD_SMOKE_PROJECT__)
-  const project = projects.projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
-  if (!project) throw new Error('The fixture project was not registered')
-  const projectButton = await waitFor('fixture project', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.project'))
-    .find((entry) => entry.querySelector('.project__name')?.textContent === project.name))
-  projectButton.click()
   const start = await waitFor('shared terminal action', () => {
     const entry = button('New shared terminal')
     return entry && !entry.disabled && entry
@@ -417,7 +455,16 @@ async function restore() {
 void (async () => {
   let result
   try {
-    result = __SHEPHERD_SMOKE_PHASE__ === 'restore' ? await restore() : await smoke()
+    switch (__SHEPHERD_SMOKE_PHASE__) {
+      case 'restore':
+        result = await restore()
+        break
+      case 'codex-approval':
+        result = await replayCodexApproval()
+        break
+      default:
+        result = await smoke()
+    }
   } catch (error) {
     const message = typeof error === 'object' && error !== null && 'message' in error
       ? String(error.message)

@@ -325,8 +325,20 @@ Manual script on a throwaway repository:
 The network approval scenario passed live with GPT-6.1 Terra at `low` effort.
 Codex asked before running the command, Shepherd recorded the denial, and the
 turn completed. A second run passed by replaying the saved response sequence in
-`.cache/shepherd-live/codex/terra-low-v1/network-approval.json`. The desktop
-approval interaction remains part of the gate.
+`.cache/shepherd-live/codex/terra-low-v1/network-approval.json`.
+
+The macOS desktop smoke replays that same exchange through the real adapter
+and native webview. It sends a prompt from the composer, checks the approval
+card shows the command arguments, clicks **Deny**, and waits for the recorded
+decision and a ready task. It uses a disposable project and database.
+
+```sh
+direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-approval
+```
+
+The desktop smoke requires an existing capture. The ignored
+`live_codex_requests_approval_for_a_network_command` test in `agent-harness`
+can create it with a ChatGPT-authenticated Codex CLI.
 
 **If it fails:** do not build more adapters or UI breadth. Record the exact
 protocol gap and decide: patch the adapter, use the `exec` fallback, or lower
@@ -644,7 +656,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | --- | --- | --- | --- |
 | 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shepherd-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
 |  | S1 |  |  |
-| 2026-11-05 | S2 | Partial | A live headless run on a disposable repository (`codex-cli 0.166.0-alpha.6`, ignored test) streamed 32 deltas, reported two tool calls, changed the file, reopened the same thread after restarting the process, and cancelled a running turn. It found and fixed one protocol gap: `thread/start` takes `workspace-write`, not `workspaceWrite`. A mid-turn SIGKILL of the real process is proven through the core (ignored test: task `failed`, failure row, stderr tail). A live approval request is also proven at the adapter: Codex asked before a network command, the request carried the command and its decisions, the denial was recorded, and the turn completed. Restart-resume is proven through the core too: an ignored test quits mid-turn, reloads the same database, sees the task interrupted, resumes the recorded thread and finishes another turn. Still unverified before a pass: the desktop window, including how the approval card renders there. The core now pumps adapter events between commands (covered by a focused test), so a live turn can stream into the window. The desktop shell was also built and launched from the Nix shell on 2026-11-05 (Vite on 1420 answered 200 and the Tauri binary ran), but the window was not inspected and no task was driven through it. Automated suites: 38 `agent-harness` (2 live, ignored), 37 `shepherd-core` plus 2 ignored live runs, 9 shell. |
+| 2026-11-05 | S2 | Partial | A live headless run on a disposable repository (`codex-cli 0.166.0-alpha.6`, ignored test) streamed 32 deltas, reported two tool calls, changed the file, reopened the same thread after restarting the process, and cancelled a running turn. It found and fixed one protocol gap: `thread/start` takes `workspace-write`, not `workspaceWrite`. A mid-turn SIGKILL of the real process is proven through the core (ignored test: task `failed`, failure row, stderr tail). A live approval request is also proven at the adapter: Codex asked before a network command, the request carried the command and its decisions, the denial was recorded, and the turn completed. Restart-resume is proven through the core too: an ignored test quits mid-turn, reloads the same database, sees the task interrupted, resumes the recorded thread and finishes another turn. The native macOS smoke replayed the captured live approval exchange through the actual adapter and window. The command and approval actions appeared in the transcript, clicking Deny recorded the decision, and the task returned to ready. The full desktop script against the live CLI remains open. Automated suites: 38 `agent-harness` (2 live, ignored), 37 `shepherd-core` plus 2 ignored live runs, 9 shell. |
 |  | S3 |  |  |
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim and less, distinguished Ctrl+I from Tab in interactive fish, and checked composition events, bracketed paste and SGR mouse reports. It verified PTY size changes, preserved a shared terminal across task switches, and restarted both shared and task terminals after relaunch. The latest run painted the tail of a 1 MiB burst in 185 ms and all 24 paced markers, with a 93 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. System IME, Ubuntu and the manual workday gate remain open. |
 |  | S5 |  |  |

@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command -v vim less python3 >/dev/null
+phases=(prepare restore)
+unset SHEPHERD_DEV_CODEX_APPROVAL_REPLAY
+case "${1:-}" in
+  "")
+    command -v vim less python3 >/dev/null
+    export SHEPHERD_DEV_SCRIPTED_HARNESS=1
+    ;;
+  --codex-approval)
+    command -v python3 >/dev/null
+    phases=(codex-approval)
+    export SHEPHERD_DEV_CODEX_APPROVAL_REPLAY=1
+    ;;
+  *)
+    printf '%s\n' "Usage: $0 [--codex-approval]" >&2
+    exit 2
+    ;;
+esac
 
 port=${SHEPHERD_DESKTOP_SMOKE_PORT:-1432}
 if [[ ! $port =~ ^[1-9][0-9]{3,4}$ ]] || (( port < 1024 || port > 65535 )); then
@@ -20,7 +36,6 @@ git -C "$fixture/project" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
   -c user.name="Shepherd Terminal Smoke" -c user.email="smoke@example.invalid" \
   commit --quiet --allow-empty -m "Seed disposable repository"
 
-export SHEPHERD_DEV_SCRIPTED_HARNESS=1
 export SHEPHERD_DEV_DATA_DIR="$fixture/data"
 export SHEPHERD_DEV_PROJECT_ROOT="$fixture"
 export SHEPHERD_DESKTOP_SMOKE_PROJECT="$fixture/project"
@@ -41,7 +56,11 @@ config=$(cat <<EOF
 }
 EOF
 )
-for phase in prepare restore; do
-  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s pnpm --dir apps/shepherd exec tauri dev --no-watch --config "$config" 2>&1 | tee "$fixture/$phase.log"
+launch=(pnpm --dir apps/shepherd exec tauri dev --no-watch --config "$config")
+if [[ ${SHEPHERD_DEV_CODEX_APPROVAL_REPLAY:-} == 1 ]]; then
+  launch+=(--features desktop-codex-smoke)
+fi
+for phase in "${phases[@]}"; do
+  SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s 180s "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
 done

@@ -78,7 +78,7 @@ pub struct LiveCodexRun {
 }
 
 impl LiveCodexRun {
-    pub async fn load(scenario: &str) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+    fn cache_path(scenario: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         if scenario.is_empty()
             || !scenario
                 .bytes()
@@ -86,9 +86,19 @@ impl LiveCodexRun {
         {
             return Err("invalid live Codex scenario name".into());
         }
-        let cache_path = workspace().join(format!(
+        Ok(workspace().join(format!(
             ".cache/shepherd-live/codex/terra-low-v1/{scenario}.json"
-        ));
+        )))
+    }
+
+    pub fn load_replay(scenario: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let cache_path = Self::cache_path(scenario)?;
+        Self::cached(&cache_path)?
+            .ok_or_else(|| format!("missing cached Codex run at {}", cache_path.display()).into())
+    }
+
+    pub async fn load(scenario: &str) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let cache_path = Self::cache_path(scenario)?;
         if let Some(replay) = Self::cached(&cache_path)? {
             return Ok(Some(replay));
         }

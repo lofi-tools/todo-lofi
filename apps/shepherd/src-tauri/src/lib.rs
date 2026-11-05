@@ -17,16 +17,7 @@ use agent_harness::codex::CodexTier;
 use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
-fn harness_factory(
-    data_directory: &std::path::Path,
-    isolated: bool,
-) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
-    #[cfg(debug_assertions)]
-    if isolated && std::env::var("SHEPHERD_DEV_SCRIPTED_HARNESS").as_deref() == Ok("1") {
-        return (Box::new(dev_harness::ScriptedHarnessFactory), None);
-    }
-    #[cfg(not(debug_assertions))]
-    let _isolated = isolated;
+fn harness_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
     let probe_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.to_path_buf());
     let detection =
         tauri::async_runtime::block_on(agent_harness::codex::detect(None, &probe_directory));
@@ -59,12 +50,18 @@ pub fn run() -> Result<(), tauri::Error> {
                 .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))
                 .flatten()
                 .filter(|path| !path.is_empty());
-            let isolated = override_directory.is_some();
+            #[cfg(debug_assertions)]
+            let dev_factory = dev_harness::factory(override_directory.is_some())?;
+            #[cfg(not(debug_assertions))]
+            let dev_factory: Option<Box<dyn HarnessFactory>> = None;
             let data_directory = match override_directory {
                 Some(path) => path.into(),
                 None => app.path().app_data_dir()?,
             };
-            let (harness_factory, codex_program) = harness_factory(&data_directory, isolated);
+            let (harness_factory, codex_program) = match dev_factory {
+                Some(factory) => (factory, None),
+                None => harness_factory(&data_directory),
+            };
             let mut state = tauri::async_runtime::block_on(bridge::ShellState::load(
                 &data_directory,
                 harness_factory,

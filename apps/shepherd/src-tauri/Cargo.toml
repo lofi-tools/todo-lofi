@@ -12,6 +12,9 @@ path = "src/lib.rs"
 name = "shepherd"
 path = "src/main.rs"
 
+[features]
+desktop-codex-smoke = ["agent-harness/live-test-support"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
