@@ -77,6 +77,23 @@ struct ScreenSlot {
     frames: watch::Sender<Arc<TerminalFrame>>,
 }
 
+impl ScreenSlot {
+    fn publish(&self) {
+        if self.frames.receiver_count() > 0 {
+            self.frames.send_replace(Arc::new(self.screen.frame()));
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<Arc<TerminalFrame>> {
+        let first = self.frames.receiver_count() == 0;
+        let receiver = self.frames.subscribe();
+        if first {
+            self.publish();
+        }
+        receiver
+    }
+}
+
 /// The state Tauri manages for the window: one core, one event broadcaster, the
 /// PTY engine, one parsed screen per live terminal, and the cached project scan
 /// shared with the startup scan task.
@@ -506,7 +523,7 @@ impl ShellState {
                         slot.screen.finish_sync();
                     }
                     deadline = slot.screen.sync_deadline();
-                    slot.frames.send_replace(Arc::new(slot.screen.frame()));
+                    slot.publish();
                     (slot.screen.take_replies(), slot.screen.take_bell())
                 };
                 if bell
@@ -550,7 +567,7 @@ impl ShellState {
             .search(query, before)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         if found.is_some() {
-            slot.frames.send_replace(Arc::new(slot.screen.frame()));
+            slot.publish();
         }
         Ok(found)
     }
@@ -561,7 +578,7 @@ impl ShellState {
             .get_mut(terminal_id)
             .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
         slot.screen.scroll(lines);
-        slot.frames.send_replace(Arc::new(slot.screen.frame()));
+        slot.publish();
         Ok(())
     }
 
@@ -583,7 +600,7 @@ impl ShellState {
         if let Some(slot) = self.screens.lock().await.get_mut(&terminal_id)
             && slot.screen.follow_output()
         {
-            slot.frames.send_replace(Arc::new(slot.screen.frame()));
+            slot.publish();
         }
         Ok(())
     }
@@ -648,7 +665,7 @@ impl ShellState {
         let mut screens = self.screens.lock().await;
         if let Some(slot) = screens.get_mut(&terminal_id) {
             slot.screen.resize(usize::from(columns), usize::from(rows));
-            slot.frames.send_replace(Arc::new(slot.screen.frame()));
+            slot.publish();
         }
         Ok(())
     }
@@ -671,7 +688,7 @@ impl ShellState {
             .lock()
             .await
             .get(terminal_id)
-            .map(|slot| slot.frames.subscribe())
+            .map(ScreenSlot::subscribe)
             .ok_or_else(|| {
                 BridgeError::new("terminal", format!("no live terminal {terminal_id}"))
             })?;
