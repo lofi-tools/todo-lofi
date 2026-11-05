@@ -607,8 +607,9 @@ delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
 selection and candidate-window placement still need a system IME with
 conversion candidates.
 
-The native smoke starts synthetic composition from scrollback and checks that
-the input anchor returns to the live cursor before committing text once.
+The native smoke waits for the composition prompt's cursor row to paint before
+scrolling back. It starts synthetic composition from scrollback and checks
+that the input anchor returns to the live cursor before committing text once.
 
 The **Shepherd terminal smoke** workflow uses an Ubuntu 24.04 runner and Xvfb
 for the same two native launches. A push to `codex/shepherd-terminal-smoke`

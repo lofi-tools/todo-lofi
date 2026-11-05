@@ -208,10 +208,12 @@ async function exerciseWideCopy(terminalId: string, input: HTMLTextAreaElement) 
 }
 
 async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {
-  await bridge.terminalWrite(terminalId, "index=0; while [ \"$index\" -lt 100 ]; do printf 'history %s\\n' \"$index\"; index=$((index + 1)); done; printf '\\033[6;8HS4_%s> ' IME_READY; IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
+  const promptRow = 6
+  await bridge.terminalWrite(terminalId, `index=0; while [ "$index" -lt 100 ]; do printf 'history %s\\n' "$index"; index=$((index + 1)); done; printf '\\033[${promptRow};8HS4_%s> ' IME_READY; IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME "$composed"\r`)
   const ready = () => terminalOutput().includes('S4_IME_READY')
+  const promptTop = 8 + (promptRow - 1) * 17
   await waitFor('composition prompt at a displaced cursor', () => ready() &&
-    parseFloat(input.style.top) > 8 && parseFloat(input.style.left) > 8)
+    parseFloat(input.style.top) === promptTop && parseFloat(input.style.left) > 8)
   const { top, left } = input.style
   await bridge.terminalScroll(terminalId, 40)
   await waitFor('scrollback away from the composition prompt', () => !ready() && input.style.top !== top)
