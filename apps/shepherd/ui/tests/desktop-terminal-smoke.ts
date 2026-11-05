@@ -41,6 +41,30 @@ async function measureBurst(terminalId: string): Promise<number> {
   }
 }
 
+async function measurePacing(terminalId: string) {
+  const original = CanvasRenderingContext2D.prototype.fillText
+  const seen = new Map<string, number>()
+  let tail = ''
+  CanvasRenderingContext2D.prototype.fillText = function (text, x, y, maxWidth) {
+    original.call(this, text, x, y, maxWidth)
+    if (!this.canvas.classList.contains('terminal-view__canvas')) return
+    tail = (tail + text).slice(-6)
+    if (/^S4_T\d{2}$/.test(tail) && !seen.has(tail)) seen.set(tail, performance.now())
+  }
+  try {
+    await bridge.terminalWrite(terminalId, "i=0; while [ \"$i\" -lt 24 ]; do printf 'S4_T%02d\\n' \"$i\"; i=$((i+1)); sleep 0.05; done\r")
+    await waitFor('all 24 paced output markers to paint', () => seen.size === 24)
+    const times = [...seen.values()]
+    let maxGap = 0
+    for (let index = 1; index < times.length; index++) {
+      maxGap = Math.max(maxGap, times[index] - times[index - 1])
+    }
+    return { markers: seen.size, maxGapMs: Math.round(maxGap * 10) / 10 }
+  } finally {
+    CanvasRenderingContext2D.prototype.fillText = original
+  }
+}
+
 function press(input: HTMLTextAreaElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
@@ -130,7 +154,8 @@ async function smoke() {
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
   const burstPaintMs = await measureBurst(terminal.id)
-  return { ok: true, roundTrip: true, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
+  const pacing = await measurePacing(terminal.id)
+  return { ok: true, roundTrip: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, burstPaintMs }
 }
 
 void (async () => {
