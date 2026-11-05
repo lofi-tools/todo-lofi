@@ -205,7 +205,8 @@ impl TerminalService for PtyTerminals {
 
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
         let mut sessions = self.sessions()?;
-        let Some(mut session) = sessions.remove(terminal_id.as_str()) else {
+        // The waiter owns removal so a failed signal can be retried.
+        let Some(session) = sessions.get_mut(terminal_id.as_str()) else {
             return Ok(());
         };
         session
