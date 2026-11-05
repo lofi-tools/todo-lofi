@@ -421,6 +421,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   const reportedKeys = new Map<string, string>()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
+  let selectionAnchor: number | undefined
   let mouseCapture: { pointerId: number; button: number } | undefined
   let mousePosition = ''
   let wheelRemainder = 0
@@ -482,7 +483,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       (match.start.line + current.displayOffset) * columns + match.start.column,
       (match.end.line + current.displayOffset) * columns + match.end.column,
     ] : null
-    const selected = selection && selection.start !== selection.end ? selectionRange(current, selection) : null
+    const selected = selection ? selectionRange(current, selection) : null
     const rows = changedRows ?? Array.from({ length: current.rows }, (_, row) => row)
     for (const row of rows) {
       const y = row * LINE_HEIGHT
@@ -591,8 +592,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
     if (event.button !== 0) return
     event.preventDefault()
-    const index = cell.row * frame.columns + cell.column
-    selection = { start: index, end: index }
+    selectionAnchor = cell.row * frame.columns + cell.column
+    selection = undefined
     selecting = event.pointerId
     event.currentTarget.setPointerCapture(event.pointerId)
     scheduleDraw()
@@ -602,8 +603,10 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (mouseCapture && mouseCapture.pointerId !== event.pointerId) return
     if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move')) return
     const cell = cellAt(event)
-    if (!cell || !frame || !selection || event.pointerId !== selecting) return
-    selection.end = cell.row * frame.columns + cell.column
+    if (!cell || !frame || selectionAnchor === undefined || event.pointerId !== selecting) return
+    const end = cell.row * frame.columns + cell.column
+    if (!selection && end === selectionAnchor) return
+    selection = { start: selectionAnchor, end }
     scheduleDraw()
   }
 
@@ -612,7 +615,33 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       reportMouse(event, mouseCapture.button, 'release')
       mouseCapture = undefined
     }
-    if (selecting === event.pointerId) selecting = undefined
+    if (selecting === event.pointerId) {
+      selecting = undefined
+      selectionAnchor = undefined
+    }
+  }
+
+  function selectWord(event: MouseEvent) {
+    if (!frame || (!event.shiftKey && !frame.displayOffset && (frame.modes & MOUSE_REPORTING))) return
+    const cell = cellAt(event)
+    if (!cell) return
+    const first = cell.row * frame.columns
+    const after = first + frame.columns
+    let start = first + cell.column
+    if (start > first && frame.cells[start - 1]?.width === 2) start--
+    let end = start
+    const category = (text: string) => /[\p{L}\p{N}_]/u.test(text) ? 'word' : text.trim() ? 'punctuation' : 'space'
+    const group = category(frame.cells[start]?.text ?? '')
+    const cells = frame.cells
+    const belongs = (index: number) => {
+      const entry = cells[index]
+      if (!entry) return false
+      return entry.width === 0 || category(entry.text) === group
+    }
+    while (start > first && belongs(start - 1)) start--
+    while (end + 1 < after && belongs(end + 1)) end++
+    selection = { start, end }
+    scheduleDraw()
   }
 
   function viewportText(current: bridge.TerminalFrame): string {
@@ -620,7 +649,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function selectedText(): string {
-    if (!frame || !selection || selection.start === selection.end) return ''
+    if (!frame || !selection) return ''
     const [start, end] = selectionRange(frame, selection)
     return readCells(frame, start, end)
   }
@@ -851,6 +880,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         ref={canvas}
         aria-hidden="true"
         onPointerDown={onPointerDown}
+        onDblClick={selectWord}
         onPointerMove={onPointerMove}
         onPointerUp={releaseMouse}
         onPointerCancel={releaseMouse}
