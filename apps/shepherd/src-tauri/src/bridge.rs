@@ -168,6 +168,7 @@ struct TerminalSubscription {
 
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
+    pub(crate) codex_program: Option<PathBuf>,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
@@ -181,6 +182,7 @@ impl ShellState {
         let (events, _) = broadcast::channel(512);
         Self {
             core: Arc::new(Mutex::new(core)),
+            codex_program: None,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
@@ -375,6 +377,23 @@ impl ShellState {
 
     pub async fn project_list(&self) -> ProjectList {
         self.core.lock().await.project_list()
+    }
+
+    pub async fn codex_project_model(
+        &self,
+        project_id: String,
+    ) -> Result<Option<String>, BridgeError> {
+        let Some(program) = &self.codex_program else {
+            return Ok(None);
+        };
+        let directory = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        agent_harness::codex::project_model(program, directory)
+            .await
+            .map_err(|error| BridgeError::new("codex_model", error.to_string()))
     }
 
     pub async fn project_remote(
@@ -981,6 +1000,14 @@ pub mod commands {
     #[tauri::command]
     pub fn local_codex_available() -> bool {
         agent_harness::codex::desktop_project_program().is_some()
+    }
+
+    #[tauri::command]
+    pub async fn codex_project_model(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Option<String>, BridgeError> {
+        state.codex_project_model(project_id).await
     }
 
     #[tauri::command]

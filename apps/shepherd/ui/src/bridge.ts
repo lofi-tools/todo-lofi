@@ -155,6 +155,7 @@ export interface Entry {
 export interface AgentDiagnostics {
   command: string
   protocol: string
+  model?: string
   stderrTail: string
 }
 
@@ -267,6 +268,10 @@ export function projectList(): Promise<ProjectList> {
 
 export function projectRemote(projectId: string): Promise<ProjectRemote | null> {
   return invoke('project_remote', { projectId })
+}
+
+export function codexProjectModel(projectId: string): Promise<string | null> {
+  return invoke('codex_project_model', { projectId })
 }
 
 export function scanProjects(rescan: boolean): Promise<ProjectScan> {

@@ -566,6 +566,61 @@ async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
     Ok(projects)
 }
 
+pub async fn project_model(program: &Path, cwd: PathBuf) -> HarnessResult<Option<String>> {
+    let mut harness = CodexHarness::new();
+    let result = async {
+        let directory = cwd.display().to_string();
+        harness
+            .start(SpawnSpec {
+                program: program.to_string_lossy().into_owned(),
+                args: vec!["app-server".into()],
+                cwd,
+                ..SpawnSpec::default()
+            })
+            .await?;
+        let config = harness
+            .request("config/read", json!({ "cwd": directory }))
+            .await?;
+        if let Some(model) = config.pointer("/config/model").and_then(Value::as_str) {
+            return Ok(Some(model.to_owned()));
+        }
+
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        loop {
+            let response = harness
+                .request("model/list", json!({ "cursor": cursor }))
+                .await?;
+            let models = response
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    HarnessError::Protocol("the Codex model list did not include data".into())
+                })?;
+            if let Some(model) = models.iter().find(|model| model["isDefault"] == true) {
+                return Ok(model
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned));
+            }
+            let Some(next) = response.get("nextCursor").and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            if !seen_cursors.insert(next.to_owned()) {
+                return Err(HarnessError::Protocol(
+                    "Codex repeated a model list cursor".into(),
+                ));
+            }
+            cursor = Some(next.to_owned());
+        }
+    }
+    .await;
+    let shutdown = harness.shutdown().await;
+    let model = result?;
+    shutdown?;
+    Ok(model)
+}
+
 #[derive(Default)]
 struct Pending {
     responses: HashMap<i64, oneshot::Sender<Result<Value, String>>>,
@@ -596,6 +651,7 @@ pub struct CodexHarness {
     supported: BTreeSet<String>,
     cwd: PathBuf,
     session_id: Option<SessionId>,
+    model: Option<String>,
     command: String,
     protocol: String,
     version: Option<String>,
@@ -626,6 +682,7 @@ impl CodexHarness {
                 .collect(),
             cwd: PathBuf::new(),
             session_id: None,
+            model: None,
             command: String::new(),
             protocol: "app-server".to_string(),
             version: None,
@@ -816,6 +873,7 @@ impl AgentHarness for CodexHarness {
         AgentDiagnostics {
             command: self.command.clone(),
             protocol: self.protocol.clone(),
+            model: self.model.clone(),
             stderr_tail: stderr_tail(&self.stderr),
         }
     }
@@ -864,6 +922,10 @@ impl AgentHarness for CodexHarness {
         self.pending.lock().await.thread_id = Some(thread_id.clone());
         let session_id = SessionId::new(thread_id);
         self.session_id = Some(session_id.clone());
+        self.model = response
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         Ok(session_id)
     }
 
@@ -1075,6 +1137,7 @@ impl AgentHarness for ExecHarness {
         AgentDiagnostics {
             command: self.command.clone(),
             protocol: "codex exec --json".to_string(),
+            model: None,
             stderr_tail: stderr_tail(&self.stderr),
         }
     }
@@ -2097,8 +2160,21 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       printf '{"id":%s,"result":{"capabilities":{"methods":["thread/start","thread/resume","turn/start","turn/interrupt","item/commandExecution/requestApproval"]}}}\n' "$id"
       ;;
+    *'"method":"config/read"'*)
+      case "$line" in
+        *'/configured"'*) model='"project-model"' ;;
+        *) model=null ;;
+      esac
+      printf '{"id":%s,"result":{"config":{"model":%s}}}\n' "$id" "$model"
+      ;;
+    *'"method":"model/list"'*)
+      case "$line" in
+        *'"cursor":"next"'*) printf '{"id":%s,"result":{"data":[{"model":"catalog-default","isDefault":true}],"nextCursor":null}}\n' "$id" ;;
+        *) printf '{"id":%s,"result":{"data":[{"model":"another-model","isDefault":false}],"nextCursor":"next"}}\n' "$id" ;;
+      esac
+      ;;
     *'"method":"thread/start"'*)
-      printf '{"id":%s,"result":{"thread":{"id":"thr_1"}}}\n' "$id"
+      printf '{"id":%s,"result":{"thread":{"id":"thr_1"},"model":"session-model"}}\n' "$id"
       ;;
     *'"method":"thread/resume"'*)
       printf '%s\n' "$line" >> "$directory/methods.txt"
@@ -2441,6 +2517,29 @@ done
     }
 
     #[tokio::test]
+    async fn model_lookup_prefers_the_project_config_and_falls_back_to_the_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(&directory, "codex.sh", PROTOCOL_STUB);
+        let configured = directory.path().join("configured");
+        std::fs::create_dir(&configured)?;
+
+        assert_eq!(
+            project_model(Path::new(&stub), configured)
+                .await?
+                .as_deref(),
+            Some("project-model")
+        );
+        assert_eq!(
+            project_model(Path::new(&stub), directory.path().to_path_buf())
+                .await?
+                .as_deref(),
+            Some("catalog-default")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_build_without_app_server_offers_the_exec_tier() {
         let directory = TempDir::new().expect("temp dir");
         let stub = write_stub(&directory, "codex-old.sh", UNSUPPORTED_STUB);
@@ -2473,6 +2572,10 @@ done
         assert!(capabilities.streaming);
         assert!(capabilities.resume);
         assert!(capabilities.approvals);
+        assert_eq!(
+            harness.diagnostics().model.as_deref(),
+            Some("session-model")
+        );
 
         harness
             .prompt(PromptInput {

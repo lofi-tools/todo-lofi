@@ -11,13 +11,19 @@ mod dev_harness;
 mod pty_terminal;
 mod terminal_screen;
 
+use std::path::PathBuf;
+
+use agent_harness::codex::CodexTier;
 use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
-fn harness_factory(data_directory: &std::path::Path, isolated: bool) -> Box<dyn HarnessFactory> {
+fn harness_factory(
+    data_directory: &std::path::Path,
+    isolated: bool,
+) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
     #[cfg(debug_assertions)]
     if isolated && std::env::var("SHEPHERD_DEV_SCRIPTED_HARNESS").as_deref() == Ok("1") {
-        return Box::new(dev_harness::ScriptedHarnessFactory);
+        return (Box::new(dev_harness::ScriptedHarnessFactory), None);
     }
     #[cfg(not(debug_assertions))]
     let _isolated = isolated;
@@ -27,11 +33,19 @@ fn harness_factory(data_directory: &std::path::Path, isolated: bool) -> Box<dyn 
     match &detection.install {
         Some(install) => {
             tracing::info!("{}", detection.summary());
-            Box::new(codex_harness::CodexHarnessFactory::new(install))
+            let program =
+                (install.probe.tier == CodexTier::AppServer).then(|| install.program.clone());
+            (
+                Box::new(codex_harness::CodexHarnessFactory::new(install)),
+                program,
+            )
         }
         None => {
             tracing::warn!("{}", detection.summary());
-            Box::new(codex_harness::MissingCodexFactory::new(detection.summary()))
+            (
+                Box::new(codex_harness::MissingCodexFactory::new(detection.summary())),
+                None,
+            )
         }
     }
 }
@@ -50,11 +64,12 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => path.into(),
                 None => app.path().app_data_dir()?,
             };
-            let harness_factory = harness_factory(&data_directory, isolated);
-            let state = tauri::async_runtime::block_on(bridge::ShellState::load(
+            let (harness_factory, codex_program) = harness_factory(&data_directory, isolated);
+            let mut state = tauri::async_runtime::block_on(bridge::ShellState::load(
                 &data_directory,
                 harness_factory,
             ))?;
+            state.codex_program = codex_program;
             state.start_event_pump();
             app.manage(state);
             Ok(())
@@ -73,6 +88,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_scan,
             bridge::commands::local_codex_available,
             bridge::commands::local_codex_projects,
+            bridge::commands::codex_project_model,
             bridge::commands::task_list,
             bridge::commands::task_workspace,
             bridge::commands::review_file_diff,

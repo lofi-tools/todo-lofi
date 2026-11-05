@@ -248,6 +248,8 @@ pub struct AgentDiagnostics {
     pub command: String,
     /// The protocol surface and version the adapter verified.
     pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The child's stderr, newest last.
     pub stderr_tail: String,
 }

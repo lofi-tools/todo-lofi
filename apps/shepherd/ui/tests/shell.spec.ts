@@ -189,7 +189,12 @@ test.beforeEach(async ({ context }) => {
 
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
-      return { project: projects.find((candidate) => candidate.id === task.projectId), task: detail(task), transcript: transcripts[taskId] ?? [] }
+      return {
+        project: projects.find((candidate) => candidate.id === task.projectId),
+        task: detail(task),
+        transcript: transcripts[taskId] ?? [],
+        diagnostics: task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
+      }
     }
 
     window.__TAURI_INTERNALS__ = {
@@ -217,6 +222,8 @@ test.beforeEach(async ({ context }) => {
             return '/tmp/home/'
           case 'project_list':
             return { projects: [...projects] }
+          case 'codex_project_model':
+            return args.projectId === 'project-notes' ? 'notes-model' : 'project-model'
           case 'project_remote':
             if (options.has('hugging-face-remote')) {
               return { label: 'datasets/example/data', forge: 'huggingface' }
@@ -346,6 +353,7 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
   await page.getByRole('button', { name: 'Send' }).click()
   await expect(page.getByText('working on it')).toBeVisible()
   await expect(page.locator('.transcript')).toContainText('make it fast')
+  await expect(page.getByRole('button', { name: 'Model / effort: session-model' })).toHaveText('session-model')
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
@@ -373,6 +381,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await directory.click()
   const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
   await expect(welcome).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Model / effort: notes-model' })).toHaveText('notes-model')
   const agent = welcome.getByRole('button', { name: 'Agent: Codex' })
   await agent.click()
   const agentMenu = welcome.getByRole('menu', { name: 'Agent' })
@@ -669,9 +678,9 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
 
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await expect(composer.getByRole('menuitemradio', { name: 'Codex', checked: true })).toBeVisible()
-  await composer.getByRole('button', { name: 'Model / effort: Agent default' }).click()
+  await composer.getByRole('button', { name: 'Model / effort: project-model' }).click()
   const model = composer.getByRole('menu', { name: 'Model / effort' })
-  await expect(model.getByRole('menuitemradio', { name: 'Agent default', checked: true })).toBeVisible()
+  await expect(model.getByRole('menuitemradio', { name: 'project-model', checked: true })).toBeVisible()
   await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
 })
 

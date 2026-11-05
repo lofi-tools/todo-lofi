@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -51,10 +51,30 @@ export function App() {
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
+  const [projectModel] = createResource(
+    () => {
+      const project = selectedProject()
+      return project && !project.missing ? project.id : false
+    },
+    async (projectId) => {
+      try {
+        return { projectId, model: await bridge.codexProjectModel(projectId) }
+      } catch (error) {
+        console.warn('Could not read the Codex model', error)
+        return { projectId, model: null }
+      }
+    },
+  )
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const composerModel = () => {
+    const activeModel = workspace()?.diagnostics?.model
+    if (activeModel) return activeModel
+    const configured = projectModel()
+    return configured?.projectId === selectedProjectId() ? configured.model : null
+  }
   const [showArchived, setShowArchived] = createSignal(false)
   const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
@@ -656,7 +676,7 @@ export function App() {
               }}
             />
             <div class="composer__actions">
-              <ComposerPickers />
+              <ComposerPickers model={composerModel()} />
               <button
                 type="button"
                 class="composer__send composer__send--icon"
@@ -824,13 +844,13 @@ const APPROVAL_OPTIONS: PickerOption[] = [
   { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
 ]
 
-const MODEL_OPTIONS: PickerOption[] = [
-  { id: 'default', name: 'Agent default' },
+const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'model', name: 'Choose model (coming soon)', disabled: true },
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers() {
+function ComposerPickers(props: { model: string | null }) {
+  const modelLabel = () => props.model ?? 'Codex default'
   return (
     <>
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
@@ -847,8 +867,8 @@ function ComposerPickers() {
         <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
         <PickerCaret />
       </PickerMenu>
-      <PickerMenu label="Model / effort" text="Agent default" value="default" options={MODEL_OPTIONS} triggerClass="composer__picker composer__picker--model" above>
-        <span class="composer__picker-label">Model / effort</span>
+      <PickerMenu label="Model / effort" text={modelLabel()} value="default" options={[{ id: 'default', name: modelLabel() }, ...MODEL_OVERRIDES]} triggerClass="composer__picker composer__picker--model" above>
+        <span class="composer__picker-label">{modelLabel()}</span>
         <PickerCaret />
       </PickerMenu>
     </>
