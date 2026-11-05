@@ -953,6 +953,32 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_remove_a_worktree_containing_an_untracked_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let path = task_worktree(&fixture)?;
+        let untracked = path.join("draft.txt");
+        std::fs::write(&untracked, "keep this draft")?;
+        assert!(matches!(
+            GitService.remove_clean_worktree(fixture.repository(), &path),
+            Err(GitError::DirtyWorktree { .. }),
+        ));
+        assert_eq!(std::fs::read_to_string(&untracked)?, "keep this draft");
+
+        std::fs::remove_file(&untracked)?;
+        GitService.remove_clean_worktree(fixture.repository(), &path)?;
+        assert!(!path.exists());
+        assert!(
+            run_git(
+                fixture.path(),
+                &["show-ref", "--verify", "refs/heads/shepherd/example"]
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
         let error = GitService::discover(directory.path()).expect_err("not a repository");
