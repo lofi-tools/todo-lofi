@@ -350,21 +350,33 @@ async function ptyColumns(terminalId: string, title: string, marker: string): Pr
 async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
   const divider = await waitFor('inspector resize control', () =>
     document.querySelector<HTMLElement>('[aria-label="Resize inspector"]'))
-  const initialWidth = await waitFor('terminal frame fitted to the inspector', () => {
-    const view = terminalPane(terminal.title)?.querySelector<HTMLElement>('.terminal-view')
-    const width = paneWidth(terminal.title)
-    return view && width > 0 && Math.abs(view.clientWidth - 16 - width) <= 8 && width
-  })
+  function fittedColumns() {
+    const canvas = terminalPane(terminal.title)?.querySelector('canvas')
+    const view = canvas?.parentElement
+    const context = canvas?.getContext('2d')
+    if (!canvas || !view || !context) return
+    const padding = getComputedStyle(view)
+    const available = view.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight)
+    const cellWidth = Math.max(6, context.measureText('M').width)
+    const columns = Math.floor(available / cellWidth)
+    if (columns >= 2 && parseFloat(canvas.style.width) === Math.ceil(columns * cellWidth)) return columns
+  }
+  const initialFit = await waitFor('terminal frame fitted to the inspector', fittedColumns)
   const initialColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_BEFORE')
+  if (initialColumns !== initialFit) throw new Error('The PTY and initial inspector frame disagree')
   const inspectorWidth = Number(divider.getAttribute('aria-valuenow'))
   press(divider, 'ArrowLeft')
   await waitFor('wider inspector', () => Number(divider.getAttribute('aria-valuenow')) > inspectorWidth)
-  await waitFor('wider terminal frame', () => paneWidth(terminal.title) > initialWidth)
+  const expandedFit = await waitFor('terminal frame fitted to the wider inspector', fittedColumns)
   const expandedColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_AFTER')
-  if (expandedColumns <= initialColumns) throw new Error('The PTY did not widen with the inspector')
+  if (expandedColumns !== expandedFit || expandedColumns <= initialColumns) {
+    throw new Error('The PTY did not fit the wider inspector')
+  }
   press(divider, 'ArrowRight')
-  await waitFor('terminal frame after restoring the inspector width', () =>
-    paneWidth(terminal.title) === initialWidth)
+  await waitFor('terminal frame fitted to the restored inspector', () =>
+    Number(divider.getAttribute('aria-valuenow')) === inspectorWidth && fittedColumns() === initialFit)
+  const restoredColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_RESTORED')
+  if (restoredColumns !== initialColumns) throw new Error('The PTY did not restore its original width')
 }
 
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {

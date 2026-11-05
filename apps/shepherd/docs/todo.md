@@ -526,7 +526,9 @@ task-scoped, persistent and fast enough.
   layout. The Turso round-trip covers an existing layout and a task with default
   dimensions.
 - [x] Resize the inspector with the pointer or arrow keys. The terminal adopts
-  the new width, and switching tasks restores their individual widths.
+  the new width, and switching tasks restores their individual widths. The
+  native smoke verifies that the canvas and PTY agree on the column count
+  before resizing, after widening and after restoring the original width.
 - [x] Implement shared terminals (one PTY across tasks) and task terminals
   (swap with the active task; keep running while hidden).
 - [x] Add **New task terminal**, **New shared terminal**, the instance menu,
