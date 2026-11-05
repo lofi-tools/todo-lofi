@@ -373,7 +373,8 @@ review and merge gate is tracked separately.
   and the Git test checks a fixture hook and rejection of a stale staging revision.
 - [x] A failing hook preserves the attempted commit message and staged revision
   for retry. The Git pane clears the draft message after a successful commit.
-- [ ] squash-merge from a clean root;
+- [x] Squash-merge from a clean root. The Git fixture checks the merged contents,
+  single parent, commit subject and retained task branch.
 - [ ] dirty root and off-base root refuse with a reason;
 - [ ] conflict paths are listed;
 - [ ] missing and dirty worktrees are not silently removed.
