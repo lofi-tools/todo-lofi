@@ -131,7 +131,7 @@ impl ShellState {
 
         // Walking the home directory can take seconds, so the scan starts with
         // the app and the picker reads whatever has landed by the time it opens.
-        if let Some(home) = home_directory() {
+        if let Some(home) = project_scan_root() {
             let scan = state.scan.clone();
             tauri::async_runtime::spawn(async move {
                 match tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
@@ -299,7 +299,7 @@ impl ShellState {
     ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
         let mut cache = self.scan.lock().await;
         if rescan || cache.is_none() {
-            let home = home_directory()
+            let home = project_scan_root()
                 .ok_or_else(|| BridgeError::new("scan", "no home directory to scan"))?;
             let found =
                 tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
@@ -701,7 +701,13 @@ impl ShellState {
     }
 }
 
-fn home_directory() -> Option<PathBuf> {
+fn project_scan_root() -> Option<PathBuf> {
+    if cfg!(debug_assertions)
+        && let Some(path) = std::env::var_os("SHEPHERD_DEV_PROJECT_ROOT")
+        && !path.is_empty()
+    {
+        return Some(path.into());
+    }
     std::env::var_os("HOME").map(PathBuf::from)
 }
 

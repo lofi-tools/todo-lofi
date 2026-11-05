@@ -21,7 +21,8 @@ running between app restarts. Non-interactive runners can use
 `direnv exec . shep`.
 
 Set `SHEPHERD_DEV_DATA_DIR` to an absolute path when exercising the debug app
-with a separate project list and database.
+with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
+to point the debug project picker at a fixture directory.
 
 Until the Codex adapter lands in S2, the shell runs a scripted adapter
 (`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
