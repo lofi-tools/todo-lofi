@@ -60,6 +60,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     setSelectedId(terminalId)
   }
 
+  function resizeSplit(path: SplitPath, ratio: number) {
+    const node = root()
+    if (node) void run(() => save(updateSplit(node, path, ratio)))
+  }
+
   function start(taskId: string | null, axis: bridge.SplitAxis) {
     void run(async () => {
       const before = new Set(terminals().map((terminal) => terminal.id))
@@ -113,7 +118,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       <Show when={root()} fallback={<p class="empty">No terminals yet. Start one in this project.</p>}>
         {(node) => <TerminalTree node={node()} terminal={terminal} active={active()} select={setSelectedId}
           restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
-          stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />}
+          path={[]} resize={resizeSplit} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />}
       </Show>
     </div>
   )
@@ -143,8 +148,19 @@ function firstVisible(node: bridge.TerminalSplit | null, terminal: TerminalLooku
     : firstVisible(node.first, terminal) ?? firstVisible(node.second, terminal)
 }
 
+type SplitSide = 'first' | 'second'
+type SplitPath = readonly SplitSide[]
+
+function updateSplit(node: bridge.TerminalSplit, path: SplitPath, ratio: number): bridge.TerminalSplit {
+  if (node.type !== 'split') return node
+  const [side, ...rest] = path
+  return side ? { ...node, [side]: updateSplit(node[side], rest, ratio) } : { ...node, ratio }
+}
+
 interface TerminalTreeProps {
   node: bridge.TerminalSplit
+  path: SplitPath
+  resize: (path: SplitPath, ratio: number) => void
   terminal: TerminalLookup
   active: string | null
   select: (id: string) => void
@@ -154,6 +170,18 @@ interface TerminalTreeProps {
 }
 
 function TerminalTree(props: TerminalTreeProps) {
+  const [preview, setPreview] = createSignal<number | null>(null)
+  let bounds: DOMRect | undefined
+  let dragPointer: number | undefined
+
+  function ratioAt(event: PointerEvent, axis: bridge.SplitAxis) {
+    if (!bounds) return null
+    const horizontal = axis === 'horizontal'
+    const position = horizontal ? event.clientX - bounds.left : event.clientY - bounds.top
+    const size = horizontal ? bounds.width : bounds.height
+    return size > 0 ? Math.max(100, Math.min(900, Math.round(position / size * 1000))) : null
+  }
+
   const split = () => props.node.type === 'split' ? props.node : null
   const pane = () => props.node.type === 'pane' ? props.terminal(props.node.terminalId) : undefined
   return (
@@ -185,13 +213,42 @@ function TerminalTree(props: TerminalTreeProps) {
       {(branch) => (
         <div class={`terminal-split terminal-split--${branch().axis}`}>
           <Show when={firstVisible(branch().first, props.terminal)}>
-            <div class="terminal-split__child" style={{ flex: branch().ratio }}>
-              <TerminalTree {...props} node={branch().first} />
+            <div class="terminal-split__child" style={{ flex: preview() ?? branch().ratio }}>
+              <TerminalTree {...props} node={branch().first} path={[...props.path, 'first']} />
             </div>
           </Show>
+          <Show when={firstVisible(branch().first, props.terminal) && firstVisible(branch().second, props.terminal)}>
+            <div class="terminal-divider" role="separator" tabIndex={0} aria-label="Resize terminal split"
+              aria-orientation={branch().axis === 'horizontal' ? 'vertical' : 'horizontal'}
+              aria-valuemin={10} aria-valuemax={90} aria-valuenow={Math.round((preview() ?? branch().ratio) / 10)}
+              onPointerDown={(event) => {
+                if (event.button !== 0 || props.pending) return
+                bounds = event.currentTarget.parentElement?.getBoundingClientRect()
+                dragPointer = event.pointerId
+                event.currentTarget.setPointerCapture(event.pointerId)
+              }}
+              onPointerMove={(event) => {
+                if (event.pointerId === dragPointer) setPreview(ratioAt(event, branch().axis))
+              }}
+              onPointerUp={(event) => {
+                if (event.pointerId !== dragPointer) return
+                const ratio = ratioAt(event, branch().axis)
+                dragPointer = undefined
+                setPreview(null)
+                if (ratio !== null && !props.pending) props.resize(props.path, ratio)
+              }}
+              onLostPointerCapture={() => { dragPointer = undefined; setPreview(null) }}
+              onKeyDown={(event) => {
+                const keys = branch().axis === 'horizontal' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown']
+                const direction = keys.indexOf(event.key)
+                if (direction < 0 || props.pending) return
+                event.preventDefault()
+                props.resize(props.path, Math.max(100, Math.min(900, branch().ratio + (direction ? 50 : -50))))
+              }} />
+          </Show>
           <Show when={firstVisible(branch().second, props.terminal)}>
-            <div class="terminal-split__child" style={{ flex: 1000 - branch().ratio }}>
-              <TerminalTree {...props} node={branch().second} />
+            <div class="terminal-split__child" style={{ flex: 1000 - (preview() ?? branch().ratio) }}>
+              <TerminalTree {...props} node={branch().second} path={[...props.path, 'second']} />
             </div>
           </Show>
         </div>
@@ -274,8 +331,7 @@ function TerminalCanvas(props: { terminalId: string }) {
     try {
       await bridge.terminalResize(props.terminalId, size.columns, size.rows)
     } catch {
-      // A terminal that already ended cannot be resized; the ended view replaces
-      // this canvas when the next terminal-list event arrives.
+      if (lastSent === key) lastSent = '' 
     }
   }
 
@@ -339,10 +395,14 @@ function TerminalCanvas(props: { terminalId: string }) {
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
 
-    const observer = new ResizeObserver(() => void applySize())
+    let resizeTimer: number | undefined
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(resizeTimer)
+      resizeTimer = window.setTimeout(() => void applySize(), 75)
+    })
     if (container) observer.observe(container)
 
-    onCleanup(() => observer.disconnect())
+    onCleanup(() => { observer.disconnect(); window.clearTimeout(resizeTimer) })
   })
 
   return (

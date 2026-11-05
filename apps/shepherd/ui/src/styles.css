@@ -1000,3 +1000,22 @@ textarea {
 .terminal-tile > .terminal-pane__bar {
   padding: 4px 8px;
 }
+
+.terminal-divider {
+  flex: 0 0 7px;
+  background: var(--border);
+  touch-action: none;
+}
+
+.terminal-split--horizontal > .terminal-divider {
+  cursor: col-resize;
+}
+
+.terminal-split--vertical > .terminal-divider {
+  cursor: row-resize;
+}
+
+.terminal-divider:hover,
+.terminal-divider:focus-visible {
+  background: var(--accent, #6f8fdc);
+}
