@@ -676,20 +676,23 @@ export function App() {
               }}
             />
             <div class="composer__actions">
-              <ComposerPickers model={composerModel()} />
-              <button
-                type="button"
-                class="composer__send composer__send--icon"
-                data-send-accent={sendAccent()}
-                aria-label="Send"
-                title="Send"
-                onClick={sendPrompt}
-                disabled={!canCompose() || pending() || !prompt().trim()}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />
-                </svg>
-              </button>
+              <ComposerPickers />
+              <div class="composer__send-actions">
+                <ComposerModelPicker model={composerModel()} />
+                <button
+                  type="button"
+                  class="composer__send composer__send--icon"
+                  data-send-accent={sendAccent()}
+                  aria-label="Send"
+                  title="Send"
+                  onClick={sendPrompt}
+                  disabled={!canCompose() || pending() || !prompt().trim()}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -839,8 +842,9 @@ const ATTACHMENT_OPTIONS: PickerOption[] = [
   { id: 'commands', name: 'Commands (coming soon)', disabled: true },
 ]
 
+const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
 const APPROVAL_OPTIONS: PickerOption[] = [
-  { id: 'ask', name: 'Ask me' },
+  DEFAULT_APPROVAL,
   { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
 ]
 
@@ -849,29 +853,35 @@ const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers(props: { model: string | null }) {
-  const modelLabel = () => props.model ?? 'Codex default'
+function ComposerPickers() {
   return (
     <>
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
         <PlusIcon />
       </PickerMenu>
-      <PickerMenu label="Shell approvals" text="Ask me" value="ask" options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
+      <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker composer__picker--approval" above>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
           <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
         </svg>
+        <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
         <PickerCaret />
       </PickerMenu>
       <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={AGENT_OPTIONS} triggerClass="composer__picker" above>
         <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
         <PickerCaret />
       </PickerMenu>
-      <PickerMenu label="Model / effort" text={modelLabel()} value="default" options={[{ id: 'default', name: modelLabel() }, ...MODEL_OVERRIDES]} triggerClass="composer__picker composer__picker--model" above>
-        <span class="composer__picker-label">{modelLabel()}</span>
-        <PickerCaret />
-      </PickerMenu>
     </>
+  )
+}
+
+function ComposerModelPicker(props: { model: string | null }) {
+  const modelLabel = () => props.model ?? 'Codex default'
+  return (
+    <PickerMenu label="Model / effort" text={modelLabel()} value="default" options={[{ id: 'default', name: modelLabel() }, ...MODEL_OVERRIDES]} triggerClass="composer__picker" above>
+      <span class="composer__picker-label">{modelLabel()}</span>
+      <PickerCaret />
+    </PickerMenu>
   )
 }
 

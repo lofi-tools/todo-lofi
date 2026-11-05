@@ -1054,8 +1054,18 @@ textarea {
 
 .composer__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
+}
+
+.composer__send-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: auto;
 }
 
 .composer__picker {
@@ -1073,7 +1083,11 @@ textarea {
   cursor: pointer;
 }
 
-.composer__picker--model {
+.composer__picker--approval {
+  flex: 0 0 128px;
+}
+
+.composer__picker--approval .picker-caret {
   margin-inline-start: auto;
 }
 

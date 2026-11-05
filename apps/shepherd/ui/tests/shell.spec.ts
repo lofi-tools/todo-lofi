@@ -666,6 +666,7 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   await expect(attachments.getByRole('menuitem', { name: 'Commands (coming soon)' })).toBeDisabled()
 
   const shell = composer.getByRole('button', { name: 'Shell approvals: Ask me' })
+  await expect(shell).toHaveText('Ask me')
   await shell.click()
   const approvals = composer.getByRole('menu', { name: 'Shell approvals' })
   await expect(attachments).toBeHidden()
