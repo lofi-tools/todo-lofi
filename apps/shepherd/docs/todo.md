@@ -322,6 +322,12 @@ Manual script on a throwaway repository:
 
 **Pass:** a real Codex task works end to end on a disposable repository.
 
+The network approval scenario passed live with GPT-6.1 Terra at `low` effort.
+Codex asked before running the command, Shepherd recorded the denial, and the
+turn completed. A second run passed by replaying the saved response sequence in
+`.cache/shepherd-live/codex/terra-low-v1/network-approval.json`. The desktop
+approval interaction remains part of the gate.
+
 **If it fails:** do not build more adapters or UI breadth. Record the exact
 protocol gap and decide: patch the adapter, use the `exec` fallback, or lower
 Codex’s advertised capability. The product must not pretend a broken protocol is
