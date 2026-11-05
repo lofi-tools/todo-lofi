@@ -50,6 +50,9 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh
 The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
+On Ubuntu 24.04, the **Shepherd terminal smoke** GitHub Actions workflow runs
+the same two launches under Xvfb. Dispatch it for the ref you want to verify.
+
 ## Import projects from the ChatGPT app
 
 When the Projects list is empty, choose **ChatGPT app** under **or import all

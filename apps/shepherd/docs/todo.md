@@ -584,6 +584,10 @@ conversion candidates.
 The native smoke starts synthetic composition from scrollback and checks that
 the input anchor returns to the live cursor before committing text once.
 
+The manually dispatched **Shepherd terminal smoke** workflow uses an Ubuntu
+24.04 runner and Xvfb for the same two native launches. The Ubuntu result
+remains pending until the workflow runs on a published ref.
+
 ### Gate
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without

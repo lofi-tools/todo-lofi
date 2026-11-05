@@ -1,0 +1,31 @@
+name: Shepherd terminal smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      GDK_BACKEND: x11
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Install display and terminal fixtures
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-daemon less python3 ripgrep vim xauth xvfb
+      - name: Build the debug app
+        run: |
+          nix develop --impure -c pnpm --filter shepherd-app --filter shepherd-ui install --frozen-lockfile
+          nix develop --impure -c cargo build --locked -p shepherd --no-default-features
+      - name: Exercise both native launches
+        run: |
+          nix develop --impure -c dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24' ./scripts/smoke-shepherd-terminal.sh
