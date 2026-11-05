@@ -540,6 +540,7 @@ impl Core {
     pub fn git_snapshot(&self, task_id: &TaskId) -> Result<git::GitSnapshot, CoreError> {
         let (task, repository, path) = self.task_git_worktree(task_id)?;
         let mut snapshot = GitService.snapshot(path)?;
+        snapshot.project_root = Some(GitService.checkout_status(&repository.root)?);
         snapshot.merge_blocked = match (&task.base_branch, &task.branch) {
             (Some(base), Some(branch)) => {
                 GitService.merge_blocked(&repository.root, path, base, branch)?

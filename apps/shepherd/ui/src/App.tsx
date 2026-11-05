@@ -450,7 +450,7 @@ export function App() {
             <Show when={inspectorTab() === 'git'}>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
                 <Show when={workspace()?.task.id} keyed>
-                  {(taskId) => <GitPane taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
+                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
                 </Show>
               </Show>
             </Show>

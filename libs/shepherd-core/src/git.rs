@@ -348,18 +348,44 @@ impl GitService {
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    pub fn snapshot(&self, path: &Path) -> Result<GitSnapshot, GitError> {
+    pub fn checkout_status(&self, path: &Path) -> Result<CheckoutStatus, GitError> {
         let head = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let branch = (head != "HEAD").then_some(head);
+        let tracking = if let Some(branch) = &branch {
+            let reference = format!("refs/heads/{branch}");
+            let summary = run_git(
+                path,
+                &[
+                    "for-each-ref",
+                    "--format=%(upstream:short) %(upstream:track)",
+                    &reference,
+                ],
+            )?;
+            (!summary.is_empty()).then_some(summary)
+        } else {
+            None
+        };
+        Ok(CheckoutStatus {
+            branch,
+            tracking,
+            files: self.status(path)?,
+        })
+    }
+
+    pub fn snapshot(&self, path: &Path) -> Result<GitSnapshot, GitError> {
+        let checkout = self.checkout_status(path)?;
         let branches = run_git(
             path,
             &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
         )?;
         Ok(GitSnapshot {
-            branch: (head != "HEAD").then_some(head),
+            branch: checkout.branch,
+            tracking: checkout.tracking,
+            project_root: None,
             staged_revision: self.staged_revision(path)?,
             merge_blocked: None,
             branches: branches.lines().map(str::to_string).collect(),
-            files: self.status(path)?,
+            files: checkout.files,
             history: self.history(path)?,
             staged_diff: run_git(
                 path,
@@ -635,9 +661,18 @@ pub struct GitCommit {
 }
 
 #[derive(Debug, Serialize)]
+pub struct CheckoutStatus {
+    pub branch: Option<String>,
+    pub tracking: Option<String>,
+    pub files: Vec<GitFile>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitSnapshot {
     pub branch: Option<String>,
+    pub tracking: Option<String>,
+    pub project_root: Option<CheckoutStatus>,
     pub branches: Vec<String>,
     pub history: Vec<GitCommit>,
     pub files: Vec<GitFile>,

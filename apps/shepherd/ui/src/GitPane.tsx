@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { gitSnapshot, mutateGit, type GitMutation } from './bridge'
 
-export function GitPane(props: { taskId: string; revision: number; live: boolean }) {
+export function GitPane(props: { taskId: string; revision: number; live: boolean; openTerminal: () => void }) {
   const [git, { refetch, mutate }] = createResource(
     () => [props.taskId, props.revision] as const,
     ([taskId]) => gitSnapshot(taskId),
@@ -41,7 +41,24 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
       <Show when={!git.error && git()}>
         {(snapshot) => (
           <>
-            <p>Branch: {snapshot().branch ?? 'Detached HEAD'}</p>
+            <p>Task branch: {snapshot().branch ?? 'Detached HEAD'}</p>
+            <Show when={snapshot().tracking}>{(tracking) => <p class="empty">Upstream {tracking()}</p>}</Show>
+            <Show when={snapshot().projectRoot}>
+              {(root) => (
+                <details>
+                  <summary>Project root · {root().branch ?? 'Detached HEAD'} · {root().files.length} changed</summary>
+                  <Show when={root().tracking}>{(tracking) => <p class="empty">Upstream {tracking()}</p>}</Show>
+                  <ul class="git-pane__files">
+                    <For each={root().files}>{(file) => (
+                      <li><code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code>{' '}
+                        {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+                      </li>
+                    )}</For>
+                  </ul>
+                  <div class="terminal-pane__bar"><button type="button" onClick={props.openTerminal}>Open project terminals</button></div>
+                </details>
+              )}
+            </Show>
             <div class="terminal-pane__bar">
               <select aria-label="Local branch" value={branch()} onChange={(event) => setBranch(event.currentTarget.value)}>
                 <option value="">Choose a branch</option>

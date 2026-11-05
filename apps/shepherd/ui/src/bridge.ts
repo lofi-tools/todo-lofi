@@ -326,6 +326,8 @@ export function reviewSnapshot(taskId: string): Promise<ReviewSnapshot> {
 
 export interface GitSnapshot {
   branch: string | null
+  tracking: string | null
+  projectRoot: { branch: string | null; tracking: string | null; files: GitFile[] } | null
   branches: string[]
   history: { id: string; author: string; time: string; subject: string }[]
   files: GitFile[]
