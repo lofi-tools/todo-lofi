@@ -230,7 +230,64 @@ impl Core {
             core.terminals.insert(terminal.id.clone(), terminal);
         }
 
+        core.collect_archived_worktrees().await;
         Ok(core)
+    }
+
+    async fn collect_archived_worktrees(&mut self) {
+        const ARCHIVE_AGE_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
+        let cutoff = projects::now_millis().saturating_sub(ARCHIVE_AGE_MILLIS);
+        let candidates: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                task.state == TaskState::Done
+                    && task.updated_at <= cutoff
+                    && task.worktree_path.is_some()
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        for task_id in candidates {
+            if let Err(error) = self.collect_archived_worktree(&task_id).await {
+                tracing::info!(%task_id, %error, "kept archived worktree");
+            }
+        }
+    }
+
+    async fn collect_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let (task, repository, path) = self.task_git_worktree(task_id)?;
+        let mut updated = task.clone();
+        let Some(branch) = task.branch.as_deref() else {
+            return Ok(());
+        };
+        if GitService.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        updated.branch_tip_sha = Some(GitService.checked_out_tip(path, branch)?);
+        self.store.save_task(&updated).await?;
+        self.tasks.insert(task_id.clone(), updated.clone());
+        let Some(path) = updated.worktree_path.as_deref() else {
+            return Ok(());
+        };
+        GitService.remove_clean_worktree(&repository, path)?;
+        updated.worktree_path = None;
+        self.store.save_task(&updated).await?;
+        self.tasks.insert(task_id.clone(), updated);
+        Ok(())
+    }
+
+    pub async fn touch_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let task = self.task(task_id)?;
+        if task.state == TaskState::Done && task.worktree_path.is_some() {
+            let mut updated = task.clone();
+            updated.updated_at = projects::now_millis();
+            self.store.save_task(&updated).await?;
+            self.tasks.insert(task_id.clone(), updated);
+        }
+        Ok(())
     }
 
     /// Terminal records for one project, oldest first. An ended terminal stays
@@ -454,7 +511,13 @@ impl Core {
                     }
                     .into());
                 };
-                GitService.squash_merge(&repository.root, path, base, branch, &task.title)?;
+                let mut updated = task.clone();
+                updated.branch_tip_sha = Some(GitService.checked_out_tip(path, branch)?);
+                self.store.save_task(&updated).await?;
+                let outcome =
+                    GitService.squash_merge(&repository.root, path, base, branch, &task.title);
+                self.tasks.insert(task_id.clone(), updated);
+                outcome?;
             }
         }
         self.git_snapshot(task_id)
@@ -625,7 +688,10 @@ impl Core {
             }
             ReviewAction::Reopen => {
                 task.set_state(TaskState::Review)?;
-                self.repair_worktree(task_id).await?;
+                if task.worktree_path.is_none() && task.branch.is_some() {
+                    task.worktree_path = Some(task.proposed_worktree_path.clone());
+                }
+                self.restore_task_worktree(&task)?;
             }
             ReviewAction::SendNote { text } => {
                 if text.trim().is_empty() {
@@ -869,7 +935,25 @@ impl Core {
                 session.shutdown().await?;
                 self.sessions.remove(task_id);
             }
-            GitService.restore_worktree(&repository, path, branch, None)?;
+            GitService.restore_worktree(
+                &repository,
+                path,
+                branch,
+                task.branch_tip_sha.as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn restore_task_worktree(&self, task: &Task) -> Result<(), CoreError> {
+        if let (Some(path), Some(branch)) = (&task.worktree_path, &task.branch) {
+            let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
+            GitService.restore_worktree(
+                &repository,
+                path,
+                branch,
+                task.branch_tip_sha.as_deref(),
+            )?;
         }
         Ok(())
     }
@@ -1180,6 +1264,9 @@ impl Core {
             let Some(mut session) = self.sessions.remove(&task_id) else {
                 continue;
             };
+            if session.is_closed() {
+                continue;
+            }
             let events = match session.shutdown().await {
                 Ok(events) => events,
                 Err(error) => {

@@ -301,11 +301,10 @@ impl ShellState {
     }
 
     pub async fn task_workspace(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
-        self.core
-            .lock()
-            .await
-            .task_workspace(&TaskId::new(task_id))
-            .map_err(BridgeError::from)
+        let task_id = TaskId::new(task_id);
+        let mut core = self.core.lock().await;
+        core.touch_archived_worktree(&task_id).await?;
+        Ok(core.task_workspace(&task_id)?)
     }
 
     pub async fn terminal_list(&self, project_id: String) -> Vec<TerminalSnapshot> {

@@ -339,7 +339,7 @@ squash-merge into the base from inside Shepherd.
   review count.
 - [x] Implement **Mark reviewed and archive**, **Reopen** and **Send review
   note**.
-- [ ] Record the branch tip before worktree collection; never delete branches
+- [x] Record the branch tip before worktree collection; never delete branches
   automatically.
 
 ### Proof

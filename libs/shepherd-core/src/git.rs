@@ -45,6 +45,8 @@ pub enum GitError {
     EmptyCommitMessage,
     #[error("staging changed; refresh Git status before committing")]
     StagingChanged,
+    #[error("check out the task branch {branch} before collecting its worktree")]
+    UnexpectedBranch { branch: String },
     #[error("local branch does not exist: {branch}")]
     UnknownBranch { branch: String },
     #[error("squash merge is unavailable: {reason}")]
@@ -384,7 +386,11 @@ impl GitService {
         let mut hash = Sha256::new();
         hash.update(git_bytes(path, &["rev-parse", "HEAD"])?);
         hash.update(git_bytes(path, &["ls-files", "--stage", "-z"])?);
-        Ok(format!("{:x}", hash.finalize()))
+        Ok(hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
     }
 
     pub fn checkout(&self, path: &Path, branch: &str) -> Result<(), GitError> {
@@ -432,6 +438,16 @@ impl GitService {
             return Ok(Some("The task branch has no commits to merge.".into()));
         }
         Ok(None)
+    }
+
+    pub fn checked_out_tip(&self, path: &Path, branch: &str) -> Result<String, GitError> {
+        let reference = format!("refs/heads/{branch}");
+        if run_git(path, &["symbolic-ref", "--quiet", "HEAD"])? != reference {
+            return Err(GitError::UnexpectedBranch {
+                branch: branch.into(),
+            });
+        }
+        run_git(path, &["rev-parse", "--verify", "HEAD"])
     }
 
     pub fn squash_merge(
