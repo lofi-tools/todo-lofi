@@ -29,8 +29,13 @@
           # soup3-sys, webkit2gtk-sys and libdbus-sys each ask pkg-config for
           # their library at build time. macOS needs none of them: tauri and
           # tao use the system frameworks there.
+          # Zig is a build dependency of the terminal engine: `libghostty-vt`
+          # is a C library whose archive is compiled by Zig at build time (see
+          # docs/spec/stack.md). The shipped app links the archive statically,
+          # so end users never install Zig.
           buildDeps = [
             pkgs.pkg-config
+            pkgs.zig
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.glib
             pkgs.gtk3

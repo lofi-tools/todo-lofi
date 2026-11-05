@@ -49,7 +49,7 @@ and merge it without leaving Shepherd?”
 | `rustc` / `rustfmt` | Not directly on `PATH`; the Nix Cargo wrapper supplies `rustc`, and `rustfmt` is available in the Nix store | ACP tests and Shepherd checks pass through the wrapper. Use the Nix dev shell for direct compiler and formatter commands before S0. |
 | `pnpm` | 11.25.0 | Use it for the v1 UI. |
 | Node | 24.21.0 | Fine for Vite/Tauri tooling. |
-| `zig` | Not installed | Required by `libghostty-vt`. Install the pinned Zig or decide to use the `alacritty_terminal` fallback before S1/S4. |
+| `zig` | In the flake's build dependencies (`pkgs.zig`) | Builds `libghostty-vt` at build time only. The shipped app statically links the archive, so end users install nothing. Confirm `pkgs.zig` satisfies the bindings' required Zig version before the engine spike. |
 | `codex` | Available through the ChatGPT app bundle; protocol support unverified | S2 can use recorded fixtures and a fake server, but the S2 gate requires a live `codex` run. |
 | Git | 2.50.1 | Use temporary repositories for every automated Git test. |
 
