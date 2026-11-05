@@ -44,4 +44,18 @@ Every core command has one `#[tauri::command]`, and the window receives core
 events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
 the snapshots come from `shepherd-core`, never from a second frontend model.
 
+## Live Codex tests
+
+The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at
+`low` effort. A successful run records the app-server responses under
+`.cache/shepherd-live/codex/terra-low-v1/`. Later runs replay them through
+the adapter, including the recorded file change where the scenario needs it.
+Delete a scenario's JSON file to request a fresh live run.
+
+```sh
+direnv exec . cargo test -p agent-harness -- --ignored live_codex
+direnv exec . cargo test -p shepherd-core -- --ignored live_exit
+direnv exec . cargo test -p shepherd-core -- --ignored live_restart
+```
+
 Design and build order: [docs/todo.md](./docs/todo.md).

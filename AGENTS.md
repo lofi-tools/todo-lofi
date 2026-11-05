@@ -175,6 +175,10 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 # Build guidelines
 
+Live tests that use a ChatGPT plan through Codex must use `gpt-6.1-terra`
+at `low` effort. Use the shared `LiveCodexRun` helper to record successful
+responses under `.cache/shepherd-live/` and replay them on later runs.
+
 Run workspace commands through the repository's Nix direnv environment, not
 the ambient shell:
 

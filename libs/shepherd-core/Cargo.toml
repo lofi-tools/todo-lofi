@@ -25,5 +25,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+agent-harness = { path = "../agent-harness", features = ["live-test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

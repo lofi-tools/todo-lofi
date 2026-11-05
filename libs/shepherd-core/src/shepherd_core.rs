@@ -1667,7 +1667,7 @@ mod live_exit {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use agent_harness::codex::{CodexHarness, detect};
+    use agent_harness::live_codex::LiveCodexRun;
     use agent_harness::{AgentHarness, SpawnSpec};
 
     use crate::harness::HarnessFactory;
@@ -1678,25 +1678,25 @@ mod live_exit {
     /// Starts the real Codex, then kills it with SIGKILL once the test creates
     /// the marker file, so a mid-turn death is reproducible on demand.
     struct KilledCodexFactory {
-        wrapper: PathBuf,
-        version: Option<String>,
+        run: LiveCodexRun,
+        marker: PathBuf,
+        wrapper: Option<PathBuf>,
     }
 
     impl HarnessFactory for KilledCodexFactory {
         fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
-            let harness = CodexHarness::new();
-            let harness = match &self.version {
-                Some(version) => harness.with_version(version.clone()),
-                None => harness,
-            };
-            Ok(Box::new(harness))
+            Ok(Box::new(self.run.harness("killed", true)))
         }
 
         fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
-            SpawnSpec {
-                program: self.wrapper.to_string_lossy().into_owned(),
-                cwd,
-                ..SpawnSpec::default()
+            if let Some(wrapper) = &self.wrapper {
+                SpawnSpec {
+                    program: wrapper.to_string_lossy().into_owned(),
+                    cwd,
+                    ..SpawnSpec::default()
+                }
+            } else {
+                self.run.spec(cwd, "killed", Some(&self.marker))
             }
         }
     }
@@ -1705,36 +1705,45 @@ mod live_exit {
     #[ignore]
     async fn a_killed_codex_process_fails_the_task_with_its_stderr_tail()
     -> Result<(), Box<dyn std::error::Error>> {
-        let here = std::env::current_dir()?;
-        let detection = detect(None, &here).await;
-        let Some(install) = &detection.install else {
-            eprintln!("skipping the live kill: {}", detection.summary());
+        let Some(run) = LiveCodexRun::load("core-mid-turn-exit").await? else {
             return Ok(());
         };
-        eprintln!("{}", detection.summary());
 
         let repository = TestRepository::new()?;
         let database = TestDatabase::new()?;
         let directory = tempfile::TempDir::new()?;
         let marker = directory.path().join("kill");
-        let wrapper = directory.path().join("codex-killed.sh");
-        // A backgrounded job gets /dev/null as stdin, so keep the harness pipe
-        // on fd 3 and hand it to codex explicitly.
-        let script = format!(
-            "#!/bin/bash\nexec 3<&0\n{:?} app-server <&3 &\nchild=$!\nwhile [ ! -f {:?} ]; do sleep 0.1; done\nkill -9 \"$child\"\nprintf 'codex app-server killed mid-turn\\n' >&2\nwait \"$child\"\n",
-            install.program, marker
-        );
-        std::fs::write(&wrapper, script)?;
-        std::fs::set_permissions(
-            &wrapper,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )?;
+        let wrapper = if run.is_replay() {
+            None
+        } else {
+            let wrapper = directory.path().join("codex-killed.sh");
+            let spec = run.spec(repository.path().to_path_buf(), "killed", None);
+            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+            let invocation = std::iter::once(spec.program.as_str())
+                .chain(spec.args.iter().map(String::as_str))
+                .map(quote)
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Keep the harness pipe on fd 3 when the shell backgrounds Codex.
+            let script = format!(
+                "#!/bin/bash\nexec 3<&0\n{invocation} <&3 &\nchild=$!\nwhile [ ! -f {} ] && kill -0 \"$child\" 2>/dev/null; do sleep 0.1; done\nif [ -f {} ]; then printf 'codex app-server killed mid-turn\\n' >&2; kill -9 \"$child\"; fi\nwait \"$child\"\n",
+                quote(&marker.to_string_lossy()),
+                quote(&marker.to_string_lossy()),
+            );
+            std::fs::write(&wrapper, script)?;
+            std::fs::set_permissions(
+                &wrapper,
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            )?;
+            Some(wrapper)
+        };
 
         let mut core = Core::with_services(
             Box::new(TursoStore::open(&database.uri()).await?),
             Box::new(KilledCodexFactory {
+                run: run.clone(),
+                marker: marker.clone(),
                 wrapper,
-                version: install.probe.version.clone(),
             }),
         );
 
@@ -1808,6 +1817,7 @@ mod live_exit {
             "stderr tail: {}",
             diagnostics.stderr_tail
         );
+        run.finish(None)?;
         Ok(())
     }
 }
@@ -1817,7 +1827,7 @@ mod live_restart {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use agent_harness::codex::{CodexHarness, CodexInstall, detect};
+    use agent_harness::live_codex::LiveCodexRun;
     use agent_harness::{AgentHarness, SpawnSpec};
 
     use crate::harness::HarnessFactory;
@@ -1826,27 +1836,17 @@ mod live_restart {
     use crate::{Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
 
     struct LiveCodexFactory {
-        program: PathBuf,
-        version: Option<String>,
+        run: LiveCodexRun,
+        session: &'static str,
     }
 
     impl HarnessFactory for LiveCodexFactory {
         fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
-            let harness = CodexHarness::new();
-            let harness = match &self.version {
-                Some(version) => harness.with_version(version.clone()),
-                None => harness,
-            };
-            Ok(Box::new(harness))
+            Ok(Box::new(self.run.harness(self.session, false)))
         }
 
         fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
-            SpawnSpec {
-                program: self.program.to_string_lossy().into_owned(),
-                args: vec!["app-server".to_string()],
-                cwd,
-                ..SpawnSpec::default()
-            }
+            self.run.spec(cwd, self.session, None)
         }
     }
 
@@ -1854,25 +1854,21 @@ mod live_restart {
     #[ignore]
     async fn a_restarted_core_resumes_the_recorded_thread() -> Result<(), Box<dyn std::error::Error>>
     {
-        let here = std::env::current_dir()?;
-        let detection = detect(None, &here).await;
-        let Some(install) = &detection.install else {
-            eprintln!("skipping the live restart: {}", detection.summary());
+        let Some(run) = LiveCodexRun::load("core-restart-resume").await? else {
             return Ok(());
         };
-        eprintln!("{}", detection.summary());
 
         let repository = TestRepository::new()?;
         let database = TestDatabase::new()?;
         let uri = database.uri();
-        let factory = |install: &CodexInstall| LiveCodexFactory {
-            program: install.program.clone(),
-            version: install.probe.version.clone(),
+        let factory = |session| LiveCodexFactory {
+            run: run.clone(),
+            session,
         };
 
         let mut core = Core::with_services(
             Box::new(TursoStore::open(&uri).await?),
-            Box::new(factory(install)),
+            Box::new(factory("initial")),
         );
         let CommandResult::ProjectList(projects) = core
             .execute(Command::AddProject {
@@ -1924,7 +1920,7 @@ mod live_restart {
             .and_then(|session| session.adapter_session_id.clone())
             .ok_or("the adapter thread is recorded")?;
 
-        let mut restarted = Core::load(Box::new(store), Box::new(factory(install))).await?;
+        let mut restarted = Core::load(Box::new(store), Box::new(factory("resumed"))).await?;
         let workspace = restarted.task_workspace(&task_id)?;
         assert_eq!(
             workspace.task.state,
@@ -1976,6 +1972,7 @@ mod live_restart {
             workspace.transcript.len() > resumed.transcript.len(),
             "the resumed turn must add to the transcript"
         );
+        run.finish(None)?;
         Ok(())
     }
 }

@@ -137,7 +137,7 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
         ));
     };
     let stderr_state = Arc::new(Mutex::new(VecDeque::new()));
-    let stderr_task = spawn_stderr_reader(stderr, Arc::clone(&stderr_state));
+    let stderr_task = spawn_stderr_reader(stderr, Arc::clone(&stderr_state), None);
 
     let request = json!({ "method": "initialize", "id": 1, "params": initialize_params() });
     let mut line = serde_json::to_string(&request)
@@ -487,8 +487,13 @@ struct Pending {
     turn_id: Option<String>,
 }
 
+#[cfg(any(test, feature = "live-test-support"))]
+use crate::live_codex::{WireCapture, WireEntry, without_api_credentials};
+
 /// One `codex app-server` session.
 pub struct CodexHarness {
+    #[cfg(any(test, feature = "live-test-support"))]
+    wire_capture: Option<WireCapture>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     outgoing: Option<mpsc::UnboundedSender<Value>>,
@@ -514,6 +519,8 @@ impl CodexHarness {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
+            #[cfg(any(test, feature = "live-test-support"))]
+            wire_capture: None,
             sender,
             receiver,
             outgoing: None,
@@ -543,6 +550,12 @@ impl CodexHarness {
     /// still come from the advertised methods, never from this string.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
+        self
+    }
+
+    #[cfg(any(test, feature = "live-test-support"))]
+    pub(crate) fn with_wire_capture(mut self, capture: WireCapture) -> Self {
+        self.wire_capture = Some(capture);
         self
     }
 
@@ -636,6 +649,12 @@ impl AgentHarness for CodexHarness {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        #[cfg(any(test, feature = "live-test-support"))]
+        if let Some(capture) = self.wire_capture.as_mut() {
+            without_api_credentials(&mut command);
+            capture.set_cwd(&spec.cwd);
+        }
+
         let mut child = command
             .spawn()
             .map_err(|source| spawn_error(&spec.program, source))?;
@@ -659,7 +678,13 @@ impl AgentHarness for CodexHarness {
         self.child = Some(child);
 
         let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
-        self.writer_task = Some(spawn_writer(stdin, outgoing_receiver));
+        self.writer_task = Some(spawn_writer(
+            stdin,
+            outgoing_receiver,
+            #[cfg(any(test, feature = "live-test-support"))]
+            self.wire_capture.clone(),
+        ));
+        let (stderr_done, stderr_drained) = oneshot::channel();
         self.stdout_task = Some(spawn_reader(
             stdout,
             self.sender.clone(),
@@ -668,8 +693,15 @@ impl AgentHarness for CodexHarness {
             Arc::clone(&self.stderr),
             Arc::clone(&self.closed),
             Arc::clone(&self.closing),
+            stderr_drained,
+            #[cfg(any(test, feature = "live-test-support"))]
+            self.wire_capture.clone(),
         ));
-        self.stderr_task = Some(spawn_stderr_reader(stderr, Arc::clone(&self.stderr)));
+        self.stderr_task = Some(spawn_stderr_reader(
+            stderr,
+            Arc::clone(&self.stderr),
+            Some(stderr_done),
+        ));
         self.outgoing = Some(outgoing);
         self.started = true;
 
@@ -1031,7 +1063,7 @@ impl AgentHarness for ExecHarness {
         };
 
         self.stderr = Arc::new(Mutex::new(VecDeque::new()));
-        self.stderr_task = Some(spawn_stderr_reader(stderr, Arc::clone(&self.stderr)));
+        self.stderr_task = Some(spawn_stderr_reader(stderr, Arc::clone(&self.stderr), None));
 
         let turn_id = TurnId::new(format!("exec-turn-{}", self.next_turn));
         self.next_turn += 1;
@@ -1463,9 +1495,14 @@ fn exec_tool_event(
 fn spawn_writer(
     mut stdin: ChildStdin,
     mut outgoing: mpsc::UnboundedReceiver<Value>,
+    #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(message) = outgoing.recv().await {
+            #[cfg(any(test, feature = "live-test-support"))]
+            if let Some(capture) = &capture {
+                capture.push(WireEntry::Request(message.clone()));
+            }
             let mut line = match serde_json::to_string(&message) {
                 Ok(line) => line,
                 Err(error) => {
@@ -1494,6 +1531,8 @@ fn spawn_reader(
     stderr: Arc<Mutex<VecDeque<String>>>,
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
+    stderr_drained: oneshot::Receiver<()>,
+    #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -1517,6 +1556,10 @@ fn spawn_reader(
                     continue;
                 }
             };
+            #[cfg(any(test, feature = "live-test-support"))]
+            if let Some(capture) = &capture {
+                capture.push(WireEntry::Response(message.clone()));
+            }
             route_incoming(message, &sender, &pending, &outgoing).await;
         }
 
@@ -1524,11 +1567,19 @@ fn spawn_reader(
         if closing.load(Ordering::Relaxed) {
             return;
         }
+        if timeout(Duration::from_millis(150), stderr_drained)
+            .await
+            .is_err()
+        {
+            tracing::debug!("codex stderr did not close with stdout");
+        }
+        let stderr = stderr_tail(&stderr);
+        #[cfg(any(test, feature = "live-test-support"))]
+        if let Some(capture) = &capture {
+            capture.push(WireEntry::Exit(stderr.clone()));
+        }
         if sender
-            .send(HarnessEvent::Exited {
-                code: None,
-                stderr: stderr_tail(&stderr),
-            })
+            .send(HarnessEvent::Exited { code: None, stderr })
             .is_err()
         {
             tracing::debug!("the core stopped listening to codex events");
@@ -1536,7 +1587,11 @@ fn spawn_reader(
     })
 }
 
-fn spawn_stderr_reader(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) -> JoinHandle<()> {
+fn spawn_stderr_reader(
+    stderr: ChildStderr,
+    tail: Arc<Mutex<VecDeque<String>>>,
+    drained: Option<oneshot::Sender<()>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -1556,6 +1611,11 @@ fn spawn_stderr_reader(stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) 
                     tail.push_back(line);
                 }
             }
+        }
+        if let Some(drained) = drained
+            && drained.send(()).is_err()
+        {
+            tracing::debug!("codex stdout reader already stopped");
         }
     })
 }
@@ -2858,10 +2918,9 @@ mod live {
     use tempfile::TempDir;
     use tokio::time::timeout;
 
-    use super::{CodexHarness, CodexInstall, detect};
-    use crate::{
-        AgentHarness, Decision, HarnessEvent, PromptInput, SpawnSpec, ToolStatus, TurnFinishReason,
-    };
+    use super::CodexHarness;
+    use crate::live_codex::LiveCodexRun;
+    use crate::{AgentHarness, Decision, HarnessEvent, PromptInput, ToolStatus, TurnFinishReason};
 
     const TURN_LIMIT: Duration = Duration::from_secs(180);
 
@@ -2872,13 +2931,12 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_codex_streams_a_tool_change_approves_resumes_and_cancels() {
-        let here = std::env::current_dir().expect("a working directory");
-        let detection = detect(None, &here).await;
-        let Some(install) = &detection.install else {
-            eprintln!("skipping the live run: {}", detection.summary());
+        let Some(run) = LiveCodexRun::load("stream-resume-cancel")
+            .await
+            .expect("load the live test cache")
+        else {
             return;
         };
-        eprintln!("{}", detection.summary());
 
         let directory = TempDir::new().expect("a temp repo");
         let repo = directory.path();
@@ -2889,7 +2947,7 @@ mod live {
         git(repo, &["add", "note.txt"]);
         git(repo, &["commit", "--quiet", "-m", "seed"]);
 
-        let mut harness = start(install, repo).await;
+        let mut harness = start(&run, "initial", repo).await;
         let thread = harness
             .open_session(None)
             .await
@@ -2925,6 +2983,9 @@ mod live {
             ),
             "the turn must finish: {first:?}"
         );
+        if let Some(note) = run.cached_note() {
+            std::fs::write(repo.join("note.txt"), note).expect("restore the recorded file change");
+        }
         let changed = std::fs::read_to_string(repo.join("note.txt")).expect("note.txt is readable");
         assert!(
             changed.contains("hello from shepherd"),
@@ -2936,7 +2997,7 @@ mod live {
         eprintln!("protocol: {}", diagnostics.protocol);
         harness.shutdown().await.expect("the first session stops");
 
-        let mut resumed = start(install, repo).await;
+        let mut resumed = start(&run, "resumed", repo).await;
         let same = resumed
             .open_session(Some(thread.clone()))
             .await
@@ -3013,6 +3074,8 @@ mod live {
             "the cancel must end the turn: {finished:?}"
         );
         resumed.shutdown().await.expect("the session stops");
+        run.finish(Some(changed))
+            .expect("cache the verified responses");
     }
 
     /// The real CLI decides when to ask; under `workspace-write` network access
@@ -3020,17 +3083,17 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_codex_requests_approval_for_a_network_command() {
-        let here = std::env::current_dir().expect("a working directory");
-        let detection = detect(None, &here).await;
-        let Some(install) = &detection.install else {
-            eprintln!("skipping the live approval: {}", detection.summary());
+        let Some(run) = LiveCodexRun::load("network-approval")
+            .await
+            .expect("load the live test cache")
+        else {
             return;
         };
 
         let directory = TempDir::new().expect("a temp repo");
         let repo = directory.path();
         git(repo, &["init", "--quiet"]);
-        let mut harness = start(install, repo).await;
+        let mut harness = start(&run, "approval", repo).await;
         harness
             .open_session(None)
             .await
@@ -3064,9 +3127,8 @@ mod live {
         }
 
         let Some(request) = requested else {
-            eprintln!("codex finished without asking for approval: {finished:?}");
             harness.shutdown().await.expect("the session stops");
-            return;
+            panic!("codex finished without asking for approval: {finished:?}");
         };
         eprintln!("approval: {} {:?}", request.title, request.arguments);
 
@@ -3099,22 +3161,17 @@ mod live {
             }
         }
         assert!(resolved, "the denial must be recorded");
+        assert!(finished.is_some(), "the denied turn should finish");
         eprintln!("after the denial: {finished:?}");
         harness.shutdown().await.expect("the session stops");
+        run.finish(None)
+            .expect("cache the verified approval responses");
     }
 
-    async fn start(install: &CodexInstall, repo: &Path) -> CodexHarness {
-        let mut harness = match &install.probe.version {
-            Some(version) => CodexHarness::new().with_version(version.clone()),
-            None => CodexHarness::new(),
-        };
+    async fn start(run: &LiveCodexRun, session: &str, repo: &Path) -> CodexHarness {
+        let mut harness = run.harness(session, false);
         harness
-            .start(SpawnSpec {
-                program: install.program.to_string_lossy().into_owned(),
-                args: vec!["app-server".to_string()],
-                cwd: repo.to_path_buf(),
-                ..SpawnSpec::default()
-            })
+            .start(run.spec(repo.to_path_buf(), session, None))
             .await
             .expect("codex app-server starts");
         harness
