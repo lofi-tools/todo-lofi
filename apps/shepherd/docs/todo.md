@@ -557,8 +557,9 @@ Automated:
 - [x] Playwright with mocked IPC covers the shared terminal's single
   subscription across task switches, task pane visibility, split resize,
   hide and reopen, key encoding and keyboard copy mode.
-- [x] Native macOS smoke saves a Vim edit to disk and pages through less with
-  terminal keyboard input. It also covers alternate screen restoration, synthetic
+- [x] Native macOS smoke saves a Vim edit to disk, pages through less and
+  selects a filtered result in full-screen fzf with terminal keyboard input.
+  It also covers alternate screen restoration, synthetic
   composition from scrollback, Kitty and fish key reports, bracketed paste,
   SGR mouse input, OSC 8 hyperlinks, burst and paced paint, scrollback search, PTY split
   resize, task switching, reattachment, quit and restart of shared and task
@@ -568,7 +569,7 @@ Automated:
 Manual script:
 
 1. Open two terminals in a split; resize both.
-2. Run `vim`, `less` and a full-screen TUI; check alternate screen and keys.
+2. Run `vim`, `less` and full-screen `fzf`; check alternate screen and keys.
 3. Run a long-output command; confirm scrolling and no frame drops.
 4. Create a shared terminal and a task terminal.
 5. Switch tasks; shared stays, task-specific swaps.

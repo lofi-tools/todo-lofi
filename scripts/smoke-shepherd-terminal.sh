@@ -6,7 +6,12 @@ duration=180s
 unset SHEPHERD_DEV_CODEX_SMOKE
 case "${1:-}" in
   "")
-    command -v vim less python3 >/dev/null
+    for tool in vim less fzf python3; do
+      if ! command -v "$tool" >/dev/null; then
+        printf 'Shepherd terminal smoke requires %s on PATH\n' "$tool" >&2
+        exit 1
+      fi
+    done
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
     ;;
   --codex-approval)

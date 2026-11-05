@@ -145,6 +145,20 @@ async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaEl
   await waitFor('main screen restored after less', () => terminalOutput().includes('S4_VIM_EDIT') && !/S4_LESS\d{3}/.test(terminalOutput()))
 }
 
+async function exerciseFuzzyFinder(terminalId: string, input: HTMLTextAreaElement) {
+  const command = "selection=$(printf '%s.%s\\n' first txt second txt third md | FZF_DEFAULT_OPTS= FZF_DEFAULT_OPTS_FILE= fzf --layout=reverse --no-sort); printf 'S4_%s:%s\\n' FZF \"$selection\""
+  await bridge.terminalWrite(terminalId, command + '\r')
+  await waitFor('fzf alternate screen', () => terminalOutput().includes('first.txt')
+    && terminalOutput().includes('third.md') && !terminalOutput().includes('S4_VIM_EDIT'))
+  for (const key of 'txt') press(input, key)
+  await waitFor('fzf filtered to text files', () => terminalOutput().includes('first.txt')
+    && terminalOutput().includes('second.txt') && !terminalOutput().includes('third.md'))
+  press(input, 'ArrowDown')
+  press(input, 'Enter')
+  await waitFor('fzf selection returned to the shell', () =>
+    terminalOutput().split('\n').some((line) => line.trim() === 'S4_FZF:second.txt'))
+}
+
 async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {
   await bridge.terminalWrite(terminalId, "index=0; while [ \"$index\" -lt 100 ]; do printf 'history %s\\n' \"$index\"; index=$((index + 1)); done; printf '\\033[6;8HS4_%s> ' IME_READY; IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
   const ready = () => terminalOutput().includes('S4_IME_READY')
@@ -700,6 +714,7 @@ async function smoke() {
     terminalOutput().includes(project.path) && terminalOutput().includes('S4_READY'))
   await exerciseShellInterrupt(terminal.id, input)
   await exerciseAlternateScreen(terminal.id, input)
+  await exerciseFuzzyFinder(terminal.id, input)
   await exerciseComposition(terminal.id, input)
   await exerciseKitty(terminal.id, input)
   if (__SHEPHERD_SMOKE_FISH__) await exerciseFish(terminal.id, input)
@@ -715,7 +730,7 @@ async function smoke() {
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
   await requestQuitWithLiveTask()
-  return { ok: true, quitWarning: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  return { ok: true, quitWarning: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {

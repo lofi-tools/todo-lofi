@@ -21,7 +21,7 @@ jobs:
       - name: Install display and terminal fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus-daemon less python3 ripgrep vim xauth xvfb
+          sudo apt-get install -y --no-install-recommends dbus-daemon fzf less python3 ripgrep vim xauth xvfb
       - name: Build the debug app
         run: |
           nix develop --impure -c pnpm --filter shepherd-app --filter shepherd-ui install --frozen-lockfile

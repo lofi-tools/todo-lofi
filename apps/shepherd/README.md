@@ -36,12 +36,14 @@ to point the debug project picker at a fixture directory.
 
 The native terminal smoke uses a disposable Git project, database and scripted
 agent in a temporary directory under `.cache/test-db/`. The first launch saves
-a Vim edit, pages through less, and exercises Kitty key reports, bracketed paste,
+a Vim edit, pages through less, selects a result in full-screen fzf, and
+exercises Kitty key reports, bracketed paste,
 mouse reports, scrollback search, PTY resizing, output bursts and switching
 between task and shared terminals. It also checks distinct Ctrl+I and Tab
 bindings when fish 4 or later is installed. The second launch checks layout
 restoration and restarts a shared terminal and a task terminal in its worktree.
-Run it from an active desktop session with `vim`, `less` and `python3` on your path.
+Run it from an active desktop session with `vim`, `less`, `fzf` and `python3`
+on your path.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh
