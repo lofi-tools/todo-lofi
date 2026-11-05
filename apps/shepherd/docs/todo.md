@@ -371,7 +371,8 @@ review and merge gate is tracked separately.
 - [x] Stage, unstage and commit in a temporary repository. Signing is disabled
   and hooks are isolated to the fixture. The workflow covers a normal commit
   and the Git test checks a fixture hook and rejection of a stale staging revision.
-- [ ] failing hook preserves the commit message;
+- [x] A failing hook preserves the attempted commit message and staged revision
+  for retry. The Git pane clears the draft message after a successful commit.
 - [ ] squash-merge from a clean root;
 - [ ] dirty root and off-base root refuse with a reason;
 - [ ] conflict paths are listed;
