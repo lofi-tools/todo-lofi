@@ -137,9 +137,9 @@ export function TerminalPane(props: TerminalPaneProps) {
         </ul>
       </details>
       <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
-        {() => <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId}
+        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId}
           restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
-          path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />}
+          path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
     </div>
   )
@@ -587,7 +587,7 @@ function TerminalCanvas(props: { terminalId: string }) {
     setError(null)
     inputWrites = inputWrites
       .then(() => bridge.terminalWrite(props.terminalId, data))
-      .catch((failure) => setError(describe(failure)))
+      .catch((failure) => { setError(describe(failure)) })
   }
 
   function resetSearch() {
