@@ -12,6 +12,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{BuildError, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
@@ -406,8 +407,8 @@ impl Screen {
 
         for indexed in grid.display_iter() {
             let cell = indexed.cell;
-            let mut foreground = color_to_rgb(cell.fg);
-            let mut background = color_to_rgb(cell.bg);
+            let mut foreground = color_to_rgb(self.term.colors(), cell.fg);
+            let mut background = color_to_rgb(self.term.colors(), cell.bg);
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut foreground, &mut background);
             }
@@ -460,12 +461,19 @@ impl Screen {
     }
 }
 
-fn color_to_rgb(color: Color) -> u32 {
-    match color {
-        Color::Spec(Rgb { r, g, b }) => rgb(r, g, b),
-        Color::Indexed(index) => indexed(index),
-        Color::Named(named) => named_color(named),
-    }
+fn color_to_rgb(colors: &Colors, color: Color) -> u32 {
+    let value = match color {
+        Color::Spec(value) => value,
+        Color::Indexed(index) => match colors[usize::from(index)] {
+            Some(value) => value,
+            None => return indexed(index),
+        },
+        Color::Named(named) => match colors[named] {
+            Some(value) => value,
+            None => return named_color(named),
+        },
+    };
+    rgb(value.r, value.g, value.b)
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -674,6 +682,21 @@ mod tests {
         assert_eq!(screen.frame().encode(None).get(1), Some(&11));
         screen.process(b"\x1b[4 q");
         assert_eq!(screen.frame().encode(None).get(1), Some(&7));
+    }
+
+    #[test]
+    fn osc_palette_overrides_change_existing_cells() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b[31mR\x1b[0mD\x1b]4;1;#123456\x07\x1b]10;#abcdef\x07");
+        let frame = screen.frame();
+        assert_eq!(
+            frame.cells.first().map(|cell| cell.foreground),
+            Some(0x123456)
+        );
+        assert_eq!(
+            frame.cells.get(1).map(|cell| cell.foreground),
+            Some(0xabcdef)
+        );
     }
 
     #[test]
