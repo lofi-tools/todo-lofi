@@ -9,6 +9,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   )
 
   const [branch, setBranch] = createSignal('')
+  const [newBranch, setNewBranch] = createSignal('')
   const [message, setMessage] = createSignal('')
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal('')
@@ -21,6 +22,7 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
     try {
       mutate(await mutateGit(props.taskId, operation))
       if (operation.type === 'commit') setMessage('')
+      if (operation.type === 'createBranch') setNewBranch('')
       if (operation.type === 'checkout') setBranch('')
     } catch (failure) {
       setError((failure as { message?: string })?.message ?? String(failure))
@@ -67,6 +69,14 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
               <button type="button" disabled={disabled() || !branch() || branch() === snapshot().branch || !!snapshot().files.length}
                 onClick={() => void apply({ type: 'checkout', branch: branch() })}>Checkout</button>
             </div>
+            <form class="terminal-pane__bar" onSubmit={(event) => {
+              event.preventDefault()
+              const name = newBranch().trim()
+              if (name && !snapshot().files.length) void apply({ type: 'createBranch', branch: name })
+            }}>
+              <input class="composer__input" aria-label="New branch name" placeholder="New branch" value={newBranch()} onInput={(event) => setNewBranch(event.currentTarget.value)} />
+              <button type="submit" disabled={disabled() || !newBranch().trim() || !!snapshot().files.length}>Create and check out</button>
+            </form>
             <Show when={snapshot().files.length} fallback={<p class="empty">Working tree clean.</p>}>
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (

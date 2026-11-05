@@ -346,6 +346,7 @@ export type GitMutation =
   | { type: 'unstage'; path: string }
   | { type: 'commit'; message: string; expected: string }
   | { type: 'checkout'; branch: string }
+  | { type: 'createBranch'; branch: string }
   | { type: 'squashMerge' }
 
 export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSnapshot> {

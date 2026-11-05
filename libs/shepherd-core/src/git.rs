@@ -492,6 +492,18 @@ impl GitService {
         Ok(())
     }
 
+    pub fn create_branch(&self, path: &Path, branch: &str) -> Result<(), GitError> {
+        if self.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            });
+        }
+        let reference = format!("refs/heads/{branch}");
+        run_git(path, &["check-ref-format", &reference])?;
+        run_git(path, &["switch", "-c", branch, "--"])?;
+        Ok(())
+    }
+
     pub fn merge_blocked(
         &self,
         root: &Path,
@@ -689,6 +701,7 @@ pub enum GitMutation {
     Unstage { path: String },
     Commit { message: String, expected: String },
     Checkout { branch: String },
+    CreateBranch { branch: String },
     SquashMerge,
 }
 

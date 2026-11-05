@@ -518,6 +518,7 @@ impl Core {
                 GitService.commit(path, &message, &expected)?
             }
             git::GitMutation::Checkout { branch } => GitService.checkout(path, &branch)?,
+            git::GitMutation::CreateBranch { branch } => GitService.create_branch(path, &branch)?,
             git::GitMutation::SquashMerge => {
                 let (Some(base), Some(branch)) = (&task.base_branch, &task.branch) else {
                     return Err(GitError::MergeUnavailable {
