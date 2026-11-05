@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -812,22 +812,123 @@ function HeadlinePicker(props: {
   options: HeadlineOption[]
   onChange?: (value: string) => void
 }) {
+  const menuId = createUniqueId()
+  const [open, setOpen] = createSignal(false)
+  let trigger!: HTMLButtonElement
+  let menu!: HTMLSpanElement
+
+  function positionMenu() {
+    const bounds = trigger.getBoundingClientRect()
+    const viewportInset = 12
+    const gap = 6
+    const below = window.innerHeight - bounds.bottom - gap - viewportInset
+    const above = bounds.top - gap - viewportInset
+    menu.style.removeProperty('--headline-menu-room')
+    const opensAbove = menu.offsetHeight > below && above > below
+    menu.style.setProperty('--headline-menu-room', `${Math.max(0, opensAbove ? above : below)}px`)
+    const left = Math.min(bounds.left, window.innerWidth - menu.offsetWidth - viewportInset)
+    menu.style.left = `${Math.max(viewportInset, left)}px`
+    menu.style.top = `${opensAbove ? bounds.top - gap - menu.offsetHeight : bounds.bottom + gap}px`
+  }
+
+  function closeMenu() {
+    menu.hidePopover()
+    trigger.focus({ preventScroll: true })
+  }
+
+  createEffect(() => {
+    if (!open()) return
+    const transcript = trigger.closest('.chat__transcript')
+    const dismiss = () => menu.hidePopover()
+    transcript?.addEventListener('scroll', dismiss)
+    window.addEventListener('resize', positionMenu)
+    onCleanup(() => {
+      transcript?.removeEventListener('scroll', dismiss)
+      window.removeEventListener('resize', positionMenu)
+    })
+  })
+
   return (
-    <span class="headline-picker">
-      <span class="headline-picker__text" aria-hidden="true">{props.text}</span>
-      <svg width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
-      </svg>
-      <select aria-label={props.label} onChange={(event) => props.onChange?.(event.currentTarget.value)}>
+    <>
+      <button
+        ref={trigger}
+        class="headline-picker"
+        type="button"
+        aria-label={`${props.label}: ${props.text}`}
+        aria-haspopup="menu"
+        aria-controls={menuId}
+        aria-expanded={open()}
+        popovertarget={menuId}
+      >
+        <span class="headline-picker__text">{props.text}</span>
+        <svg width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
+        </svg>
+      </button>
+      <span
+        ref={menu}
+        id={menuId}
+        class="headline-picker__menu"
+        popover="auto"
+        role="menu"
+        aria-label={props.label}
+        on:toggle={(event) => {
+          const isOpen = event.newState === 'open'
+          setOpen(isOpen)
+          if (!isOpen) return
+          positionMenu()
+          const current = menu.querySelector<HTMLButtonElement>('button[aria-checked="true"]:enabled')
+            ?? menu.querySelector<HTMLButtonElement>('button:enabled')
+          current?.focus()
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Tab') {
+            closeMenu()
+            return
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            closeMenu()
+            return
+          }
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+          event.preventDefault()
+          const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:enabled'))
+          if (!items.length) return
+          const current = items.findIndex((item) => item === document.activeElement)
+          const step = event.key === 'ArrowUp' ? -1 : 1
+          let next = (current + step + items.length) % items.length
+          if (event.key === 'Home') next = 0
+          else if (event.key === 'End') next = items.length - 1
+          items[next]?.focus()
+        }}
+      >
         <For each={props.options}>
           {(option) => (
-            <option value={option.id} title={option.detail} selected={props.value === option.id} disabled={option.disabled}>
-              {option.name}
-            </option>
+            <button
+              type="button"
+              class="nav-item"
+              role="menuitemradio"
+              tabindex={-1}
+              aria-checked={props.value === option.id}
+              title={option.detail}
+              disabled={option.disabled}
+              onClick={() => {
+                closeMenu()
+                if (option.id !== props.value) props.onChange?.(option.id)
+              }}
+            >
+              <span>{option.name}</span>
+              <Show when={props.value === option.id}>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m3.5 8 3 3 6-6" />
+                </svg>
+              </Show>
+            </button>
           )}
         </For>
-      </select>
-    </span>
+      </span>
+    </>
   )
 }
 
