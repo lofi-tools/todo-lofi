@@ -25,6 +25,7 @@ export function App() {
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [showArchived, setShowArchived] = createSignal(false)
   const visibleTasks = () => tasks().filter((task) => showArchived() || task.state !== 'done')
+  const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
   const [prompt, setPrompt] = createSignal('')
   const [pickerOpen, setPickerOpen] = createSignal(false)
@@ -68,6 +69,7 @@ export function App() {
   }
 
   async function selectProject(project: bridge.ProjectSnapshot) {
+    setTerminalListEvent(undefined)
     setSelectedProjectId(project.id)
     setSelectedTaskId(null)
     setWorkspace(null)
@@ -99,6 +101,9 @@ export function App() {
         }
         break
       }
+      case 'terminalListChanged':
+        if (event.data.projectId === selectedProjectId()) setTerminalListEvent(event.data)
+        break
       case 'error':
         setError(event.data.message)
         break
@@ -110,10 +115,10 @@ export function App() {
 
   onMount(() => {
     void run(async () => {
+      await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
       setProjects(list.projects)
       if (list.projects[0]) await selectProject(list.projects[0])
-      await bridge.subscribeToEvents(handleEvent)
     })
   })
 
@@ -453,7 +458,7 @@ export function App() {
           >
             <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
-                {(projectId) => <TerminalPane projectId={projectId} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} />}
+                {(projectId) => <TerminalPane projectId={projectId} taskId={workspace()?.task.id ?? null} taskHasWorktree={!!workspace()?.task.worktreePath} listEvent={terminalListEvent()} />}
               </Show>
             </div>
             <Show when={inspectorTab() === 'review'}>

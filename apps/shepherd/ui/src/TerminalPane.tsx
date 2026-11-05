@@ -12,6 +12,7 @@ interface TerminalPaneProps {
   projectId: string
   taskId: string | null
   taskHasWorktree: boolean
+  listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
@@ -89,20 +90,20 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }
 
+  createEffect(() => {
+    const event = props.listEvent
+    if (event?.projectId === props.projectId) setTerminals(event.terminals)
+  })
+
   onMount(() => {
     let disposed = false
-    const load = async () => {
+    const initialEvent = props.listEvent
+    void run(async () => {
       const [list, saved] = await Promise.all([bridge.terminalList(props.projectId), bridge.terminalLayout(props.projectId)])
       if (disposed) return
-      setTerminals(list)
+      if (props.listEvent === initialEvent) setTerminals(list)
       if (saved) setLayout(saved)
-    }
-    void run(load)
-    void bridge.subscribeToEvents((event) => {
-      if (!disposed && event.type === 'terminalListChanged' && event.data.projectId === props.projectId) {
-        setTerminals(event.data.terminals)
-      }
-    }).catch((failure) => setError(describe(failure)))
+    })
     onCleanup(() => { disposed = true })
   })
 
