@@ -14,17 +14,23 @@ test.beforeEach(async ({ page }) => {
     let nextCallbackId = 1
     let nextTask = 2
     let desktopProjectReads = 0
+    const options = new URLSearchParams(window.location.search)
 
     const project = {
       id: 'project-1',
       path: '/tmp/demo',
       name: 'demo',
       missing: false,
+      isGitRepository: true,
       lastTaskId: 'task-1',
       unfinishedTaskCount: 1,
     }
 
-    const projects = new URLSearchParams(window.location.search).has('empty-projects') ? [] : [project]
+    const projects = options.has('empty-projects') ? [] : [project]
+    if (options.has('two-projects')) {
+      projects.push({ ...project, id: 'project-notes', path: '/tmp/notes', name: 'notes',
+        isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
+    }
 
     const scan = {
       root: '/tmp/home',
@@ -61,6 +67,9 @@ test.beforeEach(async ({ page }) => {
         createdAt: 1_760_000_000_000,
       },
     ]
+    if (options.has('two-projects')) {
+      tasks.push({ ...tasks[0], id: 'task-archived', title: 'Old chat', state: 'done' })
+    }
 
     const transcripts = {
       'task-1': [
@@ -180,7 +189,7 @@ test.beforeEach(async ({ page }) => {
 
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
-      return { project, task: detail(task), transcript: transcripts[taskId] ?? [] }
+      return { project: projects.find((candidate) => candidate.id === task.projectId), task: detail(task), transcript: transcripts[taskId] ?? [] }
     }
 
     window.__TAURI_INTERNALS__ = {
@@ -225,6 +234,7 @@ test.beforeEach(async ({ page }) => {
                 path: args.path,
                 name,
                 missing: false,
+                isGitRepository: args.path.startsWith('/tmp/home/'),
                 lastTaskId: null,
                 unfinishedTaskCount: 0,
               })
@@ -234,7 +244,7 @@ test.beforeEach(async ({ page }) => {
           case 'task_list':
             // A fresh array each call: real IPC serializes, and Solid skips a
             // setter handed the identical reference.
-            return { projectId: args.projectId, tasks: [...tasks] }
+            return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
           case 'create_draft': {
@@ -313,9 +323,9 @@ test.beforeEach(async ({ page }) => {
 test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 
-  await expect(page.getByRole('button', { name: /demo/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'demo', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: 'New task', exact: true }).click()
+  await page.getByRole('button', { name: 'New chat in demo' }).click()
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
   await expect(page.getByText('Proposed branch')).toBeVisible()
   await expect(page.getByText('shepherd/new-task')).toBeVisible()
@@ -401,7 +411,31 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
 
   await page.getByRole('treeitem', { name: /alpha/ }).click()
   await expect(picker).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /alpha/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'alpha', exact: true })).toBeVisible()
+})
+
+test('shows project icons, opens archive controls on hover, and composes in another project', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const repository = page.getByRole('button', { name: 'demo', exact: true })
+  const directory = page.getByRole('button', { name: 'notes', exact: true })
+  await expect(repository.locator('.project-icon__git')).toBeVisible()
+  await expect(directory.locator('.project-icon')).toBeVisible()
+  await expect(directory.locator('.project-icon__git')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
+  await repository.hover()
+  const archive = page.getByRole('menuitemcheckbox', { name: 'Show archived' })
+  await expect(archive).toHaveAttribute('aria-checked', 'false')
+  await archive.click()
+  await expect(page.getByRole('button', { name: /Old chat/ })).toBeVisible()
+
+  await directory.click()
+  await expect(page.getByText('No tasks yet.')).toHaveCount(0)
+  await expect(page.locator('.tasks')).toHaveCount(0)
+  await repository.click()
+  await page.getByRole('button', { name: 'New chat in notes' }).click()
+  await expect(directory).toHaveAttribute('aria-current', 'true')
+  await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
 })
 
 test('batch imports local Codex projects from the empty Projects list', async ({ page }) => {
@@ -459,7 +493,8 @@ test('opens settings in the task pane and returns to the current chat', async ({
 
   await expect(chat).toBeVisible()
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
-  await expect(page.getByLabel('Show archived', { exact: true })).toBeChecked()
+  await page.getByRole('button', { name: 'Project menu for demo' }).press('ArrowDown')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'Show archived' })).toHaveAttribute('aria-checked', 'true')
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

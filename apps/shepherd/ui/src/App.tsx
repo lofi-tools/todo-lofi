@@ -10,6 +10,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
+import { ProjectRow } from './ProjectRow'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SettingsPane } from './SettingsPane'
@@ -29,8 +30,12 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [showArchived, setShowArchived] = createSignal(false)
+  const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
+  const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
-  const visibleTasks = () => tasks().filter((task) => showArchived() || task.state !== 'done')
+  const showsArchived = (projectId: string | null) =>
+    (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
+  const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
   const [terminalAttention, setTerminalAttention] = createSignal<TerminalBell[]>([])
@@ -75,7 +80,7 @@ export function App() {
 
   async function loadTasks(projectId: string) {
     const list = await bridge.taskList(projectId)
-    setTasks(list.tasks)
+    if (selectedProjectId() === projectId) setTasks(list.tasks)
     return list.tasks
   }
 
@@ -93,10 +98,11 @@ export function App() {
     setWorkspace(null)
     setTasks([])
     const listed = await loadTasks(project.id)
+    if (selectedProjectId() !== project.id) return
     const lastTask = project.lastTaskId
       ? listed.find((task) => task.id === project.lastTaskId)
       : undefined
-    if (lastTask && (showArchived() || lastTask.state !== 'done')) await selectTask(lastTask.id)
+    if (lastTask && (showsArchived(project.id) || lastTask.state !== 'done')) await selectTask(lastTask.id)
   }
 
   function handleEvent(event: CoreEvent) {
@@ -220,14 +226,17 @@ export function App() {
     if (errors.length) setError(errors.join(' · '))
   }
 
-  function newTask() {
-    const projectId = selectedProjectId()
-    if (!projectId) return
+  function newTask(projectId: string) {
     setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task')
-      setWorkspace(draft)
+      if (selectedProjectId() !== projectId) {
+        setTerminalListEvent(undefined)
+        setSelectedProjectId(projectId)
+        setTasks([])
+      }
       setSelectedTaskId(draft.task.id)
+      setWorkspace(draft)
       await loadTasks(projectId)
     })
   }
@@ -329,40 +338,29 @@ export function App() {
             <For each={projects()}>
               {(project) => (
                 <li>
-                  <button
-                    type="button"
-                    class="project nav-item"
-                    aria-expanded={project.id === selectedProjectId()}
-                    aria-current={project.id === selectedProjectId() ? 'true' : undefined}
-                    onClick={() => {
+                  <ProjectRow
+                    project={project}
+                    selected={project.id === selectedProjectId()}
+                    pending={pending()}
+                    showArchived={showsArchived(project.id)}
+                    menuOpen={projectMenuId() === project.id}
+                    onSelect={() => {
                       setSettingsOpen(false)
                       void run(() => selectProject(project))
                     }}
-                  >
-                    <span class="project__name">{project.name}</span>
-                    <span class="project__count">{project.unfinishedTaskCount}</span>
-                  </button>
+                    onCompose={() => newTask(project.id)}
+                    onMenuOpenChange={(open) => {
+                      if (open) setProjectMenuId(project.id)
+                      else if (projectMenuId() === project.id) setProjectMenuId(undefined)
+                    }}
+                    onToggleArchived={() => setArchiveVisibility((previous) => new Map(previous).set(project.id, !showsArchived(project.id)))}
+                  />
                   <Show when={project.missing}>
                     <p class="project__missing">path is missing</p>
                   </Show>
 
-                  <Show when={project.id === selectedProjectId()}>
+                  <Show when={project.id === selectedProjectId() && visibleTasks().length > 0}>
                     <div class="tasks">
-                      <button
-                        type="button"
-                        class="tasks__new"
-                        onClick={newTask}
-                        disabled={pending()}
-                      >
-                        New task
-                      </button>
-                      <label>
-                        <input type="checkbox" checked={showArchived()} onChange={(event) => setShowArchived(event.currentTarget.checked)} />
-                        Show archived
-                      </label>
-                      <Show when={visibleTasks().length === 0}>
-                        <p class="empty empty--tight">No tasks yet.</p>
-                      </Show>
                       <ul class="task-list">
                         <For each={visibleTasks()}>
                           {(task) => (

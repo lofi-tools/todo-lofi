@@ -1263,6 +1263,7 @@ mod tests {
             .add_project(repository.path().display().to_string())
             .await?;
         assert_eq!(projects.projects.len(), 1);
+        assert!(projects.projects[0].is_git_repository);
         let project_id = projects.projects[0].id.clone();
 
         let mut saw_project_list = false;
@@ -1469,6 +1470,7 @@ mod tests {
         let reopened = ShellState::load(directory.path(), Box::new(ScriptedHarnessFactory)).await?;
         let projects = reopened.project_list().await;
         assert_eq!(projects.projects.len(), 1);
+        assert!(!projects.projects[0].is_git_repository);
         assert!(!projects.projects[0].name.is_empty());
         Ok(())
     }

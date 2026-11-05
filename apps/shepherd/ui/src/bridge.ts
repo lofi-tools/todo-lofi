@@ -29,6 +29,7 @@ export interface ProjectSnapshot {
   path: string
   name: string
   missing: boolean
+  isGitRepository: boolean
   lastTaskId: string | null
   unfinishedTaskCount: number
   reviewTaskCount: number

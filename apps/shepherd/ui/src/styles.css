@@ -4,6 +4,7 @@
   --surface-raised: #1d1d22;
   --border: #26262d;
   --text: #e6e6ea;
+  --text-secondary: #d9d9df;
   --text-muted: #8b8b96;
   --text-disabled: #5f5f6b;
   --focus: #6f7dff;
@@ -233,6 +234,7 @@ textarea {
   margin: 0;
   padding: 0;
   min-height: 0;
+  flex: 1;
   overflow: auto;
   list-style: none;
 }
@@ -286,16 +288,98 @@ textarea {
   background: var(--surface-raised);
 }
 
+.project-row {
+  --project-row-background: var(--background);
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-inline-end: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--project-row-background);
+  color: var(--text-secondary);
+}
+
+.project-row--selected {
+  --project-row-background: var(--surface);
+  border-color: var(--border);
+}
+
+.project-row:hover {
+  --project-row-background: var(--surface-raised);
+  border-color: var(--border);
+}
+
+.project-row .project {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.project-row__action {
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+}
+
+.project-row__action:hover:enabled {
+  background: var(--background);
+}
+
+.project-icon {
+  position: relative;
+  flex: 0 0 18px;
+  height: 16px;
+}
+
+.project-icon__git {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: -1px;
+  width: 11px;
+  height: 11px;
+  padding: 1px;
+  border-radius: 3px;
+  background: var(--project-row-background);
+}
+
+.project-menu {
+  position: absolute;
+  z-index: 1;
+  inset-inline-end: 0;
+  top: 100%;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.project-menu--above {
+  top: auto;
+  bottom: 100%;
+}
+
+.project-menu .nav-item:hover {
+  background: var(--surface-raised);
+}
+
+.project-menu__check {
+  width: 1em;
+}
+
 .project__name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.project__count {
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .project__missing {
@@ -308,16 +392,6 @@ textarea {
   margin: 2px 0 6px 10px;
   padding-left: 8px;
   border-left: 1px solid var(--border);
-}
-
-.tasks__new {
-  margin: 4px 0;
-  padding: 4px 8px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
 }
 
 .task-list {

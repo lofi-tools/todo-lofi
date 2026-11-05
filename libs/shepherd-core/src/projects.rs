@@ -54,8 +54,6 @@ impl Project {
     }
 }
 
-/// The project row a shell paints. Task counts exclude `done` and `cancelled`,
-/// matching the sidebar's unfinished count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSnapshot {
@@ -63,6 +61,7 @@ pub struct ProjectSnapshot {
     pub path: String,
     pub name: String,
     pub missing: bool,
+    pub is_git_repository: bool,
     pub last_task_id: Option<String>,
     pub unfinished_task_count: usize,
     pub review_task_count: usize,

@@ -19,7 +19,7 @@ These were chosen explicitly and override the pre-interview draft.
 | --- | --- |
 | Primary object | Durable **tasks**, each with its own workspace. Every agent run is a record with state, transcript, worktree and review data; terminals and diffs are views over it. |
 | Layout | **Fixed task workspace**: a required chat region in the centre and an always-on inspector on the right. No pane moves between them. The inspector has one Terminals tab, Preview, Review, Git and Files; terminals split only inside the Terminals tab. Switching tasks swaps the chat and task-specific content; the inspector tab and project-shared terminals stay mounted. |
-| Navigation | Expandable project list with a **flat task list** under the selected project. Only one project expands; switching collapses every other project. Each project row counts every task not `done` or `cancelled`. |
+| Navigation | Expandable project list with a **flat task list** under the selected project. Switching projects collapses the previous list. Each project row has a folder icon, a context menu and a compose button. |
 | Inspector | **Always-on right inspector** with a thin vertical pane switcher; resizable, never closed or torn out. |
 | Attention | Task rows and inspector tabs use rings, dots and text badges (`needs input`, `review`), with status-bar counts and the dock badge. |
 | Task browser | Sidebar list only; no board or separate review view in v1. |
@@ -92,7 +92,7 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 | **Project terminal layout** | The saved arrangement of terminal panes in the Terminals tab, shared by every task in a project. Each slot is project-shared or task-specific. |
 | **Shared terminal** | A terminal instance owned by the project and visible in every task's Terminals tab. |
 | **Task terminal** | A terminal instance owned by one task and shown only while that task is active. |
-| **Unfinished** | Any task not in `done` or `cancelled`; used for project row counts. |
+| **Unfinished** | Any task outside the `done` and `cancelled` states. |
 | **Review** | The state after a completed turn whose HEAD, branch or worktree status/diff changed since turn start, before a human archives the task or sends a note. |
 | **Session** | One agent-side conversation inside a task, identified by the adapter's session or thread ID. |
 | **Turn** | One user prompt plus everything the agent streams until it is idle again. |
@@ -108,10 +108,10 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 │ sidebar      │ chat                                        │ inspector      │
 │              │ ┌─────────────────────────────────────────┐ │ tabs           │
 │ Projects     │ │ task: fix flaky test                    │ │  Terminals     │
-│  ▾ repo-a 3  │ │ transcript                              │ │  Preview       │
+│  ▾ repo-a ✎  │ │ transcript                              │ │  Preview       │
 │    · task 1 ●│ │                                         │ │  Review        │
 │    · task 2 ✓│ │ composer                                │ │  Git           │
-│  ▸ repo-b 1  │ └─────────────────────────────────────────┘ │  Files         │
+│  ▸ repo-b ✎  │ └─────────────────────────────────────────┘ │  Files         │
 │              │                                             │ ┌────────────┐ │
 │              │                                             │ │ term 1     │ │
 │              │                                             │ ├────────────┤ │
@@ -122,11 +122,12 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- Left: an expandable project list with a flat task list. Only one project
-  expands; switching projects collapses every other project, including one
-  expanded by hand. Each project row counts tasks not `done` or `cancelled`. The
-  selected project lists every non-archived task as a flat row; `done` is
-  archived and stays behind the filter. Rows carry state and attention: working
+- The sidebar shows a flat list of tasks for the selected project. A project
+  with no visible tasks has an empty list. Each project row has a folder icon
+  with a branch badge for Git working trees. Its compose button opens a draft
+  in that project. Hovering over a project highlights the row and opens its
+  context menu, where **Show archived** includes that project's `done` tasks.
+  Task rows show state and attention using icons and badges for working
   (spinner), waiting (ring and dot), review (badge), failed (cross), interrupted
   (pause), draft (outline), ready (dim).
 - Centre: the fixed chat region. Transcript and composer are always visible and
@@ -1071,7 +1072,7 @@ is bounded (scrollback, stderr, search results, per-task event queue).
   reject keybinding conflicts, replay an external edit, and report a value
   conflict without overwriting it.
 - **UI**: v1 Playwright tests against the Tauri webview for the palette, flat task
-  list and unfinished counts, switching collapsing every other project, fixed
+  list, project compose and archive controls, project switching, fixed
   chat/inspector regions, the Terminals tab and its project layout, a shared
   terminal staying mounted across task switches, inspector tabs, attention
   rings/dots/badges, preview annotation and its screenshot fallback, the draft
@@ -1083,7 +1084,7 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
-| **M0** | Task-workspace shell, project registry, schema, palette, status bar, settings files, quit flow | Add two projects; restart and both persist with their last task workspaces and trees; project rows count every task not `done` or `cancelled`; the selected project shows a flat task list and switching projects collapses every other; a missing last task opens a draft; settings and keybindings survive restart in the config directory, a malformed file falls back to defaults with a banner, and the palette lists every command with its binding and disabled reason; quitting with nothing running is instant; a missing path is flagged |
+| **M0** | Task-workspace shell, project registry, schema, palette, status bar, settings files, quit flow | Add two projects and restart to verify both persist with their last task workspaces and trees. Compose opens a draft in the chosen project. Its menu can reveal archived tasks. The selected project shows a flat list and switching projects collapses the previous list. A missing last task opens a draft. Settings and keybindings survive restart in the config directory. A malformed file falls back to defaults with a banner. The palette lists commands with their bindings and disabled reasons. Quitting with nothing running is instant. A missing path is flagged. |
 | **M1** | Fixed task workspace, terminal service, project terminal layout, worktree per task | Split the Terminals tab and resize it; switch tasks and keep a shared terminal mounted; a task terminal disappears with its task and returns on reselect; the terminal layout is saved per project; chat and inspector cannot be torn apart; closing a terminal view keeps it running; quitting with a working agent warns and stops it within 2 s; restart shows ended terminals in their task workspaces and restarts them; the first send creates a worktree under the Git directory |
 | **M2** | Codex native adapter end to end | A prompt streams into the transcript with tool rows; approvals follow the agent's review mode; cancel stops the turn; resume works by thread ID; a finished turn with changes lands in **needs review**, a chat-only turn returns to **ready**, and both archive and review-note actions work; approval cards show a diff when the adapter or worktree provides one and say when they cannot; adapter item IDs map to canonical entries and ordering holds after reconnect; an archived worktree unused for 30 days is removed and reopens from its branch or tip; quitting mid-turn marks the task interrupted |
 | **M3** | OpenCode adapter, ACP path (Claude Code), Freebuff terminal wrapper | Each tier produces a correct transcript or an honest coarse state; Freebuff input reaches its TUI and its badge matches a captured manifest fixture; a missing manifest shows a plain pane |

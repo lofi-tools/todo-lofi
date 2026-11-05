@@ -1615,6 +1615,11 @@ impl Core {
             path: project.path.display().to_string(),
             name: project.name.clone(),
             missing: project.missing,
+            is_git_repository: project
+                .path
+                .join(".git")
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_dir() || metadata.is_file()),
             last_task_id: project
                 .last_task_id
                 .as_ref()
