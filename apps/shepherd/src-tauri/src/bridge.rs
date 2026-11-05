@@ -409,7 +409,7 @@ impl ShellState {
         let project_id = record.project_id.clone();
         let bell_project = project_id.clone();
         let bell_task = record.task_id.as_ref().map(|id| id.as_str().to_owned());
-        let (output, mut receiver) = mpsc::unbounded_channel();
+        let (output, mut receiver) = mpsc::channel(32);
         let terminal_id = self
             .engine
             .lock()

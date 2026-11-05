@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use shepherd_core::terminal::{
     TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec, TerminalWrite,
     validate_size,
 };
-use tokio::sync::{mpsc, mpsc::UnboundedSender, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 struct WriteRequest {
     bytes: Vec<u8>,
@@ -113,7 +114,7 @@ impl TerminalService for PtyTerminals {
     fn spawn(
         &mut self,
         spec: TerminalSpec,
-        events: UnboundedSender<TerminalEvent>,
+        events: mpsc::Sender<TerminalEvent>,
     ) -> Result<TerminalId, TerminalError> {
         validate_size(spec.columns, spec.rows)?;
         let terminal_id = spec.id;
@@ -152,16 +153,19 @@ impl TerminalService for PtyTerminals {
 
         let (reader_finished, reader_status) = std::sync::mpsc::sync_channel(1);
         let output_events = events.clone();
+        let sending = Arc::new(AtomicBool::new(false));
+        let reader_sending = Arc::clone(&sending);
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
-                        if output_events
-                            .send(TerminalEvent::Output(buffer[..read].to_vec()))
-                            .is_err()
-                        {
+                        reader_sending.store(true, Ordering::Release);
+                        let sent = output_events
+                            .blocking_send(TerminalEvent::Output(buffer[..read].to_vec()));
+                        reader_sending.store(false, Ordering::Release);
+                        if sent.is_err() {
                             break;
                         }
                     }
@@ -225,10 +229,23 @@ impl TerminalService for PtyTerminals {
                 }
                 Err(error) => tracing::error!(%error, "could not release terminal descriptors"),
             }
-            if let Err(error) = reader_status.recv_timeout(Duration::from_millis(150)) {
-                tracing::debug!(%error, "terminal output did not drain before exit");
+            loop {
+                match reader_status.recv_timeout(Duration::from_millis(150)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // A full queue still has output ahead of the exit. Only time out
+                        // a reader waiting for descendants that inherited the slave.
+                        if !sending.load(Ordering::Acquire) || events.is_closed() {
+                            tracing::debug!("terminal reader did not reach EOF before exit");
+                            break;
+                        }
+                    }
+                }
             }
-            if events.send(TerminalEvent::Exited { exit_code }).is_err() {
+            if events
+                .blocking_send(TerminalEvent::Exited { exit_code })
+                .is_err()
+            {
                 tracing::debug!("terminal event receiver closed");
             }
         });
@@ -299,7 +316,7 @@ mod tests {
     #[test]
     fn a_pty_reports_its_output_and_exit_code() {
         let mut engine = PtyTerminals::new();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(8);
         engine
             .spawn(
                 TerminalSpec {
@@ -335,7 +352,7 @@ mod tests {
     #[test]
     fn closing_a_live_terminal_removes_it() {
         let mut engine = PtyTerminals::new();
-        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, _receiver) = mpsc::channel(8);
         let terminal_id = engine
             .spawn(
                 TerminalSpec {

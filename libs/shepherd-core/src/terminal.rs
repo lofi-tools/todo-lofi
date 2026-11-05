@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
+use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::projects::ProjectId;
 use crate::tasks::TaskId;
@@ -230,7 +230,7 @@ pub trait TerminalService: Send {
     fn spawn(
         &mut self,
         spec: TerminalSpec,
-        events: UnboundedSender<TerminalEvent>,
+        events: Sender<TerminalEvent>,
     ) -> Result<TerminalId, TerminalError>;
     fn write(
         &mut self,
