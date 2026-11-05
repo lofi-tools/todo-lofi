@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::projects::ProjectId;
@@ -122,6 +122,72 @@ pub struct TerminalSnapshot {
     pub created_at: u64,
     pub ended_at: Option<u64>,
     pub exit_code: Option<i32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalLayout {
+    pub revision: u64,
+    pub root: Option<TerminalSplit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TerminalSplit {
+    Pane {
+        terminal_id: String,
+    },
+    Split {
+        axis: SplitAxis,
+        ratio: u16,
+        first: Box<TerminalSplit>,
+        second: Box<TerminalSplit>,
+    },
+}
+
+impl TerminalSplit {
+    pub fn validate(&self, mut belongs_to_project: impl FnMut(&str) -> bool) -> bool {
+        let mut panes = std::collections::BTreeSet::new();
+        let mut remaining = vec![(self, 0)];
+        while let Some((node, depth)) = remaining.pop() {
+            if depth > 20 {
+                return false;
+            }
+            match node {
+                Self::Pane { terminal_id } => {
+                    if !belongs_to_project(terminal_id)
+                        || !panes.insert(terminal_id)
+                        || panes.len() > 64
+                    {
+                        return false;
+                    }
+                }
+                Self::Split {
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => {
+                    if !(100..=900).contains(ratio) {
+                        return false;
+                    }
+                    remaining.extend([(first.as_ref(), depth + 1), (second.as_ref(), depth + 1)]);
+                }
+            }
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug)]

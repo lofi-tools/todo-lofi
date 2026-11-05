@@ -255,6 +255,23 @@ export function taskWorkspace(taskId: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('task_workspace', { taskId })
 }
 
+export type SplitAxis = 'horizontal' | 'vertical'
+export type TerminalSplit =
+  | { type: 'pane'; terminalId: string }
+  | { type: 'split'; axis: SplitAxis; ratio: number; first: TerminalSplit; second: TerminalSplit }
+export interface TerminalLayout {
+  revision: number
+  root: TerminalSplit | null
+}
+
+export function terminalLayout(projectId: string): Promise<TerminalLayout> {
+  return invoke('terminal_layout', { projectId })
+}
+
+export function saveTerminalLayout(projectId: string, layout: TerminalLayout): Promise<TerminalLayout> {
+  return invoke('save_terminal_layout', { projectId, layout })
+}
+
 export function terminalList(projectId: string): Promise<TerminalSnapshot[]> {
   return invoke<TerminalSnapshot[]>('terminal_list', { projectId })
 }

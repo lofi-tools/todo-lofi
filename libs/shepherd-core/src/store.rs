@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::projects::{Project, ProjectId};
 use crate::session::SessionRecord;
 use crate::tasks::{AgentTier, Task, TaskId, TaskState};
-use crate::terminal::{TerminalId, TerminalRecord, TerminalScope};
+use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -42,6 +42,12 @@ pub trait Store: Send + Sync {
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
+    async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError>;
+    async fn save_terminal_layout(
+        &self,
+        project_id: &ProjectId,
+        layout: &TerminalLayout,
+    ) -> Result<(), StoreError>;
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
 }
@@ -297,6 +303,43 @@ impl Store for TursoStore {
         .bind(exit_code)
         .exec(&mut *db)
         .await?;
+        Ok(())
+    }
+
+    async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query("SELECT project_id, layout_json FROM terminal_layouts")
+            .column_types([Type::String, Type::String])
+            .exec(&mut *db)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(fields) = row else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a terminal layout record".into(),
+                    ));
+                };
+                let project = ProjectId::new(required_string(fields.first())?);
+                let json = required_string(fields.get(1))?;
+                let layout = serde_json::from_str(&json)
+                    .map_err(|error| StoreError::InvalidRow(error.to_string()))?;
+                Ok((project, layout))
+            })
+            .collect()
+    }
+
+    async fn save_terminal_layout(
+        &self,
+        project_id: &ProjectId,
+        layout: &TerminalLayout,
+    ) -> Result<(), StoreError> {
+        let json = serde_json::to_string(layout)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (project_id) DO UPDATE SET layout_json = excluded.layout_json, updated_at = excluded.updated_at",
+        ).bind(project_id.as_str()).bind(json).bind(crate::projects::now_millis() as i64).exec(&mut *db).await?;
         Ok(())
     }
 
@@ -580,6 +623,7 @@ pub struct MemoryStore {
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
+    terminal_layouts: RwLock<BTreeMap<ProjectId, TerminalLayout>>,
     sessions: RwLock<Vec<SessionRecord>>,
 }
 
@@ -627,6 +671,28 @@ impl Store for MemoryStore {
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError> {
         let mut terminals = self.terminals.write().await;
         terminals.insert(terminal.id.as_str().to_string(), terminal.clone());
+        Ok(())
+    }
+
+    async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError> {
+        Ok(self
+            .terminal_layouts
+            .read()
+            .await
+            .iter()
+            .map(|(project, layout)| (project.clone(), layout.clone()))
+            .collect())
+    }
+
+    async fn save_terminal_layout(
+        &self,
+        project_id: &ProjectId,
+        layout: &TerminalLayout,
+    ) -> Result<(), StoreError> {
+        self.terminal_layouts
+            .write()
+            .await
+            .insert(project_id.clone(), layout.clone());
         Ok(())
     }
 

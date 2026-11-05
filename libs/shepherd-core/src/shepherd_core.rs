@@ -38,7 +38,7 @@ use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::store::{MemoryStore, Store, StoreError};
-use crate::terminal::{TerminalId, TerminalRecord, TerminalSnapshot};
+use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalSnapshot};
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -54,6 +54,10 @@ pub enum CoreError {
     ProjectPathMissing { path: String },
     #[error("task not found: {id}")]
     TaskNotFound { id: String },
+    #[error("the terminal layout contains invalid or duplicate panes")]
+    InvalidTerminalLayout,
+    #[error("the terminal layout changed; reload it before editing")]
+    TerminalLayoutChanged,
     #[error("terminal not found: {id}")]
     TerminalNotFound { id: String },
     #[error("task title cannot be empty")]
@@ -134,6 +138,7 @@ pub struct Core {
     /// The newest durable session per task, kept across restarts so resume can
     /// ask the adapter for the thread the previous process opened.
     session_records: BTreeMap<TaskId, SessionRecord>,
+    terminal_layouts: BTreeMap<ProjectId, TerminalLayout>,
     terminals: BTreeMap<TerminalId, TerminalRecord>,
     store: Box<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
@@ -170,6 +175,7 @@ impl Core {
             turn_baselines: BTreeMap::new(),
             review_notes: BTreeMap::new(),
             session_records: BTreeMap::new(),
+            terminal_layouts: BTreeMap::new(),
             terminals: BTreeMap::new(),
             store,
             harness_factory,
@@ -241,6 +247,13 @@ impl Core {
             core.terminals.insert(terminal.id.clone(), terminal);
         }
 
+        for (project, layout) in core.store.load_terminal_layouts().await? {
+            if core.valid_terminal_layout(&project, &layout) {
+                core.terminal_layouts.insert(project, layout);
+            } else {
+                tracing::warn!(%project, "ignored invalid terminal layout");
+            }
+        }
         core.collect_archived_worktrees().await;
         Ok(core)
     }
@@ -339,6 +352,56 @@ impl Core {
         }
         let (_, _, path) = self.task_git_worktree(task_id)?;
         Ok(path.to_path_buf())
+    }
+
+    fn valid_terminal_layout(&self, project_id: &ProjectId, layout: &TerminalLayout) -> bool {
+        self.projects.contains_key(project_id)
+            && layout.root.as_ref().is_none_or(|root| {
+                root.validate(|id| {
+                    self.terminals
+                        .get(&TerminalId::new(id))
+                        .is_some_and(|terminal| &terminal.project_id == project_id)
+                })
+            })
+    }
+
+    pub fn terminal_layout(&self, project_id: &ProjectId) -> Result<TerminalLayout, CoreError> {
+        if !self.projects.contains_key(project_id) {
+            return Err(CoreError::ProjectNotFound {
+                id: project_id.to_string(),
+            });
+        }
+        Ok(self
+            .terminal_layouts
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    pub async fn save_terminal_layout(
+        &mut self,
+        project_id: &ProjectId,
+        mut layout: TerminalLayout,
+    ) -> Result<TerminalLayout, CoreError> {
+        if self.shutdown != ShutdownState::Running {
+            return Err(CoreError::NotRunning {
+                state: self.shutdown,
+            });
+        }
+        if !self.valid_terminal_layout(project_id, &layout) {
+            return Err(CoreError::InvalidTerminalLayout);
+        }
+        if self.terminal_layout(project_id)?.revision != layout.revision {
+            return Err(CoreError::TerminalLayoutChanged);
+        }
+        layout.revision = layout
+            .revision
+            .checked_add(1)
+            .ok_or(CoreError::TerminalLayoutChanged)?;
+        self.store.save_terminal_layout(project_id, &layout).await?;
+        self.terminal_layouts
+            .insert(project_id.clone(), layout.clone());
+        Ok(layout)
     }
 
     pub fn terminal_record(&self, id: &TerminalId) -> Result<TerminalRecord, CoreError> {

@@ -747,6 +747,32 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn terminal_layout(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<shepherd_core::terminal::TerminalLayout, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .terminal_layout(&ProjectId::new(project_id))?)
+    }
+
+    #[tauri::command]
+    pub async fn save_terminal_layout(
+        state: State<'_, ShellState>,
+        project_id: String,
+        layout: shepherd_core::terminal::TerminalLayout,
+    ) -> Result<shepherd_core::terminal::TerminalLayout, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .save_terminal_layout(&ProjectId::new(project_id), layout)
+            .await?)
+    }
+
+    #[tauri::command]
     pub async fn terminal_list(
         state: State<'_, ShellState>,
         project_id: String,
