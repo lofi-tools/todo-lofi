@@ -28,6 +28,14 @@ Until the Codex adapter lands in S2, the shell runs a scripted adapter
 (`src-tauri/src/dev_harness.rs`). Its messages say they are scripted; it is not a
 real agent.
 
+The native terminal smoke uses a disposable project and database, starts a
+separate dev server on port 1432, and closes its window after reporting the
+result. Run it from an active desktop session.
+
+```sh
+direnv exec . ./scripts/smoke-shepherd-terminal.sh
+```
+
 ## Bridge
 
 Every core command has one `#[tauri::command]`, and the window receives core
