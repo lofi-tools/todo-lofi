@@ -1254,6 +1254,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_links_reject_stale_frame_revisions() {
+        let core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        );
+        let state = state_with(core);
+        let screen = Screen::new(20, 2);
+        let (frames, _) = watch::channel(Arc::new(screen.frame()));
+        let mut slot = ScreenSlot {
+            revision: 0,
+            screen,
+            frames,
+        };
+        let mut receiver = slot.subscribe();
+        let old = receiver.borrow_and_update().revision;
+        slot.screen
+            .process(b"\x1b]8;;file:///tmp/fixture\x1b\\link\x1b]8;;\x1b\\");
+        slot.publish();
+        let current = receiver.borrow_and_update().revision;
+        state
+            .screens
+            .lock()
+            .await
+            .insert("fixture".into(), Arc::new(Mutex::new(slot)));
+
+        assert!(matches!(
+            state.open_terminal_link("fixture", 0, 0, old).await,
+            Err(error) if error.message == "terminal output changed before the link could open"
+        ));
+        assert!(matches!(
+            state.open_terminal_link("fixture", 0, 0, current).await,
+            Err(error) if error.message == "terminal links must use HTTP or HTTPS"
+        ));
+    }
+
+    #[tokio::test]
     async fn snapshots_serialize_as_tagged_camel_case_json()
     -> Result<(), Box<dyn std::error::Error>> {
         let event = Event::TaskListChanged(TaskList {
