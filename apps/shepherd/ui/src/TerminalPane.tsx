@@ -400,6 +400,8 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   let copyInput: HTMLTextAreaElement | undefined
   let searchGeneration = 0
   let composing = false
+  let committedComposition: string | undefined
+  let compositionTimer: number | undefined
   let canvas: HTMLCanvasElement | undefined
   let container: HTMLDivElement | undefined
   let frame: bridge.TerminalFrame | null = null
@@ -436,6 +438,10 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     }
     canvas.style.width = `${width}px`
     canvas.style.height = `${height}px`
+    if (input) {
+      input.style.left = `${8 + current.cursorColumn * cellWidth}px`
+      input.style.top = `${8 + current.cursorRow * LINE_HEIGHT}px`
+    }
     context.setTransform(ratio, 0, 0, ratio, 0, 0)
     context.textBaseline = 'top'
 
@@ -666,6 +672,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
 
   function onKeyDown(event: KeyboardEvent) {
     if (composing || event.isComposing || event.keyCode === 229) return
+    committedComposition = undefined
     if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && event.key.toLowerCase() === 'f') {
       event.preventDefault()
       setFinding(true)
@@ -759,6 +766,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
     onCleanup(() => {
       detached = true
       window.clearTimeout(mirrorTimer)
+      window.clearTimeout(compositionTimer)
       if (input === document.activeElement) props.onFocus(null)
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
@@ -823,16 +831,28 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
         }}
         onPaste={onPaste}
         onCopy={onCopy}
-        onCompositionStart={() => { composing = true }}
+        onCompositionStart={() => {
+          composing = true
+          committedComposition = undefined
+        }}
         onCompositionEnd={(event) => {
           composing = false
+          committedComposition = event.data
+          window.clearTimeout(compositionTimer)
+          compositionTimer = window.setTimeout(() => { committedComposition = undefined }, 0)
           event.currentTarget.value = ''
           write(encodeTerminalText(event.data, frame?.modes ?? 0))
         }}
         onInput={(event) => {
-          if (composing || (event as InputEvent).isComposing) return
-          write(encodeTerminalText(event.currentTarget.value, frame?.modes ?? 0))
+          const inputEvent = event as InputEvent
+          if (composing || inputEvent.isComposing) return
+          const value = event.currentTarget.value
           event.currentTarget.value = ''
+          if (committedComposition !== undefined && (value === committedComposition || inputEvent.data === committedComposition)) {
+            committedComposition = undefined
+            return
+          }
+          write(encodeTerminalText(value, frame?.modes ?? 0))
         }}
       />
       <pre class="terminal-view__text" aria-label="Terminal output">{visibleText()}</pre>
