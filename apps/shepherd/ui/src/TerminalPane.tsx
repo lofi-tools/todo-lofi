@@ -266,7 +266,9 @@ function TerminalTree(props: TerminalTreeProps) {
             </div>
             <Show when={entry().endedAt === null} fallback={
               <div class="terminal-ended">
-                <p class="empty">{entry().title} ended{formatExit(entry().exitCode)} in {entry().cwd}</p>
+                <p>{entry().title} ended{formatExit(entry().exitCode)}</p>
+                <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
+                <span class="terminal-list__state">{entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}</span>
                 <button type="button" onClick={() => props.restart(entry().id)} disabled={props.pending}>Restart</button>
               </div>
             }>
