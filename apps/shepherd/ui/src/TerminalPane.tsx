@@ -514,6 +514,7 @@ const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
+  const mac = navigator.platform.startsWith('Mac')
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -894,7 +895,10 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         .catch((failure) => setError(describe(failure)))
       return
     }
-    if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && event.key.toLowerCase() === 'f') {
+    const findModifier = mac
+      ? event.metaKey && !event.ctrlKey && !event.shiftKey
+      : event.ctrlKey && !event.metaKey && event.shiftKey
+    if (findModifier && !event.altKey && event.key.toLowerCase() === 'f') {
       event.preventDefault()
       setFinding(true)
       searchInput?.focus()
@@ -1137,7 +1141,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
           event.preventDefault()
           const direction = event.submitter?.getAttribute('value') === 'next' ? 'next' : 'previous'
           void find(searchInput?.value ?? '', direction)
-        }} onKeyDown={(event) => { if (event.key === 'Escape') closeSearch() }}>
+        }} onKeyDown={(event) => {
+          if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return
+          event.preventDefault()
+          closeSearch()
+        }}>
           <input ref={searchInput} type="search" aria-label="Find in terminal" placeholder="Find in terminal" onInput={resetSearch} />
           <button type="submit" value="previous" disabled={searching()}>Find previous</button>
           <button type="submit" value="next" disabled={searching()}>Find next</button>

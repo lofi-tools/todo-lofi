@@ -386,17 +386,42 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
   }
 }
 
-async function exerciseSearch(terminalId: string) {
-  const latest = await bridge.searchTerminal(terminalId, 'S4_T0', null, 'previous')
-  if (!latest) throw new Error('Paced output was missing from scrollback')
-  const previous = await bridge.searchTerminal(terminalId, 'S4_T0', latest.start, 'previous')
-  if (!previous || previous.start.line >= latest.start.line) {
-    throw new Error('Searching backward should select an earlier marker')
-  }
-  const next = await bridge.searchTerminal(terminalId, 'S4_T0', previous.end, 'next')
-  if (!next || next.start.line !== latest.start.line || next.start.column !== latest.start.column) {
-    throw new Error('Searching forward should return to the later marker')
-  }
+async function exerciseSearch(terminal: bridge.TerminalSnapshot, input: HTMLTextAreaElement) {
+  const query = 'S4_SEARCH[.]'
+  const command = "for match in first second; do printf 'S4_%s[.]:%s\\n' SEARCH \"$match\"; awk 'BEGIN {for (line=1; line<=80; line++) print line}'; done; printf 'S4_%s\\n' SEARCH_END"
+  await bridge.terminalWrite(terminal.id, command + '\r')
+  await waitFor('search markers have moved into scrollback', () =>
+    terminalOutput().includes('S4_SEARCH_END') && !terminalOutput().includes(query))
+
+  const mac = navigator.platform.startsWith('Mac')
+  input.focus()
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: mac ? 'f' : 'F', metaKey: mac, ctrlKey: !mac, shiftKey: !mac, bubbles: true, cancelable: true,
+  }))
+  const search = await waitFor('focused terminal find field', () => {
+    const field = document.querySelector<HTMLInputElement>('input[aria-label="Find in terminal"]')
+    return field && document.activeElement === field && field
+  })
+  search.value = query
+  search.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  const reveal = (result: string) => waitFor(`search reveals ${result}`, () =>
+    terminalOutput().split('\n').some((line) => line.trim() === `${query}:${result}`))
+  const previous = await enabledButton('Find previous')
+  previous.click()
+  await reveal('second')
+  await waitFor('previous search completed', () => !previous.disabled)
+  previous.click()
+  await reveal('first')
+  const next = await enabledButton('Find next')
+  next.click()
+  await reveal('second')
+  search.focus()
+  press(search, 'Escape')
+  await waitFor('find closes and returns terminal focus', () =>
+    !search.isConnected && document.activeElement === input)
+  await typeIntoFocusedTerminal(terminal.title, "printf 'S4_%s\\n' SEARCH_RETURN")
+  await waitFor('typing after search shows live shell output', () =>
+    terminalOutput().split('\n').some((line) => line.trim() === 'S4_SEARCH_RETURN'))
 }
 
 async function exerciseProjectSwitch(project: bridge.ProjectSnapshot, terminal: bridge.TerminalSnapshot) {
@@ -783,7 +808,7 @@ async function smoke() {
   await exerciseHyperlink(terminal.id)
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
-  await exerciseSearch(terminal.id)
+  await exerciseSearch(terminal, input)
   await exerciseProjectSwitch(project, terminal)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project, terminal)

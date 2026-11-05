@@ -893,6 +893,24 @@ test('keeps the shared terminal attached while switching task terminals', async 
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
 })
 
+test('keeps terminal find open when Escape belongs to an IME composition', async ({ page }) => {
+  await page.goto('/')
+  const terminal = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const modifier = await page.evaluate(() => navigator.platform.startsWith('Mac') ? 'Meta' : 'Control+Shift')
+  await terminal.press(`${modifier}+f`)
+  const search = page.getByRole('searchbox', { name: 'Find in terminal' })
+  await expect(search).toBeFocused()
+  await search.fill('unmatched')
+  await search.press('Enter')
+  await expect(page.getByText('No matches', { exact: true })).toBeVisible()
+
+  await search.dispatchEvent('keydown', { key: 'Escape', isComposing: true, cancelable: true, bubbles: true })
+  await expect(search).toBeFocused()
+  await search.press('Escape')
+  await expect(search).toHaveCount(0)
+  await expect(terminal).toBeFocused()
+})
+
 test('clears a terminal bell when its focused window returns', async ({ page }) => {
   await page.goto('/?scoped-terminals')
   const input = page.getByRole('region', { name: 'Task shell' }).getByRole('textbox')
