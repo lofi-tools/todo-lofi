@@ -582,6 +582,8 @@ Automated:
   The find bar navigates literal matches in both directions and returns
   keyboard focus to the shell when dismissed. The browser smoke checks that
   Escape during IME composition leaves the find bar open.
+  The native smoke also copies a wide glyph from either cell and copies the
+  punctuation next to it independently.
 
 Manual script:
 

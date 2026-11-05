@@ -184,6 +184,29 @@ async function exerciseFuzzyFinder(terminalId: string, input: HTMLTextAreaElemen
     terminalOutput().split('\n').some((line) => line.trim() === 'S4_FZF:second.txt'))
 }
 
+async function exerciseWideCopy(terminalId: string, input: HTMLTextAreaElement) {
+  await bridge.terminalWrite(terminalId, "printf '\\033[?1049h\\033[H%s\\n' '界!'; IFS= read -r answer; printf '\\033[?1049lS4_%s\\n' COPY_DONE\r")
+  await waitFor('wide glyph and punctuation on the terminal screen', () =>
+    terminalOutput().split('\n')[0].trim() === '界!')
+  const canvas = await waitFor('terminal canvas for copy', () =>
+    document.querySelector<HTMLCanvasElement>('.terminal-view__canvas'))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('The terminal canvas has no 2D context')
+  const cellWidth = context.measureText('M').width
+  const { left, top } = canvas.getBoundingClientRect()
+  for (const [column, expected] of [[2, '!'], [0, '界'], [1, '界']] as const) {
+    canvas.dispatchEvent(new MouseEvent('dblclick', {
+      bubbles: true, button: 0, clientX: left + (column + 0.5) * cellWidth, clientY: top + 1,
+    }))
+    const clipboard = new DataTransfer()
+    input.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+    const text = clipboard.getData('text/plain')
+    if (text !== expected) throw new Error(`Copy at column ${column} returned ${JSON.stringify(text)} instead of ${expected}`)
+  }
+  press(input, 'Enter')
+  await waitFor('main screen restored after wide selection', () => terminalOutput().includes('S4_COPY_DONE'))
+}
+
 async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {
   await bridge.terminalWrite(terminalId, "index=0; while [ \"$index\" -lt 100 ]; do printf 'history %s\\n' \"$index\"; index=$((index + 1)); done; printf '\\033[6;8HS4_%s> ' IME_READY; IFS= read -r composed; printf '\\nS4_%s:%s\\n' IME \"$composed\"\r")
   const ready = () => terminalOutput().includes('S4_IME_READY')
@@ -809,6 +832,7 @@ async function smoke() {
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal, input)
+  await exerciseWideCopy(terminal.id, input)
   await exerciseProjectSwitch(project, terminal)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project, terminal)

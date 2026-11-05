@@ -764,7 +764,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const belongs = (index: number) => {
       const entry = cells[index]
       if (!entry) return false
-      return entry.width === 0 || category(entry.text) === group
+      if (entry.width !== 0) return category(entry.text) === group
+      const leading = index > first ? cells[index - 1] : undefined
+      return leading?.width === 2 && category(leading.text) === group
     }
     while (start > first && belongs(start - 1)) start--
     while (end + 1 < after && belongs(end + 1)) end++
