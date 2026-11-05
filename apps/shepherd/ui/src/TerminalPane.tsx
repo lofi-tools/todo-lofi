@@ -19,6 +19,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
   const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null })
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
+  const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
 
@@ -63,6 +64,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       await save(previous ? (target ? replacePane(previous, target, split) : split(previous)) : added)
     }
     setSelectedId(terminalId)
+    setFocusRequest({ id: terminalId })
   }
 
   function detach(id: string) {
@@ -138,7 +140,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         </ul>
       </details>
       <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
-        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId}
+        <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId} focusRequest={focusRequest()}
           restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
@@ -209,6 +211,7 @@ interface TerminalTreeProps {
   terminal: TerminalLookup
   active: string | null
   select: (id: string) => void
+  focusRequest: { id: string } | undefined
   restart: (id: string) => void
   stop: (id: string) => void
   detach: (id: string) => void
@@ -250,7 +253,7 @@ function TerminalTree(props: TerminalTreeProps) {
               </div>
             }>
               <Show when={entry().id} keyed>
-                {(id) => <TerminalCanvas terminalId={id} />}
+                {(id) => <TerminalCanvas terminalId={id} focusRequest={props.focusRequest} />}
               </Show>
             </Show>
           </section>
@@ -323,7 +326,7 @@ const MOUSE_DRAG = 1 << 13
 const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 
-function TerminalCanvas(props: { terminalId: string }) {
+function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string } | undefined }) {
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -343,6 +346,10 @@ function TerminalCanvas(props: { terminalId: string }) {
   let selecting: number | undefined
   let mouseButton: number | undefined
   let mousePosition = ''
+
+  createEffect(() => {
+    if (props.focusRequest?.id === props.terminalId) input?.focus({ preventScroll: true })
+  })
 
   function draw(changedRows: Iterable<number> | null = null) {
     const current = frame
