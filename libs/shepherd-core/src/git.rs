@@ -788,6 +788,34 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_rejected_commit_keeps_the_index_available_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = TestRepository::new()?;
+        let hook = fixture.repository().git_dir.join("hooks/commit-msg");
+        std::fs::write(&hook, "#!/bin/sh\ncat \"$1\" >&2\nexit 1\n")?;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        fixture.write_file("README.md", "edited\n")?;
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        let snapshot = GitService.snapshot(fixture.path())?;
+        let result = GitService.commit(
+            fixture.path(),
+            "Preserve this message",
+            &snapshot.staged_revision,
+        );
+        assert!(
+            matches!(result, Err(GitError::CommandFailed { stderr, .. }) if stderr.contains("Preserve this message"))
+        );
+        assert_eq!(
+            GitService.snapshot(fixture.path())?.staged_revision,
+            snapshot.staged_revision
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_non_repository_is_reported() {
         let directory = TestDirectory::new().expect("temp directory");
