@@ -3015,6 +3015,94 @@ mod live {
         resumed.shutdown().await.expect("the session stops");
     }
 
+    /// The real CLI decides when to ask; under `workspace-write` network access
+    /// needs escalation, so a fetch is the cheapest prompt that raises a card.
+    #[tokio::test]
+    #[ignore]
+    async fn live_codex_requests_approval_for_a_network_command() {
+        let here = std::env::current_dir().expect("a working directory");
+        let detection = detect(None, &here).await;
+        let Some(install) = &detection.install else {
+            eprintln!("skipping the live approval: {}", detection.summary());
+            return;
+        };
+
+        let directory = TempDir::new().expect("a temp repo");
+        let repo = directory.path();
+        git(repo, &["init", "--quiet"]);
+        let mut harness = start(install, repo).await;
+        harness
+            .open_session(None)
+            .await
+            .expect("a new thread opens");
+        harness
+            .prompt(PromptInput {
+                text: "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com".to_string(),
+            })
+            .await
+            .expect("the turn starts");
+
+        let mut requested = None;
+        let mut finished = None;
+        loop {
+            let event = match timeout(TURN_LIMIT, harness.events().recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(_) => panic!("codex sent no event within {}s", TURN_LIMIT.as_secs()),
+            };
+            match event {
+                HarnessEvent::ApprovalRequested { request } => {
+                    requested = Some(request);
+                    break;
+                }
+                HarnessEvent::TurnFinished { reason } => {
+                    finished = Some(reason);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let Some(request) = requested else {
+            eprintln!("codex finished without asking for approval: {finished:?}");
+            harness.shutdown().await.expect("the session stops");
+            return;
+        };
+        eprintln!("approval: {} {:?}", request.title, request.arguments);
+
+        harness
+            .respond(request.approval_id.clone(), Decision::Deny)
+            .await
+            .expect("the request is answered");
+        let mut resolved = false;
+        let mut finished = None;
+        loop {
+            let event = match timeout(Duration::from_secs(60), harness.events().recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(_) => panic!("codex sent no event after the denial"),
+            };
+            match event {
+                HarnessEvent::ApprovalResolved {
+                    approval_id,
+                    decision,
+                } => {
+                    assert_eq!(approval_id.as_str(), request.approval_id.as_str());
+                    assert_eq!(decision, Decision::Deny);
+                    resolved = true;
+                }
+                HarnessEvent::TurnFinished { reason } => {
+                    finished = Some(reason);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(resolved, "the denial must be recorded");
+        eprintln!("after the denial: {finished:?}");
+        harness.shutdown().await.expect("the session stops");
+    }
+
     async fn start(install: &CodexInstall, repo: &Path) -> CodexHarness {
         let mut harness = match &install.probe.version {
             Some(version) => CodexHarness::new().with_version(version.clone()),
