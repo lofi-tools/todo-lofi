@@ -1,4 +1,4 @@
-import { Show, createEffect, createResource, createSignal, createUniqueId, onCleanup } from 'solid-js'
+import { Match, Show, Switch, createEffect, createResource, createSignal, createUniqueId, onCleanup } from 'solid-js'
 
 import { projectRemote, type ProjectRemote, type ProjectSnapshot } from './bridge'
 
@@ -223,15 +223,22 @@ function FolderIcon(props: { size: number }) {
   )
 }
 
+const forgeNames = { github: 'GitHub', gitlab: 'GitLab', huggingface: 'Hugging Face' }
+
 function ForgeIcon(props: { forge: NonNullable<ProjectRemote['forge']> }) {
   return (
-    <svg class="project-menu__icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label={props.forge === 'github' ? 'GitHub' : 'GitLab'}>
-      <Show
-        when={props.forge === 'github'}
-        fallback={<path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z" />}
-      >
-        <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22" />
-      </Show>
+    <svg class="project-menu__icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label={forgeNames[props.forge]}>
+      <Switch>
+        <Match when={props.forge === 'github'}>
+          <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22" />
+        </Match>
+        <Match when={props.forge === 'gitlab'}>
+          <path d="M22.65 14.39L12 22.13 1.35 14.39a.84.84 0 0 1-.3-.94l1.22-3.78 2.44-7.51A.42.42 0 0 1 4.82 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.49h8.1l2.44-7.51A.42.42 0 0 1 18.6 2a.43.43 0 0 1 .58 0 .42.42 0 0 1 .11.18l2.44 7.51L23 13.45a.84.84 0 0 1-.35.94z" />
+        </Match>
+        <Match when={props.forge === 'huggingface'}>
+          <path d="M4 12a8 8 0 1 1 16 0M9 10h.01M15 10h.01M9.5 13a3.2 3.2 0 0 0 5 0M10 20a5 5 0 0 1-6-1l-2-3a1.5 1.5 0 0 1 2.5-1.5l2 2-1-3m8.5 6.5a5 5 0 0 0 6-1l2-3a1.5 1.5 0 0 0-2.5-1.5l-2 2 1-3M10 20a8 8 0 0 0 4 0" />
+        </Match>
+      </Switch>
     </svg>
   )
 }

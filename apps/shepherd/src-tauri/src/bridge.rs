@@ -70,6 +70,7 @@ pub struct ProjectRemote {
 enum RemoteForge {
     GitHub,
     GitLab,
+    HuggingFace,
 }
 
 impl ProjectRemote {
@@ -93,6 +94,7 @@ impl ProjectRemote {
         let forge = match host.as_deref() {
             Some("github.com" | "ssh.github.com") => Some(RemoteForge::GitHub),
             Some("gitlab.com" | "altssh.gitlab.com") => Some(RemoteForge::GitLab),
+            Some("huggingface.co" | "hf.co") => Some(RemoteForge::HuggingFace),
             _ => None,
         };
         let label = label.split(['?', '#']).next().unwrap_or_default();
@@ -1359,6 +1361,20 @@ mod tests {
                 serde_json::json!({ "label": "example/mirror", "forge": "gitlab" })
             };
             assert_eq!(remote, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identifies_hugging_face_https_and_ssh_remotes() -> Result<(), serde_json::Error> {
+        for url in [
+            "https://huggingface.co/datasets/example/data.git",
+            "git@hf.co:datasets/example/data",
+        ] {
+            assert_eq!(
+                serde_json::to_value(ProjectRemote::from_url(url))?,
+                serde_json::json!({ "label": "datasets/example/data", "forge": "huggingface" })
+            );
         }
         Ok(())
     }

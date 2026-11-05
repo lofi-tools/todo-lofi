@@ -218,6 +218,9 @@ test.beforeEach(async ({ page }) => {
           case 'project_list':
             return { projects: [...projects] }
           case 'project_remote':
+            if (options.has('hugging-face-remote')) {
+              return { label: 'datasets/example/data', forge: 'huggingface' }
+            }
             return args.projectId === 'project-alpha'
               ? { label: 'demo/alpha-a-repository-with-a-long-name-that-still-fits-on-one-line', forge: 'gitlab' }
               : { label: 'example/demo', forge: 'github' }
@@ -446,6 +449,14 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   const remoteBounds = await remote.boundingBox()
   if (!iconBounds || !remoteBounds) throw new Error('The remote icon and label should be visible')
   expect(iconBounds.y + iconBounds.height / 2).toBeCloseTo(remoteBounds.y + remoteBounds.height / 2, 0)
+})
+
+test('shows a Hugging Face icon beside its project remote', async ({ page }) => {
+  await page.goto('/?hugging-face-remote')
+  await page.getByRole('button', { name: 'demo', exact: true }).hover()
+  const card = page.getByRole('menu', { name: 'demo' })
+  await expect(card.getByText('datasets/example/data')).toBeVisible()
+  await expect(card.getByRole('img', { name: 'Hugging Face' })).toBeVisible()
 })
 
 test('shows project icons, opens archive controls on hover, and composes in another project', async ({ page }) => {

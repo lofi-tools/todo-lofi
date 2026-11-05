@@ -41,7 +41,7 @@ export interface ProjectList {
 
 export interface ProjectRemote {
   label: string
-  forge: 'github' | 'gitlab' | null
+  forge: 'github' | 'gitlab' | 'huggingface' | null
 }
 
 /** One row in the project picker: a repository, a directory leading to one, or
