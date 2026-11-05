@@ -1,3 +1,5 @@
+import { getCurrentWindow } from '@tauri-apps/api/window'
+
 import * as bridge from '../src/bridge'
 
 declare const __SHEPHERD_SMOKE_FISH__: boolean
@@ -5,7 +7,8 @@ declare const __SHEPHERD_SMOKE_PROJECT__: string
 declare const __SHEPHERD_SMOKE_PHASE__: string
 
 export function button(label: string): HTMLButtonElement | undefined {
-  return Array.from(document.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === label)
+  return Array.from(document.querySelectorAll('button'))
+    .find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent?.trim()) === label)
 }
 
 export async function waitFor<T>(label: string, read: () => T | null | undefined | false): Promise<T> {
@@ -414,6 +417,6 @@ void (async () => {
   try {
     await fetch('/__shepherd-terminal-smoke', { method: 'POST', body: JSON.stringify(result) })
   } finally {
-    button('Quit')?.click()
+    await getCurrentWindow().close()
   }
 })()

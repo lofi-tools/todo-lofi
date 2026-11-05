@@ -1,22 +1,18 @@
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId } from 'solid-js'
 
-import type { LocalCodexProject, ProjectNode, ProjectScan } from './bridge'
+import type { ProjectNode, ProjectScan } from './bridge'
 
 interface ProjectPickerProps {
   scan: ProjectScan | null
-  desktopProjects?: LocalCodexProject[]
   loading: boolean
   error: string | null
-  onSwitchSource: () => void
   onRescan: () => void
   onCancel: () => void
-  onSelect: (paths: string[]) => void
+  onSelect: (path: string) => void
 }
 
-type PickerNode = ProjectNode | LocalCodexProject
-
 interface PickerRow {
-  node: PickerNode
+  node: ProjectNode
   depth: number
   parent?: string
   expanded?: boolean
@@ -29,10 +25,7 @@ export function ProjectPicker(props: ProjectPickerProps) {
   const treeId = createUniqueId()
   let input: HTMLInputElement | undefined
 
-  const fromChatGpt = () => props.desktopProjects !== undefined
-  const filterLabel = () => fromChatGpt() ? 'Filter ChatGPT projects' : 'Filter repositories'
-  const roots = createMemo<PickerNode[]>(() => {
-    if (props.desktopProjects) return props.desktopProjects
+  const roots = createMemo(() => {
     let nodes = props.scan?.tree ?? []
     while (nodes.length === 1) {
       const [only] = nodes
@@ -42,28 +35,19 @@ export function ProjectPicker(props: ProjectPickerProps) {
     return nodes
   })
   const needle = () => filter().trim().toLowerCase()
-  const emptyMessage = () => {
-    if (fromChatGpt()) {
-      if (props.loading) return 'Loading ChatGPT projects…'
-      return needle() ? 'No projects match the filter.' : 'No new local folders to import.'
-    }
-    if (props.loading) return 'Scanning for Git repositories…'
-    return needle() ? 'No repositories match the filter.' : 'No Git repositories here.'
-  }
   const visible = createMemo(() => {
     const rows: PickerRow[] = []
     const query = needle()
     const open = expansion()
-    function visit(nodes: PickerNode[], depth: number, parent?: string) {
+    function visit(nodes: ProjectNode[], depth: number, parent?: string) {
       for (const node of nodes) {
-        const group = 'children' in node && !node.repository
         if (query) {
-          if (!group && (node.name.toLowerCase().includes(query) || node.path.toLowerCase().includes(query))) {
+          if (node.repository && (node.name.toLowerCase().includes(query) || node.path.toLowerCase().includes(query))) {
             rows.push({ node, depth: 0 })
-          } else if (group) {
+          } else {
             visit(node.children, 0)
           }
-        } else if (!group) {
+        } else if (node.repository) {
           rows.push({ node, depth, parent })
         } else {
           const expanded = open.get(node.path) ?? depth === 0
@@ -86,19 +70,12 @@ export function ProjectPicker(props: ProjectPickerProps) {
 
   function toggle(row: PickerRow) {
     setActivePath(row.node.path)
-    if (row.expanded === undefined) {
-      props.onSelect([row.node.path])
+    if (row.node.repository) {
+      props.onSelect(row.node.path)
       return
     }
     setExpansion((previous) => new Map(previous).set(row.node.path, !row.expanded))
     input?.focus({ preventScroll: true })
-  }
-
-  function switchSource() {
-    setFilter('')
-    setActivePath(undefined)
-    props.onSwitchSource()
-    input?.focus()
   }
 
   function handleKeyDown(event: KeyboardEvent) {
@@ -145,32 +122,22 @@ export function ProjectPicker(props: ProjectPickerProps) {
       <div class="picker" role="dialog" aria-modal="true" aria-label="Add project" onKeyDown={handleKeyDown}>
         <header class="picker__header">
           <h3>Add project</h3>
-          <button type="button" onClick={switchSource}>
-            {fromChatGpt() ? 'Browse repositories' : 'From ChatGPT app'}
-          </button>
-          <button type="button" onClick={props.onRescan} disabled={props.loading}>
-            {fromChatGpt() ? 'Refresh' : 'Re-scan'}
-          </button>
-          <Show when={props.desktopProjects?.length}>
-            <button type="button" onClick={() => props.onSelect(props.desktopProjects?.map((project) => project.path) ?? [])}>
-              Import all
-            </button>
-          </Show>
+          <button type="button" onClick={props.onRescan} disabled={props.loading}>Re-scan</button>
           <button type="button" aria-label="Close picker" onClick={props.onCancel}>Close</button>
         </header>
 
-        <p class="picker__root">{fromChatGpt() ? 'Primary folders from local Codex projects' : props.scan?.root ?? 'Home'}</p>
+        <p class="picker__root">{props.scan?.root ?? 'Home'}</p>
         <input
           class="picker__filter"
           ref={input}
           role="combobox"
-          aria-label={filterLabel()}
+          aria-label="Filter repositories"
           aria-controls={visible().length ? treeId : undefined}
           aria-activedescendant={visible().length ? rowId(activeIndex()) : undefined}
           aria-expanded={visible().length > 0}
           aria-haspopup="tree"
           aria-autocomplete="list"
-          placeholder={filterLabel()}
+          placeholder="Filter repositories"
           autofocus
           value={filter()}
           onInput={(event) => {
@@ -180,15 +147,23 @@ export function ProjectPicker(props: ProjectPickerProps) {
         />
 
         <Show when={props.error}>
-          {(message) => <p class="empty" role="alert">{message()}</p>}
+          {(message) => <p class="empty">{message()}</p>}
         </Show>
 
         <Show when={!props.error}>
           <Show
             when={visible().length > 0}
-            fallback={<p class="empty">{emptyMessage()}</p>}
+            fallback={
+              <p class="empty">
+                {props.loading
+                  ? 'Scanning for Git repositories…'
+                  : needle()
+                    ? 'No repositories match the filter.'
+                    : 'No Git repositories here.'}
+              </p>
+            }
           >
-            <ul class="picker__list" role="tree" aria-label={fromChatGpt() ? 'ChatGPT app projects' : 'Repositories'} id={treeId}>
+            <ul class="picker__list" role="tree" aria-label="Repositories" id={treeId}>
               <For each={visible()}>
                 {(row, index) => (
                   <li role="presentation">
@@ -210,9 +185,7 @@ export function ProjectPicker(props: ProjectPickerProps) {
                         {row.expanded === undefined ? '' : row.expanded ? '▾' : '▸'}
                       </span>
                       <span class="picker__name">{row.node.name}</span>
-                      <span class="picker__kind" classList={{ 'picker__path': fromChatGpt() }}>
-                        {fromChatGpt() ? row.node.path : row.expanded === undefined ? 'repository' : 'folder'}
-                      </span>
+                      <span class="picker__kind">{row.node.repository ? 'repository' : 'folder'}</span>
                     </button>
                   </li>
                 )}
@@ -221,9 +194,7 @@ export function ProjectPicker(props: ProjectPickerProps) {
           </Show>
         </Show>
 
-        <footer class="picker__hint">
-          {fromChatGpt() ? '↑ ↓ Move · Enter Import · Esc Cancel' : '↑ ↓ Move · ← → Collapse or expand · Enter Open · Esc Cancel'}
-        </footer>
+        <footer class="picker__hint">↑ ↓ Move · ← → Collapse or expand · Enter Open · Esc Cancel</footer>
       </div>
     </div>
   )

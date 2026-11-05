@@ -70,6 +70,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::quit,
             bridge::commands::project_list,
             bridge::commands::project_scan,
+            bridge::commands::local_codex_available,
             bridge::commands::local_codex_projects,
             bridge::commands::task_list,
             bridge::commands::task_workspace,

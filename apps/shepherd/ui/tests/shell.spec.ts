@@ -23,7 +23,7 @@ test.beforeEach(async ({ page }) => {
       unfinishedTaskCount: 1,
     }
 
-    const projects = [project]
+    const projects = new URLSearchParams(window.location.search).has('empty-projects') ? [] : [project]
 
     const scan = {
       root: '/tmp/home',
@@ -207,9 +207,10 @@ test.beforeEach(async ({ page }) => {
             return { projects: [...projects] }
           case 'project_scan':
             return scan
+          case 'local_codex_available':
+            return !new URLSearchParams(window.location.search).has('no-codex')
           case 'local_codex_projects':
             return [
-              { name: 'Already registered', path: '/tmp/demo' },
               { name: 'Desktop notes', path: '/tmp/outside-scan/notes' },
               { name: 'Desktop service', path: '/tmp/outside-scan/service' },
               { name: 'Desktop website', path: '/tmp/outside-scan/website' },
@@ -371,7 +372,11 @@ test('encodes typed keys into terminal input', async ({ page }) => {
 test('opens the project picker, filters, and adds a project', async ({ page }) => {
   await page.goto('/')
 
-  await page.getByRole('button', { name: 'Add project' }).click()
+  const heading = page.locator('.sidebar__header')
+  await expect(heading.getByRole('heading', { name: 'Projects' })).toBeVisible()
+  const addProject = heading.getByRole('button', { name: 'Add project' })
+  await expect(addProject).toHaveAttribute('title', 'Add project')
+  await addProject.click()
   const picker = page.getByRole('dialog', { name: 'Add project' })
   await expect(picker).toBeVisible()
   await expect(picker.getByRole('treeitem')).toHaveCount(4)
@@ -397,33 +402,53 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   await expect(page.getByRole('button', { name: /alpha/ })).toBeVisible()
 })
 
-test('imports one or all new local Codex project folders from the ChatGPT app', async ({ page }) => {
-  await page.goto('/')
-  const picker = page.getByRole('dialog', { name: 'Add project' })
-  async function openDesktopProjects() {
-    await page.getByRole('button', { name: 'Add project' }).click()
-    await picker.getByRole('button', { name: 'From ChatGPT app' }).click()
+test('batch imports local Codex projects from the empty Projects list', async ({ page }) => {
+  await page.goto('/?empty-projects')
+  const projects = page.locator('.projects')
+  await projects.getByRole('button', { name: 'New project' }).click()
+  await expect(page.getByRole('dialog', { name: 'Add project' })).toBeVisible()
+  await page.getByRole('button', { name: 'Close picker' }).click()
+  await expect(projects.getByText('or import all from')).toBeVisible()
+  const sources = projects.getByRole('group', { name: 'Project import sources' })
+  for (const source of ['OpenCode', 'Pi', 'Claude Code', 'Freebuff']) {
+    await expect(sources.getByRole('button', { name: source })).toBeDisabled()
   }
-
-  await openDesktopProjects()
-  await expect(picker.getByRole('treeitem')).toHaveCount(3)
-  const filter = picker.getByRole('combobox', { name: 'Filter ChatGPT projects' })
-  await filter.fill('desktop notes')
-  await expect(picker.getByRole('treeitem')).toHaveCount(1)
-  await filter.press('Enter')
-  await expect(picker).toHaveCount(0)
+  const importProjects = sources.getByRole('button', { name: 'ChatGPT app' })
+  await expect(importProjects).toBeEnabled()
+  await importProjects.click()
+  await expect(page.getByRole('dialog', { name: 'Add project' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^notes/ })).toBeVisible()
-
-  await openDesktopProjects()
-  await expect(picker.getByRole('treeitem')).toHaveCount(2)
-  await picker.getByRole('button', { name: 'Import all' }).click()
   await expect(page.getByRole('button', { name: /^service/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /^website/ })).toBeVisible()
+  await expect(importProjects).toHaveCount(0)
 
-  await openDesktopProjects()
-  await expect(picker.getByText('No new local folders to import.')).toBeVisible()
-  await picker.getByRole('button', { name: 'Browse repositories' }).click()
-  await expect(picker.getByRole('treeitem', { name: /alpha/ })).toBeVisible()
+  await page.goto('/?empty-projects&no-codex')
+  await expect(importProjects).toBeDisabled()
+  await expect(projects.getByRole('button', { name: 'New project' })).toBeEnabled()
+})
+
+test('opens settings in the task pane and returns to the current chat', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Quit', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await page.getByLabel('Prompt').fill('keep this draft')
+
+  const settings = page.getByRole('button', { name: 'Settings' })
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await settings.click()
+  await expect(chat).toBeHidden()
+  await expect(settings).toHaveAttribute('aria-pressed', 'true')
+  const categories = page.getByRole('navigation', { name: 'Settings categories' })
+  await expect(categories.getByRole('button', { name: 'Workspace' })).toHaveAttribute('aria-current', 'true')
+  await page.getByLabel('Show archived tasks').check()
+  await categories.getByRole('button', { name: 'Projects' }).click()
+  await page.getByRole('region', { name: 'Projects' }).getByRole('button', { name: 'Add project' }).click()
+  await page.getByRole('button', { name: 'Close picker' }).click()
+  await settings.click()
+
+  await expect(chat).toBeVisible()
+  await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
+  await expect(page.getByLabel('Show archived', { exact: true })).toBeChecked()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

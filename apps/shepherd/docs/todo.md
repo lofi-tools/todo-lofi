@@ -8,10 +8,9 @@ source of truth for behaviour and technology.
 
 ## Next feature
 
-- [x] Import local Codex projects from the ChatGPT desktop app. Offer each
-  project's primary folder in the project picker and let users import one or all
-  available folders. A protocol fixture covers pagination, and the browser smoke
-  covers individual import, bulk import and already registered folders.
+- [x] Import the primary folders of local Codex projects from the ChatGPT desktop
+  app. Offer batch import in the sidebar when the Projects list is empty. A
+  protocol fixture covers pagination, and the browser smoke covers batch import.
 
 ## The ordering rule
 

@@ -503,17 +503,21 @@ struct ProjectRoot {
     path: PathBuf,
 }
 
-pub async fn desktop_projects() -> HarnessResult<Vec<CodexProject>> {
+pub fn desktop_project_program() -> Option<PathBuf> {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     let mut candidates = codex_candidates(None, &path_env, &[PathBuf::from("/Applications")]);
     // A CLI on PATH may predate project/list while the installed desktop build supports it.
     candidates.sort_by_key(|(_, kind)| *kind != CodexInstallKind::AppBundle);
-    let (program, _) = candidates
+    candidates
         .into_iter()
         .find(|(path, _)| path.is_file() && is_executable(path))
-        .ok_or_else(|| HarnessError::MissingProgram {
-            program: "codex".into(),
-        })?;
+        .map(|(program, _)| program)
+}
+
+pub async fn desktop_projects() -> HarnessResult<Vec<CodexProject>> {
+    let program = desktop_project_program().ok_or_else(|| HarnessError::MissingProgram {
+        program: "codex".into(),
+    })?;
     list_projects(SpawnSpec {
         program: program.to_string_lossy().into_owned(),
         args: vec!["app-server".into()],

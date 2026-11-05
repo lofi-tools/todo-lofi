@@ -4,27 +4,32 @@
  * frontend model.
  */
 
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
 import { ProjectPicker } from './ProjectPicker'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
+import { SettingsPane } from './SettingsPane'
 import { TerminalPane } from './TerminalPane'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
+const UPCOMING_IMPORT_SOURCES = ['OpenCode', 'Pi', 'Claude Code', 'Freebuff']
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
+  const [projectsLoaded, setProjectsLoaded] = createSignal(false)
+  const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [showArchived, setShowArchived] = createSignal(false)
+  const [settingsOpen, setSettingsOpen] = createSignal(false)
   const visibleTasks = () => tasks().filter((task) => showArchived() || task.state !== 'done')
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
@@ -42,15 +47,7 @@ export function App() {
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
   const [scanning, setScanning] = createSignal(false)
   const [scanError, setScanError] = createSignal<string | null>(null)
-  const [fromChatGpt, setFromChatGpt] = createSignal(false)
-  const [desktopProjects, setDesktopProjects] = createSignal<bridge.LocalCodexProject[]>([])
-  const [loadingDesktopProjects, setLoadingDesktopProjects] = createSignal(false)
-  const [desktopProjectsError, setDesktopProjectsError] = createSignal<string | null>(null)
-  const importableProjects = createMemo(() => {
-    if (!fromChatGpt()) return undefined
-    const registered = new Set(projects().map((project) => project.path))
-    return desktopProjects().filter((project) => !registered.has(project.path))
-  })
+  const [importNote, setImportNote] = createSignal<string | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
   const [quitRequired, setQuitRequired] = createSignal<number | null>(null)
@@ -143,7 +140,9 @@ export function App() {
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
       setProjects(list.projects)
+      setProjectsLoaded(true)
       if (list.projects[0]) await selectProject(list.projects[0])
+      else setCodexAvailable(await bridge.localCodexAvailable())
     })
   })
 
@@ -160,28 +159,8 @@ export function App() {
   }
 
   function openPicker() {
-    setFromChatGpt(false)
     setPickerOpen(true)
     if (!scan() && !scanning()) void scanProjects(false)
-  }
-
-  async function loadDesktopProjects() {
-    if (loadingDesktopProjects()) return
-    setLoadingDesktopProjects(true)
-    setDesktopProjectsError(null)
-    setDesktopProjects([])
-    try {
-      setDesktopProjects(await bridge.localCodexProjects())
-    } catch (failure) {
-      setDesktopProjectsError(describe(failure))
-    } finally {
-      setLoadingDesktopProjects(false)
-    }
-  }
-
-  function switchPickerSource() {
-    setFromChatGpt(!fromChatGpt())
-    if (fromChatGpt()) void loadDesktopProjects()
   }
 
   onMount(() => {
@@ -201,28 +180,47 @@ export function App() {
     })
   })
 
-  function addProjects(paths: string[]) {
+  function addProject(path: string) {
     setPickerOpen(false)
+    void run(() => addProjects([path]))
+  }
+
+  function importProjects() {
+    if (pending() || !codexAvailable() || projects().length > 0) return
+    setImportNote(null)
     void run(async () => {
-      let target: bridge.ProjectSnapshot | undefined
-      const errors: string[] = []
-      for (const path of paths) {
-        try {
-          const list = await bridge.addProject(path)
-          setProjects(list.projects)
-          target ??= list.projects.find((project) => project.path === path) ?? list.projects.at(-1)
-        } catch (failure) {
-          errors.push(describe(failure))
-        }
+      const available = await bridge.localCodexProjects()
+      if (available.length === 0) {
+        setImportNote('No local Codex project folders to import.')
+        return
       }
-      if (target) await selectProject(target)
-      if (errors.length) setError(errors.join(' · '))
+      await addProjects(available.map((project) => project.path))
     })
+  }
+
+  async function addProjects(paths: string[]) {
+    let target: bridge.ProjectSnapshot | undefined
+    const errors: string[] = []
+    for (const path of paths) {
+      try {
+        const list = await bridge.addProject(path)
+        setProjects(list.projects)
+        target ??= list.projects.find((project) => project.path === path) ?? list.projects.at(-1)
+      } catch (failure) {
+        errors.push(describe(failure))
+      }
+    }
+    if (target) {
+      setSettingsOpen(false)
+      await selectProject(target)
+    }
+    if (errors.length) setError(errors.join(' · '))
   }
 
   function newTask() {
     const projectId = selectedProjectId()
     if (!projectId) return
+    setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task')
       setWorkspace(draft)
@@ -296,28 +294,54 @@ export function App() {
   return (
     <div class="shell">
       <div class="shell__body">
-        <aside class="sidebar" aria-label="Projects">
-          <h2 class="sidebar__title">Projects</h2>
-          <div class="add-project">
-            <button type="button" class="add-project__open" onClick={openPicker} disabled={pending()}>
-              Add project
+        <aside class="sidebar" aria-label="Workspace navigation">
+          <header class="sidebar__header">
+            <h2 class="sidebar__title">Projects</h2>
+            <button
+              type="button"
+              class="project-action project-action--icon"
+              aria-label="Add project"
+              title="Add project"
+              onClick={openPicker}
+              disabled={pending()}
+            >
+              <PlusIcon />
             </button>
-          </div>
-
-          <Show when={projects().length === 0}>
-            <p class="empty">No projects yet. Add one with the button above.</p>
-          </Show>
+          </header>
 
           <ul class="projects">
+            <Show when={projectsLoaded() && projects().length === 0}>
+              <li class="projects__empty">
+                <button type="button" class="project-action projects__new" onClick={openPicker} disabled={pending()}>
+                  <PlusIcon />
+                  New project
+                </button>
+                <p class="empty">or import all from</p>
+                <div class="projects__sources" role="group" aria-label="Project import sources">
+                  <button type="button" class="project-action" onClick={importProjects} disabled={pending() || !codexAvailable()}>
+                    ChatGPT app
+                  </button>
+                  <For each={UPCOMING_IMPORT_SOURCES}>
+                    {(source) => <button type="button" class="project-action" disabled>{source}</button>}
+                  </For>
+                </div>
+                <Show when={importNote()}>
+                  {(note) => <p class="empty" role="status">{note()}</p>}
+                </Show>
+              </li>
+            </Show>
             <For each={projects()}>
               {(project) => (
                 <li>
                   <button
                     type="button"
-                    class="project"
+                    class="project nav-item"
                     aria-expanded={project.id === selectedProjectId()}
                     aria-current={project.id === selectedProjectId() ? 'true' : undefined}
-                    onClick={() => void run(() => selectProject(project))}
+                    onClick={() => {
+                      setSettingsOpen(false)
+                      void run(() => selectProject(project))
+                    }}
                   >
                     <span class="project__name">{project.name}</span>
                     <span class="project__count">{project.unfinishedTaskCount}</span>
@@ -351,7 +375,10 @@ export function App() {
                                 type="button"
                                 class={`task task--${task.state}`}
                                 aria-current={task.id === selectedTaskId() ? 'true' : undefined}
-                                onClick={() => void run(() => selectTask(task.id))}
+                                onClick={() => {
+                                  setSettingsOpen(false)
+                                  void run(() => selectTask(task.id))
+                                }}
                               >
                                 <span class="task__state" aria-hidden="true" />
                                 <span class="task__title">{task.title}</span>
@@ -372,10 +399,33 @@ export function App() {
               )}
             </For>
           </ul>
+          <div class="sidebar__footer">
+            <button
+              type="button"
+              class="nav-item sidebar__settings"
+              aria-pressed={settingsOpen()}
+              onClick={() => setSettingsOpen((open) => !open)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.97a1.7 1.7 0 0 0-.34-1.88l-.06-.06A2 2 0 1 1 7.03 4.2l.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.03 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 8.97 1.7 1.7 0 0 0 20.95 10H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+              </svg>
+              Settings
+            </button>
+          </div>
         </aside>
 
-        <section class="chat" aria-label="Task chat">
-          <header class="chat__header">
+        <Show when={settingsOpen()}>
+          <SettingsPane
+            showArchived={showArchived()}
+            onShowArchived={setShowArchived}
+            onAddProject={openPicker}
+            pending={pending()}
+          />
+        </Show>
+
+        <section class="chat" aria-label="Task chat" hidden={settingsOpen()}>
+          <header class="pane-header">
             <span class="chat__title">{workspace()?.task.title ?? 'No task selected'}</span>
             <Show when={workspace()}>
               {(current) => <span class="chat__state">{current().task.state}</span>}
@@ -546,13 +596,11 @@ export function App() {
       <Show when={pickerOpen()}>
         <ProjectPicker
           scan={scan()}
-          desktopProjects={importableProjects()}
-          loading={fromChatGpt() ? loadingDesktopProjects() : scanning()}
-          error={fromChatGpt() ? desktopProjectsError() : scanError()}
-          onSwitchSource={switchPickerSource}
-          onRescan={() => void (fromChatGpt() ? loadDesktopProjects() : scanProjects(true))}
+          loading={scanning()}
+          error={scanError()}
+          onRescan={() => void scanProjects(true)}
           onCancel={() => setPickerOpen(false)}
-          onSelect={addProjects}
+          onSelect={addProject}
         />
       </Show>
 
@@ -599,9 +647,6 @@ export function App() {
             </>
           )}
         </Show>
-        <button type="button" class="status-bar__quit" onClick={quit} disabled={pending()}>
-          Quit
-        </button>
       </footer>
     </div>
   )
@@ -611,6 +656,14 @@ interface InspectorTab {
   id: string
   label: string
   enabled: boolean
+}
+
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  )
 }
 
 const INSPECTOR_TABS: InspectorTab[] = [

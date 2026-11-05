@@ -267,6 +267,10 @@ export function localCodexProjects(): Promise<LocalCodexProject[]> {
   return invoke('local_codex_projects')
 }
 
+export function localCodexAvailable(): Promise<boolean> {
+  return invoke('local_codex_available')
+}
+
 export function taskList(projectId: string): Promise<TaskList> {
   return invoke<TaskList>('task_list', { projectId })
 }

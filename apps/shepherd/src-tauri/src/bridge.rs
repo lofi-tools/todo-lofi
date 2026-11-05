@@ -899,6 +899,11 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub fn local_codex_available() -> bool {
+        agent_harness::codex::desktop_project_program().is_some()
+    }
+
+    #[tauri::command]
     pub async fn local_codex_projects() -> Result<Vec<LocalCodexProject>, BridgeError> {
         let projects = agent_harness::codex::desktop_projects()
             .await

@@ -41,10 +41,11 @@ The smoke uses a separate dev server on port 1432. Set
 
 ## Import projects from the ChatGPT app
 
-Choose **Add project → From ChatGPT app**. Select a project to add its primary
-folder, or choose **Import all** to add all available folders. Shepherd skips
-folders that are missing or already registered. Imported projects use the
-folder name in Shepherd, and agent tasks still require a Git repository.
+When the Projects list is empty, choose **ChatGPT app** under **or import all
+from** to add the available primary folders in one batch. Shepherd skips missing
+folders. Imported projects use the folder name in Shepherd, and agent tasks
+still require a Git repository. Use the plus button beside **Projects** to add
+a repository individually.
 
 The import uses the installed Codex app server's local project list. It works
 with a Codex installation that supports `project/list`.
