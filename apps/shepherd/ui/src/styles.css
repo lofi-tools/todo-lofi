@@ -108,6 +108,7 @@ textarea {
   padding: 0;
   border: 0;
   background: transparent;
+  color: var(--text-muted);
 }
 
 .project-action--icon:hover:enabled {
