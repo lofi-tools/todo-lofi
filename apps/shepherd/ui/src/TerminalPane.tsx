@@ -411,6 +411,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let canvas: HTMLCanvasElement | undefined
   let container: HTMLDivElement | undefined
   let frame: bridge.TerminalFrame | null = null
+  let paintedFrame: bridge.TerminalFrame | null = null
   let paintRequest: number | undefined
   let dirtyRows: Set<number> | null = null
   let cellWidth = 7.8
@@ -533,14 +534,15 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         }
       }
     }
+    paintedFrame = current
   }
 
-  function cellAt(event: MouseEvent) {
-    if (!frame || !canvas) return null
+  function cellAt(event: MouseEvent, current = frame) {
+    if (!current || !canvas) return null
     const bounds = canvas.getBoundingClientRect()
     return {
-      column: Math.max(0, Math.min(frame.columns - 1, Math.floor((event.clientX - bounds.left) / cellWidth))),
-      row: Math.max(0, Math.min(frame.rows - 1, Math.floor((event.clientY - bounds.top) / LINE_HEIGHT))),
+      column: Math.max(0, Math.min(current.columns - 1, Math.floor((event.clientX - bounds.left) / cellWidth))),
+      row: Math.max(0, Math.min(current.rows - 1, Math.floor((event.clientY - bounds.top) / LINE_HEIGHT))),
     }
   }
 
@@ -579,10 +581,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     input?.focus({ preventScroll: true })
     const cell = cellAt(event)
     if (!cell || !frame || mouseCapture || selecting !== undefined) return
-    if (event.button === 0 && (event.metaKey || event.ctrlKey) && frame.cells[cell.row * frame.columns + cell.column]?.linked) {
-      event.preventDefault()
-      void bridge.openTerminalLink(props.terminalId, cell.row, cell.column, frame.revision).catch((failure) => setError(describe(failure)))
-      return
+    if (event.button === 0 && (event.metaKey || event.ctrlKey) && paintedFrame) {
+      const painted = cellAt(event, paintedFrame)
+      if (painted && paintedFrame.cells[painted.row * paintedFrame.columns + painted.column]?.linked) {
+        event.preventDefault()
+        void bridge.openTerminalLink(props.terminalId, painted.row, painted.column, paintedFrame.revision)
+          .catch((failure) => setError(describe(failure)))
+        return
+      }
     }
     const button = [0, 1, 2][event.button]
     if (button !== undefined && reportMouse(event, button, 'press')) {
