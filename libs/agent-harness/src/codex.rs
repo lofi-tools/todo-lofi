@@ -718,7 +718,7 @@ impl AgentHarness for CodexHarness {
                         json!({
                             "cwd": cwd,
                             "approvalPolicy": "on-request",
-                            "sandbox": "workspaceWrite",
+                            "sandbox": "workspace-write",
                         }),
                     )
                     .await?;
@@ -2846,5 +2846,243 @@ sleep 30
         assert_eq!(install.probe.tier, CodexTier::Exec);
         let summary = detection.summary();
         assert!(summary.contains("exec"), "summary: {summary}");
+    }
+}
+
+#[cfg(test)]
+mod live {
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tokio::time::timeout;
+
+    use super::{CodexHarness, CodexInstall, detect};
+    use crate::{
+        AgentHarness, Decision, HarnessEvent, PromptInput, SpawnSpec, ToolStatus, TurnFinishReason,
+    };
+
+    const TURN_LIMIT: Duration = Duration::from_secs(180);
+
+    /// Drives the installed, logged-in Codex through the same path the app uses.
+    /// Ignored because CI has no CLI; replaying the recorded fixtures covers the
+    /// translation without one. Run it with
+    /// `cargo test -p agent-harness -- --ignored live_codex`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_codex_streams_a_tool_change_approves_resumes_and_cancels() {
+        let here = std::env::current_dir().expect("a working directory");
+        let detection = detect(None, &here).await;
+        let Some(install) = &detection.install else {
+            eprintln!("skipping the live run: {}", detection.summary());
+            return;
+        };
+        eprintln!("{}", detection.summary());
+
+        let directory = TempDir::new().expect("a temp repo");
+        let repo = directory.path();
+        git(repo, &["init", "--quiet"]);
+        git(repo, &["config", "user.email", "shepherd@test.invalid"]);
+        git(repo, &["config", "user.name", "Shepherd Test"]);
+        std::fs::write(repo.join("note.txt"), "first line\n").expect("the seed file is writable");
+        git(repo, &["add", "note.txt"]);
+        git(repo, &["commit", "--quiet", "-m", "seed"]);
+
+        let mut harness = start(install, repo).await;
+        let thread = harness
+            .open_session(None)
+            .await
+            .expect("a new thread opens");
+        eprintln!("thread: {}", thread.as_str());
+
+        let first = drive_turn(
+            &mut harness,
+            "Append the line 'hello from shepherd' to note.txt. Change nothing else.",
+            TURN_LIMIT,
+        )
+        .await;
+        let deltas = first
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::Delta { .. }))
+            .count();
+        let tool_calls = first
+            .iter()
+            .filter(|event| matches!(event, HarnessEvent::ToolCall { .. }))
+            .count();
+        eprintln!("first turn: {deltas} deltas, {tool_calls} tool calls");
+        assert!(deltas > 0, "the turn must stream text: {first:?}");
+        assert!(
+            tool_calls > 0,
+            "the turn must report a tool call: {first:?}"
+        );
+        assert!(
+            matches!(
+                first.last(),
+                Some(HarnessEvent::TurnFinished {
+                    reason: TurnFinishReason::Completed
+                })
+            ),
+            "the turn must finish: {first:?}"
+        );
+        let changed = std::fs::read_to_string(repo.join("note.txt")).expect("note.txt is readable");
+        assert!(
+            changed.contains("hello from shepherd"),
+            "codex changed note.txt: {changed}"
+        );
+
+        let diagnostics = harness.diagnostics();
+        eprintln!("command: {}", diagnostics.command);
+        eprintln!("protocol: {}", diagnostics.protocol);
+        harness.shutdown().await.expect("the first session stops");
+
+        let mut resumed = start(install, repo).await;
+        let same = resumed
+            .open_session(Some(thread.clone()))
+            .await
+            .expect("the stored thread resumes");
+        assert_eq!(same, thread, "resume must reopen the same thread");
+        let second = drive_turn(
+            &mut resumed,
+            "Reply with the single word: resumed.",
+            TURN_LIMIT,
+        )
+        .await;
+        assert!(
+            matches!(
+                second.last(),
+                Some(HarnessEvent::TurnFinished {
+                    reason: TurnFinishReason::Completed
+                })
+            ),
+            "the resumed turn must finish: {second:?}"
+        );
+
+        // A turn that only replies with text ends before there is anything to
+        // interrupt, so wait for a command that is actually running.
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            resumed
+                .prompt(PromptInput {
+                    text: "Run the shell command `sleep 25` and wait for it to finish.".to_string(),
+                })
+                .await
+                .expect("the long turn starts");
+            let mut running = false;
+            let mut finished = None;
+            loop {
+                match next_event(&mut resumed, TURN_LIMIT).await {
+                    HarnessEvent::ToolCall {
+                        status: ToolStatus::Running,
+                        ..
+                    } => {
+                        running = true;
+                        break;
+                    }
+                    HarnessEvent::TurnFinished { reason } => {
+                        finished = Some(reason);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if running {
+                break;
+            }
+            assert!(
+                attempts < 3,
+                "codex never ran a command to cancel: {finished:?}"
+            );
+            eprintln!("cancel attempt {attempts} ended early: {finished:?}");
+        }
+        resumed.cancel().await.expect("the turn is interrupted");
+        let finished = loop {
+            let event = next_event(&mut resumed, Duration::from_secs(60)).await;
+            if matches!(event, HarnessEvent::TurnFinished { .. }) {
+                break event;
+            }
+        };
+        assert!(
+            matches!(
+                finished,
+                HarnessEvent::TurnFinished {
+                    reason: TurnFinishReason::Cancelled | TurnFinishReason::Interrupted
+                }
+            ),
+            "the cancel must end the turn: {finished:?}"
+        );
+        resumed.shutdown().await.expect("the session stops");
+    }
+
+    async fn start(install: &CodexInstall, repo: &Path) -> CodexHarness {
+        let mut harness = match &install.probe.version {
+            Some(version) => CodexHarness::new().with_version(version.clone()),
+            None => CodexHarness::new(),
+        };
+        harness
+            .start(SpawnSpec {
+                program: install.program.to_string_lossy().into_owned(),
+                args: vec!["app-server".to_string()],
+                cwd: repo.to_path_buf(),
+                ..SpawnSpec::default()
+            })
+            .await
+            .expect("codex app-server starts");
+        harness
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed: {status}");
+    }
+
+    async fn next_event(harness: &mut CodexHarness, limit: Duration) -> HarnessEvent {
+        loop {
+            let event = match timeout(limit, harness.events().recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => panic!("codex closed its event stream"),
+                Err(_) => panic!("codex sent no event within {}s", limit.as_secs()),
+            };
+            if let HarnessEvent::ApprovalRequested { request } = &event {
+                eprintln!(
+                    "approval requested: {} ({})",
+                    request.title,
+                    request.approval_id.as_str()
+                );
+                harness
+                    .respond(request.approval_id.clone(), Decision::Allow)
+                    .await
+                    .expect("the approval is answered");
+                continue;
+            }
+            return event;
+        }
+    }
+
+    async fn drive_turn(
+        harness: &mut CodexHarness,
+        text: &str,
+        limit: Duration,
+    ) -> Vec<HarnessEvent> {
+        harness
+            .prompt(PromptInput {
+                text: text.to_string(),
+            })
+            .await
+            .expect("the prompt starts a turn");
+        let mut events = Vec::new();
+        loop {
+            let event = next_event(harness, limit).await;
+            let finished = matches!(event, HarnessEvent::TurnFinished { .. });
+            events.push(event);
+            if finished {
+                return events;
+            }
+        }
     }
 }

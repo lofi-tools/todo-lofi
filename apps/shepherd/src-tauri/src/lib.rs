@@ -5,10 +5,12 @@
 //! of the state model.
 
 mod bridge;
+mod codex_harness;
 mod dev_harness;
 mod pty_terminal;
 mod terminal_screen;
 
+use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
 /// Build and run the window. A startup failure is returned so `main` can report
@@ -17,9 +19,25 @@ pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
+            let probe_directory =
+                std::env::current_dir().unwrap_or_else(|_| data_directory.clone());
+            let detection = tauri::async_runtime::block_on(agent_harness::codex::detect(
+                None,
+                &probe_directory,
+            ));
+            let harness_factory: Box<dyn HarnessFactory> = match &detection.install {
+                Some(install) => {
+                    tracing::info!("{}", detection.summary());
+                    Box::new(codex_harness::CodexHarnessFactory::new(install))
+                }
+                None => {
+                    tracing::warn!("{}", detection.summary());
+                    Box::new(codex_harness::MissingCodexFactory::new(detection.summary()))
+                }
+            };
             let state = tauri::async_runtime::block_on(bridge::ShellState::load(
                 &data_directory,
-                Box::new(dev_harness::ScriptedHarnessFactory),
+                harness_factory,
             ))?;
             app.manage(state);
             Ok(())

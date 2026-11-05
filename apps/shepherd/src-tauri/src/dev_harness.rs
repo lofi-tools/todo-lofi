@@ -1,7 +1,7 @@
-//! The S1 walking skeleton's scripted adapter.
+//! The scripted adapter used by the shell's tests.
 //!
-//! Until the Codex adapter lands in S2, the shell runs a deterministic fake so
-//! the command bridge, transcript and approval flow are usable end to end. The
+//! The app itself runs the live Codex adapter. Tests use this deterministic fake
+//! so the command bridge, transcript and approval flow need no installed CLI. The
 //! scripted text says what it is; this factory never pretends to be a real agent.
 
 use agent_harness::AgentHarness;

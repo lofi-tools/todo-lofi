@@ -23,7 +23,7 @@ pub mod test_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_harness::{FailureKind, HarnessEvent, SessionId, SpawnSpec, TurnFinishReason};
+use agent_harness::{FailureKind, HarnessEvent, SessionId, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary};
@@ -88,6 +88,8 @@ pub enum CoreError {
     NotRunning { state: ShutdownState },
     #[error("the core was built without an agent harness")]
     HarnessUnavailable,
+    #[error("no usable agent is installed: {report}")]
+    HarnessMissing { report: String },
     #[error("no agent session is open for task {id}")]
     SessionMissing { id: String },
     #[error("filesystem error at {path}: {source}")]
@@ -720,17 +722,11 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
+        let spec = self.harness_factory.spawn_spec(cwd);
         let harness = self.harness_factory.create()?;
         let mut session = HarnessSession::new(harness);
         session.restore_transcript(carried);
-        let capabilities = match session
-            .start(SpawnSpec {
-                program: "shepherd-agent".to_string(),
-                cwd,
-                ..SpawnSpec::default()
-            })
-            .await
-        {
+        let capabilities = match session.start(spec).await {
             Ok(capabilities) => capabilities,
             Err(error) => return Err(self.fail_session_start(task_id, session, error)),
         };

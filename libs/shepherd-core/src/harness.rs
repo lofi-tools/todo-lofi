@@ -4,6 +4,8 @@
 //! owns the session lifecycle: start, open, prompt, pause on approval, cancel and
 //! shutdown. It does not know which CLI is underneath.
 
+use std::path::PathBuf;
+
 use agent_harness::{
     AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, Entry, FailureKind,
     HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
@@ -15,6 +17,17 @@ use crate::CoreError;
 /// implementation; the core never chooses a concrete CLI here.
 pub trait HarnessFactory: Send + Sync {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
+
+    /// The command to launch for a task running in `cwd`. The core stays
+    /// CLI-agnostic, so a factory that wraps a specific executable supplies
+    /// both the program and its subcommand here.
+    fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
+        SpawnSpec {
+            program: "shepherd-agent".to_string(),
+            cwd,
+            ..SpawnSpec::default()
+        }
+    }
 }
 
 /// The factory a core built without an adapter gets. Agent work fails with a
