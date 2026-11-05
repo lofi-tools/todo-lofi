@@ -557,7 +557,8 @@ Automated:
 - [x] Playwright with mocked IPC covers the shared terminal's single
   subscription across task switches, task pane visibility, split resize,
   hide and reopen, key encoding and keyboard copy mode.
-- [x] Native macOS smoke covers Vim and less alternate screens, synthetic
+- [x] Native macOS smoke saves a Vim edit to disk and pages through less with
+  terminal keyboard input. It also covers alternate screen restoration, synthetic
   composition from scrollback, Kitty and fish key reports, bracketed paste,
   SGR mouse input, OSC 8 hyperlinks, burst and paced paint, scrollback search, PTY split
   resize, task switching, reattachment, quit and restart of shared and task

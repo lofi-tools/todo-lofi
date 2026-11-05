@@ -126,15 +126,23 @@ async function exerciseShellInterrupt(terminalId: string, input: HTMLTextAreaEle
 }
 
 async function exerciseAlternateScreen(terminalId: string, input: HTMLTextAreaElement) {
-  await bridge.terminalWrite(terminalId, "vim -Nu NONE -n -i NONE -c 'call setline(1, \"S4_\" . \"VIM\")' -c 'set nomodified'\r")
+  await bridge.terminalWrite(terminalId, "vim -Nu NONE -n -i NONE -c 'call setline(1, \"S4_\" . \"VIM\")' .shepherd-terminal-vim\r")
   await waitFor('Vim alternate screen', () => terminalOutput().includes('S4_VIM') && !terminalOutput().includes('S4_READY'))
-  for (const key of ['Escape', ':', 'q', 'Enter']) press(input, key)
+  for (const key of ['A', ...'_EDIT', 'Escape']) press(input, key)
+  await waitFor('Vim buffer reflects keyboard input', () => terminalOutput().includes('S4_VIM_EDIT'))
+  for (const key of [':', 'w', 'q', 'Enter']) press(input, key)
   await waitFor('main screen restored after Vim', () => terminalOutput().includes('S4_READY') && !terminalOutput().includes('S4_VIM'))
+  await bridge.terminalWrite(terminalId, 'cat .shepherd-terminal-vim && rm .shepherd-terminal-vim\r')
+  await waitFor('Vim edit saved to disk', () => terminalOutput().split('\n').some((line) => line.trim() === 'S4_VIM_EDIT'))
 
-  await bridge.terminalWrite(terminalId, "printf 'S4_%s\\n' LESS | LESS= less -R\r")
-  await waitFor('less alternate screen', () => terminalOutput().includes('S4_LESS') && !terminalOutput().includes('S4_READY'))
+  await bridge.terminalWrite(terminalId, "awk 'BEGIN {for (line=1; line<=120; line++) printf \"S4_%s%03d\\n\", \"LESS\", line}' | LESS= less -R\r")
+  await waitFor('less alternate screen', () => terminalOutput().includes('S4_LESS001') && !terminalOutput().includes('S4_READY'))
+  press(input, 'PageDown')
+  await waitFor('less paged forward', () => !terminalOutput().includes('S4_LESS001') && /S4_LESS\d{3}/.test(terminalOutput()))
+  press(input, 'G')
+  await waitFor('less end of output', () => terminalOutput().includes('S4_LESS120'))
   press(input, 'q')
-  await waitFor('main screen restored after less', () => terminalOutput().includes('S4_READY') && !terminalOutput().includes('S4_LESS'))
+  await waitFor('main screen restored after less', () => terminalOutput().includes('S4_VIM_EDIT') && !/S4_LESS\d{3}/.test(terminalOutput()))
 }
 
 async function exerciseComposition(terminalId: string, input: HTMLTextAreaElement) {

@@ -35,8 +35,8 @@ with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
 to point the debug project picker at a fixture directory.
 
 The native terminal smoke uses a disposable Git project, database and scripted
-agent in a temporary directory under `.cache/test-db/`. The first launch exercises
-Vim, less, Kitty key reports, bracketed paste,
+agent in a temporary directory under `.cache/test-db/`. The first launch saves
+a Vim edit, pages through less, and exercises Kitty key reports, bracketed paste,
 mouse reports, scrollback search, PTY resizing, output bursts and switching
 between task and shared terminals. It also checks distinct Ctrl+I and Tab
 bindings when fish 4 or later is installed. The second launch checks layout
