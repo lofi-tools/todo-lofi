@@ -328,6 +328,31 @@ impl Core {
         events
     }
 
+    /// Fold adapter activity that arrived since the last command. Without this,
+    /// a streaming turn only appears when the user issues another command; the
+    /// shell calls it on a short tick. Returns whether anything was folded.
+    pub async fn pump(&mut self) -> Result<bool, CoreError> {
+        let task_ids: Vec<TaskId> = self.sessions.keys().cloned().collect();
+        let mut changed = false;
+        for task_id in task_ids {
+            let events = match self.sessions.get_mut(&task_id) {
+                Some(session) => session.pump(),
+                None => continue,
+            };
+            if events.is_empty() {
+                continue;
+            }
+            let before = self.task(&task_id)?.state;
+            self.apply_events(&task_id, &events)?;
+            if self.task(&task_id)?.state != before {
+                self.save_task(&task_id).await?;
+            }
+            self.publish_task(&task_id)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     pub fn project_list(&self) -> ProjectList {
         ProjectList {
             projects: self
@@ -1128,6 +1153,149 @@ fn normalize_project_path(path: &Path) -> Result<PathBuf, CoreError> {
         })
     } else {
         Ok(absolute)
+    }
+}
+
+#[cfg(test)]
+mod streaming {
+    use std::sync::Mutex;
+
+    use agent_harness::{
+        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, HarnessEvent, HarnessResult,
+        ItemId, PromptInput, SessionId, SpawnSpec, TurnFinishReason,
+    };
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+
+    use crate::harness::HarnessFactory;
+    use crate::store::TursoStore;
+    use crate::test_support::{TestDatabase, TestRepository};
+    use crate::{Command, CommandResult, Core, CoreError, Event, ProjectId, TaskId, TaskState};
+
+    struct LateHarnessFactory {
+        receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
+    }
+
+    impl HarnessFactory for LateHarnessFactory {
+        fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+            let receiver = self
+                .receiver
+                .lock()
+                .expect("the test holds the receiver lock")
+                .take()
+                .expect("the factory creates one harness per test");
+            Ok(Box::new(LateHarness { events: receiver }))
+        }
+    }
+
+    /// Emits nothing on its own; the test sends events after the prompt returns,
+    /// the way a real adapter streams them between commands.
+    struct LateHarness {
+        events: mpsc::UnboundedReceiver<HarnessEvent>,
+    }
+
+    #[async_trait]
+    impl AgentHarness for LateHarness {
+        fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+            &mut self.events
+        }
+
+        async fn start(&mut self, _spec: SpawnSpec) -> HarnessResult<Capabilities> {
+            Ok(Capabilities::default())
+        }
+
+        async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+            Ok(resume.unwrap_or_else(|| SessionId::new("late-thread")))
+        }
+
+        async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+            Ok(())
+        }
+
+        async fn cancel(&mut self) -> HarnessResult<()> {
+            Ok(())
+        }
+
+        async fn respond(
+            &mut self,
+            _approval_id: ApprovalId,
+            _decision: Decision,
+        ) -> HarnessResult<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> HarnessResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn pumping_folds_a_streaming_turn_into_the_workspace()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(LateHarnessFactory {
+                receiver: Mutex::new(Some(receiver)),
+            }),
+        );
+
+        let CommandResult::ProjectList(projects) = core
+            .execute(Command::AddProject {
+                path: repository.path().to_path_buf(),
+            })
+            .await?
+        else {
+            return Err("expected a project list".into());
+        };
+        let project = projects.projects.first().ok_or("the project is listed")?;
+        let CommandResult::TaskWorkspace(draft) = core
+            .execute(Command::CreateDraft {
+                project_id: ProjectId::new(project.id.clone()),
+                title: "Stream a turn".to_string(),
+            })
+            .await?
+        else {
+            return Err("expected a draft".into());
+        };
+        let task_id = TaskId::new(draft.task.id.clone());
+        let CommandResult::TaskWorkspace(workspace) = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".to_string(),
+            })
+            .await?
+        else {
+            return Err("expected a task workspace".into());
+        };
+        assert_eq!(workspace.task.state, TaskState::Working);
+        assert_eq!(workspace.transcript.len(), 1);
+        core.drain_events();
+
+        sender.send(HarnessEvent::Delta {
+            item_id: ItemId::new("item-1"),
+            kind: DeltaKind::Message,
+            text: "streamed".to_string(),
+        })?;
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+
+        assert!(core.pump().await?);
+
+        let workspace = core.task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(workspace.transcript.len(), 2);
+        assert_eq!(workspace.transcript[1].summary(), "agent: streamed");
+        assert!(
+            core.drain_events()
+                .iter()
+                .any(|event| matches!(event, Event::TaskWorkspaceChanged(_))),
+            "the pump must publish the changed workspace"
+        );
+        Ok(())
     }
 }
 

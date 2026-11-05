@@ -6,6 +6,7 @@
 
 mod bridge;
 mod codex_harness;
+#[cfg(test)]
 mod dev_harness;
 mod pty_terminal;
 mod terminal_screen;
@@ -39,6 +40,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 &data_directory,
                 harness_factory,
             ))?;
+            state.start_event_pump();
             app.manage(state);
             Ok(())
         })

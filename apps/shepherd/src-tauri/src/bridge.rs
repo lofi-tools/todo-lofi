@@ -5,13 +5,14 @@
 //! shell does not keep a second copy of the state model.
 //!
 //! Core events are drained after every command and broadcast to whatever window
-//! is subscribed. Streaming adapter events that arrive between commands need a
-//! core-side event stream, which the Codex slice adds; until then every state
-//! change in the skeleton is command-driven.
+//! is subscribed. Adapter events that arrive between commands are folded by a
+//! short pump tick ([`ShellState::start_event_pump`]) and broadcast the same way,
+//! so a streaming turn paints without waiting for the next invoke.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_harness::Decision;
 use serde::Serialize;
@@ -127,6 +128,31 @@ impl ShellState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    /// Fold agent activity between commands. A streaming turn must reach the
+    /// window without waiting for the next invoke, so this runs on a short tick
+    /// and broadcasts whatever the core emits.
+    pub fn start_event_pump(&self) {
+        let core = self.core.clone();
+        let events = self.events.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let drained = {
+                    let mut core = core.lock().await;
+                    if let Err(error) = core.pump().await {
+                        tracing::warn!(%error, "could not fold agent activity");
+                    }
+                    core.drain_events()
+                };
+                for event in drained {
+                    if let Err(error) = events.send(event) {
+                        tracing::debug!(%error, "no shell is subscribed to core events");
+                    }
+                }
+            }
+        });
     }
 
     async fn execute(&self, command: Command) -> Result<CommandResult, BridgeError> {
