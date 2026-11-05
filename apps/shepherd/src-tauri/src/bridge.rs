@@ -592,6 +592,18 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn git_snapshot(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<shepherd_core::git::GitSnapshot, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .git_snapshot(&TaskId::new(task_id))?)
+    }
+
+    #[tauri::command]
     pub async fn review_snapshot(
         state: State<'_, ShellState>,
         task_id: String,

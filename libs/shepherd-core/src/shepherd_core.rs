@@ -392,17 +392,38 @@ impl Core {
         })
     }
 
-    pub fn review_snapshot(&self, task_id: &TaskId) -> Result<git::ReviewSnapshot, CoreError> {
+    fn task_git_worktree(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<(&Task, git::GitRepository, &Path), CoreError> {
         let task = self.task(task_id)?;
-        let (Some(path), Some(base)) = (&task.worktree_path, &task.base_branch) else {
-            return Err(CoreError::TaskNotReady {
+        let path = task
+            .worktree_path
+            .as_deref()
+            .ok_or_else(|| CoreError::TaskNotReady {
                 id: task.id.to_string(),
                 state: task.state.as_str(),
-            });
-        };
+            })?;
         let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
         GitService.validate_worktree(&repository, path)?;
+        Ok((task, repository, path))
+    }
+
+    pub fn review_snapshot(&self, task_id: &TaskId) -> Result<git::ReviewSnapshot, CoreError> {
+        let (task, _, path) = self.task_git_worktree(task_id)?;
+        let base = task
+            .base_branch
+            .as_deref()
+            .ok_or_else(|| CoreError::TaskNotReady {
+                id: task.id.to_string(),
+                state: task.state.as_str(),
+            })?;
         Ok(GitService.review(path, base)?)
+    }
+
+    pub fn git_snapshot(&self, task_id: &TaskId) -> Result<git::GitSnapshot, CoreError> {
+        let (_, _, path) = self.task_git_worktree(task_id)?;
+        Ok(GitService.snapshot(path)?)
     }
 
     pub fn task_workspace(&self, task_id: &TaskId) -> Result<TaskWorkspace, CoreError> {

@@ -9,6 +9,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
 import { ProjectPicker } from './ProjectPicker'
+import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { TerminalPane } from './TerminalPane'
 
@@ -429,6 +430,11 @@ export function App() {
                 <ReviewPane taskId={workspace()!.task.id} revision={workspace()!.task.updatedAt} />
               </Show>
             </Show>
+            <Show when={inspectorTab() === 'git'}>
+              <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
+                <GitPane taskId={workspace()!.task.id} revision={workspace()!.task.updatedAt} />
+              </Show>
+            </Show>
           </div>
         </aside>
       </div>
@@ -505,7 +511,7 @@ const INSPECTOR_TABS: InspectorTab[] = [
   { id: 'terminals', label: 'Terminals', enabled: true },
   { id: 'preview', label: 'Preview', enabled: false },
   { id: 'review', label: 'Review', enabled: true },
-  { id: 'git', label: 'Git', enabled: false },
+  { id: 'git', label: 'Git', enabled: true },
   { id: 'files', label: 'Files', enabled: false },
 ]
 

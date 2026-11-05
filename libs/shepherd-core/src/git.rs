@@ -300,6 +300,24 @@ impl GitService {
         Ok(ReviewSnapshot { files, diff })
     }
 
+    pub fn snapshot(&self, path: &Path) -> Result<GitSnapshot, GitError> {
+        let head = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let branches = run_git(
+            path,
+            &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        )?;
+        Ok(GitSnapshot {
+            branch: (head != "HEAD").then_some(head),
+            branches: branches.lines().map(str::to_string).collect(),
+            files: self.status(path)?,
+            staged_diff: run_git(
+                path,
+                &["diff", "--cached", "--no-ext-diff", "--no-textconv", "--"],
+            )?,
+            unstaged_diff: run_git(path, &["diff", "--no-ext-diff", "--no-textconv", "--"])?,
+        })
+    }
+
     fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
         let bytes = git_bytes(
             path,
@@ -346,6 +364,16 @@ pub struct GitFile {
 pub struct ReviewSnapshot {
     pub files: Vec<GitFile>,
     pub diff: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSnapshot {
+    pub branch: Option<String>,
+    pub branches: Vec<String>,
+    pub files: Vec<GitFile>,
+    pub staged_diff: String,
+    pub unstaged_diff: String,
 }
 
 fn git_paths(bytes: &[u8]) -> impl Iterator<Item = String> + '_ {

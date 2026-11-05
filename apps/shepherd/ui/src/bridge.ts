@@ -317,3 +317,15 @@ export interface ReviewSnapshot {
 export function reviewSnapshot(taskId: string): Promise<ReviewSnapshot> {
   return invoke('review_snapshot', { taskId })
 }
+
+export interface GitSnapshot {
+  branch: string | null
+  branches: string[]
+  files: GitFile[]
+  stagedDiff: string
+  unstagedDiff: string
+}
+
+export function gitSnapshot(taskId: string): Promise<GitSnapshot> {
+  return invoke('git_snapshot', { taskId })
+}
