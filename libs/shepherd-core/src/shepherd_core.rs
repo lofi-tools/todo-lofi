@@ -292,7 +292,8 @@ impl Core {
     }
 
     /// Execute one command. A shell should send exactly this enum over its
-    /// bridge; it does not get a second copy of the state model.
+    /// bridge; it does not get a second copy of the state model. Git mutations
+    /// run here under exclusive access to the core.
     pub async fn execute(&mut self, command: Command) -> Result<CommandResult, CoreError> {
         if self.shutdown != ShutdownState::Running {
             return Err(CoreError::NotRunning {

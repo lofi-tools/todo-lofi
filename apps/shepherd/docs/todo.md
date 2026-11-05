@@ -328,7 +328,7 @@ squash-merge into the base from inside Shepherd.
 
 - [x] Resolve the real Git directory and create worktrees at
   `<git-dir>/shepherd/worktrees/<slug>` from the project’s default branch.
-- [ ] Implement missing-worktree repair, dirty-worktree refusal and serialized
+- [x] Implement missing-worktree repair, dirty-worktree refusal and serialized
   Git mutations.
 - [ ] Capture the turn baseline (HEAD/status/diff) and implement the review
   trigger for real changes only.
