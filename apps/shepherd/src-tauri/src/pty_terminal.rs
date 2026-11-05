@@ -10,12 +10,18 @@ use std::time::Duration;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use shepherd_core::terminal::{
-    TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec, validate_size,
+    TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec, TerminalWrite,
+    validate_size,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc, mpsc::UnboundedSender, oneshot};
+
+struct WriteRequest {
+    bytes: Vec<u8>,
+    completion: Option<oneshot::Sender<Result<(), TerminalError>>>,
+}
 
 struct Session {
-    writer: Box<dyn Write + Send>,
+    writer: mpsc::Sender<WriteRequest>,
     closing: bool,
     /// The waiting thread owns the child, so closing goes through a cloned killer.
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -54,6 +60,38 @@ impl PtyTerminals {
                 tracing::warn!(%terminal_id, %error, "could not stop terminal process");
             }
         }
+    }
+
+    pub fn write_reply(
+        &self,
+        terminal_id: &TerminalId,
+        bytes: Vec<u8>,
+    ) -> Result<(), TerminalError> {
+        self.queue_write(
+            terminal_id,
+            WriteRequest {
+                bytes,
+                completion: None,
+            },
+        )
+    }
+
+    fn queue_write(
+        &self,
+        terminal_id: &TerminalId,
+        request: WriteRequest,
+    ) -> Result<(), TerminalError> {
+        let sessions = self.sessions()?;
+        let session = sessions
+            .get(terminal_id.as_str())
+            .filter(|session| !session.closing)
+            .ok_or_else(|| {
+                TerminalError::Backend(format!("no live terminal {}", terminal_id.as_str()))
+            })?;
+        session
+            .writer
+            .try_send(request)
+            .map_err(|error| TerminalError::Backend(format!("terminal input queue: {error}")))
     }
 
     fn sessions(
@@ -101,7 +139,7 @@ impl TerminalService for PtyTerminals {
             .master
             .try_clone_reader()
             .map_err(|error| TerminalError::Backend(format!("reader failed: {error}")))?;
-        let writer = pair
+        let mut writer = pair
             .master
             .take_writer()
             .map_err(|error| TerminalError::Backend(format!("writer failed: {error}")))?;
@@ -138,11 +176,33 @@ impl TerminalService for PtyTerminals {
             }
         });
 
+        let (input, mut writes) = mpsc::channel::<WriteRequest>(32);
+        std::thread::spawn(move || {
+            while let Some(request) = writes.blocking_recv() {
+                let result = writer
+                    .write_all(&request.bytes)
+                    .and_then(|()| writer.flush())
+                    .map_err(|error| TerminalError::Backend(format!("write failed: {error}")));
+                match request.completion {
+                    Some(completion) => {
+                        if let Err(Err(error)) = completion.send(result) {
+                            tracing::debug!(%error, "terminal input requester disconnected");
+                        }
+                    }
+                    None => {
+                        if let Err(error) = result {
+                            tracing::debug!(%error, "could not write terminal reply");
+                        }
+                    }
+                }
+            }
+        });
+
         let killer = child.clone_killer();
         self.sessions()?.insert(
             terminal_id.as_str().to_string(),
             Session {
-                writer,
+                writer: input,
                 closing: false,
                 killer,
                 master: pair.master,
@@ -176,19 +236,20 @@ impl TerminalService for PtyTerminals {
         Ok(terminal_id)
     }
 
-    fn write(&mut self, terminal_id: &TerminalId, bytes: &[u8]) -> Result<(), TerminalError> {
-        let mut sessions = self.sessions()?;
-        let session = sessions
-            .get_mut(terminal_id.as_str())
-            .filter(|session| !session.closing)
-            .ok_or_else(|| {
-                TerminalError::Backend(format!("no live terminal {}", terminal_id.as_str()))
-            })?;
-        session
-            .writer
-            .write_all(bytes)
-            .and_then(|()| session.writer.flush())
-            .map_err(|error| TerminalError::Backend(format!("write failed: {error}")))
+    fn write(
+        &mut self,
+        terminal_id: &TerminalId,
+        bytes: Vec<u8>,
+    ) -> Result<TerminalWrite, TerminalError> {
+        let (completion, result) = oneshot::channel();
+        self.queue_write(
+            terminal_id,
+            WriteRequest {
+                bytes,
+                completion: Some(completion),
+            },
+        )?;
+        Ok(result)
     }
 
     fn resize(
@@ -292,7 +353,7 @@ mod tests {
 
         engine.close(&terminal_id).expect("close should succeed");
         assert!(
-            engine.write(&terminal_id, b"x").is_err(),
+            engine.write(&terminal_id, b"x".to_vec()).is_err(),
             "a closed terminal keeps no writer"
         );
     }

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::projects::ProjectId;
 use crate::tasks::TaskId;
@@ -224,13 +224,19 @@ pub enum TerminalEvent {
     Exited { exit_code: Option<i32> },
 }
 
+pub type TerminalWrite = oneshot::Receiver<Result<(), TerminalError>>;
+
 pub trait TerminalService: Send {
     fn spawn(
         &mut self,
         spec: TerminalSpec,
         events: UnboundedSender<TerminalEvent>,
     ) -> Result<TerminalId, TerminalError>;
-    fn write(&mut self, terminal_id: &TerminalId, bytes: &[u8]) -> Result<(), TerminalError>;
+    fn write(
+        &mut self,
+        terminal_id: &TerminalId,
+        bytes: Vec<u8>,
+    ) -> Result<TerminalWrite, TerminalError>;
     fn resize(
         &mut self,
         terminal_id: &TerminalId,

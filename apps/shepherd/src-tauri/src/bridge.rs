@@ -64,9 +64,9 @@ pub enum TerminalInput {
 }
 
 impl TerminalInput {
-    fn as_bytes(&self) -> &[u8] {
+    fn into_bytes(self) -> Vec<u8> {
         match self {
-            Self::Text(text) => text.as_bytes(),
+            Self::Text(text) => text.into_bytes(),
             Self::Bytes(bytes) => bytes,
         }
     }
@@ -519,7 +519,7 @@ impl ShellState {
                     tracing::debug!(%error, "no shell is subscribed to terminal bells");
                 }
                 if !replies.is_empty()
-                    && let Err(error) = engine.lock().await.write(&terminal_id, &replies)
+                    && let Err(error) = engine.lock().await.write_reply(&terminal_id, replies)
                 {
                     tracing::debug!(%error, "could not send terminal replies");
                 }
@@ -570,10 +570,15 @@ impl ShellState {
         terminal_id: String,
         data: TerminalInput,
     ) -> Result<(), BridgeError> {
-        self.engine
+        let completion = self
+            .engine
             .lock()
             .await
-            .write(&TerminalId::new(terminal_id.clone()), data.as_bytes())
+            .write(&TerminalId::new(terminal_id.clone()), data.into_bytes())
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        completion
+            .await
+            .map_err(|_| BridgeError::new("terminal", "the terminal writer stopped"))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         if let Some(slot) = self.screens.lock().await.get_mut(&terminal_id)
             && slot.screen.follow_output()
