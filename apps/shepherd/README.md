@@ -54,7 +54,9 @@ The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
 On Ubuntu 24.04, the **Shepherd terminal smoke** GitHub Actions workflow runs
-the same two launches under Xvfb. Dispatch it for the ref you want to verify.
+the same two launches under Xvfb. A push to `codex/shepherd-terminal-smoke`
+starts the run. Once the workflow is on the default branch, you can also
+dispatch it for a published ref.
 
 ## Import projects from the ChatGPT app
 

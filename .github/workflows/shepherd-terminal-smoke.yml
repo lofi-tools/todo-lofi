@@ -1,6 +1,8 @@
 name: Shepherd terminal smoke
 
 on:
+  push:
+    branches: [codex/shepherd-terminal-smoke]
   workflow_dispatch:
 
 permissions:

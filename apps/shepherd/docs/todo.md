@@ -609,9 +609,9 @@ conversion candidates.
 The native smoke starts synthetic composition from scrollback and checks that
 the input anchor returns to the live cursor before committing text once.
 
-The manually dispatched **Shepherd terminal smoke** workflow uses an Ubuntu
-24.04 runner and Xvfb for the same two native launches. The Ubuntu result
-remains pending until the workflow runs on a published ref.
+The **Shepherd terminal smoke** workflow uses an Ubuntu 24.04 runner and Xvfb
+for the same two native launches. A push to `codex/shepherd-terminal-smoke`
+starts the run. The Ubuntu result remains pending.
 The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
 override.
 
