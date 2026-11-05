@@ -1,0 +1,5 @@
+{"id":"0","msg":{"type":"task_started"}}
+{"id":"1","msg":{"type":"agent_message","message":"Running the suite."}}
+{"id":"2","msg":{"type":"exec_command_begin","call_id":"call-1","command":["cargo","test"]}}
+{"id":"3","msg":{"type":"exec_command_end","call_id":"call-1","command":["cargo","test"],"exit_code":0,"aggregated_output":"ok"}}
+{"id":"4","msg":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1200},"model_context_window":128000}}}

@@ -1,0 +1,5 @@
+{"method":"turn/started","params":{"turn":{"id":"turn_1"}}}
+{"method":"item/agentMessage/delta","params":{"itemId":"item_1","delta":"Reading the repo."}}
+{"method":"item/agentMessage/delta","params":{"itemId":"item_1","delta":" Done."}}
+{"method":"item/completed","params":{"item":{"id":"item_2","type":"commandExecution","command":"cargo test","status":"completed","aggregatedOutput":"ok"}}}
+{"method":"turn/completed","params":{"turn":{"id":"turn_1","status":"completed"}}}

@@ -2102,6 +2102,108 @@ done
         harness.shutdown().await.expect("the session stops");
     }
 
+    fn fixture_lines(name: &str) -> Vec<Value> {
+        let path = format!("{}/fixtures/codex/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).expect("the recorded fixture is readable");
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("a recorded line is JSON"))
+            .collect()
+    }
+
+    /// Replay a recorded app-server stream through the same translation the
+    /// stdout reader uses, with no child process involved.
+    async fn replay_app_server(name: &str) -> Transcript {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (outgoing, _outgoing_receiver) = mpsc::unbounded_channel();
+        for message in fixture_lines(name) {
+            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            match (message.get("id"), message.get("method")) {
+                (Some(id), Some(method)) => {
+                    handle_server_request(
+                        id.clone(),
+                        method.as_str().unwrap_or_default().to_string(),
+                        params,
+                        &sender,
+                        &pending,
+                        &outgoing,
+                    )
+                    .await;
+                }
+                (None, Some(method)) => {
+                    handle_notification(
+                        method.as_str().unwrap_or_default(),
+                        &params,
+                        &sender,
+                        &pending,
+                    )
+                    .await;
+                }
+                // Answers to Shepherd's own requests need a live waiter; the
+                // mapping under test is the notification and request surface.
+                (Some(_), None) | (None, None) => {}
+            }
+        }
+        drop(sender);
+        let mut transcript = Transcript::default();
+        while let Ok(event) = receiver.try_recv() {
+            transcript.apply(&event);
+        }
+        transcript
+    }
+
+    fn summaries(transcript: &Transcript) -> Vec<String> {
+        transcript.entries().iter().map(Entry::summary).collect()
+    }
+
+    #[tokio::test]
+    async fn a_recorded_app_server_session_replays_without_the_cli() {
+        let transcript = replay_app_server("app-server-session.jsonl").await;
+        assert_eq!(
+            summaries(&transcript),
+            vec![
+                "agent: Reading the repo. Done.".to_string(),
+                "cargo test (Completed)".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_approval_replays_as_a_pending_card() {
+        let transcript = replay_app_server("app-server-approval.jsonl").await;
+        assert_eq!(
+            summaries(&transcript),
+            vec![
+                "agent: About to run the tests.".to_string(),
+                "approval: cargo test (pending)".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_exec_stream_replays_without_the_cli() {
+        let mut transcript = Transcript::default();
+        let mut usage = None;
+        for message in fixture_lines("exec-session.jsonl") {
+            for event in exec_events(&message) {
+                if let HarnessEvent::Usage { used, size, .. } = &event {
+                    usage = Some((*used, *size));
+                }
+                transcript.apply(&event);
+            }
+        }
+        assert_eq!(
+            summaries(&transcript),
+            vec![
+                "agent: Running the suite.".to_string(),
+                "cargo test (Completed)".to_string(),
+                "usage: 1200/128000".to_string(),
+            ]
+        );
+        assert_eq!(usage, Some((1200, 128_000)));
+    }
+
     async fn collect_until<H, F>(harness: &mut H, reached: F) -> Vec<HarnessEvent>
     where
         H: AgentHarness,

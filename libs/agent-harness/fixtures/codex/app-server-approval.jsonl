@@ -1,0 +1,3 @@
+{"method":"item/agentMessage/delta","params":{"itemId":"item_1","delta":"About to run the tests."}}
+{"id":7,"method":"item/commandExecution/requestApproval","params":{"itemId":"item_2","threadId":"thr_1","turnId":"turn_1","command":"cargo test"}}
+{"method":"turn/completed","params":{"turn":{"id":"turn_1","status":"completed"}}}
