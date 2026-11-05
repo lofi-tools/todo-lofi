@@ -20,6 +20,27 @@ export function terminalOutput(): string {
   return document.querySelector('.terminal-view__text')?.textContent ?? ''
 }
 
+async function measureBurst(terminalId: string): Promise<number> {
+  const original = CanvasRenderingContext2D.prototype.fillText
+  let tail = ''
+  let paintedAt = 0
+  CanvasRenderingContext2D.prototype.fillText = function (text, x, y, maxWidth) {
+    original.call(this, text, x, y, maxWidth)
+    if (!paintedAt && this.canvas.classList.contains('terminal-view__canvas')) {
+      tail = (tail + text).slice(-6)
+      if (tail === 'S4_END') paintedAt = performance.now()
+    }
+  }
+  try {
+    const started = performance.now()
+    await bridge.terminalWrite(terminalId, "awk 'BEGIN {for(i=0;i<16384;i++) printf \"%062d\\n\", i; printf \"S4_%s\\n\", \"END\"}'\r")
+    await waitFor('1 MiB burst tail painted', () => paintedAt)
+    return Math.round((paintedAt - started) * 10) / 10
+  } finally {
+    CanvasRenderingContext2D.prototype.fillText = original
+  }
+}
+
 async function smoke() {
   await waitFor('shell startup', () => {
     const add = button('Add project')
@@ -43,7 +64,8 @@ async function smoke() {
   input.focus()
   await bridge.terminalWrite(terminal.id, "printf '\nS4_%s\n' READY\r")
   await waitFor('PTY output in the webview', () => terminalOutput().includes('S4_READY'))
-  return { ok: true, roundTrip: true }
+  const burstPaintMs = await measureBurst(terminal.id)
+  return { ok: true, roundTrip: true, burstPaintMs }
 }
 
 void (async () => {
