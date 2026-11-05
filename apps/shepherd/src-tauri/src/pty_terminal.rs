@@ -349,6 +349,44 @@ mod tests {
         assert_eq!(exit_code, Some(Some(0)));
     }
 
+    #[tokio::test]
+    async fn a_slow_reader_gets_all_output_before_exit() -> Result<(), Box<dyn std::error::Error>> {
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(1);
+        engine.spawn(
+            TerminalSpec {
+                id: TerminalId::new("burst-terminal"),
+                columns: 80,
+                rows: 24,
+                cwd: std::env::temp_dir(),
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "head -c 1048576 /dev/zero; printf tail".to_string(),
+                ],
+                environment: BTreeMap::new(),
+            },
+            sender,
+        )?;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (output, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut output = Vec::new();
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    TerminalEvent::Output(bytes) => output.extend(bytes),
+                    TerminalEvent::Exited { exit_code } => return (output, exit_code),
+                }
+            }
+            (output, None)
+        })
+        .await?;
+        assert_eq!(output.len(), 1_048_580);
+        assert!(output.ends_with(b"tail"));
+        assert_eq!(status, Some(0));
+        Ok(())
+    }
+
     #[test]
     fn closing_a_live_terminal_removes_it() {
         let mut engine = PtyTerminals::new();
