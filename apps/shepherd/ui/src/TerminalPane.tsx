@@ -26,6 +26,7 @@ interface TerminalPaneProps {
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
+  let region: HTMLDivElement | undefined
   const measuredSizes = new Map<string, TerminalSize>()
   const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
   const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null })
@@ -125,7 +126,31 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (entry) start(entry.taskId, axis)
   }
 
+  function handleShortcut(event: KeyboardEvent) {
+    if (event.altKey || event.isComposing || event.keyCode === 229 || !(event.metaKey || event.ctrlKey)) return
+    const target = event.target
+    if (!(target instanceof HTMLElement) || !target.matches('.terminal-view__input')) return
+    const id = active()
+    if (!id) return
+    const letter = event.key.toLowerCase()
+    if (event.code === 'Backquote') {
+      event.preventDefault()
+      const ids = paneIds(root()).filter((pane) => terminal(pane)?.endedAt === null)
+      const index = ids.indexOf(id)
+      const next = ids[(index + (event.shiftKey ? -1 : 1) + ids.length) % ids.length]
+      if (next) setFocusRequest({ id: next })
+    } else if (event.shiftKey && (letter === 'd' || letter === 'e')) {
+      event.preventDefault()
+      if (!event.repeat) splitActive(letter === 'd' ? 'horizontal' : 'vertical')
+    } else if (letter === 'w' && (event.metaKey ? !event.shiftKey : event.shiftKey)) {
+      event.preventDefault()
+      if (!event.repeat) detach(id)
+    }
+  }
+
   onMount(() => {
+    region?.addEventListener('keydown', handleShortcut, true)
+    onCleanup(() => region?.removeEventListener('keydown', handleShortcut, true))
     let disposed = false
     const initialEvent = props.listEvent
     void run(async () => {
@@ -141,7 +166,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   return (
-    <div class="terminal-pane">
+    <div class="terminal-pane" ref={region}>
       <div class="terminal-pane__bar">
         <button type="button" onClick={() => start(null, 'vertical')} disabled={pending()}>New shared terminal</button>
         <button type="button" onClick={() => start(props.taskId, 'vertical')} disabled={pending() || !props.taskHasWorktree}>New task terminal</button>
