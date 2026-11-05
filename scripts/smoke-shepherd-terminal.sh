@@ -20,8 +20,13 @@ case "${1:-}" in
     duration=300s
     export SHEPHERD_DEV_CODEX_SMOKE=approval-cancel
     ;;
+  --codex-edit)
+    command -v python3 >/dev/null
+    phases=(codex-edit)
+    export SHEPHERD_DEV_CODEX_SMOKE=worktree-edit
+    ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live]" >&2
+    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit]" >&2
     exit 2
     ;;
 esac
@@ -39,6 +44,10 @@ trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"
 git -C "$fixture/project" -c init.templateDir= init --quiet -b main
+if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == worktree-edit ]]; then
+  printf '%s\n' 'first line' > "$fixture/project/note.txt"
+  git -C "$fixture/project" add -- note.txt
+fi
 git -C "$fixture/project" -c core.hooksPath=/dev/null -c commit.gpgsign=false \
   -c user.name="Shepherd Terminal Smoke" -c user.email="smoke@example.invalid" \
   commit --quiet --allow-empty -m "Seed disposable repository"

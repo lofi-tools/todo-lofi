@@ -45,33 +45,40 @@ fn codex_smoke_factory(
     if !isolated {
         return Err(std::io::Error::other("Codex smoke requires isolated data"));
     }
-    let (run, session) = match mode.as_str() {
-        "approval-replay" => (
-            LiveCodexRun::load_replay("network-approval")
-                .map_err(|error| std::io::Error::other(error.to_string()))?,
-            "approval",
-        ),
-        "approval-cancel" => (
-            tauri::async_runtime::block_on(LiveCodexRun::load("desktop-approval-cancel"))
-                .map_err(|error| std::io::Error::other(error.to_string()))?
-                .ok_or_else(|| {
-                    std::io::Error::other("Codex smoke requires a Codex installation")
-                })?,
-            "desktop",
-        ),
+    let scenario = match mode.as_str() {
+        "approval-replay" => "network-approval",
+        "approval-cancel" => "desktop-approval-cancel",
+        "worktree-edit" => "desktop-worktree-edit",
         _ => return Err(std::io::Error::other("Unknown Codex smoke mode")),
     };
+    let (run, session) = if mode == "approval-replay" {
+        (LiveCodexRun::load_replay(scenario), "approval")
+    } else {
+        let run = tauri::async_runtime::block_on(LiveCodexRun::load(scenario))
+            .and_then(|run| run.ok_or_else(|| "Codex smoke requires a Codex installation".into()));
+        (run, "desktop")
+    };
+    let run = run.map_err(|error| std::io::Error::other(error.to_string()))?;
+    let apply_patch = mode == "worktree-edit" && run.is_replay();
     app.manage(run.clone());
-    Ok(Some(Box::new(CodexSmoke { run, session })))
+    Ok(Some(Box::new(CodexSmoke {
+        run,
+        session,
+        apply_patch,
+    })))
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
 #[tauri::command]
-pub fn finish_codex_smoke(app: tauri::AppHandle) -> Result<bool, String> {
+pub fn finish_codex_smoke(
+    app: tauri::AppHandle,
+    worktree_patch: Option<String>,
+) -> Result<bool, String> {
     let run = app
         .try_state::<LiveCodexRun>()
         .ok_or_else(|| "Codex smoke is inactive".to_string())?;
-    run.finish(None).map_err(|error| error.to_string())?;
+    run.finish(worktree_patch)
+        .map_err(|error| error.to_string())?;
     Ok(run.is_replay())
 }
 
@@ -79,6 +86,7 @@ pub fn finish_codex_smoke(app: tauri::AppHandle) -> Result<bool, String> {
 struct CodexSmoke {
     run: LiveCodexRun,
     session: &'static str,
+    apply_patch: bool,
 }
 
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
@@ -88,7 +96,12 @@ impl HarnessFactory for CodexSmoke {
     }
 
     fn spawn_spec(&self, cwd: std::path::PathBuf) -> agent_harness::SpawnSpec {
-        self.run.spec(cwd, self.session, None)
+        let mut spec = self.run.spec(cwd, self.session, None);
+        if self.apply_patch {
+            spec.environment
+                .insert("SHEPHERD_REPLAY_WORKTREE_PATCH".into(), "1".into());
+        }
+        spec
     }
 }
 

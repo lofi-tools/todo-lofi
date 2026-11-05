@@ -1,7 +1,9 @@
 """Replay one cached app-server session against the real Rust adapter."""
 
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -20,6 +22,14 @@ def main():
     cache_file, session, cwd, *gate = sys.argv[1:]
     cache = json.loads(Path(cache_file).read_text())
     placeholder = "__SHEPHERD_TEST_WORKTREE__"
+    patch = None
+    if os.environ.get("SHEPHERD_REPLAY_WORKTREE_PATCH") == "1":
+        test_root = Path(__file__).resolve().parent.parent / ".cache/test-db"
+        if not Path(cwd).resolve().is_relative_to(test_root.resolve()):
+            raise ValueError("worktree patch replay requires a disposable project")
+        patch = cache.get("note")
+        if not isinstance(patch, str) or not patch:
+            raise ValueError("the cached run has no worktree patch")
 
     for entry in cache["sessions"][session]:
         kind = entry["kind"]
@@ -32,6 +42,9 @@ def main():
             if actual != value:
                 raise ValueError(f"cached request mismatch in {session} ({value.get('method', 'response')})")
         elif kind == "response":
+            if patch is not None and value.get("method") == "turn/completed":
+                subprocess.run(["git", "apply", "-"], cwd=cwd, input=patch, text=True, check=True)
+                patch = None
             print(json.dumps(replace_path(value, placeholder, cwd)), flush=True)
         elif kind == "exit":
             if gate:
@@ -54,6 +67,6 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (KeyError, OSError, ValueError) as error:
+    except (KeyError, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(error, file=sys.stderr, flush=True)
         sys.exit(2)

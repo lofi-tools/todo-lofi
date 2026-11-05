@@ -439,6 +439,28 @@ async function exerciseLiveCodex() {
   return { ok: true, approvalAllowed: true, cancelledRunningTool: true, followUp: true, replay }
 }
 
+async function exerciseCodexEdit() {
+  await openFixtureProject()
+  await sendPrompt('Append exactly the line `hello from shepherd` to `note.txt` in the current directory. Keep its existing line and change no other files. Reply with a short summary.')
+  await waitFor('edited turn with streamed text and a tool row', () => chatState() === 'review' &&
+    document.querySelector('.entry__agent')?.textContent &&
+    document.querySelector('.entry__tool'), CODEX_WAIT)
+  const review = await waitFor('Review tab', () => document.querySelector<HTMLButtonElement>('#inspector-tab-review'))
+  review.click()
+  const file = await waitFor('one modified file in Review', () => {
+    const files = document.querySelectorAll<HTMLButtonElement>('.git-pane__file')
+    const [file] = files
+    return files.length === 1 && file?.textContent?.trim() === 'note.txt' && file
+  })
+  file.click()
+  const patch = await waitFor('actual worktree patch in Review', () => {
+    const text = document.querySelector('[aria-label="File diff"]')?.textContent
+    return text?.split('\n').includes('+hello from shepherd') && text
+  })
+  const replay = await invoke<boolean>('finish_codex_smoke', { worktreePatch: patch })
+  return { ok: true, streamedText: true, toolRow: true, reviewedWorktreeEdit: true, replay }
+}
+
 async function smoke() {
   const project = await openFixtureProject()
   if (navigator.platform.startsWith('Mac')) {
@@ -551,6 +573,9 @@ void (async () => {
         break
       case 'codex-live':
         result = await exerciseLiveCodex()
+        break
+      case 'codex-edit':
+        result = await exerciseCodexEdit()
         break
       default:
         result = await smoke()
