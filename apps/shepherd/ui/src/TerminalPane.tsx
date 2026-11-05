@@ -342,6 +342,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
+  const [visibleText, setVisibleText] = createSignal('')
   const [searching, setSearching] = createSignal(false)
   const [noMatch, setNoMatch] = createSignal(false)
   let match: bridge.TerminalMatch | null = null
@@ -505,6 +506,15 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
   function releaseMouse(event: PointerEvent) {
     if (mouseButton !== undefined) reportMouse(event, mouseButton, 'release')
     mouseButton = undefined
+  }
+
+  function viewportText(current: bridge.TerminalFrame): string {
+    const lines = []
+    for (let start = 0; start < current.cells.length; start += current.columns) {
+      const text = current.cells.slice(start, start + current.columns).map((cell) => cell.text).join('')
+      lines.push(text.trimEnd())
+    }
+    return lines.join('\n').trimEnd()
   }
 
   function selectedText(): string {
@@ -697,6 +707,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
 
     let detached = false
     let unsubscribe: (() => Promise<void>) | undefined
+    let mirrorTimer: number | undefined
     void bridge.subscribeTerminal(props.terminalId, (next, changedRows) => {
       if (detached) return
       const previous = frame
@@ -711,12 +722,19 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
       }
       frame = next
       draw(rows)
+      if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
+        mirrorTimer = window.setTimeout(() => {
+          mirrorTimer = undefined
+          if (frame) setVisibleText(viewportText(frame))
+        }, 100)
+      }
     }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {
       if (detached) void dispose().catch(console.error)
       else unsubscribe = dispose
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
     onCleanup(() => {
       detached = true
+      window.clearTimeout(mirrorTimer)
       if (input === document.activeElement) props.onFocus(null)
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
@@ -791,6 +809,7 @@ function TerminalCanvas(props: { terminalId: string; focusRequest: { id: string 
           event.currentTarget.value = ''
         }}
       />
+      <pre class="terminal-view__text" aria-label="Terminal output">{visibleText()}</pre>
       <Show when={finding()}>
         <form class="terminal-view__find" onSubmit={(event) => {
           event.preventDefault()

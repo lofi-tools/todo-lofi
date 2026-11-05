@@ -857,6 +857,15 @@ textarea {
   opacity: 0;
 }
 
+.terminal-view__text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
 .terminal-view__find {
   position: absolute;
   top: 8px;
