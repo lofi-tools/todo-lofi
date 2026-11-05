@@ -24,7 +24,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   const visible = () => terminals().filter((terminal) =>
     terminal.scope === 'project' || terminal.taskId === props.taskId)
   const terminal = (id: string) => visible().find((entry) => entry.id === id)
-  const root = () => layout().root ?? (visible()[0] ? leaf(visible()[0].id) : null)
+  const root = () => {
+    const saved = layout()
+    const first = visible()[0]
+    return saved.revision === 0 && !saved.root && first ? leaf(first.id) : saved.root
+  }
   const active = () => {
     const id = selectedId()
     const node = root()
@@ -58,6 +62,16 @@ export function TerminalPane(props: TerminalPaneProps) {
       await save(previous ? (target ? replacePane(previous, target, split) : split(previous)) : added)
     }
     setSelectedId(terminalId)
+  }
+
+  function detach(id: string) {
+    const node = root()
+    if (node) void run(() => save(removePane(node, id)))
+  }
+
+  function arrange(axis: bridge.SplitAxis) {
+    const ids = paneIds(root())
+    if (ids.length > 1) void run(() => save(preset(ids, axis)))
   }
 
   function resizeSplit(path: SplitPath, ratio: number) {
@@ -99,9 +113,15 @@ export function TerminalPane(props: TerminalPaneProps) {
         <button type="button" onClick={() => start(props.taskId, 'vertical')} disabled={pending() || !props.taskHasWorktree}>New task terminal</button>
         <button type="button" onClick={() => start(props.taskId && props.taskHasWorktree ? props.taskId : null, 'horizontal')} disabled={pending() || !active()}>Split right</button>
         <button type="button" onClick={() => start(props.taskId && props.taskHasWorktree ? props.taskId : null, 'vertical')} disabled={pending() || !active()}>Split down</button>
+        <Show when={paneIds(root()).length > 1}>
+          <button type="button" onClick={() => arrange('horizontal')} disabled={pending()}>Side by side</button>
+          <button type="button" onClick={() => arrange('vertical')} disabled={pending()}>Stack</button>
+        </Show>
       </div>
       <Show when={error()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
-      <ul class="terminal-list" aria-label="Terminals">
+      <details open>
+        <summary>Terminal instances</summary>
+        <ul class="terminal-list" aria-label="Terminals">
         <For each={visible()}>
           {(entry) => (
             <li>
@@ -109,16 +129,17 @@ export function TerminalPane(props: TerminalPaneProps) {
                 aria-current={entry.id === active() ? 'true' : undefined}
                 disabled={pending()} onClick={() => void run(() => show(entry.id))}>
                 <span>{entry.title}</span>
-                <span class="terminal-list__state">{entry.scope === 'project' ? 'shared' : 'task'} · {entry.endedAt === null ? 'live' : 'ended'}</span>
+                <span class="terminal-list__state">{entry.scope === 'project' ? 'shared' : 'task'} · {entry.endedAt === null ? 'live' : 'ended'}{contains(root(), entry.id) ? '' : ' · hidden'}</span>
               </button>
             </li>
           )}
         </For>
-      </ul>
-      <Show when={root()} fallback={<p class="empty">No terminals yet. Start one in this project.</p>}>
-        {(node) => <TerminalTree node={node()} terminal={terminal} active={active()} select={setSelectedId}
+        </ul>
+      </details>
+      <Show when={firstVisible(root(), terminal)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
+        {() => <TerminalTree node={root()!} terminal={terminal} active={active()} select={setSelectedId}
           restart={(id) => void run(async () => { setTerminals(await bridge.restartTerminal(id, 80, 24)) })}
-          path={[]} resize={resizeSplit} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />}
+          path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />}
       </Show>
     </div>
   )
@@ -137,6 +158,29 @@ function contains(node: bridge.TerminalSplit | null, terminalId: string): boolea
 function replacePane(node: bridge.TerminalSplit, id: string, replace: (pane: bridge.TerminalSplit) => bridge.TerminalSplit): bridge.TerminalSplit {
   if (node.type === 'pane') return node.terminalId === id ? replace(node) : node
   return { ...node, first: replacePane(node.first, id, replace), second: replacePane(node.second, id, replace) }
+}
+
+function removePane(node: bridge.TerminalSplit, id: string): bridge.TerminalSplit | null {
+  if (node.type === 'pane') return node.terminalId === id ? null : node
+  const first = removePane(node.first, id)
+  const second = removePane(node.second, id)
+  return first && second ? { ...node, first, second } : first ?? second
+}
+
+function paneIds(node: bridge.TerminalSplit | null): string[] {
+  if (!node) return []
+  return node.type === 'pane' ? [node.terminalId] : [...paneIds(node.first), ...paneIds(node.second)]
+}
+
+function preset(ids: string[], axis: bridge.SplitAxis): bridge.TerminalSplit | null {
+  if (!ids.length) return null
+  const [firstId] = ids
+  if (ids.length === 1) return leaf(firstId)
+  const midpoint = Math.floor(ids.length / 2)
+  const first = preset(ids.slice(0, midpoint), axis)
+  const second = preset(ids.slice(midpoint), axis)
+  if (!first || !second) return first ?? second
+  return { type: 'split', axis, ratio: Math.round(midpoint / ids.length * 1000), first, second }
 }
 
 type TerminalLookup = (id: string) => bridge.TerminalSnapshot | undefined
@@ -166,6 +210,7 @@ interface TerminalTreeProps {
   select: (id: string) => void
   restart: (id: string) => void
   stop: (id: string) => void
+  detach: (id: string) => void
   pending: boolean
 }
 
@@ -192,8 +237,9 @@ function TerminalTree(props: TerminalTreeProps) {
             aria-label={entry().title} onFocusIn={() => props.select(entry().id)}>
             <div class="terminal-pane__bar">
               <span>{entry().title}</span>
+              <button type="button" onClick={() => props.detach(entry().id)} disabled={props.pending}>Hide pane</button>
               <Show when={entry().endedAt === null}>
-                <button type="button" onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop</button>
+                <button type="button" onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
               </Show>
             </div>
             <Show when={entry().endedAt === null} fallback={
