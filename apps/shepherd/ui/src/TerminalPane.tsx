@@ -717,13 +717,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     input?.focus({ preventScroll: true })
   }
 
-  async function find(query: string) {
+  async function find(query: string, direction: bridge.SearchDirection) {
     if (!query || searching()) return
     const generation = ++searchGeneration
     setSearching(true)
     setError(null)
     try {
-      const found = await bridge.searchTerminal(props.terminalId, query, match?.start ?? null)
+      const anchor = direction === 'previous' ? match?.start : match?.end
+      const found = await bridge.searchTerminal(props.terminalId, query, anchor ?? null, direction)
       if (generation !== searchGeneration) return
       match = found
       setNoMatch(!found)
@@ -954,10 +955,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       <Show when={finding()}>
         <form class="terminal-view__find" onSubmit={(event) => {
           event.preventDefault()
-          void find(searchInput?.value ?? '')
+          const direction = event.submitter?.getAttribute('value') === 'next' ? 'next' : 'previous'
+          void find(searchInput?.value ?? '', direction)
         }} onKeyDown={(event) => { if (event.key === 'Escape') closeSearch() }}>
           <input ref={searchInput} type="search" aria-label="Find in terminal" placeholder="Find in terminal" onInput={resetSearch} />
-          <button type="submit" disabled={searching()}>Find previous</button>
+          <button type="submit" value="previous" disabled={searching()}>Find previous</button>
+          <button type="submit" value="next" disabled={searching()}>Find next</button>
           <button type="button" onClick={closeSearch}>Close find</button>
           <Show when={noMatch()}><span role="status">No matches</span></Show>
         </form>

@@ -28,7 +28,7 @@ use shepherd_core::{
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::pty_terminal::PtyTerminals;
-use crate::terminal_screen::{Screen, SearchMatch, SearchPoint, TerminalFrame};
+use crate::terminal_screen::{Screen, SearchDirection, SearchMatch, SearchPoint, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -562,7 +562,8 @@ impl ShellState {
         &self,
         terminal_id: &str,
         query: &str,
-        before: Option<SearchPoint>,
+        anchor: Option<SearchPoint>,
+        direction: SearchDirection,
     ) -> Result<Option<SearchMatch>, BridgeError> {
         if query.len() > 1024 {
             return Err(BridgeError::new(
@@ -574,7 +575,7 @@ impl ShellState {
         let mut slot = slot.lock().await;
         let found = slot
             .screen
-            .search(query, before)
+            .search(query, anchor, direction)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         if found.is_some() {
             slot.publish();
@@ -1035,11 +1036,12 @@ pub mod commands {
         state: State<'_, ShellState>,
         terminal_id: String,
         query: String,
-        before: Option<SearchPoint>,
+        anchor: Option<SearchPoint>,
+        direction: SearchDirection,
     ) -> Result<Option<SearchMatch>, BridgeError> {
         state
             .inner()
-            .search_terminal(&terminal_id, &query, before)
+            .search_terminal(&terminal_id, &query, anchor, direction)
             .await
     }
 

@@ -309,8 +309,10 @@ export interface TerminalMatch {
   end: SearchPoint
 }
 
-export function searchTerminal(terminalId: string, query: string, before: SearchPoint | null): Promise<TerminalMatch | null> {
-  return invoke('search_terminal', { terminalId, query, before })
+export type SearchDirection = 'previous' | 'next'
+
+export function searchTerminal(terminalId: string, query: string, anchor: SearchPoint | null, direction: SearchDirection): Promise<TerminalMatch | null> {
+  return invoke('search_terminal', { terminalId, query, anchor, direction })
 }
 
 export function terminalScroll(terminalId: string, lines: number): Promise<void> {

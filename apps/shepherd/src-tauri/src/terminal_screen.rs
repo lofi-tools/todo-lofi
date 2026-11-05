@@ -124,6 +124,13 @@ impl From<Point> for SearchPoint {
     }
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchDirection {
+    Previous,
+    Next,
+}
+
 #[derive(Serialize)]
 pub struct SearchMatch {
     start: SearchPoint,
@@ -384,7 +391,8 @@ impl Screen {
     pub fn search(
         &mut self,
         query: &str,
-        before: Option<SearchPoint>,
+        anchor: Option<SearchPoint>,
+        direction: SearchDirection,
     ) -> Result<Option<SearchMatch>, Box<BuildError>> {
         if query.is_empty() {
             return Ok(None);
@@ -398,20 +406,34 @@ impl Screen {
         }
         let mut regex = RegexSearch::new(&pattern)?;
         let grid = self.term.grid();
-        let origin = before.map_or_else(
-            || Point::new(grid.bottommost_line(), grid.last_column()),
-            |point| {
-                Point::new(
-                    Line(point.line),
-                    Column(point.column.min(grid.last_column().0)),
-                )
-                .grid_clamp(grid, Boundary::Grid)
-                .sub(grid, Boundary::None, 1)
-            },
-        );
-        let Some(found) =
-            self.term
-                .search_next(&mut regex, origin, Direction::Left, Side::Left, None)
+        let origin = anchor.map(|point| {
+            Point::new(
+                Line(point.line),
+                Column(point.column.min(grid.last_column().0)),
+            )
+            .grid_clamp(grid, Boundary::Grid)
+        });
+        let (origin, direction, side) = match direction {
+            SearchDirection::Previous => (
+                origin.map_or_else(
+                    || Point::new(grid.bottommost_line(), grid.last_column()),
+                    |point| point.sub(grid, Boundary::None, 1),
+                ),
+                Direction::Left,
+                Side::Left,
+            ),
+            SearchDirection::Next => (
+                origin.map_or_else(
+                    || Point::new(grid.topmost_line(), Column(0)),
+                    |point| point.add(grid, Boundary::None, 1),
+                ),
+                Direction::Right,
+                Side::Right,
+            ),
+        };
+        let Some(found) = self
+            .term
+            .search_next(&mut regex, origin, direction, side, None)
         else {
             return Ok(None);
         };
