@@ -612,6 +612,8 @@ the input anchor returns to the live cursor before committing text once.
 The manually dispatched **Shepherd terminal smoke** workflow uses an Ubuntu
 24.04 runner and Xvfb for the same two native launches. The Ubuntu result
 remains pending until the workflow runs on a published ref.
+The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
+override.
 
 ### Gate
 
