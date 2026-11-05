@@ -34,7 +34,7 @@ pub use projects::{Project, ProjectId, ProjectSnapshot};
 pub use snapshots::{ProjectList, TaskList, TaskWorkspace};
 pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
-use crate::git::{GitError, GitService};
+use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::store::{MemoryStore, Store, StoreError};
@@ -120,6 +120,7 @@ pub struct Core {
     project_order: Vec<ProjectId>,
     tasks: BTreeMap<TaskId, Task>,
     sessions: BTreeMap<TaskId, HarnessSession>,
+    turn_baselines: BTreeMap<TaskId, TurnBaseline>,
     /// The newest durable session per task, kept across restarts so resume can
     /// ask the adapter for the thread the previous process opened.
     session_records: BTreeMap<TaskId, SessionRecord>,
@@ -156,6 +157,7 @@ impl Core {
             project_order: Vec::new(),
             tasks: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            turn_baselines: BTreeMap::new(),
             session_records: BTreeMap::new(),
             terminals: BTreeMap::new(),
             store,
@@ -546,6 +548,10 @@ impl Core {
             }
         }
 
+        if let Some(path) = self.task(task_id)?.worktree_path.as_ref() {
+            let baseline = GitService.turn_baseline(path)?;
+            self.turn_baselines.insert(task_id.clone(), baseline);
+        }
         self.set_task_state(task_id, TaskState::Working)?;
         if let Err(error) = self.ensure_session(task_id, None).await {
             // A session that never started leaves the task ready to retry; the
@@ -568,6 +574,7 @@ impl Core {
         let events = match outcome {
             Ok(events) => events,
             Err(error) => {
+                self.turn_baselines.remove(task_id);
                 self.record_failure(task_id, &error);
                 // A rejected prompt ends the turn but keeps the session, so the
                 // user can sign in and send another prompt.
@@ -847,9 +854,13 @@ impl Core {
                     next_state = Some(TaskState::Waiting);
                 }
                 HarnessEvent::TurnFinished { reason } => match reason {
-                    TurnFinishReason::Completed => {
-                        next_state = Some(self.state_after_completed_turn(task_id)?);
-                    }
+                    TurnFinishReason::Completed => match self.state_after_completed_turn(task_id) {
+                        Ok(state) => next_state = Some(state),
+                        Err(error) => {
+                            next_state = Some(TaskState::Failed);
+                            task_error = Some(format!("could not compare turn changes: {error}"));
+                        }
+                    },
                     TurnFinishReason::Cancelled => next_state = Some(TaskState::Ready),
                     TurnFinishReason::Failed => {
                         next_state = Some(TaskState::Failed);
@@ -887,6 +898,9 @@ impl Core {
         }
 
         if let Some(state) = next_state {
+            if !state.is_live() {
+                self.turn_baselines.remove(task_id);
+            }
             let task = self
                 .tasks
                 .get_mut(task_id)
@@ -904,17 +918,15 @@ impl Core {
         Ok(())
     }
 
-    /// A completed turn with real changes enters review; a chat-only turn goes
-    /// back to ready. S3 replaces the worktree check with the turn baseline.
-    fn state_after_completed_turn(&self, task_id: &TaskId) -> Result<TaskState, CoreError> {
+    fn state_after_completed_turn(&mut self, task_id: &TaskId) -> Result<TaskState, CoreError> {
+        let Some(baseline) = self.turn_baselines.remove(task_id) else {
+            return Ok(TaskState::Ready);
+        };
         let task = self.task(task_id)?;
         let Some(worktree_path) = task.worktree_path.as_ref() else {
             return Ok(TaskState::Ready);
         };
-        if !worktree_path.exists() {
-            return Ok(TaskState::Ready);
-        }
-        if GitService.has_changes(worktree_path)? {
+        if GitService.turn_baseline(worktree_path)? != baseline {
             Ok(TaskState::Review)
         } else {
             Ok(TaskState::Ready)

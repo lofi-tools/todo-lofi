@@ -4,8 +4,11 @@
 //! The user's `git` binary is authoritative: hooks, signing, sparse checkout and
 //! worktree bookkeeping must behave as they do in a terminal.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitRepository {
@@ -178,11 +181,89 @@ impl GitService {
         Ok(())
     }
 
+    pub fn turn_baseline(&self, path: &Path) -> Result<TurnBaseline, GitError> {
+        let status = git_bytes(
+            path,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let tracked = |cached| {
+            let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--binary"];
+            if cached {
+                args.push("--cached");
+            }
+            git_bytes(path, &args).map(|bytes| Sha256::digest(bytes).into())
+        };
+        let mut untracked = Vec::new();
+        let names = git_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for relative in names
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+        {
+            #[cfg(unix)]
+            let relative = {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsStr::from_bytes(relative)
+            };
+            #[cfg(not(unix))]
+            let relative = std::str::from_utf8(relative).map_err(|source| GitError::Io {
+                source: std::io::Error::other(source),
+            })?;
+            let file_path = path.join(relative);
+            let mut hash = Sha256::new();
+            let hash_file = || -> std::io::Result<[u8; 32]> {
+                let metadata = file_path.symlink_metadata()?;
+                if metadata.is_symlink() {
+                    hash.update(b"symlink");
+                    hash.update(
+                        std::fs::read_link(&file_path)?
+                            .as_os_str()
+                            .as_encoded_bytes(),
+                    );
+                } else if metadata.is_file() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        hash.update((metadata.permissions().mode() & 0o111).to_le_bytes());
+                    }
+                    let mut file = std::fs::File::open(&file_path)?;
+                    let mut buffer = [0; 8192];
+                    loop {
+                        let count = file.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        hash.update(&buffer[..count]);
+                    }
+                }
+                Ok(hash.finalize().into())
+            };
+            untracked.push(hash_file().map_err(|source| GitError::Io { source })?);
+        }
+        Ok(TurnBaseline {
+            head: run_git(path, &["rev-parse", "HEAD"])?,
+            branch: run_git(path, &["rev-parse", "--symbolic-full-name", "HEAD"])?,
+            staged: tracked(true)?,
+            unstaged: tracked(false)?,
+            status,
+            untracked,
+        })
+    }
+
     /// True when the worktree has staged, unstaged or untracked changes.
     pub fn has_changes(&self, worktree_path: &Path) -> Result<bool, GitError> {
         let status = run_git(worktree_path, &["status", "--porcelain"])?;
         Ok(!status.is_empty())
     }
+}
+
+#[derive(PartialEq, Eq)]
+pub struct TurnBaseline {
+    head: String,
+    branch: String,
+    staged: [u8; 32],
+    unstaged: [u8; 32],
+    status: Vec<u8>,
+    untracked: Vec<[u8; 32]>,
 }
 
 /// The branch a new worktree starts from. A recorded remote HEAD wins, then
@@ -213,6 +294,12 @@ fn canonicalize(path: &Path) -> Result<PathBuf, GitError> {
 }
 
 pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
+    Ok(String::from_utf8_lossy(&git_bytes(cwd, args)?)
+        .trim()
+        .to_string())
+}
+
+fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -226,7 +313,7 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout)
 }
 
 #[cfg(test)]

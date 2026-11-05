@@ -330,7 +330,7 @@ squash-merge into the base from inside Shepherd.
   `<git-dir>/shepherd/worktrees/<slug>` from the project’s default branch.
 - [x] Implement missing-worktree repair, dirty-worktree refusal and serialized
   Git mutations.
-- [ ] Capture the turn baseline (HEAD/status/diff) and implement the review
+- [x] Capture the turn baseline (HEAD/status/diff) and implement the review
   trigger for real changes only.
 - [ ] Add the Review tab: changed files, status, worktree diff and review notes.
 - [ ] Add the Git tab: status, stage/unstage, commit, branch display, checkout,
