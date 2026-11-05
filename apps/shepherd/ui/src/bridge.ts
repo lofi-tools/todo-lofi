@@ -186,6 +186,9 @@ export interface TerminalFrame {
   rows: number
   cursorColumn: number
   cursorRow: number
+  cursorVisible: boolean
+  displayOffset: number
+  modes: number
   cells: FrameCell[]
 }
 
@@ -287,6 +290,10 @@ export function startTerminal(
 
 export function restartTerminal(terminalId: string, columns: number, rows: number): Promise<TerminalSnapshot[]> {
   return invoke('restart_terminal', { terminalId, columns, rows })
+}
+
+export function terminalScroll(terminalId: string, lines: number): Promise<void> {
+  return invoke('terminal_scroll', { terminalId, lines })
 }
 
 export function terminalWrite(terminalId: string, data: string): Promise<void> {

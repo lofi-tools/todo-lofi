@@ -6,9 +6,9 @@
 //! later optimisation, not a correctness requirement.
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use serde::Serialize;
 
@@ -19,6 +19,9 @@ pub struct TerminalFrame {
     pub rows: usize,
     pub cursor_column: usize,
     pub cursor_row: usize,
+    pub cursor_visible: bool,
+    pub display_offset: usize,
+    pub modes: u32,
     pub cells: Vec<FrameCell>,
 }
 
@@ -79,9 +82,28 @@ impl Screen {
         self.term.resize(ScreenSize { columns, rows });
     }
 
+    pub fn scroll(&mut self, lines: i32) {
+        self.term
+            .scroll_display(Scroll::Delta(lines.clamp(-120, 120)));
+    }
+
+    pub fn follow_output(&mut self) -> bool {
+        if self.term.grid().display_offset() == 0 {
+            return false;
+        }
+        self.term.scroll_display(Scroll::Bottom);
+        true
+    }
+
     pub fn frame(&self) -> TerminalFrame {
         let grid = self.term.grid();
         let cursor = grid.cursor.point;
+        let display_offset = grid.display_offset();
+        let viewport_row = usize::try_from(cursor.line.0)
+            .unwrap_or(0)
+            .saturating_add(display_offset);
+        let cursor_visible =
+            viewport_row < self.rows && self.term.mode().contains(TermMode::SHOW_CURSOR);
         let mut cells = Vec::with_capacity(self.columns * self.rows);
 
         for indexed in grid.display_iter() {
@@ -104,9 +126,10 @@ impl Screen {
             columns: self.columns,
             rows: self.rows,
             cursor_column: cursor.column.0.min(self.columns.saturating_sub(1)),
-            cursor_row: usize::try_from(cursor.line.0)
-                .unwrap_or(0)
-                .min(self.rows.saturating_sub(1)),
+            cursor_row: viewport_row.min(self.rows.saturating_sub(1)),
+            cursor_visible,
+            display_offset,
+            modes: self.term.mode().bits(),
             cells,
         }
     }
@@ -210,6 +233,23 @@ mod tests {
         assert!(frame.cells[0].bold);
         assert_eq!(frame.cells[0].foreground, 0xe06a6a);
         assert!(!frame.cells[0].italic);
+    }
+
+    #[test]
+    fn scrollback_and_alternate_screen_keep_separate_contents() {
+        let mut screen = Screen::new(12, 3);
+        screen.process(b"first\r\nsecond\r\nthird\r\nfourth");
+        screen.scroll(1);
+        let history = screen.frame();
+        assert_eq!(history.display_offset, 1);
+        assert!(!history.cursor_visible);
+        assert!(row(&history, 0).starts_with("first"));
+
+        screen.follow_output();
+        screen.process(b"\x1b[?1049halternate");
+        assert!(row(&screen.frame(), 0).starts_with("alternate"));
+        screen.process(b"\x1b[?1049l");
+        assert!(row(&screen.frame(), 2).starts_with("fourth"));
     }
 
     #[test]

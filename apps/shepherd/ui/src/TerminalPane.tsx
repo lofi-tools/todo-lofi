@@ -352,7 +352,7 @@ function TerminalCanvas(props: { terminalId: string }) {
         context.fillStyle = hex(cell.foreground)
         context.fillText(cell.text, x, y + 1)
       }
-      if (row === current.cursorRow && column === current.cursorColumn) {
+      if (current.cursorVisible && row === current.cursorRow && column === current.cursorColumn) {
         context.fillStyle = 'rgba(230, 230, 234, 0.35)'
         context.fillRect(x, y, cellWidth, LINE_HEIGHT)
       }
@@ -440,6 +440,16 @@ function TerminalCanvas(props: { terminalId: string }) {
       detached = true
       if (unsubscribe) void unsubscribe().catch(console.error)
     })
+
+    function wheel(event: WheelEvent) {
+      if (!event.deltaY || !frame) return
+      event.preventDefault()
+      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY : event.deltaY / LINE_HEIGHT
+      const count = Math.max(1, Math.round(Math.abs(lines)))
+      void bridge.terminalScroll(props.terminalId, -Math.sign(lines) * count).catch(console.error)
+    }
+    container?.addEventListener('wheel', wheel, { passive: false })
+    onCleanup(() => container?.removeEventListener('wheel', wheel))
 
     let resizeTimer: number | undefined
     const observer = new ResizeObserver(() => {

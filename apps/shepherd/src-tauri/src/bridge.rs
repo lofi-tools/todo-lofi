@@ -463,6 +463,16 @@ impl ShellState {
         Ok(self.core.lock().await.terminals_for(&project_id))
     }
 
+    pub async fn terminal_scroll(&self, terminal_id: &str, lines: i32) -> Result<(), BridgeError> {
+        let mut screens = self.screens.lock().await;
+        let slot = screens
+            .get_mut(terminal_id)
+            .ok_or_else(|| BridgeError::new("terminal", "no live terminal"))?;
+        slot.screen.scroll(lines);
+        slot.frames.send_replace(slot.screen.frame());
+        Ok(())
+    }
+
     pub async fn terminal_write(
         &self,
         terminal_id: String,
@@ -471,8 +481,14 @@ impl ShellState {
         self.engine
             .lock()
             .await
-            .write(&TerminalId::new(terminal_id), data.as_bytes())
-            .map_err(|error| BridgeError::new("terminal", error.to_string()))
+            .write(&TerminalId::new(terminal_id.clone()), data.as_bytes())
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        if let Some(slot) = self.screens.lock().await.get_mut(&terminal_id)
+            && slot.screen.follow_output()
+        {
+            slot.frames.send_replace(slot.screen.frame());
+        }
+        Ok(())
     }
 
     pub async fn terminal_resize(
@@ -805,6 +821,15 @@ pub mod commands {
             .inner()
             .restart_terminal(terminal_id, columns, rows)
             .await
+    }
+
+    #[tauri::command]
+    pub async fn terminal_scroll(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+        lines: i32,
+    ) -> Result<(), BridgeError> {
+        state.inner().terminal_scroll(&terminal_id, lines).await
     }
 
     #[tauri::command]
