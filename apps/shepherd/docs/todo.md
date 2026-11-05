@@ -394,8 +394,9 @@ task-scoped, persistent and fast enough.
 
 - [ ] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
-  hyperlinks. Kitty modes negotiate independently for each screen. Reflow and
-  live keyboard compatibility still need verification.
+  hyperlinks. Kitty modes negotiate independently for each screen. Fixtures
+  cover reflow and key encoding. Live keyboard and IME compatibility still need
+  verification in the desktop webview.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
 - [x] Add the project terminal layout: slots, sizes, order and scope; save it
@@ -409,20 +410,21 @@ task-scoped, persistent and fast enough.
 - [x] Route terminal focus and keyboard input. Show bell attention on the
   Terminals tab and on the owning task for task-scoped terminals.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
-- [ ] Measure frame throughput before considering WebGL; keep the 1 MB burst
-  budget and dirty-row coalescing.
+- [x] Measure parser and encoder throughput on a 1 MiB output burst.
+- [ ] Measure delivery and paint throughput in the desktop webview before
+  considering WebGL.
 
 ### Proof
 
 Automated:
 
-- [ ] PTY fixtures: colours, alternate screen, resize, wide chars, large output;
-- [ ] parser state and input encoding, not pixels;
-- [ ] terminal layout round-trip;
-- [ ] shared terminal remains the same PTY across task switches;
-- [ ] task terminal disappears with its task and returns on reselect;
-- [ ] ended terminal restarts in the right scope;
-- [ ] Playwright: tabs, split resize, task switch and instance menu.
+- [x] Parser fixtures for colours, alternate screen, resize, wide characters,
+  reflow, large output and Kitty mode negotiation.
+- [x] Terminal layout round-trip through Turso and task terminal restart through
+  the PTY bridge.
+- [x] Playwright with mocked IPC covers the shared terminal's single
+  subscription across task switches, task pane visibility, split resize,
+  hide and reopen, key encoding and keyboard copy mode.
 
 Manual script:
 
@@ -608,7 +610,7 @@ Record every gate result here. Do not silently mark a gate passed.
 |  | S1 |  |  |
 | 2026-11-05 | S2 | Partial | A live headless run on a disposable repository (`codex-cli 0.166.0-alpha.6`, ignored test) streamed 32 deltas, reported two tool calls, changed the file, reopened the same thread after restarting the process, and cancelled a running turn. It found and fixed one protocol gap: `thread/start` takes `workspace-write`, not `workspaceWrite`. A mid-turn SIGKILL of the real process is proven through the core (ignored test: task `failed`, failure row, stderr tail). A live approval request is also proven at the adapter: Codex asked before a network command, the request carried the command and its decisions, the denial was recorded, and the turn completed. Restart-resume is proven through the core too: an ignored test quits mid-turn, reloads the same database, sees the task interrupted, resumes the recorded thread and finishes another turn. Still unverified before a pass: the desktop window, including how the approval card renders there. The core now pumps adapter events between commands (covered by a focused test), so a live turn can stream into the window. The desktop shell was also built and launched from the Nix shell on 2026-11-05 (Vite on 1420 answered 200 and the Tauri binary ran), but the window was not inspected and no task was driven through it. Automated suites: 38 `agent-harness` (2 live, ignored), 37 `shepherd-core` plus 2 ignored live runs, 9 shell. |
 |  | S3 |  |  |
-|  | S4 |  |  |
+| 2026-11-05 | S4 | Partial | Offline Rust tests and the eight mocked-IPC browser tests pass. The debug parser and encoder fixture processed 1,048,576 bytes in 122.3 ms and produced four frames totalling 45,632 encoded bytes. Run it with `cargo test --offline -p shepherd terminal_frame_burst -- --ignored --nocapture`. Desktop IPC and paint throughput, live terminal applications and the manual workday gate remain open. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |

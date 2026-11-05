@@ -303,7 +303,7 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await expect(page.getByRole('button', { name: /demo/ })).toBeVisible()
 
-  await page.getByRole('button', { name: 'New task' }).click()
+  await page.getByRole('button', { name: 'New task', exact: true }).click()
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
   await expect(page.getByText('Proposed branch')).toBeVisible()
   await expect(page.getByText('shepherd/new-task')).toBeVisible()

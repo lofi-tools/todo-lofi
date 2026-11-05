@@ -3168,7 +3168,15 @@ mod tests {
         let store = TursoStore::open_at(&database).await?;
         let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
         let project = add_project(&mut core, directory.path().to_path_buf()).await?;
-        let foreign = add_project(&mut core, other.path().to_path_buf()).await?;
+        core.execute(Command::AddProject {
+            path: other.path().to_path_buf(),
+        })
+        .await?;
+        let foreign = core
+            .project_order
+            .last()
+            .cloned()
+            .ok_or("second project was not added")?;
         for (id, owner, path) in [
             ("first", &project, directory.path()),
             ("second", &project, directory.path()),

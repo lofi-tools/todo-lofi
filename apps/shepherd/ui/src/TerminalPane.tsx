@@ -4,7 +4,7 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, batch, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
 import { encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
@@ -21,6 +21,7 @@ interface TerminalPaneProps {
 export function TerminalPane(props: TerminalPaneProps) {
   const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
   const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null })
+  const [layoutLoaded, setLayoutLoaded] = createSignal(false)
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
   const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
   const [pending, setPending] = createSignal(false)
@@ -30,6 +31,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     terminal.scope === 'project' || terminal.taskId === props.taskId)
   const terminal = (id: string) => visible().find((entry) => entry.id === id)
   const root = () => {
+    if (!layoutLoaded()) return null
     const saved = layout()
     const first = visible()[0]
     return saved.revision === 0 && !saved.root && first ? leaf(first.id) : saved.root
@@ -112,8 +114,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     void run(async () => {
       const [list, saved] = await Promise.all([bridge.terminalList(props.projectId), bridge.terminalLayout(props.projectId)])
       if (disposed) return
-      if (props.listEvent === initialEvent) setTerminals(list)
-      if (saved) setLayout(saved)
+      batch(() => {
+        if (props.listEvent === initialEvent) setTerminals(list)
+        if (saved) setLayout(saved)
+        setLayoutLoaded(true)
+      })
     })
     onCleanup(() => { disposed = true })
   })

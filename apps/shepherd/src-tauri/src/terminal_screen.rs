@@ -559,6 +559,41 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reports local parser and encoder throughput"]
+    fn terminal_frame_burst() {
+        use std::fmt::Write as _;
+        use std::time::Instant;
+
+        const BURST_BYTES: usize = 1024 * 1024;
+        const BATCH_BYTES: usize = 32 * 8192;
+        let mut output = String::with_capacity(BURST_BYTES);
+        for line in 0.. {
+            assert!(writeln!(output, "\x1b[32m{line:06}\x1b[0m Shepherd terminal burst\r").is_ok());
+            if output.len() >= BURST_BYTES {
+                break;
+            }
+        }
+        output.truncate(BURST_BYTES);
+        let mut screen = Screen::new(80, 24);
+        let start = Instant::now();
+        let mut previous = None;
+        let mut frames = 0;
+        let mut encoded_bytes = 0;
+        for batch in output.as_bytes().chunks(BATCH_BYTES) {
+            screen.process(batch);
+            let frame = screen.frame();
+            encoded_bytes += frame.encode(previous.as_ref()).len();
+            previous = Some(frame);
+            frames += 1;
+        }
+        eprintln!(
+            "{BURST_BYTES} PTY bytes in {:.1?}; {frames} frames, {encoded_bytes} encoded bytes",
+            start.elapsed(),
+        );
+        assert!(encoded_bytes < BURST_BYTES);
+    }
+
+    #[test]
     fn text_lands_in_the_grid_and_moves_the_cursor() {
         let mut screen = Screen::new(10, 3);
         screen.process(b"hello\r\nworld");
