@@ -91,6 +91,7 @@ fi
 export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
 if [[ -z ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
+  mkdir "$fixture/second-project"
   mkdir "$fixture/bin"
   cat > "$fixture/bin/open" <<'EOF'
 #!/bin/sh

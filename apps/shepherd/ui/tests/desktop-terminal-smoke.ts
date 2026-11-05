@@ -379,6 +379,28 @@ async function exerciseSearch(terminalId: string) {
   }
 }
 
+async function exerciseProjectSwitch(project: bridge.ProjectSnapshot, terminal: bridge.TerminalSnapshot) {
+  await bridge.terminalWrite(terminal.id, "project_marker=preserved; printf 'S4_%s\\n' PROJECT_BEFORE\r")
+  await waitFor('shared terminal output before project switch', () =>
+    terminalOutput().split('\n').some((line) => line.trim() === 'S4_PROJECT_BEFORE'))
+
+  const secondProject = 'second-project'
+  await bridge.addProject(`${project.path}/../${secondProject}`)
+  const secondRow = await enabledButton(secondProject)
+  secondRow.click()
+  await waitFor('other project without the shared terminal', () =>
+    secondRow.getAttribute('aria-current') === 'true' && !terminalPane(terminal.title))
+  await bridge.terminalWrite(terminal.id, "printf 'S4_%s:%s\\n' PROJECT_AFTER \"$project_marker\"\r")
+
+  const originalRow = await enabledButton(project.name)
+  originalRow.click()
+  await waitFor('same shell after switching projects', () => {
+    const pane = terminalPane(terminal.title)
+    return pane && terminalOutput(pane).includes('S4_PROJECT_BEFORE')
+      && terminalOutput(pane).includes('S4_PROJECT_AFTER:preserved')
+  })
+}
+
 async function selectTask(title: string) {
   const task = await waitFor(title, () => {
     if (document.querySelector('.chat__title')?.textContent === title) return true
@@ -724,13 +746,14 @@ async function smoke() {
   const burstPaintMs = await measureBurst(terminal.id)
   const pacing = await measurePacing(terminal.id)
   await exerciseSearch(terminal.id)
+  await exerciseProjectSwitch(project, terminal)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project, terminal)
   await selectTask(INTERRUPTED_TASK)
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
   await requestQuitWithLiveTask()
-  return { ok: true, quitWarning: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {
