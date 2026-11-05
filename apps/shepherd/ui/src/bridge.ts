@@ -306,6 +306,8 @@ export async function subscribeToEvents(handler: (event: Event) => void): Promis
 
 export interface GitFile {
   path: string
+  originalPath: string | null
+  actionable: boolean
   index: string
   worktree: string
 }

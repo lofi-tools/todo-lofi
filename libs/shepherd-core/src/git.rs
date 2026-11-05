@@ -39,6 +39,8 @@ pub enum GitError {
     DirtyWorktree { path: PathBuf },
     #[error("task branch {branch} is missing and has no recorded tip")]
     MissingBranch { branch: String },
+    #[error("git returned an invalid status record")]
+    InvalidStatus,
     #[error("file is no longer in Git status: {path}")]
     UnknownPath { path: String },
     #[error("enter a commit message")]
@@ -275,6 +277,8 @@ impl GitService {
             if !files.iter().any(|file| file.path == name) {
                 files.push(GitFile {
                     path: name,
+                    original_path: None,
+                    actionable: true,
                     index: " ".into(),
                     worktree: " ".into(),
                 });
@@ -286,7 +290,7 @@ impl GitService {
         )?;
         for file in files
             .iter()
-            .filter(|file| file.index == "?" && file.worktree == "?")
+            .filter(|file| file.actionable && file.index == "?" && file.worktree == "?")
         {
             let output = Command::new("git")
                 .arg("-C")
@@ -337,39 +341,41 @@ impl GitService {
     }
 
     pub fn stage(&self, path: &Path, file: Option<&str>) -> Result<(), GitError> {
-        if let Some(file) = file {
-            self.require_changed_path(path, file)?;
+        let mut args = vec!["--literal-pathspecs", "add", "-A", "--"];
+        let entry = file
+            .map(|file| self.require_changed_path(path, file))
+            .transpose()?;
+        if let Some(entry) = &entry {
+            args.push(&entry.path);
+            args.extend(entry.original_path.as_deref());
+        } else {
+            args.push(".");
         }
-        run_git(
-            path,
-            &[
-                "--literal-pathspecs",
-                "add",
-                "-A",
-                "--",
-                file.unwrap_or("."),
-            ],
-        )?;
+        run_git(path, &args)?;
         Ok(())
     }
 
     pub fn unstage(&self, path: &Path, file: &str) -> Result<(), GitError> {
-        self.require_changed_path(path, file)?;
-        run_git(
-            path,
-            &["--literal-pathspecs", "restore", "--staged", "--", file],
-        )?;
+        let entry = self.require_changed_path(path, file)?;
+        let mut args = vec![
+            "--literal-pathspecs",
+            "restore",
+            "--staged",
+            "--",
+            &entry.path,
+        ];
+        args.extend(entry.original_path.as_deref());
+        run_git(path, &args)?;
         Ok(())
     }
 
-    fn require_changed_path(&self, path: &Path, file: &str) -> Result<(), GitError> {
-        if self.status(path)?.iter().any(|entry| entry.path == file) {
-            Ok(())
-        } else {
-            Err(GitError::UnknownPath {
+    fn require_changed_path(&self, path: &Path, file: &str) -> Result<GitFile, GitError> {
+        self.status(path)?
+            .into_iter()
+            .find(|entry| entry.actionable && entry.path == file)
+            .ok_or_else(|| GitError::UnknownPath {
                 path: file.to_string(),
             })
-        }
     }
 
     pub fn commit(&self, path: &Path, message: &str, expected: &str) -> Result<(), GitError> {
@@ -492,25 +498,35 @@ impl GitService {
             path,
             &[
                 "status",
-                "--porcelain=v1",
+                "--porcelain=v2",
                 "-z",
-                "--no-renames",
+                "--renames",
                 "--untracked-files=all",
             ],
         )?;
-        Ok(bytes
+        let mut records = bytes
             .split(|byte| *byte == 0)
-            .filter_map(|entry| {
-                let [index, worktree, b' ', name @ ..] = entry else {
-                    return None;
-                };
-                Some(GitFile {
-                    path: String::from_utf8_lossy(name).into_owned(),
-                    index: char::from(*index).to_string(),
-                    worktree: char::from(*worktree).to_string(),
-                })
-            })
-            .collect())
+            .filter(|record| !record.is_empty());
+        let mut files = Vec::new();
+        while let Some(record) = records.next() {
+            let (columns, original) = match record.first() {
+                Some(b'1') => (9, None),
+                Some(b'2') => (10, Some(records.next().ok_or(GitError::InvalidStatus)?)),
+                Some(b'u') => (11, None),
+                Some(b'?') => {
+                    let path = record.strip_prefix(b"? ").ok_or(GitError::InvalidStatus)?;
+                    files.push(GitFile::from_status(path, None, b"??")?);
+                    continue;
+                }
+                _ => return Err(GitError::InvalidStatus),
+            };
+            let mut fields = record.splitn(columns, |byte| *byte == b' ');
+            fields.next();
+            let codes = fields.next().ok_or(GitError::InvalidStatus)?;
+            let path = fields.nth(columns - 3).ok_or(GitError::InvalidStatus)?;
+            files.push(GitFile::from_status(path, original, codes)?);
+        }
+        Ok(files)
     }
 
     /// True when the worktree has staged, unstaged or untracked changes.
@@ -524,8 +540,33 @@ impl GitService {
 #[serde(rename_all = "camelCase")]
 pub struct GitFile {
     pub path: String,
+    pub original_path: Option<String>,
+    pub actionable: bool,
     pub index: String,
     pub worktree: String,
+}
+
+impl GitFile {
+    fn from_status(path: &[u8], original: Option<&[u8]>, codes: &[u8]) -> Result<Self, GitError> {
+        let [index, worktree] = codes else {
+            return Err(GitError::InvalidStatus);
+        };
+        let code = |byte| {
+            if byte == b'.' {
+                " ".to_string()
+            } else {
+                char::from(byte).to_string()
+            }
+        };
+        Ok(Self {
+            path: String::from_utf8_lossy(path).into_owned(),
+            original_path: original.map(|path| String::from_utf8_lossy(path).into_owned()),
+            actionable: std::str::from_utf8(path).is_ok()
+                && original.is_none_or(|path| std::str::from_utf8(path).is_ok()),
+            index: code(*index),
+            worktree: code(*worktree),
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1015,6 +1056,22 @@ mod tests {
             "archived content\n"
         );
         assert_eq!(GitService.checked_out_tip(&path, "shepherd/example")?, tip);
+        Ok(())
+    }
+
+    #[test]
+    fn status_reports_a_rename_and_unstages_both_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        run_git(fixture.path(), &["mv", "README.md", "new name.md"])?;
+        let status = GitService.snapshot(fixture.path())?;
+        let [file] = status.files.as_slice() else {
+            return Err("expected one rename".into());
+        };
+        assert_eq!(file.index, "R");
+        assert_eq!(file.path, "new name.md");
+        assert_eq!(file.original_path.as_deref(), Some("README.md"));
+        GitService.unstage(fixture.path(), &file.path)?;
+        assert!(GitService.snapshot(fixture.path())?.staged_diff.is_empty());
         Ok(())
     }
 

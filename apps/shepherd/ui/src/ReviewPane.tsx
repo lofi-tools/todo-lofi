@@ -55,7 +55,7 @@ export function ReviewPane(props: { task: TaskDetail; onAction: (action: ReviewA
             <Show when={snapshot().files.length} fallback={<p class="empty">No changed files.</p>}>
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
-                  <li><code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.path}</li>
+                  <li><code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}</li>
                 )}</For>
               </ul>
             </Show>

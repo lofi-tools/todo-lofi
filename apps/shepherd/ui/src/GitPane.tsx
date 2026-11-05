@@ -54,12 +54,12 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
                   <li>
-                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.path}
+                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code> {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
                     <div class="terminal-pane__bar">
-                      <Show when={file.worktree.trim()}>
+                      <Show when={file.actionable && file.worktree.trim()}>
                         <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: file.path })}>Stage</button>
                       </Show>
-                      <Show when={file.index.trim() && file.index !== '?'}>
+                      <Show when={file.actionable && file.index.trim() && file.index !== '?'}>
                         <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'unstage', path: file.path })}>Unstage</button>
                       </Show>
                     </div>
