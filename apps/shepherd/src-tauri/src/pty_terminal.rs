@@ -16,6 +16,8 @@ use shepherd_core::terminal::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+const MAX_WRITE_BYTES: usize = 64 * 1024;
+
 struct WriteRequest {
     bytes: Vec<u8>,
     completion: Option<oneshot::Sender<Result<(), TerminalError>>>,
@@ -82,6 +84,11 @@ impl PtyTerminals {
         terminal_id: &TerminalId,
         request: WriteRequest,
     ) -> Result<(), TerminalError> {
+        if request.bytes.len() > MAX_WRITE_BYTES {
+            return Err(TerminalError::Backend(format!(
+                "terminal input exceeds {MAX_WRITE_BYTES} bytes per request"
+            )));
+        }
         let sessions = self.sessions()?;
         let session = sessions
             .get(terminal_id.as_str())

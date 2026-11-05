@@ -695,12 +695,13 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function write(data: string | number[]) {
-    if (!data) return
+  function queueInput(send: () => Promise<void>) {
     setError(null)
-    inputWrites = inputWrites
-      .then(() => bridge.terminalWrite(props.terminalId, data))
-      .catch((failure) => { setError(describe(failure)) })
+    inputWrites = inputWrites.then(send).catch((failure) => { setError(describe(failure)) })
+  }
+
+  function write(data: string | number[]) {
+    if (data.length) queueInput(() => bridge.terminalWrite(props.terminalId, data))
   }
 
   function resetSearch() {
@@ -794,11 +795,16 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const text = event.clipboardData?.getData('text/plain')
     if (!text) return
     event.preventDefault()
-    if ((frame?.modes ?? 0) & BRACKETED_PASTE) {
-      write(`\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}\x1b[201~`)
-    } else {
-      write(text.replace(/\r?\n/g, '\r'))
-    }
+    const paste = (frame?.modes ?? 0) & BRACKETED_PASTE
+      ? `\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}\x1b[201~`
+      : text.replace(/\r?\n/g, '\r')
+    const bytes = new TextEncoder().encode(paste)
+    queueInput(async () => {
+      const chunkSize = 16 * 1024
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)))
+      }
+    })
   }
 
   onMount(() => {
