@@ -6,6 +6,7 @@
 
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
+import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
@@ -23,6 +24,7 @@ const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiti
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
+  const [homeDirectory, setHomeDirectory] = createSignal<string>()
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
@@ -33,9 +35,15 @@ export function App() {
   const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
   const showsArchived = (projectId: string | null) =>
     (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
+  const settingsProject = () => projects().find((project) => project.id === projectSettingsRequest()?.id)
   const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
+
+  function setProjectArchived(projectId: string, visible: boolean) {
+    setArchiveVisibility((previous) => new Map(previous).set(projectId, visible))
+  }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTab, setInspectorTab] = createSignal('terminals')
   const [terminalAttention, setTerminalAttention] = createSignal<TerminalBell[]>([])
@@ -142,6 +150,7 @@ export function App() {
   }
 
   onMount(() => {
+    void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void run(async () => {
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
@@ -340,6 +349,7 @@ export function App() {
                 <li>
                   <ProjectRow
                     project={project}
+                    homeDirectory={homeDirectory()}
                     selected={project.id === selectedProjectId()}
                     pending={pending()}
                     showArchived={showsArchived(project.id)}
@@ -353,7 +363,11 @@ export function App() {
                       if (open) setProjectMenuId(project.id)
                       else if (projectMenuId() === project.id) setProjectMenuId(undefined)
                     }}
-                    onToggleArchived={() => setArchiveVisibility((previous) => new Map(previous).set(project.id, !showsArchived(project.id)))}
+                    onToggleArchived={() => setProjectArchived(project.id, !showsArchived(project.id))}
+                    onProjectSettings={() => {
+                      setProjectSettingsRequest({ id: project.id })
+                      setSettingsOpen(true)
+                    }}
                   />
                   <Show when={project.missing}>
                     <p class="project__missing">path is missing</p>
@@ -398,7 +412,10 @@ export function App() {
               type="button"
               class="nav-item sidebar__settings"
               aria-pressed={settingsOpen()}
-              onClick={() => setSettingsOpen((open) => !open)}
+              onClick={() => {
+                setProjectSettingsRequest(undefined)
+                setSettingsOpen((open) => !open)
+              }}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="4" />
@@ -416,6 +433,10 @@ export function App() {
             onAddProject={openPicker}
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
+            project={settingsProject()}
+            projectSettingsRequest={projectSettingsRequest()}
+            showProjectArchived={showsArchived(projectSettingsRequest()?.id ?? null)}
+            onShowProjectArchived={setProjectArchived}
           />
         </Show>
 

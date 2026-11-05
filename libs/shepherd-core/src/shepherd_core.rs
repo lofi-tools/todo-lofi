@@ -1560,7 +1560,7 @@ impl Core {
             })
     }
 
-    fn project_path(&self, project_id: &ProjectId) -> Result<PathBuf, CoreError> {
+    pub fn project_path(&self, project_id: &ProjectId) -> Result<PathBuf, CoreError> {
         self.projects
             .get(project_id)
             .map(|project| project.path.clone())

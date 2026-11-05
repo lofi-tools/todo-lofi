@@ -213,8 +213,14 @@ test.beforeEach(async ({ page }) => {
       },
       invoke: async (command, args) => {
         switch (command) {
+          case 'plugin:path|resolve_directory':
+            return '/tmp/home/'
           case 'project_list':
             return { projects: [...projects] }
+          case 'project_remote':
+            return args.projectId === 'project-alpha'
+              ? { label: 'demo/alpha-a-repository-with-a-long-name-that-still-fits-on-one-line', forge: 'gitlab' }
+              : { label: 'example/demo', forge: 'github' }
           case 'project_scan':
             return scan
           case 'local_codex_available':
@@ -411,7 +417,18 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
 
   await page.getByRole('treeitem', { name: /alpha/ }).click()
   await expect(picker).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'alpha', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'alpha', exact: true }).hover()
+  const card = page.getByRole('menu', { name: 'alpha' })
+  await expect(card.getByText('~/src/alpha', { exact: true })).toBeVisible()
+  await expect(card.locator('.project-menu__location svg')).toBeVisible()
+  const remote = card.getByText(/^demo\/alpha-a-repository/)
+  await expect(remote).toHaveCSS('white-space', 'nowrap')
+  expect(await remote.evaluate((label) => label.scrollWidth)).toBeLessThanOrEqual(await remote.evaluate((label) => label.clientWidth))
+  expect((await card.boundingBox())?.width).toBeGreaterThan(260)
+  const iconBounds = await card.getByRole('img', { name: 'GitLab' }).boundingBox()
+  const remoteBounds = await remote.boundingBox()
+  if (!iconBounds || !remoteBounds) throw new Error('The remote icon and label should be visible')
+  expect(iconBounds.y + iconBounds.height / 2).toBeCloseTo(remoteBounds.y + remoteBounds.height / 2, 0)
 })
 
 test('shows project icons, opens archive controls on hover, and composes in another project', async ({ page }) => {
@@ -423,15 +440,46 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(directory.locator('.project-icon__git')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
   await repository.hover()
+  const card = page.getByRole('menu', { name: 'demo' })
+  await expect(card).toBeVisible()
+  await expect(card.getByText('/tmp/demo', { exact: true })).toBeVisible()
+  await expect(card.getByText('example/demo')).toBeVisible()
+  await expect(card.getByRole('img', { name: 'GitHub' })).toBeVisible()
+  const rowBounds = await repository.locator('..').boundingBox()
+  const cardBounds = await card.boundingBox()
+  if (!rowBounds || !cardBounds) throw new Error('The project row and context card should be visible')
+  expect(cardBounds.x - (rowBounds.x + rowBounds.width)).toBeCloseTo(4, 0)
+  expect(cardBounds.y).toBeCloseTo(rowBounds.y, 0)
+  await page.mouse.move(cardBounds.x + 12, rowBounds.y + rowBounds.height / 2, { steps: 20 })
+  await expect(card).toBeVisible()
   const archive = page.getByRole('menuitemcheckbox', { name: 'Show archived' })
   await expect(archive).toHaveAttribute('aria-checked', 'false')
-  await archive.click()
+  await archive.locator('.project-menu__switch').click()
+  await expect(archive).toHaveAttribute('aria-checked', 'true')
+  await expect(card).toBeVisible()
   await expect(page.getByRole('button', { name: /Old chat/ })).toBeVisible()
 
   await directory.click()
   await expect(page.getByText('No tasks yet.')).toHaveCount(0)
   await expect(page.locator('.tasks')).toHaveCount(0)
   await repository.click()
+
+  await page.getByRole('button', { name: 'Project menu for notes' }).press('ArrowDown')
+  await expect(archive).toBeFocused()
+  await archive.press('ArrowDown')
+  const projectSettings = page.getByRole('menuitem', { name: 'Project settings' })
+  await expect(projectSettings).toBeFocused()
+  await projectSettings.press('Enter')
+  const settings = page.getByRole('region', { name: 'Settings', exact: true })
+  await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
+  await expect(settings.getByText('/tmp/notes')).toBeVisible()
+  await expect(settings.getByLabel('Show archived tasks')).not.toBeChecked()
+  await expect(repository).toHaveAttribute('aria-current', 'true')
+  await settings.getByRole('button', { name: 'Workspace' }).click()
+  await directory.hover()
+  await projectSettings.click()
+  await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
+
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()

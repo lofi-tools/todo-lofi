@@ -1,4 +1,6 @@
-import { For, Show, createSignal, type JSX } from 'solid-js'
+import { For, Show, createEffect, createSignal, on, type JSX } from 'solid-js'
+
+import type { ProjectSnapshot } from './bridge'
 
 const categories = ['Workspace', 'Projects'] as const
 
@@ -8,10 +10,17 @@ interface SettingsPaneProps {
   onAddProject: () => void
   pending: boolean
   projectImports: JSX.Element
+  project?: ProjectSnapshot
+  projectSettingsRequest?: { id: string }
+  showProjectArchived: boolean
+  onShowProjectArchived: (projectId: string, visible: boolean) => void
 }
 
 export function SettingsPane(props: SettingsPaneProps) {
   const [category, setCategory] = createSignal<(typeof categories)[number]>('Workspace')
+  createEffect(on(() => props.projectSettingsRequest, (request) => {
+    if (request) setCategory('Projects')
+  }))
 
   return (
     <section class="settings" aria-labelledby="settings-title">
@@ -46,6 +55,23 @@ export function SettingsPane(props: SettingsPaneProps) {
             </label>
           </Show>
           <Show when={category() === 'Projects'}>
+            <Show when={props.project}>
+              {(project) => (
+                <div class="settings__project">
+                  <h4>Project settings</h4>
+                  <p>{project().name}</p>
+                  <p class="empty settings__project-path">{project().path}</p>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={props.showProjectArchived}
+                      onChange={(event) => props.onShowProjectArchived(project().id, event.currentTarget.checked)}
+                    />
+                    Show archived tasks
+                  </label>
+                </div>
+              )}
+            </Show>
             <button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button>
             <p class="empty">Import all from</p>
             {props.projectImports}

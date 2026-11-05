@@ -67,6 +67,17 @@ pub enum GitError {
 pub struct GitService;
 
 impl GitService {
+    pub fn primary_remote(path: &Path) -> Result<Option<String>, GitError> {
+        let names = run_git(path, &["remote"])?;
+        let mut remotes = names.lines();
+        let name = remotes
+            .clone()
+            .find(|name| *name == "origin")
+            .or_else(|| remotes.next());
+        name.map(|name| run_git(path, &["remote", "get-url", "--", name]))
+            .transpose()
+    }
+
     /// Resolve the repository root, absolute Git directory and current branch.
     pub fn discover(path: &Path) -> Result<GitRepository, GitError> {
         let root = run_git(path, &["rev-parse", "--show-toplevel"])?;

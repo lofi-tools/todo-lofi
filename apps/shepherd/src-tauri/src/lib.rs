@@ -69,6 +69,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::resume_task,
             bridge::commands::quit,
             bridge::commands::project_list,
+            bridge::commands::project_remote,
             bridge::commands::project_scan,
             bridge::commands::local_codex_available,
             bridge::commands::local_codex_projects,

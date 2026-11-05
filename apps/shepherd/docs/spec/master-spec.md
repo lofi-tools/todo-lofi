@@ -125,8 +125,12 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 - The sidebar shows a flat list of tasks for the selected project. A project
   with no visible tasks has an empty list. Each project row has a folder icon
   with a branch badge for Git working trees. Its compose button opens a draft
-  in that project. Hovering over a project highlights the row and opens its
-  context menu, where **Show archived** includes that project's `done` tasks.
+  in that project. Hovering over a project highlights the row and opens a
+  context card directly to its right. The row's three-dot button opens the same
+  menu. The card shows the folder path with the home directory abbreviated as
+  `~/`. It also shows the Git remote when available. The **Show archived**
+  switch includes that project's `done` tasks.
+  **Project settings** opens settings for that project.
   Task rows show state and attention using icons and badges for working
   (spinner), waiting (ring and dot), review (badge), failed (cross), interrupted
   (pause), draft (outline), ready (dim).

@@ -39,6 +39,11 @@ export interface ProjectList {
   projects: ProjectSnapshot[]
 }
 
+export interface ProjectRemote {
+  label: string
+  forge: 'github' | 'gitlab' | null
+}
+
 /** One row in the project picker: a repository, a directory leading to one, or
  * a synthetic group holding the entries a level could not show. A group has an
  * empty path. */
@@ -258,6 +263,10 @@ export function quit(force: boolean): Promise<QuitSummary> {
 
 export function projectList(): Promise<ProjectList> {
   return invoke<ProjectList>('project_list')
+}
+
+export function projectRemote(projectId: string): Promise<ProjectRemote | null> {
+  return invoke('project_remote', { projectId })
 }
 
 export function scanProjects(rescan: boolean): Promise<ProjectScan> {

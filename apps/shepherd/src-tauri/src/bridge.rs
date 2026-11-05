@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use agent_harness::Decision;
 use serde::{Deserialize, Serialize};
+use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
@@ -55,6 +56,57 @@ impl BridgeError {
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
         Self::new("core", error.to_string())
+    }
+}
+
+#[derive(Serialize)]
+pub struct ProjectRemote {
+    label: String,
+    forge: Option<RemoteForge>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RemoteForge {
+    GitHub,
+    GitLab,
+}
+
+impl ProjectRemote {
+    fn from_url(remote: &str) -> Self {
+        let (host, label) = if let Ok(url) = tauri::Url::parse(remote)
+            && let Some(host) = url.host_str()
+        {
+            let authority = url
+                .port()
+                .map_or_else(|| host.to_string(), |port| format!("{host}:{port}"));
+            (Some(host.to_string()), format!("{authority}{}", url.path()))
+        } else if let Some((authority, path)) = remote.split_once(':')
+            && !authority.contains(['/', '\\'])
+            && !path.starts_with("//")
+        {
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            (Some(host.to_ascii_lowercase()), format!("{host}/{path}"))
+        } else {
+            (None, remote.to_string())
+        };
+        let forge = match host.as_deref() {
+            Some("github.com" | "ssh.github.com") => Some(RemoteForge::GitHub),
+            Some("gitlab.com" | "altssh.gitlab.com") => Some(RemoteForge::GitLab),
+            _ => None,
+        };
+        let label = label.split(['?', '#']).next().unwrap_or_default();
+        let label = if forge.is_some() {
+            label
+                .split_once('/')
+                .map_or(label, |(_, path)| path.trim_end_matches('/'))
+        } else {
+            label
+        };
+        Self {
+            label: label.strip_suffix(".git").unwrap_or(label).to_string(),
+            forge,
+        }
     }
 }
 
@@ -321,6 +373,24 @@ impl ShellState {
 
     pub async fn project_list(&self) -> ProjectList {
         self.core.lock().await.project_list()
+    }
+
+    pub async fn project_remote(
+        &self,
+        project_id: String,
+    ) -> Result<Option<ProjectRemote>, BridgeError> {
+        let path = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        tokio::task::spawn_blocking(move || {
+            GitService::primary_remote(&path)
+                .map(|remote| remote.as_deref().map(ProjectRemote::from_url))
+        })
+        .await
+        .map_err(|error| BridgeError::new("git", error.to_string()))?
+        .map_err(|error| BridgeError::new("git", error.to_string()))
     }
 
     /// The cached home-directory scan. `rescan` walks the tree again; otherwise
@@ -891,6 +961,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn project_remote(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Option<ProjectRemote>, BridgeError> {
+        state.inner().project_remote(project_id).await
+    }
+
+    #[tauri::command]
     pub async fn project_scan(
         state: State<'_, ShellState>,
         rescan: bool,
@@ -1244,6 +1322,45 @@ mod tests {
 
     fn state_with(core: Core) -> ShellState {
         ShellState::new(core)
+    }
+
+    #[tokio::test]
+    async fn project_remote_uses_origin_and_hides_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        );
+        let state = state_with(core);
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project_id = &projects.projects.first().ok_or("project not added")?.id;
+        assert!(state.project_remote(project_id.clone()).await?.is_none());
+
+        for (name, url) in [
+            ("mirror", "git@GitLab.com:example/mirror.git/"),
+            (
+                "origin",
+                "https://user:secret@github.com/example/project.git?token=secret",
+            ),
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(["remote", "add", name, url])
+                .status()?;
+            assert!(status.success());
+            let remote = serde_json::to_value(state.project_remote(project_id.clone()).await?)?;
+            let expected = if name == "origin" {
+                serde_json::json!({ "label": "example/project", "forge": "github" })
+            } else {
+                serde_json::json!({ "label": "example/mirror", "forge": "gitlab" })
+            };
+            assert_eq!(remote, expected);
+        }
+        Ok(())
     }
 
     #[tokio::test]
