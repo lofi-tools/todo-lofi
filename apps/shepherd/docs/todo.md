@@ -563,6 +563,8 @@ task-scoped, persistent and fast enough.
   Each terminal view limits queued input to 128 operations and 1 MiB of
   payload. Kitty key presses reserve room for their releases. The browser
   fixture stalls a write, checks the limit, and verifies input resumes in order.
+  If a later chunk of a bracketed paste fails, the input queue attempts to
+  end the paste before sending subsequent keys and reports the write error.
 
 ### Proof
 

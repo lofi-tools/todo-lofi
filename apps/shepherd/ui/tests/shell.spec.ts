@@ -401,11 +401,17 @@ test.beforeEach(async ({ context }) => {
             if (new URLSearchParams(window.location.search).has('kitty-terminal')) {
               new DataView(update.buffer).setUint32(14, (31 << 18) | 1025, true)
             }
+            if (options.has('interrupted-terminal-paste')) {
+              new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
+            }
             callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
             return `subscription-${args.terminalId}`
           }
           case 'terminal_write':
             writes.push(args.data)
+            if (options.has('interrupted-terminal-paste') && writes.length === 2) {
+              throw { message: 'The terminal stopped accepting the paste.' }
+            }
             if (options.has('blocked-terminal-write') && writes.length === 1) {
               await new Promise<void>((resolve) => { releaseTerminalWrite = resolve })
             }
@@ -630,6 +636,23 @@ test('bounds stalled terminal input and reserves room for key release', async ({
 
   await input.press('b')
   await expect.poll(async () => (await writes()).slice(-2)).toEqual(['\x1b[98;;98u', '\x1b[98;1:3u'])
+})
+
+test('ends a partial bracketed paste before sending the next key', async ({ page }) => {
+  await page.goto('/?interrupted-terminal-paste')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+
+  await input.evaluate((element) => {
+    const clipboard = new DataTransfer()
+    clipboard.setData('text/plain', 'a'.repeat(32_768))
+    element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+  })
+  await expect(page.getByText('The terminal stopped accepting the paste.')).toBeVisible()
+  await input.press('b')
+  const writes = () => page.evaluate(() => (window as unknown as { __writes: (string | number[])[] }).__writes)
+  await expect.poll(async () => (await writes()).slice(2)).toEqual(['\x1b[201~', 'b'])
+  expect((await writes())[0].slice(0, 6)).toEqual([27, 91, 50, 48, 48, 126])
 })
 
 test('opens Freebuff as a standalone terminal in the conversation pane', async ({ page }) => {

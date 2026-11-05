@@ -506,6 +506,7 @@ const ALT_SCREEN = 1 << 12
 const ALTERNATE_SCROLL = 1 << 15
 const MOUSE_CLICK = 1 << 3
 const BRACKETED_PASTE = 1 << 4
+const BRACKETED_PASTE_END = '\x1b[201~'
 const MOUSE_SGR = 1 << 5
 const MOUSE_MOTION = 1 << 6
 const FOCUS_REPORTING = 1 << 11
@@ -971,8 +972,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       setError('Terminal paste exceeds the 1 MiB input limit.')
       return
     }
-    const paste = (frame?.modes ?? 0) & BRACKETED_PASTE
-      ? `\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}\x1b[201~`
+    const bracketed = Boolean((frame?.modes ?? 0) & BRACKETED_PASTE)
+    const paste = bracketed
+      ? `\x1b[200~${text.replaceAll('\x1b', '').replaceAll('\x9b', '')}${BRACKETED_PASTE_END}`
       : text.replace(/\r?\n/g, '\r')
     const bytes = new TextEncoder().encode(paste)
     if (bytes.length > MAX_PENDING_INPUT_BYTES) {
@@ -981,8 +983,20 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
     queueInput(async () => {
       const chunkSize = 16 * 1024
-      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)), offset === 0)
+      let offset = 0
+      try {
+        for (; offset < bytes.length; offset += chunkSize) {
+          await bridge.terminalWrite(props.terminalId, Array.from(bytes.subarray(offset, offset + chunkSize)), offset === 0)
+        }
+      } catch (failure) {
+        if (bracketed && offset > 0) {
+          try {
+            await bridge.terminalWrite(props.terminalId, BRACKETED_PASTE_END, false)
+          } catch (cleanupFailure) {
+            throw new Error(`${describe(failure)} Could not end the bracketed paste. ${describe(cleanupFailure)}`)
+          }
+        }
+        throw failure
       }
     }, bytes.length)
   }
