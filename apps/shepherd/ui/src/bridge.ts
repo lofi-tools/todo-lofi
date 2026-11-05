@@ -283,18 +283,14 @@ export function closeTerminal(terminalId: string): Promise<void> {
   return invoke<void>('close_terminal', { terminalId })
 }
 
-export function terminalFrame(terminalId: string): Promise<TerminalFrame | null> {
-  return invoke<TerminalFrame | null>('terminal_frame', { terminalId })
-}
-
 export async function subscribeTerminal(
   terminalId: string,
   handler: (frame: TerminalFrame) => void,
-): Promise<Channel<TerminalFrame>> {
+): Promise<() => Promise<void>> {
   const channel = new Channel<TerminalFrame>()
   channel.onmessage = handler
-  await invoke('subscribe_terminal', { terminalId, channel })
-  return channel
+  const subscriptionId = await invoke<string>('subscribe_terminal', { terminalId, channel })
+  return () => invoke<void>('unsubscribe_terminal', { subscriptionId })
 }
 
 /** Subscribe the window to the core's single event stream. */

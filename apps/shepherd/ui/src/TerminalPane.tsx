@@ -137,7 +137,9 @@ export function TerminalPane(props: TerminalPaneProps) {
                   </div>
                 }
               >
-                <TerminalCanvas terminalId={terminal().id} />
+                <Show when={terminal().id} keyed>
+                  {(id) => <TerminalCanvas terminalId={id} />}
+                </Show>
               </Show>
             </div>
           </div>
@@ -270,22 +272,20 @@ function TerminalCanvas(props: { terminalId: string }) {
       context.fillRect(0, 0, canvas?.width ?? 0, canvas?.height ?? 0)
     }
 
-    void bridge
-      .terminalFrame(props.terminalId)
-      .then((initial) => {
-        if (!initial) return
-        frame = initial
-        draw()
-        void applySize()
-      })
-      .catch(() => undefined)
-
-    void bridge
-      .subscribeTerminal(props.terminalId, (next) => {
-        frame = next
-        draw()
-      })
-      .catch(() => undefined)
+    let detached = false
+    let unsubscribe: (() => Promise<void>) | undefined
+    void bridge.subscribeTerminal(props.terminalId, (next) => {
+      if (detached) return
+      frame = next
+      draw()
+    }).then((dispose) => {
+      if (detached) void dispose().catch(console.error)
+      else unsubscribe = dispose
+    }).catch(console.error)
+    onCleanup(() => {
+      detached = true
+      if (unsubscribe) void unsubscribe().catch(console.error)
+    })
 
     const observer = new ResizeObserver(() => void applySize())
     if (container) observer.observe(container)
