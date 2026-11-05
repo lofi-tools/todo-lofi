@@ -191,7 +191,24 @@ os.write(1, b'\r\nS4_' + b'MOUSE_PASS\r\n')
   await waitFor('SGR wheel report in the PTY', () => terminalOutput().includes('S4_MOUSE_PASS'))
 }
 
+function paneWidth(title: string): number {
+  const canvas = terminalPane(title)?.querySelector('canvas')
+  return parseFloat(canvas?.style.width ?? '') || 0
+}
+
+async function ptyColumns(terminalId: string, title: string, marker: string): Promise<number> {
+  await bridge.terminalWrite(terminalId, "printf 'S4_%s:%s\\n' " + marker + ' "$(stty size)"\r')
+  const size = new RegExp('S4_' + marker + ':(\\d+) (\\d+)')
+  const match = await waitFor(marker + ' PTY dimensions', () => {
+    const pane = terminalPane(title)
+    return pane && terminalOutput(pane).match(size)
+  })
+  return Number(match[2])
+}
+
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
+  const initialWidth = paneWidth(title)
+  const initialColumns = await ptyColumns(terminalId, title, 'INITIAL_SIZE')
   const split = await waitFor('split action', () => {
     const entry = button('Split right')
     return entry && !entry.disabled && entry
@@ -200,8 +217,18 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
   const divider = await waitFor('live split divider', () => document.querySelector<HTMLElement>('.terminal-divider'))
   await waitFor('both canvases in the split', () => document.querySelectorAll('.terminal-view__canvas').length === 2)
   await waitFor('split layout save', () => !button('Split right')?.disabled)
+  const splitWidth = await waitFor('narrower PTY frame after split', () => {
+    const width = paneWidth(title)
+    return width > 0 && width < initialWidth && width
+  })
+  const splitColumns = await ptyColumns(terminalId, title, 'SPLIT_SIZE')
   press(divider, 'ArrowRight')
   await waitFor('persisted resize', () => divider.getAttribute('aria-valuenow') === '55')
+  await waitFor('wider PTY frame after resize', () => paneWidth(title) > splitWidth)
+  const resizedColumns = await ptyColumns(terminalId, title, 'RESIZED_SIZE')
+  if (!(splitColumns < resizedColumns && resizedColumns < initialColumns)) {
+    throw new Error('The shell should see the terminal columns change when splitting and resizing')
+  }
 
   await bridge.terminalWrite(terminalId, "printf 'S4_%s:%s\\n' VIEW \"$$\"\r")
   const identity = await waitFor('first PTY identity', () => {
@@ -323,7 +350,7 @@ async function smoke() {
   await exerciseSearch(terminal.id)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project.id, terminal)
-  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  return { ok: true, taskSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
 }
 
 async function restore() {
