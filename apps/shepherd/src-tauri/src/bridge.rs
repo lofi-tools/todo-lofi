@@ -1200,6 +1200,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restarting_a_task_terminal_reuses_its_record_and_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        );
+        let state = state_with(core);
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("project was not added")?;
+        let task = state
+            .create_draft(project.id.clone(), "terminal scope".into())
+            .await?;
+        let task_id = task.task.id;
+        let workspace = state
+            .send_prompt(task_id.clone(), "create a worktree".into())
+            .await?;
+        let worktree = workspace
+            .task
+            .worktree_path
+            .ok_or("worktree was not created")?;
+        let mut saved = TerminalRecord::project_shared(
+            TerminalId::new("task-terminal"),
+            ProjectId::new(project.id.clone()),
+            "Task terminal",
+            PathBuf::from(&worktree),
+            "/bin/sh",
+            1,
+        )
+        .for_task(TaskId::new(task_id.clone()));
+        saved.ended_at = Some(2);
+        saved.exit_code = Some(7);
+        state.core.lock().await.record_terminal(&saved).await?;
+
+        let list = state
+            .restart_terminal(saved.id.as_str().into(), 80, 24)
+            .await?;
+        let [running] = list.as_slice() else {
+            return Err("restart should reuse one terminal record".into());
+        };
+        assert_eq!(running.id, saved.id.as_str());
+        assert_eq!(running.task_id.as_deref(), Some(task_id.as_str()));
+        assert_eq!(running.scope, shepherd_core::terminal::TerminalScope::Task);
+        assert_eq!(running.cwd, worktree);
+        assert_eq!(running.command, saved.command);
+        assert_eq!((running.ended_at, running.exit_code), (None, None));
+        assert!(state.screens.lock().await.contains_key(saved.id.as_str()));
+        state.quit(true).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn load_opens_the_durable_core_and_survives_a_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
