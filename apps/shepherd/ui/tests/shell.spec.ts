@@ -759,6 +759,46 @@ test('keeps a selection while new output leaves the selected scrollback unchange
   expect(await copy()).toBe('')
 })
 
+for (const mac of process.platform === 'darwin' ? [true, false] : [false]) {
+  const shortcut = mac ? 'Meta+c' : 'Control+Shift+c'
+  test(`copies the selected terminal text with ${shortcut}`, async ({ page }) => {
+    if (!mac) {
+      await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+    }
+    await page.goto('/')
+    await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+    const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+    await page.locator('.terminal-view__canvas').dblclick({ position: { x: 2, y: 2 } })
+    await expect(input).toBeFocused()
+
+    await page.evaluate((mac) => {
+      const probe = { text: '', target: '' }
+      Object.assign(window, { __terminalCopy: probe })
+      if (mac) {
+        document.addEventListener('copy', (event) => {
+          if (!event.isTrusted) return
+          probe.target = (event.target as Element).tagName
+          const clipboard = new DataTransfer()
+          Object.defineProperty(event, 'clipboardData', { value: clipboard })
+          window.setTimeout(() => { probe.text = clipboard.getData('text/plain') }, 0)
+        }, { capture: true })
+      } else {
+        Object.defineProperty(navigator.clipboard, 'writeText', {
+          value: async (text: string) => { probe.text = text },
+        })
+      }
+    }, mac)
+    await input.press(shortcut)
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as { __terminalCopy: { text: string; target: string } }).__terminalCopy,
+    )).toEqual({ text: 'BB', target: mac ? 'TEXTAREA' : '' })
+    expect(await page.evaluate(() => window.__writes)).toEqual([])
+
+    await input.press('Control+c')
+    await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x03'])
+  })
+}
+
 test('ends a partial bracketed paste before sending the next key', async ({ page }) => {
   await page.goto('/?interrupted-terminal-paste')
   const input = page.getByRole('textbox', { name: 'Terminal', exact: true })

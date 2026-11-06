@@ -526,6 +526,10 @@ task-scoped, persistent and fast enough.
   checks Ctrl+Backspace and Alt+Shift+Tab in legacy mode.
   A browser regression checks that new output preserves a scrollback selection
   while its visible cells stay in place, and clears it when those cells change.
+  A native macOS probe confirmed that Command+C dispatches a trusted copy
+  event from the focused terminal. Browser regressions intercept the copied
+  text for Command+C and Ctrl+Shift+C, and verify that Ctrl+C still sends an
+  interrupt byte to the PTY.
   Terminal search follows the matched text while output scrolls. The native
   smoke checks the canvas highlight and searches in both directions after a
   100-line PTY burst.
