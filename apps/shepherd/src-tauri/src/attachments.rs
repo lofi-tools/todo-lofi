@@ -1,7 +1,8 @@
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
+use agent_harness::PromptAttachment;
 use sha2::{Digest, Sha256};
 
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 50_000_000;
@@ -86,6 +87,23 @@ pub(crate) fn prompt_file(path: &Path, id: &str) -> io::Result<PathBuf> {
     file.path().canonicalize()
 }
 
+pub(crate) fn resolve_prompt_file(path: &Path, id: &str) -> io::Result<PromptAttachment> {
+    let path = prompt_file(path, id)?;
+    let mut header = Vec::with_capacity(12);
+    fs::File::open(&path)?.take(12).read_to_end(&mut header)?;
+    let image_mime_type = match header.as_slice() {
+        [137, b'P', b'N', b'G', 13, 10, 26, 10, ..] => Some("image/png"),
+        [255, 216, 255, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P'] => Some("image/webp"),
+        _ => None,
+    };
+    Ok(PromptAttachment {
+        path,
+        image_mime_type: image_mime_type.map(str::to_owned),
+    })
+}
+
 pub(crate) fn persist_preview_screenshot(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(invalid("Choose a screenshot up to 50 MB."));
@@ -149,9 +167,24 @@ mod tests {
             Some("Résumé 1.txt")
         );
         assert_eq!(fs::read(&file)?, b"fixture");
+        assert_eq!(resolve_prompt_file(&task, &id)?.image_mime_type, None);
         assert!(prompt_file(&root.path().join("attachments/other-task"), &id).is_err());
         remove_task(&task)?;
         assert!(!file.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_an_image_using_the_cached_bytes() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let task = root.path().join("attachments/task");
+        let image = include_bytes!("../icons/128x128.png");
+        let id = persist_prompt_file(&task, "clipboard.data", image)?;
+        let attachment = resolve_prompt_file(&task, &id)?;
+        assert_eq!(attachment.image_mime_type.as_deref(), Some("image/png"));
+        assert_eq!(fs::read(attachment.path)?, image);
+        let id = persist_prompt_file(&task, "unrelated.png", b"plain text")?;
+        assert_eq!(resolve_prompt_file(&task, &id)?.image_mime_type, None);
         Ok(())
     }
 

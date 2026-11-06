@@ -14,6 +14,7 @@ live-test-support = ["dep:tempfile"]
 acp-client = { path = "../acp-client" }
 tempfile = { version = "3", optional = true }
 async-trait.workspace = true
+base64 = "0.22"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

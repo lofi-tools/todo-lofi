@@ -461,11 +461,7 @@ mod tests {
         ])])
         .await;
 
-        let result = harness
-            .prompt(PromptInput {
-                text: "hi".to_string(),
-            })
-            .await;
+        let result = harness.prompt(PromptInput::text("hi")).await;
         assert!(result.is_ok());
         let events = drain_events(&mut harness);
         assert!(
@@ -493,14 +489,7 @@ mod tests {
         ])])
         .await;
 
-        assert!(
-            harness
-                .prompt(PromptInput {
-                    text: "go".to_string()
-                })
-                .await
-                .is_ok()
-        );
+        assert!(harness.prompt(PromptInput::text("go")).await.is_ok());
         let events = drain_events(&mut harness);
         assert!(
             events
@@ -561,14 +550,7 @@ mod tests {
         ])])
         .await;
 
-        assert!(
-            harness
-                .prompt(PromptInput {
-                    text: "go".to_string()
-                })
-                .await
-                .is_ok()
-        );
+        assert!(harness.prompt(PromptInput::text("go")).await.is_ok());
         drain_events(&mut harness);
         assert!(
             harness
@@ -593,14 +575,7 @@ mod tests {
             "Run tests",
         )])])
         .await;
-        assert!(
-            waiting
-                .prompt(PromptInput {
-                    text: "go".to_string()
-                })
-                .await
-                .is_ok()
-        );
+        assert!(waiting.prompt(PromptInput::text("go")).await.is_ok());
         drain_events(&mut waiting);
         assert!(waiting.cancel().await.is_ok());
         let events = drain_events(&mut waiting);

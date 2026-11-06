@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use agent_harness::Decision;
 use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
+use agent_harness::{Decision, PromptInput};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
@@ -731,7 +731,7 @@ impl ShellState {
     ) -> Result<TaskWorkspace, BridgeError> {
         self.workspace(Command::SendPrompt {
             task_id: TaskId::new(task_id),
-            text,
+            input: PromptInput::text(text),
         })
         .await
     }
@@ -751,9 +751,9 @@ impl ShellState {
                 "Could not locate this task's attachment directory.",
             )
         })?;
-        let paths = tokio::task::spawn_blocking(move || {
+        let attachments = tokio::task::spawn_blocking(move || {
             ids.iter()
-                .map(|id| attachments::prompt_file(&directory, id))
+                .map(|id| attachments::resolve_prompt_file(&directory, id))
                 .collect::<std::io::Result<Vec<_>>>()
         })
         .await
@@ -764,6 +764,10 @@ impl ShellState {
                 format!("Could not read an attached file. {error}"),
             )
         })?;
+        let paths = attachments
+            .iter()
+            .map(|file| &file.path)
+            .collect::<Vec<_>>();
         let references = serde_json::to_string_pretty(&paths).map_err(|error| {
             BridgeError::new(
                 "attachments",
@@ -775,8 +779,14 @@ impl ShellState {
         } else {
             text.trim_end()
         };
-        self.send_prompt(task_id, format!("{text}\n\nAttached files\n{references}"))
-            .await
+        self.workspace(Command::SendPrompt {
+            task_id: TaskId::new(task_id),
+            input: PromptInput {
+                text: format!("{text}\n\nAttached files\n{references}"),
+                attachments,
+            },
+        })
+        .await
     }
 
     pub async fn resolve_approval(

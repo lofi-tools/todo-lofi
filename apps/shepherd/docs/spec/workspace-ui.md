@@ -207,8 +207,9 @@ current layout and give future changes a point of comparison.
   and disabled until their integrations are ready.
 - **Attach files** opens a local file chooser. Show removable filename chips
   inside the composer while files are queued. Files up to 50 MB each are
-  copied into the selected task's attachment cache on Send. The prompt
-  includes those paths and can be sent with files alone.
+  copied into the selected task's attachment cache on Send. The prompt can be
+  sent with files alone. It includes the paths in the transcript and passes
+  supported images to the agent as image input.
 - The safety picker shows a small shield containing `>_`, the current value
   **Ask me**, and a down caret immediately after the text. Reserve a 128 px
   slot wide enough for **Approve for me** so changes to the value leave sibling

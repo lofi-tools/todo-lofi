@@ -407,11 +407,7 @@ done
         harness.start(spec).await?;
         let session = harness.open_session(None).await?;
         assert_eq!(session.as_str(), "thr_test");
-        harness
-            .prompt(PromptInput {
-                text: "fixture prompt".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("fixture prompt")).await?;
         let mut answer = String::new();
         loop {
             let event = tokio::time::timeout(Duration::from_secs(5), harness.events().recv())

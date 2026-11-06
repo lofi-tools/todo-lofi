@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_harness::{Decision, FailureKind, HarnessEvent, SessionId, Transcript, TurnFinishReason};
+use agent_harness::{
+    Decision, FailureKind, HarnessEvent, PromptInput, SessionId, Transcript, TurnFinishReason,
+};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary, ReviewAction};
@@ -611,7 +613,7 @@ impl Core {
                 self.set_draft_agent(&task_id, agent).await
             }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
-            Command::SendPrompt { task_id, text } => self.send_prompt(&task_id, text).await,
+            Command::SendPrompt { task_id, input } => self.send_prompt(&task_id, input).await,
             Command::ResolveApproval {
                 task_id,
                 approval_id,
@@ -1200,16 +1202,16 @@ impl Core {
                 paths.join("\n")
             )
         };
-        self.send_prompt(task_id, prompt).await
+        self.send_prompt(task_id, PromptInput::text(prompt)).await
     }
 
     async fn send_prompt(
         &mut self,
         task_id: &TaskId,
-        text: String,
+        mut input: PromptInput,
     ) -> Result<CommandResult, CoreError> {
-        let text = text.trim().to_string();
-        if text.is_empty() {
+        input.text = input.text.trim().to_owned();
+        if input.text.is_empty() {
             return Err(CoreError::EmptyPrompt);
         }
 
@@ -1268,7 +1270,7 @@ impl Core {
                     .ok_or_else(|| CoreError::SessionMissing {
                         id: task_id.as_str().to_string(),
                     })?;
-            session.prompt(text).await
+            session.prompt(input).await
         };
         let events = match outcome {
             Ok(events) => events,
@@ -2124,7 +2126,7 @@ mod live_exit {
     use std::time::Duration;
 
     use agent_harness::live_codex::LiveCodexRun;
-    use agent_harness::{AgentHarness, SpawnSpec};
+    use agent_harness::{AgentHarness, PromptInput, SpawnSpec};
 
     use crate::harness::HarnessFactory;
     use crate::store::TursoStore;
@@ -2190,7 +2192,7 @@ mod live_exit {
         let task_id = TaskId::new(draft.task.id.clone());
         core.execute(Command::SendPrompt {
             task_id: task_id.clone(),
-            text: "Run the shell command `sleep 30` in the repository and wait for it to finish, then say done.".to_string(),
+            input: PromptInput::text("Run the shell command `sleep 30` in the repository and wait for it to finish, then say done."),
         })
         .await?;
 
@@ -2220,7 +2222,10 @@ mod live_exit {
         let workspace = failed.ok_or("the killed process must fail the task")?;
 
         let error = workspace.task.error.clone().unwrap_or_default();
-        assert!(error.contains("before the turn finished"), "task error: {error}");
+        assert!(
+            error.contains("before the turn finished"),
+            "task error: {error}"
+        );
         let rows: Vec<String> = workspace
             .transcript
             .iter()
@@ -2250,7 +2255,7 @@ mod live_restart {
     use std::time::Duration;
 
     use agent_harness::live_codex::LiveCodexRun;
-    use agent_harness::{AgentHarness, SpawnSpec};
+    use agent_harness::{AgentHarness, PromptInput, SpawnSpec};
 
     use crate::harness::HarnessFactory;
     use crate::store::{Store as _, TursoStore};
@@ -2314,7 +2319,7 @@ mod live_restart {
         let task_id = TaskId::new(draft.task.id.clone());
         core.execute(Command::SendPrompt {
             task_id: task_id.clone(),
-            text: "Run the shell command `sleep 30` in the repository, wait for it to finish, then say done.".to_string(),
+            input: PromptInput::text("Run the shell command `sleep 30` in the repository, wait for it to finish, then say done."),
         })
         .await?;
 
@@ -2371,7 +2376,7 @@ mod live_restart {
         restarted
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "Reply with the single word: resumed.".to_string(),
+                input: PromptInput::text("Reply with the single word: resumed."),
             })
             .await?;
 
@@ -2405,8 +2410,9 @@ mod streaming {
     use std::sync::Mutex;
 
     use agent_harness::{
-        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, Entry, HarnessEvent, HarnessResult,
-        ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec, TurnFinishReason,
+        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, Entry, HarnessEvent,
+        HarnessResult, ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec,
+        TurnFinishReason,
     };
     use async_trait::async_trait;
     use tokio::sync::mpsc;
@@ -2610,7 +2616,7 @@ mod streaming {
         let CommandResult::TaskWorkspace(workspace) = core
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?
         else {
@@ -2652,7 +2658,7 @@ mod streaming {
 
         core.execute(Command::SendPrompt {
             task_id: task_id.clone(),
-            text: "Cancel this turn".to_owned(),
+            input: PromptInput::text("Cancel this turn"),
         })
         .await?;
         let CommandResult::TaskWorkspace(cancelling) = core
@@ -2668,7 +2674,7 @@ mod streaming {
         assert!(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "Too soon".to_owned(),
+                input: PromptInput::text("Too soon"),
             })
             .await
             .is_err()
@@ -2685,7 +2691,7 @@ mod streaming {
 
         core.execute(Command::SendPrompt {
             task_id: task_id.clone(),
-            text: "Cancel before the process exits".to_owned(),
+            input: PromptInput::text("Cancel before the process exits"),
         })
         .await?;
         core.execute(Command::CancelTask {
@@ -3008,7 +3014,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: "go".to_string(),
+                    input: PromptInput::text("go"),
                 })
                 .await?,
         );
@@ -3072,7 +3078,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: "fix it".to_string(),
+                    input: PromptInput::text("fix it"),
                 })
                 .await?,
         );
@@ -3125,7 +3131,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: "go again".to_string(),
+                    input: PromptInput::text("go again"),
                 })
                 .await?,
         );
@@ -3200,7 +3206,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: "continue".to_string(),
+                    input: PromptInput::text("continue"),
                 })
                 .await?,
         );
@@ -3238,7 +3244,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?,
         );
@@ -3289,7 +3295,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?,
         );
@@ -3316,7 +3322,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "try again".to_string(),
+                input: PromptInput::text("try again"),
             })
             .await?,
         );
@@ -3357,7 +3363,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: TaskId::new(draft.task.id),
-                text: "Try an edit and restore it".into(),
+                input: PromptInput::text("Try an edit and restore it"),
             })
             .await?,
         );
@@ -3401,7 +3407,7 @@ mod tests {
             let workspace = workspace_of(
                 core.execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: text.into(),
+                    input: PromptInput::text(text),
                 })
                 .await?,
             );
@@ -3440,7 +3446,7 @@ mod tests {
         let waiting = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "Edit the readme".into(),
+                input: PromptInput::text("Edit the readme"),
             })
             .await?,
         );
@@ -3509,7 +3515,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id,
-                text: "write it".to_string(),
+                input: PromptInput::text("write it"),
             })
             .await?,
         );
@@ -3565,7 +3571,7 @@ mod tests {
         let review = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "Edit the readme and leave notes".into(),
+                input: PromptInput::text("Edit the readme and leave notes"),
             })
             .await?,
         );
@@ -3692,7 +3698,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
-                    text: "start".to_string(),
+                    input: PromptInput::text("start"),
                 })
                 .await?,
         );
@@ -4056,7 +4062,7 @@ mod tests {
         scenario
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?;
         scenario.execute(Command::Quit { force: true }).await?;
@@ -4129,7 +4135,7 @@ mod tests {
         scenario
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?;
         scenario.execute(Command::Quit { force: true }).await?;
@@ -4177,7 +4183,7 @@ mod tests {
         let result = core
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".into(),
+                input: PromptInput::text("go"),
             })
             .await;
         assert!(matches!(result, Err(CoreError::HarnessMissing { .. })));
@@ -4223,7 +4229,7 @@ mod tests {
         let result = scenario
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await;
         assert!(matches!(
@@ -4269,7 +4275,7 @@ mod tests {
         let result = scenario
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await;
         assert!(matches!(result, Err(CoreError::Harness(_))));
@@ -4324,7 +4330,7 @@ mod tests {
             scenario
                 .execute(Command::SendPrompt {
                     task_id,
-                    text: "go".to_string(),
+                    input: PromptInput::text("go"),
                 })
                 .await?,
         );
@@ -4369,7 +4375,7 @@ mod tests {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
                 task_id: TaskId::new(draft.task.id.clone()),
-                text: "go".to_string(),
+                input: PromptInput::text("go"),
             })
             .await?,
         );

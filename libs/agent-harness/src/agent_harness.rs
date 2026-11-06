@@ -363,10 +363,36 @@ impl Capabilities {
     }
 }
 
-/// One user prompt. Attachments and resource links are added by later slices.
 #[derive(Clone, Debug, Default)]
 pub struct PromptInput {
     pub text: String,
+    pub attachments: Vec<PromptAttachment>,
+}
+
+impl PromptInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptAttachment {
+    pub path: PathBuf,
+    pub image_mime_type: Option<String>,
+}
+
+impl PromptAttachment {
+    fn file_uri(&self) -> HarnessResult<reqwest::Url> {
+        reqwest::Url::from_file_path(&self.path).map_err(|()| {
+            HarnessError::Protocol(format!(
+                "could not make an attachment URI for {}",
+                self.path.display()
+            ))
+        })
+    }
 }
 
 /// A user or policy decision on an approval request.

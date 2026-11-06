@@ -18,6 +18,7 @@ use acp_client::{
     SessionRoots, ToolPermissions,
 };
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
@@ -83,6 +84,8 @@ impl AcpHarness {
             agent_terminals: self.terminals.is_some(),
             usage: true,
             patches_in_approvals: true,
+            images: info.prompt_images,
+            resource_links: true,
             ..Capabilities::default()
         };
         self.cwd = cwd;
@@ -255,7 +258,40 @@ impl AgentHarness for AcpHarness {
     }
 
     async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
-        self.control(Control::Prompt(input.text)).await
+        let info = &self
+            .connection
+            .as_ref()
+            .ok_or(HarnessError::NotStarted)?
+            .info;
+        let mut content = vec![ContentBlock::Text(schema::TextContent::new(input.text))];
+        for attachment in input.attachments {
+            if let Some(mime_type) = attachment
+                .image_mime_type
+                .as_ref()
+                .filter(|_| info.prompt_images)
+            {
+                let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
+                    protocol(format!(
+                        "could not read image {}: {error}",
+                        attachment.path.display()
+                    ))
+                })?;
+                content.push(ContentBlock::Image(schema::ImageContent::new(
+                    STANDARD.encode(bytes),
+                    mime_type,
+                )));
+            } else {
+                let name = attachment
+                    .path
+                    .file_name()
+                    .ok_or_else(|| protocol("an attachment is missing its file name"))?;
+                content.push(ContentBlock::ResourceLink(schema::ResourceLink::new(
+                    name.to_string_lossy(),
+                    attachment.file_uri()?.to_string(),
+                )));
+            }
+        }
+        self.control(Control::Prompt(content)).await
     }
 
     async fn cancel(&mut self) -> HarnessResult<()> {
@@ -330,7 +366,7 @@ fn publish(sender: &mpsc::UnboundedSender<HarnessEvent>, event: HarnessEvent) ->
 }
 
 enum Control {
-    Prompt(String),
+    Prompt(Vec<ContentBlock>),
     Cancel,
     Respond(ApprovalId, Decision),
     ResetSessionApproval(String),
@@ -502,13 +538,13 @@ async fn drive_session(
                 let result = match command {
                     Control::Prompt(_) if prompt.is_some() => Err(protocol("ACP turn is already running")),
                     Control::Prompt(_) if disconnect_deadline.is_some() => Err(protocol("the ACP connection is closing")),
-                    Control::Prompt(text) => {
+                    Control::Prompt(content) => {
                         updates = Updates::default();
                         publish(&sender, HarnessEvent::TurnStarted { turn_id: TurnId::new(uuid::Uuid::new_v4().to_string()) })?;
                         prompt = Some(Box::pin({
                             let requester = requester.clone();
                             let session = session.clone();
-                            async move { requester.prompt(&session, text).await }
+                            async move { requester.prompt_content(&session, content).await }
                         }));
                         Ok(())
                     }
@@ -1121,6 +1157,76 @@ mod tests {
         Ok((harness, capabilities, observed))
     }
 
+    #[tokio::test]
+    async fn sends_image_bytes_only_when_acp_advertises_image_support()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let image_path = directory.path().join("a screenshot.png");
+        let file_path = directory.path().join("notes.txt");
+        let bytes = b"fixture image bytes";
+        std::fs::write(&image_path, bytes)?;
+        for prompt_images in [true, false] {
+            let (mut harness, capabilities, observed) = fake(FakeScript {
+                prompt_images,
+                ..FakeScript::default()
+            })
+            .await?;
+            assert_eq!(capabilities.images, prompt_images);
+            assert!(capabilities.resource_links);
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput {
+                    text: "Review these attachments.".into(),
+                    attachments: vec![
+                        crate::PromptAttachment {
+                            path: image_path.clone(),
+                            image_mime_type: Some("image/png".into()),
+                        },
+                        crate::PromptAttachment {
+                            path: file_path.clone(),
+                            image_mime_type: None,
+                        },
+                    ],
+                })
+                .await?;
+            timeout(Duration::from_secs(5), async {
+                while let Some(event) = harness.events().recv().await {
+                    if matches!(event, HarnessEvent::TurnFinished { .. }) {
+                        return Ok(());
+                    }
+                }
+                Err(HarnessError::ChannelClosed)
+            })
+            .await??;
+            let observed = observed.lock().map_err(|_| "poisoned ACP observations")?;
+            let [content] = observed.prompt_content.as_slice() else {
+                return Err("expected one prompt".into());
+            };
+            let [
+                ContentBlock::Text(text),
+                image,
+                ContentBlock::ResourceLink(file),
+            ] = content.as_slice()
+            else {
+                return Err("expected a text block and two attachments".into());
+            };
+            assert_eq!(text.text, "Review these attachments.");
+            assert_eq!(file.name, "notes.txt");
+            match image {
+                ContentBlock::Image(image) if prompt_images => {
+                    assert_eq!(image.mime_type, "image/png");
+                    assert_eq!(STANDARD.decode(&image.data)?, bytes);
+                }
+                ContentBlock::ResourceLink(link) if !prompt_images => {
+                    assert_eq!(link.name, "a screenshot.png");
+                    assert!(link.uri.ends_with("/a%20screenshot.png"));
+                }
+                _ => return Err("unexpected ACP image content".into()),
+            }
+        }
+        Ok(())
+    }
+
     async fn configured_claude_session(
         settings: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1244,7 +1350,7 @@ done
                 })
                 .await?;
             harness.open_session(None).await?;
-            harness.prompt(PromptInput { text: "go".into() }).await?;
+            harness.prompt(PromptInput::text("go")).await?;
             let outcome = timeout(Duration::from_secs(5), async {
                 while let Some(event) = harness.events().recv().await {
                     if matches!(
@@ -1335,11 +1441,7 @@ done
         let mut harness = AcpHarness::default();
         harness.attach(connection, cwd, "fake-acp".into());
         harness.open_session(None).await?;
-        harness
-            .prompt(PromptInput {
-                text: "run a terminal".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("run a terminal")).await?;
         let mut terminal = None;
         let mut exited = false;
         let mut removed = false;
@@ -1437,11 +1539,7 @@ done
                     .read_only
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            harness
-                .prompt(PromptInput {
-                    text: prompt.into(),
-                })
-                .await?;
+            harness.prompt(PromptInput::text(prompt)).await?;
             let mut automatic = false;
             let mut saved_decision = None;
             let mut save_error = false;
@@ -1548,11 +1646,7 @@ done
             ["you: earlier question", "agent: earlier answer"]
         );
 
-        harness
-            .prompt(PromptInput {
-                text: "continue".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("continue")).await?;
         let approval = loop {
             let event = next(&mut harness).await?;
             transcript.apply(&event);
@@ -1620,11 +1714,7 @@ done
         };
         let (mut harness, _, observed) = fake(script).await?;
         harness.open_session(None).await?;
-        harness
-            .prompt(PromptInput {
-                text: "first".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("first")).await?;
         let mut transcript = Transcript::default();
         let request = loop {
             let event = next(&mut harness).await?;
@@ -1658,11 +1748,7 @@ done
             }
         }
 
-        harness
-            .prompt(PromptInput {
-                text: "second".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("second")).await?;
         loop {
             let event = next(&mut harness).await?;
             transcript.apply(&event);
@@ -1685,11 +1771,7 @@ done
         harness.reset_session_approval(&grant_id).await?;
         harness.reset_session_approval(&grant_id).await?;
         assert!(harness.session_approvals().is_empty());
-        harness
-            .prompt(PromptInput {
-                text: "after reset".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("after reset")).await?;
         let request = loop {
             match next(&mut harness).await? {
                 HarnessEvent::ApprovalRequested { request } => break request,
@@ -1805,9 +1887,7 @@ done
         let (mut harness, _, observed) = fake(script).await?;
         let session = harness.open_session(None).await?;
         harness
-            .prompt(PromptInput {
-                text: "wait for permission".into(),
-            })
+            .prompt(PromptInput::text("wait for permission"))
             .await?;
         let approval = loop {
             if let HarnessEvent::ApprovalRequested { request } = next(&mut harness).await? {

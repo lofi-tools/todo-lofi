@@ -52,6 +52,7 @@ fn require_absolute_executable(path: &Path) -> HarnessResult<()> {
 pub struct OpenCodeProbe {
     pub version: String,
     pub resume: bool,
+    pub prompt_files: bool,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +99,15 @@ impl Api {
         Ok(OpenCodeProbe {
             version: health.version,
             resume: self.supports("get", "/api/session/{sessionID}"),
+            prompt_files: self
+                .paths
+                .get("/api/session/{sessionID}/prompt")
+                .and_then(|operations| operations.get("post"))
+                .and_then(|operation| {
+                    operation
+                        .pointer("/requestBody/content/application~1json/schema/properties/files")
+                })
+                .is_some(),
         })
     }
 }
@@ -274,6 +284,8 @@ impl AgentHarness for OpenCodeHarness {
             approvals: true,
             resume: probe.resume,
             cancel: true,
+            images: probe.prompt_files,
+            resource_links: probe.prompt_files,
             ..Capabilities::default()
         };
         spec.args.extend(SERVER_ARGS.map(str::to_owned));
@@ -328,10 +340,7 @@ impl AgentHarness for OpenCodeHarness {
         let path = session_path(&session)?;
         let events = server.subscribe().await?;
         let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
-        if let Err(error) = server
-            .enqueue_prompt(&session, &id, &input.text, true)
-            .await
-        {
+        if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
             if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
                 tracing::warn!(%cleanup, "could not clean up an unconfirmed OpenCode prompt");
             }
@@ -1070,15 +1079,26 @@ impl OpenCodeServer {
         &self,
         session: &SessionId,
         prompt_id: &str,
-        text: &str,
+        input: &PromptInput,
         resume: bool,
     ) -> HarnessResult<()> {
         let path = format!("{}/prompt", session_path(session)?);
-        let response: ResponseData<Value> = response_json(
-            self.request(Method::POST, &path)
-                .json(&json!({"id": prompt_id, "text": text, "resume": resume})),
-        )
-        .await?;
+        let mut body = json!({"id": prompt_id, "text": input.text, "resume": resume});
+        if self.probe.prompt_files && !input.attachments.is_empty() {
+            let files = input
+                .attachments
+                .iter()
+                .map(|file| {
+                    Ok(json!({
+                        "uri": file.file_uri()?.as_str(),
+                        "name": file.path.file_name().map(|name| name.to_string_lossy()),
+                    }))
+                })
+                .collect::<HarnessResult<Vec<_>>>()?;
+            body["files"] = json!(files);
+        }
+        let response: ResponseData<Value> =
+            response_json(self.request(Method::POST, &path).json(&body)).await?;
         if response.data["id"] != prompt_id || response.data["sessionID"] != session.as_str() {
             return Err(HarnessError::Protocol(
                 "OpenCode admitted a different prompt".into(),
@@ -1275,6 +1295,7 @@ mod tests {
         assert!(!api.probe(health())?.resume);
         api.paths.insert(session_path.into(), session);
         assert!(api.probe(health())?.resume);
+        assert!(!api.probe(health())?.prompt_files);
         Ok(())
     }
 
@@ -1565,7 +1586,12 @@ exec sleep 60
         let events = restarted.subscribe().await?;
         let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         restarted
-            .enqueue_prompt(&session, &prompt_id, "queued fixture", false)
+            .enqueue_prompt(
+                &session,
+                &prompt_id,
+                &PromptInput::text("queued fixture"),
+                false,
+            )
             .await?;
         restarted.cancel_prompt(&session, &prompt_id).await?;
         let (sender, _receiver) = mpsc::unbounded_channel();
@@ -1589,6 +1615,49 @@ exec sleep 60
     async fn installed_harness_streams_a_turn_through_a_local_fixture()
     -> Result<(), Box<dyn std::error::Error>> {
         installed_harness_with_fixture_provider(FixtureModel::Text).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_delivers_an_image_to_the_local_provider()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let path = root.path().join("a screenshot.png");
+        std::fs::write(&path, STANDARD.decode(FIXTURE_PNG)?)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Image));
+        let outcome = async {
+            let mut harness = OpenCodeHarness::default();
+            assert!(harness.start(spec).await?.images);
+            assert_eq!(harness.tier(), AdapterTier::Native);
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput {
+                    text: "Inspect the attached image.".into(),
+                    attachments: vec![crate::PromptAttachment {
+                        path,
+                        image_mime_type: Some("image/png".into()),
+                    }],
+                })
+                .await?;
+            let events = fixture_outcome(&mut harness, TurnFinishReason::Completed).await?;
+            harness.shutdown().await?;
+            Ok::<_, HarnessError>(events)
+        }
+        .await;
+        provider.abort();
+        let mut transcript = crate::Transcript::default();
+        for event in outcome? {
+            transcript.apply(&event);
+        }
+        assert_eq!(
+            transcript.entry(0).map(crate::Entry::summary).as_deref(),
+            Some("agent: received fixture image")
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1617,7 +1686,7 @@ exec sleep 60
                         "models": {
                             "coder": {
                                 "modelID": "coder",
-                                "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
+                                "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] },
                                 "limit": { "context": 32768, "output": 8192 }
                             }
                         }
@@ -1647,9 +1716,7 @@ exec sleep 60
             harness.open_session(None).await?;
             let transcript = if unauthorized {
                 harness
-                    .prompt(PromptInput {
-                        text: "test local sign-in failure".into(),
-                    })
+                    .prompt(PromptInput::text("test local sign-in failure"))
                     .await?;
                 let mut transcript = crate::Transcript::default();
                 for event in fixture_outcome(&mut harness, TurnFinishReason::Failed).await? {
@@ -1709,9 +1776,7 @@ exec sleep 60
                 (Decision::Deny, TurnFinishReason::Interrupted),
             ] {
                 reopened
-                    .prompt(PromptInput {
-                        text: "Run the approval fixture".into(),
-                    })
+                    .prompt(PromptInput::text("Run the approval fixture"))
                     .await?;
                 let approval = fixture_approval(&mut reopened).await?;
                 reopened.respond(approval.clone(), decision).await?;
@@ -1733,9 +1798,7 @@ exec sleep 60
             }
 
             reopened
-                .prompt(PromptInput {
-                    text: "Run the cancellation fixture".into(),
-                })
+                .prompt(PromptInput::text("Run the cancellation fixture"))
                 .await?;
             let pending = fixture_approval(&mut reopened).await?;
             reopened.cancel().await?;
@@ -1900,9 +1963,7 @@ done
 
     async fn fixture_reply(harness: &mut OpenCodeHarness) -> HarnessResult<crate::Transcript> {
         harness
-            .prompt(PromptInput {
-                text: "Reply with local fixture text only".into(),
-            })
+            .prompt(PromptInput::text("Reply with local fixture text only"))
             .await?;
         let mut transcript = crate::Transcript::default();
         timeout(REQUEST_TIMEOUT, async {
@@ -1985,9 +2046,12 @@ done
     #[derive(Clone, Copy)]
     enum FixtureModel {
         Text,
+        Image,
         Unauthorized,
         Shell,
     }
+
+    const FIXTURE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGNwURIkCTGMahjVMHw1AAB4uncB7nfs+wAAAABJRU5ErkJggg==";
 
     async fn serve_fixture_model(
         listener: TcpListener,
@@ -2007,18 +2071,31 @@ done
                 writer.shutdown().await?;
                 continue;
             }
+            let fixture_text = if matches!(model, FixtureModel::Image) {
+                let request: Value = serde_json::from_slice(&request)?;
+                let expected = format!("data:image/png;base64,{FIXTURE_PNG}");
+                let found = request["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|message| message["content"].as_array())
+                    .flatten()
+                    .any(|part| part["image_url"]["url"] == expected);
+                if found {
+                    "received fixture image"
+                } else {
+                    "missing fixture image"
+                }
+            } else {
+                "local fixture reply"
+            };
             let shell_call = if matches!(model, FixtureModel::Shell) {
                 fixture_shell_call(&serde_json::from_slice(&request)?)
             } else {
                 None
             };
             let (reply, finish_reason) = shell_call.map_or_else(
-                || {
-                    (
-                        json!({"role":"assistant", "content":"local fixture reply"}),
-                        "stop",
-                    )
-                },
+                || (json!({"role":"assistant", "content":fixture_text}), "stop"),
                 |call| {
                     (
                         json!({"role":"assistant", "tool_calls":[call]}),

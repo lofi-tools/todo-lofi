@@ -173,12 +173,12 @@ impl HarnessSession {
 
     /// Record the user's prompt, ask the adapter, then fold every event the
     /// adapter has already produced into the transcript.
-    pub async fn prompt(&mut self, text: String) -> Result<Vec<HarnessEvent>, CoreError> {
+    pub async fn prompt(&mut self, input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
         // Completed messages stay separate even if the adapter reuses an item ID.
         self.transcript.clear_streaming_row_keys();
-        let change = self.transcript.push_user_message(text.clone());
+        let change = self.transcript.push_user_message(input.text.clone());
         self.track_entry(change);
-        self.harness.prompt(PromptInput { text }).await?;
+        self.harness.prompt(input).await?;
         Ok(self.pump())
     }
 
@@ -510,7 +510,7 @@ mod tests {
             .await?;
         session.open_session(None).await?;
 
-        session.prompt("go".to_string()).await?;
+        session.prompt(PromptInput::text("go")).await?;
 
         assert_eq!(session.transcript().len(), 3);
         assert_eq!(
@@ -543,7 +543,7 @@ mod tests {
             .await?;
         session.open_session(None).await?;
 
-        session.prompt("go".to_string()).await?;
+        session.prompt(PromptInput::text("go")).await?;
         assert_eq!(
             session.pending_approval().map(ApprovalId::as_str),
             Some("approval-1")

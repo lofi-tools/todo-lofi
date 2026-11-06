@@ -101,6 +101,7 @@ pub struct CodexHarnessFactory {
     program: PathBuf,
     version: Option<String>,
     tier: CodexTier,
+    images: bool,
 }
 
 impl CodexHarnessFactory {
@@ -109,6 +110,7 @@ impl CodexHarnessFactory {
             program: install.program.clone(),
             version: install.probe.version.clone(),
             tier: install.probe.tier,
+            images: install.probe.images,
         }
     }
 }
@@ -124,7 +126,7 @@ impl HarnessFactory for CodexHarnessFactory {
                 Ok(Box::new(harness))
             }
             CodexTier::Exec => {
-                let mut harness = ExecHarness::new();
+                let mut harness = ExecHarness::new().with_images(self.images);
                 if let Some(version) = &self.version {
                     harness = harness.with_version(version.clone());
                 }
@@ -207,11 +209,7 @@ mod tests {
         assert!(diagnostics.protocol.contains("codex-cli 0.9.0"));
         assert!(diagnostics.fallback_reason.is_some());
         harness.open_session(None).await?;
-        harness
-            .prompt(PromptInput {
-                text: "fixture".into(),
-            })
-            .await?;
+        harness.prompt(PromptInput::text("fixture")).await?;
         let reason = tokio::time::timeout(std::time::Duration::from_secs(4), async {
             while let Some(event) = harness.events().recv().await {
                 if let HarnessEvent::TurnFinished { reason } = event {

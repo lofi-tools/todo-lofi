@@ -982,9 +982,13 @@ and the task header never overstates the tier.
   over 50,000 entries, excluding the typing debounce and desktop rendering.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
   The composer queues removable local files and copies them into the task
-  attachment cache on Send. Prompts include the copied file paths. Structured
-  image and ACP inputs, attachment metadata and cap overrides, mentions, and
-  model and mode controls are still pending.
+  attachment cache on Send. Prompts retain the copied paths. Codex sends local
+  images through app-server or through exec when its help advertises images.
+  Native OpenCode sends structured file URIs when the API advertises them.
+  ACP receives image bytes when negotiated and file links otherwise. ACP
+  reads through Shepherd's filesystem bridge are still scoped to the task
+  worktree. Attachment metadata and cap overrides, mentions, and model and
+  mode controls are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1009,6 +1013,9 @@ and the task header never overstates the tier.
   and draft cleanup. Headless Chromium checks the composer queue and upload.
   A hidden macOS WebKit smoke verifies sending with a file alone and preserving
   the filename and bytes through the real bridge.
+  Wire fixtures cover Codex image paths and ACP image capability negotiation.
+  The configured OpenCode executable delivers the image to a loopback model
+  fixture with matching bytes.
 - [ ] Corrupt settings file falls back with a banner and backup.
 - [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
   The query plan uses the FTS index. Database fixtures cover exact-term ranking,

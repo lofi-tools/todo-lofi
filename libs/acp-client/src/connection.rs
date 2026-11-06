@@ -53,6 +53,7 @@ pub struct AgentInfo {
     pub name: String,
     pub version: String,
     pub load_session: bool,
+    pub prompt_images: bool,
     /// The agent accepts HTTP MCP servers in `session/new`. Only then may the
     /// client attach its loopback endpoint (`McpServer::Http`).
     pub mcp_http: bool,
@@ -149,10 +150,19 @@ impl Requester {
         session_id: &SessionId,
         text: String,
     ) -> Result<StopReason, AcpError> {
-        let request = PromptRequest::new(
-            session_id.clone(),
+        self.prompt_content(
+            session_id,
             vec![schema::ContentBlock::Text(schema::TextContent::new(text))],
-        );
+        )
+        .await
+    }
+
+    pub async fn prompt_content(
+        &self,
+        session_id: &SessionId,
+        content: Vec<schema::ContentBlock>,
+    ) -> Result<StopReason, AcpError> {
+        let request = PromptRequest::new(session_id.clone(), content);
         let response = self
             .connection
             .send_request(request)
@@ -615,6 +625,7 @@ where
                     .map(|info| info.version.clone())
                     .unwrap_or_default(),
                 load_session: initialize.agent_capabilities.load_session,
+                prompt_images: initialize.agent_capabilities.prompt_capabilities.image,
                 mcp_http: initialize.agent_capabilities.mcp_capabilities.http,
                 mcp_sse: initialize.agent_capabilities.mcp_capabilities.sse,
                 auth_methods: initialize.auth_methods.clone(),

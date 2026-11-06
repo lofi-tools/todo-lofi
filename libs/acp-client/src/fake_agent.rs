@@ -11,7 +11,7 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, CreateTerminalRequest,
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
     RequestPermissionRequest, SessionConfigOption, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
@@ -28,6 +28,7 @@ use agent_client_protocol::schema::v1::{
 pub struct FakeScript {
     /// Override the negotiated protocol version to test compatibility failures.
     pub protocol_version: Option<acp::schema::ProtocolVersion>,
+    pub prompt_images: bool,
     /// Text delivered as streamed agent messages.
     pub chunks: Vec<String>,
     /// A tool call announced before the prompt finishes.
@@ -62,6 +63,7 @@ pub struct FakeObservations {
     pub config_changes: Vec<serde_json::Value>,
     pub load_attempts: Vec<String>,
     pub prompts: Vec<String>,
+    pub prompt_content: Vec<Vec<ContentBlock>>,
     pub cancels: Vec<String>,
     pub permission_responses: Vec<String>,
     pub terminal_output: Vec<String>,
@@ -104,6 +106,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
 
     let initialize_observations = observations.clone();
     let protocol_version = script.protocol_version;
+    let prompt_images = script.prompt_images;
     let load_session = !script.load_updates.is_empty();
     let new_session_observations = observations.clone();
     let config_observations = observations.clone();
@@ -129,6 +132,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         .agent_capabilities(
                             AgentCapabilities::default()
                                 .load_session(load_session)
+                                .prompt_capabilities(PromptCapabilities::new().image(prompt_images))
                                 .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
                         )
                         .agent_info(Implementation::new("fake-agent", "1.0")),
@@ -197,6 +201,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         .join("\n");
                     if let Ok(mut state) = prompt_observations.lock() {
                         state.prompts.push(text);
+                        state.prompt_content.push(request.prompt);
                     }
                     let session_id = request.session_id.clone();
                     let connection = cx.clone();

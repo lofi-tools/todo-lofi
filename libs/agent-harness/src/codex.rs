@@ -63,6 +63,7 @@ pub struct CodexProbe {
     pub tier: CodexTier,
     pub version: Option<String>,
     pub methods: Vec<String>,
+    pub images: bool,
 }
 
 impl CodexProbe {
@@ -77,7 +78,9 @@ impl CodexProbe {
 pub async fn probe(program: &str, cwd: &Path) -> HarnessResult<CodexProbe> {
     let version = read_version(program).await;
     let handshake = run_handshake(program, cwd).await?;
-    if !handshake.supported {
+    let images = if handshake.supported {
+        true
+    } else {
         let output = timeout(
             PROBE_TIMEOUT,
             Command::new(program)
@@ -89,16 +92,18 @@ pub async fn probe(program: &str, cwd: &Path) -> HarnessResult<CodexProbe> {
         .await
         .map_err(|_| HarnessError::Protocol("Codex exec help probe timed out".into()))?
         .map_err(|error| spawn_error(program, error))?;
-        if !output.status.success()
-            || !String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .any(|flag| flag == "--json")
-        {
+        let help = String::from_utf8_lossy(&output.stdout);
+        let has_flag = |name| {
+            help.split_whitespace()
+                .any(|flag| flag.trim_end_matches(',') == name)
+        };
+        if !output.status.success() || !has_flag("--json") {
             return Err(HarnessError::Protocol(
                 "Codex did not expose app-server or support exec --json".into(),
             ));
         }
-    }
+        has_flag("--image")
+    };
     Ok(CodexProbe {
         tier: if handshake.supported {
             CodexTier::AppServer
@@ -107,6 +112,7 @@ pub async fn probe(program: &str, cwd: &Path) -> HarnessResult<CodexProbe> {
         },
         version,
         methods: handshake.methods,
+        images,
     })
 }
 
@@ -746,6 +752,7 @@ impl CodexHarness {
             patches_in_approvals: self.supports("item/fileChange/requestApproval"),
             resume: self.supports("thread/resume"),
             cancel: self.supports("turn/interrupt"),
+            images: true,
             ..Capabilities::default()
         }
     }
@@ -983,12 +990,24 @@ impl AgentHarness for CodexHarness {
         }
 
         let cwd = self.cwd.display().to_string();
+        let mut items = vec![json!({ "type": "text", "text": input.text })];
+        for attachment in input
+            .attachments
+            .iter()
+            .filter(|file| file.image_mime_type.is_some())
+        {
+            let path = attachment
+                .path
+                .to_str()
+                .ok_or_else(|| HarnessError::Protocol("a Codex image path must be UTF-8".into()))?;
+            items.push(json!({ "type": "localImage", "path": path }));
+        }
         let response = self
             .request(
                 "turn/start",
                 json!({
                     "threadId": session_id.as_str(),
-                    "input": [ { "type": "text", "text": input.text } ],
+                    "input": items,
                     "cwd": cwd,
                     "approvalPolicy": "on-request",
                     "sandboxPolicy": {
@@ -1110,6 +1129,7 @@ pub struct ExecHarness {
     program: String,
     command: String,
     version: Option<String>,
+    images: bool,
     args: Vec<String>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -1141,6 +1161,7 @@ impl ExecHarness {
             program: String::new(),
             command: String::new(),
             version: None,
+            images: false,
             args: Vec::new(),
             cwd: PathBuf::new(),
             environment: BTreeMap::new(),
@@ -1158,6 +1179,11 @@ impl ExecHarness {
         self
     }
 
+    pub fn with_images(mut self, enabled: bool) -> Self {
+        self.images = enabled;
+        self
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: false,
@@ -1165,6 +1191,7 @@ impl ExecHarness {
             tool_calls: true,
             cancel: true,
             usage: true,
+            images: self.images,
             ..Capabilities::default()
         }
     }
@@ -1257,10 +1284,18 @@ impl AgentHarness for ExecHarness {
         self.run = None;
 
         let mut command = Command::new(&self.program);
+        command.arg("exec").arg("--json").args(&self.args);
+        for attachment in input
+            .attachments
+            .iter()
+            .filter(|file| self.images && file.image_mime_type.is_some())
+        {
+            let mut option = std::ffi::OsString::from("--image=");
+            option.push(&attachment.path);
+            command.arg(option);
+        }
         command
-            .arg("exec")
-            .arg("--json")
-            .args(&self.args)
+            .arg("--")
             .arg(&input.text)
             .current_dir(&self.cwd)
             .envs(&self.environment)
@@ -2531,6 +2566,40 @@ done
     }
 
     #[tokio::test]
+    async fn app_server_receives_the_cached_image_path_as_a_local_image()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let script = PROTOCOL_STUB.replace(
+            "    *'\"method\":\"turn/start\"'*)\n",
+            "    *'\"method\":\"turn/start\"'*)\n      printf '%s\\n' \"$line\" > \"$directory/turn.json\"\n",
+        );
+        let stub = write_stub(&directory, "codex-images", &script);
+        let (mut harness, capabilities) = start_session(&stub, directory.path()).await;
+        assert!(capabilities.images);
+        let path = directory.path().join("a screenshot.png");
+        harness
+            .prompt(PromptInput {
+                text: "Review this screenshot.".into(),
+                attachments: vec![crate::PromptAttachment {
+                    path: path.clone(),
+                    image_mime_type: Some("image/png".into()),
+                }],
+            })
+            .await?;
+        let request: Value =
+            serde_json::from_slice(&std::fs::read(directory.path().join("turn.json"))?)?;
+        assert_eq!(
+            request["params"]["input"],
+            json!([
+                {"type": "text", "text": "Review this screenshot."},
+                {"type": "localImage", "path": path},
+            ])
+        );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_turn_preserves_the_typed_sign_in_error()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
@@ -2540,7 +2609,7 @@ done
         );
         let stub = write_stub(&directory, "codex-auth", &script);
         let (mut harness, _) = start_session(&stub, directory.path()).await;
-        harness.prompt(PromptInput { text: "go".into() }).await?;
+        harness.prompt(PromptInput::text("go")).await?;
         let events = collect_until(&mut harness, |events| {
             events
                 .iter()
@@ -2569,7 +2638,7 @@ done
             );
             let stub = write_stub(&directory, name, &script);
             let (mut harness, _) = start_session(&stub, directory.path()).await;
-            harness.prompt(PromptInput { text: "go".into() }).await?;
+            harness.prompt(PromptInput::text("go")).await?;
             let events = collect_until(&mut harness, |events| {
                 events.iter().any(|event| {
                     matches!(
@@ -2832,6 +2901,7 @@ done
 
         assert_eq!(probe.tier, CodexTier::Exec);
         assert!(probe.methods.is_empty());
+        assert!(!probe.images);
         assert!(!probe.supports("turn/start"));
     }
 
@@ -2860,9 +2930,7 @@ done
         );
 
         harness
-            .prompt(PromptInput {
-                text: "run the tests".to_string(),
-            })
+            .prompt(PromptInput::text("run the tests"))
             .await
             .expect("the turn starts");
         let events = collect_until(&mut harness, |events| {
@@ -2920,9 +2988,7 @@ done
         let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "run the tests".to_string(),
-            })
+            .prompt(PromptInput::text("run the tests"))
             .await
             .expect("the turn starts");
         let events = collect_until(&mut harness, |events| {
@@ -2975,9 +3041,7 @@ done
         let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "run the tests".to_string(),
-            })
+            .prompt(PromptInput::text("run the tests"))
             .await
             .expect("the turn starts");
         collect_until(&mut harness, |events| {
@@ -3021,9 +3085,7 @@ done
         let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "rename the answer".to_string(),
-            })
+            .prompt(PromptInput::text("rename the answer"))
             .await
             .expect("the turn starts");
         let events = collect_until(&mut harness, |events| {
@@ -3058,9 +3120,7 @@ done
         let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "keep going".to_string(),
-            })
+            .prompt(PromptInput::text("keep going"))
             .await
             .expect("the turn starts");
         let requests = collect_until(&mut harness, |events| {
@@ -3104,9 +3164,7 @@ done
             );
         }
         harness
-            .prompt(PromptInput {
-                text: "a follow-up after cancellation".to_owned(),
-            })
+            .prompt(PromptInput::text("a follow-up after cancellation"))
             .await
             .expect("no withdrawn approval blocks the follow-up");
         harness.shutdown().await.expect("the session stops");
@@ -3238,9 +3296,7 @@ sleep 30
         let (mut harness, _capabilities) = start_exec(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "run the tests".to_string(),
-            })
+            .prompt(PromptInput::text("run the tests"))
             .await
             .expect("the exec turn starts");
         let events = collect_until(&mut harness, |events| {
@@ -3288,9 +3344,7 @@ sleep 30
         assert!(arguments.contains("--json"));
         assert!(arguments.contains("run the tests"));
         harness
-            .prompt(PromptInput {
-                text: "second prompt".into(),
-            })
+            .prompt(PromptInput::text("second prompt"))
             .await
             .expect("another command starts in the same adapter");
         let next = collect_until(&mut harness, |events| {
@@ -3309,6 +3363,48 @@ sleep 30
     }
 
     #[tokio::test]
+    async fn exec_image_option_depends_on_the_cli_help_probe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let script = UNSUPPORTED_STUB.replace(
+            "echo \"  --json\"",
+            "echo \"  --json -i, --image <FILE>...\"",
+        );
+        let stub = write_stub(&directory, "codex-probe-images", &script);
+        let probe = probe(&stub, directory.path()).await?;
+        assert_eq!(probe.tier, CodexTier::Exec);
+        assert!(probe.images);
+        let path = directory.path().join("a screenshot.png");
+        let stub = write_stub(&directory, "codex-exec-images", EXEC_STUB);
+        let mut harness = ExecHarness::new().with_images(probe.images);
+        assert!(harness.start(spec(&stub, directory.path())).await?.images);
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput {
+                text: "Review the image.".into(),
+                attachments: vec![crate::PromptAttachment {
+                    path: path.clone(),
+                    image_mime_type: Some("image/png".into()),
+                }],
+            })
+            .await?;
+        collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        let arguments = std::fs::read_to_string(directory.path().join("args.txt"))?;
+        assert!(
+            arguments
+                .lines()
+                .any(|line| line == format!("--image={}", path.display()))
+        );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_failed_exec_turn_reports_its_exit_code_and_sign_in_error()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
@@ -3318,7 +3414,7 @@ sleep 30
             "#!/bin/sh\nprintf '%s\\n' 'authentication required for this account' >&2\nexit 23\n",
         );
         let (mut harness, _) = start_exec(&stub, directory.path()).await;
-        harness.prompt(PromptInput { text: "go".into() }).await?;
+        harness.prompt(PromptInput::text("go")).await?;
         let events = collect_until(&mut harness, |events| {
             events
                 .iter()
@@ -3348,9 +3444,7 @@ sleep 30
         let (mut harness, _capabilities) = start_exec(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "keep going".to_string(),
-            })
+            .prompt(PromptInput::text("keep going"))
             .await
             .expect("the exec turn starts");
         harness.cancel().await.expect("the run is killed");
@@ -3378,9 +3472,7 @@ sleep 30
         let (mut harness, _capabilities) = start_session(&stub, directory.path()).await;
 
         harness
-            .prompt(PromptInput {
-                text: "run the tests".to_string(),
-            })
+            .prompt(PromptInput::text("run the tests"))
             .await
             .expect("the turn starts");
         let events = collect_until(&mut harness, |events| {
@@ -3643,9 +3735,9 @@ mod live {
         loop {
             attempts += 1;
             resumed
-                .prompt(PromptInput {
-                    text: "Run the shell command `sleep 25` and wait for it to finish.".to_string(),
-                })
+                .prompt(PromptInput::text(
+                    "Run the shell command `sleep 25` and wait for it to finish.",
+                ))
                 .await
                 .expect("the long turn starts");
             let mut running = false;
@@ -3717,9 +3809,7 @@ mod live {
             .await
             .expect("a new thread opens");
         harness
-            .prompt(PromptInput {
-                text: "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com".to_string(),
-            })
+            .prompt(PromptInput::text("Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"))
             .await
             .expect("the turn starts");
 
@@ -3834,9 +3924,7 @@ mod live {
         limit: Duration,
     ) -> Vec<HarnessEvent> {
         harness
-            .prompt(PromptInput {
-                text: text.to_string(),
-            })
+            .prompt(PromptInput::text(text))
             .await
             .expect("the prompt starts a turn");
         let mut events = Vec::new();

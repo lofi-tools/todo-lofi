@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use agent_harness::{ApprovalId, Decision};
+use agent_harness::{ApprovalId, Decision, PromptInput};
 use serde::{Deserialize, Serialize};
 
 use crate::projects::ProjectId;
@@ -32,7 +32,7 @@ pub enum Command {
     },
     SendPrompt {
         task_id: TaskId,
-        text: String,
+        input: PromptInput,
     },
     ResolveApproval {
         task_id: TaskId,
