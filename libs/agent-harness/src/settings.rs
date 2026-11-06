@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,8 @@ use crate::{HarnessError, HarnessResult};
 pub struct AgentSettings {
     #[serde(default)]
     app: Map<String, Value>,
+    #[serde(default)]
+    projects: BTreeMap<PathBuf, Map<String, Value>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -57,11 +60,28 @@ impl AgentSettings {
     }
 
     fn value<T: DeserializeOwned>(&self, key: &str) -> HarnessResult<Option<T>> {
-        self.app
-            .get(key)
+        Self::decode(key, self.app.get(key))
+    }
+
+    pub fn project_value<T: DeserializeOwned>(
+        &self,
+        project: &Path,
+        key: &str,
+    ) -> HarnessResult<Option<T>> {
+        let value = self
+            .projects
+            .get(project)
+            .and_then(|settings| settings.get(key))
+            .filter(|value| !value.is_null())
+            .or_else(|| self.app.get(key));
+        Self::decode(key, value)
+    }
+
+    fn decode<T: DeserializeOwned>(key: &str, value: Option<&Value>) -> HarnessResult<Option<T>> {
+        value
             .filter(|value| !value.is_null())
             .map(|value| {
-                serde_json::from_value(value.clone())
+                T::deserialize(value)
                     .map_err(|error| HarnessError::Protocol(format!("invalid {key}: {error}")))
             })
             .transpose()
@@ -71,6 +91,40 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_settings_override_app_values_per_key() -> Result<(), Box<dyn std::error::Error>> {
+        let settings: AgentSettings = serde_json::from_value(serde_json::json!({
+            "app": {"limit": 50, "other": true},
+            "projects": {
+                "/project": {"limit": 15},
+                "/inherits": {"limit": null},
+                "/invalid": {"limit": "fifty"}
+            }
+        }))?;
+        assert_eq!(
+            settings.project_value::<u64>(Path::new("/project"), "limit")?,
+            Some(15)
+        );
+        assert_eq!(
+            settings.project_value::<bool>(Path::new("/project"), "other")?,
+            Some(true)
+        );
+        assert_eq!(
+            settings.project_value::<u64>(Path::new("/inherits"), "limit")?,
+            Some(50)
+        );
+        assert_eq!(
+            settings.project_value::<u64>(Path::new("/elsewhere"), "missing")?,
+            None
+        );
+        assert!(
+            settings
+                .project_value::<u64>(Path::new("/invalid"), "limit")
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn command_uses_the_configured_path_and_argument_boundaries()

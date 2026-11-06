@@ -1000,6 +1000,10 @@ in-memory model is still scoped key/value pairs, serialized per scope:
   array of arguments passed in order.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
+- `attachments.max_file_bytes` is a positive integer in bytes. It applies to
+  composer files and preview screenshots. The built-in limit is 50,000,000
+  bytes per file. Shepherd also checks the current limit before sending a
+  previously cached file.
 - Unknown keys are preserved on rewrite. A missing file means defaults; a
   malformed file is copied to `.bak`, defaults load, and a banner names the path.
 - In-app edits apply immediately and are journaled per JSON path with the

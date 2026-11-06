@@ -91,6 +91,25 @@ Every core command has one `#[tauri::command]`, and the window receives core
 events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
 the snapshots come from `shepherd-core`, never from a second frontend model.
 
+## Attachment limits
+
+Shepherd allows up to 50 MB per attachment by default. Set
+`attachments.max_file_bytes` to a positive whole number of bytes in
+Shepherd's `settings.json`. Put it under `app` to change the default or under
+`projects` and the project's absolute path to override that project. The same
+limit applies to composer files and preview screenshots. Restart Shepherd to
+load changes.
+
+```json
+{
+  "version": 1,
+  "app": { "attachments.max_file_bytes": 50000000 },
+  "projects": {
+    "/Users/me/src/example": { "attachments.max_file_bytes": 20000000 }
+  }
+}
+```
+
 ## Use an installed OpenCode
 
 In Shepherd's `settings.json`, set `agents.opencode.executable` under `app`

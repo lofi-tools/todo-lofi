@@ -18,6 +18,7 @@ use std::time::Duration;
 use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
+use agent_harness::settings::AgentSettings;
 use agent_harness::{Decision, PromptInput};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,7 @@ use shepherd_core::{
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use crate::attachments::{self, MAX_ATTACHMENT_BYTES};
+use crate::attachments::{self, AttachmentLimit};
 use crate::codex_harness::codex_spawn_spec;
 use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
@@ -425,6 +426,7 @@ struct TerminalSubscription {
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     attachment_root: Option<PathBuf>,
+    pub(crate) settings: AgentSettings,
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) opencode_configured: bool,
     pub(crate) claude_configured: bool,
@@ -460,6 +462,7 @@ impl ShellState {
         Self {
             core: Arc::new(Mutex::new(core)),
             attachment_root: None,
+            settings: AgentSettings::default(),
             codex_program: None,
             opencode_configured: false,
             claude_configured: false,
@@ -618,7 +621,7 @@ impl ShellState {
     pub async fn save_preview_screenshot(
         &self,
         task_id: String,
-        bytes: Vec<u8>,
+        bytes: &[u8],
     ) -> Result<PathBuf, BridgeError> {
         let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
             BridgeError::new(
@@ -628,7 +631,11 @@ impl ShellState {
         })?;
         // A draft cannot be discarded until its screenshot write finishes.
         let core = self.core.lock().await;
-        core.task_workspace(&TaskId::new(task_id))?;
+        let limit = self.attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)?;
+        limit
+            .check(bytes.len() as u64)
+            .map_err(|error| BridgeError::new("preview", error.to_string()))?;
+        let bytes = bytes.to_vec();
         let result = tokio::task::spawn_blocking(move || {
             attachments::persist_preview_screenshot(&directory, &bytes)
         })
@@ -645,11 +652,25 @@ impl ShellState {
         Some(self.attachment_root.as_ref()?.join(task_id.to_string()))
     }
 
+    fn attachment_limit_for(&self, path: &Path) -> Result<AttachmentLimit, BridgeError> {
+        AttachmentLimit::resolve(&self.settings, path)
+            .map_err(|error| BridgeError::new("attachments", error))
+    }
+
+    async fn attachment_limit(&self, project_id: String) -> Result<AttachmentLimit, BridgeError> {
+        let path = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        self.attachment_limit_for(&path)
+    }
+
     pub async fn save_prompt_file(
         &self,
         task_id: String,
         name: String,
-        bytes: Vec<u8>,
+        bytes: &[u8],
     ) -> Result<String, BridgeError> {
         let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
             BridgeError::new(
@@ -658,7 +679,11 @@ impl ShellState {
             )
         })?;
         let core = self.core.lock().await;
-        core.task_workspace(&TaskId::new(task_id))?;
+        let limit = self.attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)?;
+        limit
+            .check(bytes.len() as u64)
+            .map_err(|error| BridgeError::new("attachments", error.to_string()))?;
+        let bytes = bytes.to_vec();
         let result = tokio::task::spawn_blocking(move || {
             attachments::persist_prompt_file(&directory, &name, &bytes)
         })
@@ -751,9 +776,15 @@ impl ShellState {
                 "Could not locate this task's attachment directory.",
             )
         })?;
+        let path = self
+            .core
+            .lock()
+            .await
+            .task_project_path(&TaskId::new(&task_id))?;
+        let limit = self.attachment_limit_for(&path)?;
         let attachments = tokio::task::spawn_blocking(move || {
             ids.iter()
-                .map(|id| attachments::resolve_prompt_file(&directory, id))
+                .map(|id| attachments::resolve_prompt_file(&directory, id, &limit))
                 .collect::<std::io::Result<Vec<_>>>()
         })
         .await
@@ -1565,6 +1596,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn attachment_limit(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<AttachmentLimit, BridgeError> {
+        state.inner().attachment_limit(project_id).await
+    }
+
+    #[tauri::command]
     pub async fn save_preview_screenshot(
         state: State<'_, ShellState>,
         request: tauri::ipc::Request<'_>,
@@ -1580,15 +1619,9 @@ pub mod commands {
                 "The screenshot did not contain image bytes.",
             ));
         };
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            return Err(BridgeError::new(
-                "preview",
-                "Choose a screenshot up to 50 MB.",
-            ));
-        }
         state
             .inner()
-            .save_preview_screenshot(task_id.to_owned(), bytes.clone())
+            .save_preview_screenshot(task_id.to_owned(), bytes)
             .await
     }
 
@@ -1620,14 +1653,8 @@ pub mod commands {
                 "The attachment did not contain file bytes.",
             ));
         };
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            return Err(BridgeError::new(
-                "attachments",
-                "Choose a file up to 50 MB.",
-            ));
-        }
         state
-            .save_prompt_file(task_id.to_owned(), name.into_owned(), bytes.clone())
+            .save_prompt_file(task_id.to_owned(), name.into_owned(), bytes)
             .await
     }
 
@@ -2874,19 +2901,17 @@ mod tests {
         let image = include_bytes!("../icons/128x128.png");
         assert!(
             state
-                .save_preview_screenshot(task.clone(), b"invalid image".to_vec())
+                .save_preview_screenshot(task.clone(), b"invalid image")
                 .await
                 .is_err()
         );
         assert!(
             state
-                .save_preview_screenshot(uuid::Uuid::new_v4().to_string(), image.to_vec())
+                .save_preview_screenshot(uuid::Uuid::new_v4().to_string(), image)
                 .await
                 .is_err()
         );
-        let path = state
-            .save_preview_screenshot(task.clone(), image.to_vec())
-            .await?;
+        let path = state.save_preview_screenshot(task.clone(), image).await?;
         assert_eq!(
             path.parent(),
             Some(
@@ -2900,18 +2925,119 @@ mod tests {
         );
         assert_eq!(std::fs::read(&path)?, image);
         assert_eq!(
-            state
-                .save_preview_screenshot(task.clone(), image.to_vec())
-                .await?,
+            state.save_preview_screenshot(task.clone(), image).await?,
             path
         );
         state.discard_draft(task.clone()).await?;
         assert!(!path.exists());
+        assert!(state.save_preview_screenshot(task, image).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn project_attachment_limit_applies_to_uploads_screenshots_and_cached_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let restricted = TestRepository::new()?;
+        let inherited = TestRepository::new()?;
+        let mut state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        state
+            .add_project(restricted.path().display().to_string())
+            .await?;
+        let projects = state
+            .add_project(inherited.path().display().to_string())
+            .await?;
+        let restricted_path = restricted.path().canonicalize()?;
+        let inherited_path = inherited.path().canonicalize()?;
+        let restricted = projects
+            .projects
+            .iter()
+            .find(|project| Path::new(&project.path) == restricted_path)
+            .ok_or("missing restricted project")?;
+        let inherited = projects
+            .projects
+            .iter()
+            .find(|project| Path::new(&project.path) == inherited_path)
+            .ok_or("missing inherited project")?;
+        let restricted_task = state
+            .create_draft(restricted.id.clone(), "Restricted".into(), Agent::Codex)
+            .await?
+            .task
+            .id;
+        let inherited_task = state
+            .create_draft(inherited.id.clone(), "Inherited".into(), Agent::Codex)
+            .await?
+            .task
+            .id;
+        let oversized = b"nine-byte";
+        let old_id = state
+            .save_prompt_file(restricted_task.clone(), "old.txt".into(), oversized)
+            .await?;
+
+        let settings_path = directory.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "app": {"attachments.max_file_bytes": 24},
+                "projects": {(restricted.path.clone()): {"attachments.max_file_bytes": 8}}
+            }))?,
+        )?;
+        state.settings = AgentSettings::read(&settings_path)?;
+        let limit = state.attachment_limit(restricted.id.clone()).await?;
+        assert_eq!(limit.bytes, 8);
+        assert_eq!(limit.label, "8 bytes");
+        assert_eq!(
+            state.attachment_limit(inherited.id.clone()).await?.bytes,
+            24
+        );
+
         assert!(
             state
-                .save_preview_screenshot(task, image.to_vec())
+                .save_prompt_file(restricted_task.clone(), "ok.txt".into(), b"12345678")
+                .await
+                .is_ok()
+        );
+        let error = state
+            .save_prompt_file(restricted_task.clone(), "large.txt".into(), oversized)
+            .await
+            .err()
+            .ok_or("oversized upload was accepted")?;
+        assert!(error.message.contains("8 bytes"));
+        assert!(
+            state
+                .save_prompt_file(inherited_task.clone(), "ok.txt".into(), oversized)
+                .await
+                .is_ok()
+        );
+        let image = b"\x89PNG\r\n\x1a\n\0";
+        assert!(
+            state
+                .save_preview_screenshot(restricted_task.clone(), image)
                 .await
                 .is_err()
+        );
+        assert!(
+            state
+                .save_preview_screenshot(inherited_task, image)
+                .await
+                .is_ok()
+        );
+        assert!(
+            state
+                .send_prompt_with_files(
+                    restricted_task,
+                    "Read the old attachment".into(),
+                    vec![old_id]
+                )
+                .await
+                .err()
+                .is_some_and(|error| error.message.contains("8 bytes"))
         );
         Ok(())
     }
@@ -2944,7 +3070,7 @@ mod tests {
             .await?;
         let contents = b"file contents";
         let id = state
-            .save_prompt_file(task.clone(), "fixture.txt".into(), contents.to_vec())
+            .save_prompt_file(task.clone(), "fixture.txt".into(), contents)
             .await?;
         assert_eq!(
             state

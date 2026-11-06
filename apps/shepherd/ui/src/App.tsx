@@ -253,6 +253,24 @@ export function App() {
   const [scanError, setScanError] = createSignal<string | null>(null)
   const [importNote, setImportNote] = createSignal<string | null>(null)
   const [error, setError] = createSignal<string | null>(null)
+  const [projectAttachmentLimit] = createResource(
+    () => selectedProjectId() ?? undefined,
+    async (projectId) => {
+      try {
+        return { projectId, limit: await bridge.attachmentLimit(projectId) }
+      } catch (failure) {
+        return { projectId, error: describe(failure) }
+      }
+    },
+  )
+  const attachmentLimit = () => {
+    const settings = projectAttachmentLimit()
+    return settings && settings.projectId === selectedProjectId() ? settings.limit : undefined
+  }
+  createEffect(() => {
+    const settings = projectAttachmentLimit()
+    if (settings?.projectId === selectedProjectId() && settings?.error) setError(settings.error)
+  })
   const [pending, setPending] = createSignal(false)
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
   const [quitRequired, setQuitRequired] = createSignal<bridge.QuitConfirmation | null>(null)
@@ -633,17 +651,18 @@ export function App() {
 
   function queuePromptFiles(files: FileList) {
     const key = fileQueueKey()
-    if (!key || !canCompose() || pending()) return
+    const limit = attachmentLimit()
+    if (!key || !limit || !canCompose() || pending()) return
     const accepted: File[] = []
     const oversized: string[] = []
     for (const file of files) {
-      if (file.size > 50_000_000) oversized.push(file.name)
+      if (file.size > limit.bytes) oversized.push(file.name)
       else accepted.push(file)
     }
     if (accepted.length) {
       setQueuedFiles((queues) => new Map(queues).set(key, [...(queues.get(key) ?? []), ...accepted]))
     }
-    setError(oversized.length ? `Attachments must be up to 50 MB each. ${oversized.join(', ')}` : null)
+    setError(oversized.length ? `Attachments must be up to ${limit.label} each. ${oversized.join(', ')}` : null)
   }
 
   function removePromptFile(file: File) {
@@ -1273,7 +1292,7 @@ export function App() {
             />
             <div class="composer__actions">
               <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
-                showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending()}
+                showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending() && !!attachmentLimit()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
@@ -1320,6 +1339,7 @@ export function App() {
             <Show when={selectedProjectId()} keyed>
               {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
                 shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
+                attachmentLimit={attachmentLimit()}
                 onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
             </Show>
             <Show when={inspectorTab() === 'preview' && !selectedProjectId()}>

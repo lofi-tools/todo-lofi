@@ -324,6 +324,10 @@ test.beforeEach(async ({ context }) => {
           }
           case 'open_project_preview':
             throw { message: `Could not open the preview in a browser. ${args.projectId}` }
+          case 'attachment_limit':
+            return options.has('attachment-cap') && args.projectId === 'project-1'
+              ? { bytes: 8, label: '8 bytes' }
+              : { bytes: 50_000_000, label: '50 MB' }
           case 'save_preview_screenshot':
             if (!(args instanceof ArrayBuffer) || new Uint8Array(args)[0] !== 137 || invokeOptions?.headers?.['X-Shepherd-Task'] !== 'task-1') {
               throw { message: 'Expected PNG bytes for task-1.' }
@@ -2041,6 +2045,24 @@ test('queues removable files and uploads them only when sending the prompt', asy
   expect(await page.evaluate(() => window.__promptFileUploads)).toEqual([
     { taskId: 'task-1', name: 'Résumé 1.txt', text: 'keep this' },
   ])
+})
+
+test('uses the selected project attachment limit', async ({ page }) => {
+  await page.goto('/?two-projects&attachment-cap')
+  const composer = page.locator('.composer')
+  const file = { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('nine-byte') }
+  async function chooseFile() {
+    await composer.getByRole('button', { name: 'Attachments and commands' }).click()
+    const chooser = page.waitForEvent('filechooser')
+    await composer.getByRole('menuitem', { name: 'Attach files', exact: true }).click()
+    await (await chooser).setFiles(file)
+  }
+  await chooseFile()
+  await expect(page.getByRole('alert')).toContainText('Attachments must be up to 8 bytes each. notes.txt')
+  await expect(composer.getByRole('list', { name: 'Queued attachments' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await chooseFile()
+  await expect(composer.getByRole('list', { name: 'Queued attachments' })).toContainText('notes.txt')
 })
 
 test('shows the agent exit and resume action, including after reopening', async ({ page }) => {

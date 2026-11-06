@@ -988,8 +988,10 @@ and the task header never overstates the tier.
   ACP receives image bytes when negotiated and file links otherwise. ACP can
   read the selected linked text files through Shepherd's bridge during the
   sending turn. Turso saves composer attachment metadata with the prompt
-  entry and restores the attachment order when reopening a task. Cap
-  overrides, mentions, and model and mode controls are still pending.
+  entry and restores the attachment order when reopening a task.
+  `attachments.max_file_bytes` supports app defaults and project overrides
+  for composer files and preview screenshots. Mentions and model and mode
+  controls are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1012,6 +1014,8 @@ and the task header never overstates the tier.
 - [ ] Attachment cap, redirect and deletion tests.
   Rust fixtures cover the default file cap, task isolation, symlink rejection
   and draft cleanup. Headless Chromium checks the composer queue and upload.
+  The bridge applies the project cap to uploads, screenshots, and cached
+  files. Headless Chromium verifies the chooser uses the selected project.
   A hidden macOS WebKit smoke verifies sending with a file alone and preserving
   the filename and bytes through the real bridge.
   Wire fixtures cover Codex image paths and ACP image capability negotiation.

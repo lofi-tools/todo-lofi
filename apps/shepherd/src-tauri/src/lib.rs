@@ -106,6 +106,10 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => path.into(),
                 None => app.path().app_data_dir()?,
             };
+            let settings = AgentSettings::read(&app.path().app_config_dir()?.join("settings.json"));
+            if let Err(error) = &settings {
+                tracing::warn!(%error, "could not load Shepherd configuration");
+            }
             let (harness_factory, codex_program, opencode_configured, claude_configured): (
                 Box<dyn HarnessFactory>,
                 _,
@@ -115,8 +119,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(factory) => (factory, None, false, false),
                 None => {
                     let (codex, codex_program) = codex_factory(&data_directory);
-                    let settings = app.path().app_config_dir()?.join("settings.json");
-                    let (opencode, claude) = match AgentSettings::read(&settings) {
+                    let (opencode, claude) = match &settings {
                         Ok(settings) => (
                             settings.executable("agents.opencode.executable"),
                             settings.command("agents.claude"),
@@ -124,7 +127,7 @@ pub fn run() -> Result<(), tauri::Error> {
                         Err(error) => {
                             let report = error.to_string();
                             (
-                                Err(error),
+                                Err(agent_harness::HarnessError::Protocol(report.clone())),
                                 Err(agent_harness::HarnessError::Protocol(report)),
                             )
                         }
@@ -155,6 +158,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 harness_factory,
                 terminals,
             ))?;
+            state.settings = settings.unwrap_or_default();
             state.codex_program = codex_program;
             state.opencode_configured = opencode_configured;
             state.claude_configured = claude_configured;
@@ -166,6 +170,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
             bridge::commands::open_project_preview,
+            bridge::commands::attachment_limit,
             bridge::commands::save_preview_screenshot,
             bridge::commands::save_prompt_file,
             bridge::commands::create_draft,

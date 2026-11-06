@@ -319,6 +319,15 @@ export function openProjectPreview(projectId: string): Promise<void> {
   return invoke<void>('open_project_preview', { projectId })
 }
 
+export interface AttachmentLimit {
+  bytes: number
+  label: string
+}
+
+export function attachmentLimit(projectId: string): Promise<AttachmentLimit> {
+  return invoke<AttachmentLimit>('attachment_limit', { projectId })
+}
+
 export async function savePreviewScreenshot(taskId: string, file: File): Promise<string> {
   return invoke<string>('save_preview_screenshot', await file.arrayBuffer(), {
     headers: { 'X-Shepherd-Task': taskId },

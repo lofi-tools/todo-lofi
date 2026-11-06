@@ -1,12 +1,13 @@
 import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
 
-import { openProjectPreview } from './bridge'
+import { openProjectPreview, type AttachmentLimit } from './bridge'
 
 interface PreviewPaneProps {
   projectId: string
   url?: string | null
   shown: boolean
   canAddToPrompt: boolean
+  attachmentLimit?: AttachmentLimit
   onAddToPrompt: (annotations: PreviewAnnotation[]) => Promise<void>
   onProjectSettings: () => void
 }
@@ -217,7 +218,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
         </div>
       </Show>
       <Show when={screenshotMode()}>
-        <ScreenshotPicker url={props.url} onCancel={() => setScreenshotMode(false)} onSelect={(selected) => {
+        <ScreenshotPicker url={props.url} limit={props.attachmentLimit} onCancel={() => setScreenshotMode(false)} onSelect={(selected) => {
           setScreenshotMode(false)
           setAnnotationError('')
           setNote('')
@@ -240,7 +241,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   )
 }
 
-function ScreenshotPicker(props: { url: string; onSelect: (selection: ScreenshotSelection) => void; onCancel: () => void }) {
+function ScreenshotPicker(props: { url: string; limit?: AttachmentLimit; onSelect: (selection: ScreenshotSelection) => void; onCancel: () => void }) {
   const [image, setImage] = createSignal<{ file: File; source: string }>()
   const [error, setError] = createSignal('')
   let picture: HTMLImageElement | undefined
@@ -253,8 +254,12 @@ function ScreenshotPicker(props: { url: string; onSelect: (selection: Screenshot
   function choose(file: File | undefined) {
     if (!file) return
     setImage(undefined)
-    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size === 0 || file.size > 50_000_000) {
-      setError('Choose a PNG or JPEG screenshot up to 50 MB.')
+    if (!props.limit) {
+      setError('The attachment limit is unavailable for this project.')
+      return
+    }
+    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size === 0 || file.size > props.limit.bytes) {
+      setError(`Choose a PNG or JPEG screenshot up to ${props.limit.label}.`)
       return
     }
     setError('')

@@ -2,10 +2,53 @@ use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
+use agent_harness::settings::AgentSettings;
 use agent_harness::{AttachmentMetadata, PromptAttachment};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub(crate) const MAX_ATTACHMENT_BYTES: usize = 50_000_000;
+const DEFAULT_ATTACHMENT_BYTES: usize = 50_000_000;
+const ATTACHMENT_LIMIT_KEY: &str = "attachments.max_file_bytes";
+
+#[derive(Serialize)]
+pub struct AttachmentLimit {
+    pub bytes: usize,
+    pub label: String,
+}
+
+impl AttachmentLimit {
+    pub fn resolve(settings: &AgentSettings, project: &Path) -> Result<Self, String> {
+        let bytes = settings
+            .project_value::<usize>(project, ATTACHMENT_LIMIT_KEY)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(DEFAULT_ATTACHMENT_BYTES);
+        if bytes == 0 || bytes as u64 > 9_007_199_254_740_991 {
+            return Err(format!(
+                "{ATTACHMENT_LIMIT_KEY} must be a positive integer byte count within JavaScript’s safe integer range."
+            ));
+        }
+        let label = if bytes.is_multiple_of(1_000_000) {
+            format!("{} MB", bytes / 1_000_000)
+        } else if bytes.is_multiple_of(1_000) {
+            format!("{} kB", bytes / 1_000)
+        } else if bytes == 1 {
+            "1 byte".to_owned()
+        } else {
+            format!("{bytes} bytes")
+        };
+        Ok(Self { bytes, label })
+    }
+
+    pub fn check(&self, bytes: u64) -> io::Result<()> {
+        if bytes > self.bytes as u64 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("Attachments must be up to {} each.", self.label),
+            ));
+        }
+        Ok(())
+    }
+}
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message)
@@ -45,9 +88,6 @@ pub(crate) fn remove_task(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn persist_prompt_file(path: &Path, name: &str, bytes: &[u8]) -> io::Result<String> {
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(invalid("Choose a file up to 50 MB."));
-    }
     if name.is_empty()
         || name.len() > 255
         || matches!(name, "." | "..")
@@ -87,13 +127,18 @@ pub(crate) fn prompt_file(path: &Path, id: &str) -> io::Result<PathBuf> {
     file.path().canonicalize()
 }
 
-pub(crate) fn resolve_prompt_file(path: &Path, id: &str) -> io::Result<PromptAttachment> {
+pub(crate) fn resolve_prompt_file(
+    path: &Path,
+    id: &str,
+    limit: &AttachmentLimit,
+) -> io::Result<PromptAttachment> {
     let file_path = prompt_file(path, id)?;
     let relative_path = file_path
         .strip_prefix(path.canonicalize()?)
         .map_err(|_| invalid("The attachment is outside the task cache."))?;
     let file = fs::File::open(&file_path)?;
     let bytes = file.metadata()?.len();
+    limit.check(bytes)?;
     let mut header = Vec::with_capacity(12);
     file.take(12).read_to_end(&mut header)?;
     let image_mime_type = match header.as_slice() {
@@ -124,9 +169,6 @@ pub(crate) fn resolve_prompt_file(path: &Path, id: &str) -> io::Result<PromptAtt
 }
 
 pub(crate) fn persist_preview_screenshot(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(invalid("Choose a screenshot up to 50 MB."));
-    }
     let extension = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "png"
     } else if bytes.starts_with(b"\xff\xd8\xff") {
@@ -171,13 +213,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_attachment_limit_is_fifty_megabytes() -> Result<(), Box<dyn std::error::Error>> {
+        let limit = AttachmentLimit::resolve(&AgentSettings::default(), Path::new("/project"))?;
+        assert_eq!(limit.bytes, 50_000_000);
+        assert_eq!(limit.label, "50 MB");
+        assert!(limit.check(50_000_000).is_ok());
+        assert!(limit.check(50_000_001).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn attachments_keep_names_and_bytes_within_their_task() -> io::Result<()> {
         let root = tempfile::tempdir()?;
         let task = root.path().join("attachments/task");
         assert!(persist_prompt_file(&task, "../outside", b"data").is_err());
-        assert!(
-            persist_prompt_file(&task, "large.txt", &vec![0; MAX_ATTACHMENT_BYTES + 1]).is_err()
-        );
         let id = persist_prompt_file(&task, "Résumé 1.txt", b"fixture")?;
         assert_eq!(persist_prompt_file(&task, "Résumé 1.txt", b"fixture")?, id);
         let file = prompt_file(&task, &id)?;
@@ -186,7 +235,6 @@ mod tests {
             Some("Résumé 1.txt")
         );
         assert_eq!(fs::read(&file)?, b"fixture");
-        assert_eq!(resolve_prompt_file(&task, &id)?.image_mime_type, None);
         assert!(prompt_file(&root.path().join("attachments/other-task"), &id).is_err());
         remove_task(&task)?;
         assert!(!file.exists());
@@ -194,16 +242,20 @@ mod tests {
     }
 
     #[test]
-    fn resolves_an_image_using_the_cached_bytes() -> io::Result<()> {
+    fn resolves_an_image_using_the_cached_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let task = root.path().join("attachments/task");
         let image = include_bytes!("../icons/128x128.png");
+        let limit = AttachmentLimit::resolve(&AgentSettings::default(), &task)?;
         let id = persist_prompt_file(&task, "clipboard.data", image)?;
-        let attachment = resolve_prompt_file(&task, &id)?;
+        let attachment = resolve_prompt_file(&task, &id, &limit)?;
         assert_eq!(attachment.image_mime_type.as_deref(), Some("image/png"));
         assert_eq!(fs::read(attachment.path)?, image);
         let id = persist_prompt_file(&task, "unrelated.png", b"plain text")?;
-        assert_eq!(resolve_prompt_file(&task, &id)?.image_mime_type, None);
+        assert_eq!(
+            resolve_prompt_file(&task, &id, &limit)?.image_mime_type,
+            None
+        );
         Ok(())
     }
 

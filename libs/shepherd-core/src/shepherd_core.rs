@@ -1983,6 +1983,10 @@ impl Core {
         Ok(self.project(project_id)?.path.clone())
     }
 
+    pub fn task_project_path(&self, task_id: &TaskId) -> Result<PathBuf, CoreError> {
+        self.project_path(&self.task(task_id)?.project_id)
+    }
+
     pub fn project_preview_url(
         &self,
         project_id: &ProjectId,
