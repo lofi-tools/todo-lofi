@@ -551,7 +551,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
   let selectionAnchor: number | undefined
-  let mouseCapture: { pointerId: number; button: number } | undefined
+  let mouseCapture: { lastEvent: PointerEvent; cell: { column: number; row: number }; button: number } | undefined
   let mousePosition = ''
   let wheelRemainder = 0
   let reportedFocus: boolean | undefined
@@ -683,11 +683,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1): boolean | undefined {
+  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1, cell = cellAt(event)): boolean | undefined {
     // Only unhandled events fall through to local selection or scrolling.
     const current = frame
-    const cell = cellAt(event)
-    if (!current || !cell || current.displayOffset || (event.shiftKey && action !== 'release') || !(current.modes & MOUSE_REPORTING)) return
+    if (!current || !cell || !(current.modes & MOUSE_REPORTING)) return
+    if (action !== 'release' && (current.displayOffset || event.shiftKey)) return
     const position = `${cell.column},${cell.row}`
     if (action === 'move') {
       if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || !mouseCapture)) return
@@ -695,8 +695,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       button += 32
     }
     const modifiers = (event.altKey ? 8 : 0) + (event.ctrlKey ? 16 : 0)
-    const column = cell.column + 1
-    const row = cell.row + 1
+    const column = Math.min(cell.column + 1, current.columns)
+    const row = Math.min(cell.row + 1, current.rows)
     let data: string | number[]
     if (current.modes & MOUSE_SGR) {
       data = `\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat)
@@ -730,11 +730,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       }
     }
     const button = [0, 1, 2][event.button]
-    const reported = button === undefined ? undefined : reportMouse(event, button, 'press')
+    const reported = button === undefined ? undefined : reportMouse(event, button, 'press', 1, cell)
     if (reported !== undefined) {
       event.preventDefault()
       if (reported) {
-        mouseCapture = { pointerId: event.pointerId, button }
+        mouseCapture = { lastEvent: event, cell, button }
         event.currentTarget.setPointerCapture(event.pointerId)
       }
       return
@@ -749,9 +749,15 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function onPointerMove(event: PointerEvent) {
-    if (mouseCapture && mouseCapture.pointerId !== event.pointerId) return
-    if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move') !== undefined) return
     const cell = cellAt(event)
+    if (mouseCapture) {
+      if (mouseCapture.lastEvent.pointerId !== event.pointerId) return
+      if (cell) {
+        mouseCapture.lastEvent = event
+        mouseCapture.cell = cell
+      }
+    }
+    if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move', 1, cell) !== undefined) return
     if (!cell || !frame || selectionAnchor === undefined || event.pointerId !== selecting) return
     const end = cell.row * frame.columns + cell.column
     if (!selection && end === selectionAnchor) return
@@ -760,10 +766,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function releaseMouse(event: PointerEvent) {
-    if (mouseCapture?.pointerId === event.pointerId) {
-      const { button } = mouseCapture
+    if (mouseCapture?.lastEvent.pointerId === event.pointerId) {
+      const { lastEvent, cell, button } = mouseCapture
       mouseCapture = undefined
-      reportMouse(event, button, 'release')
+      if (event.type === 'pointerup') reportMouse(event, button, 'release')
+      else reportMouse(lastEvent, button, 'release', 1, cell)
     }
     if (selecting === event.pointerId) {
       selecting = undefined
@@ -884,6 +891,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function leaveTerminal() {
+    if (mouseCapture) {
+      const event = mouseCapture.lastEvent
+      releaseMouse(event)
+      if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
+    }
     for (const [code, release] of reportedKeys) {
       reportedKeys.delete(code)
       write(release(), false)

@@ -405,7 +405,7 @@ test.beforeEach(async ({ context }) => {
               new DataView(update.buffer).setUint32(14, (3 << 18) | 1025, true)
             }
             if (options.has('mouse-terminal')) {
-              new DataView(update.buffer).setUint32(14, (1 << 3) | (1 << 5) | 1025, true)
+              new DataView(update.buffer).setUint32(14, (1 << 13) | (1 << 5) | 1025, true)
             }
             if (options.has('interrupted-terminal-paste')) {
               new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
@@ -682,6 +682,28 @@ test('pairs terminal mouse presses and releases when the input queue fills', asy
   await page.mouse.up()
   await input.press('b')
   await expect.poll(async () => (await writes()).slice(128)).toEqual(['b'])
+})
+
+test('releases a held terminal mouse button when focus leaves', async ({ page }) => {
+  await page.goto('/?mouse-terminal')
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const writes = () => page.evaluate(() => window.__writes)
+  const reports = ['\x1b[<0;1;1M', '\x1b[<32;2;1M', '\x1b[<0;2;1m']
+  const bounds = await page.locator('.terminal-view__canvas').boundingBox()
+  if (!bounds) throw new Error('The terminal canvas has no bounds')
+
+  await page.mouse.move(bounds.x + 2, bounds.y + 2)
+  await page.mouse.down()
+  await page.mouse.move(bounds.x + bounds.width * 0.75, bounds.y + 2)
+  await expect.poll(writes).toEqual(reports.slice(0, 2))
+  await expect(input).toBeFocused()
+  await input.evaluate((element) => (element as HTMLTextAreaElement).blur())
+  await expect.poll(writes).toEqual(reports)
+
+  await page.mouse.up()
+  await input.press('b')
+  await expect.poll(writes).toEqual([...reports, 'b'])
 })
 
 test('ends a partial bracketed paste before sending the next key', async ({ page }) => {

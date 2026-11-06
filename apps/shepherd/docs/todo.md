@@ -572,6 +572,8 @@ task-scoped, persistent and fast enough.
   releases. The browser fixture stalls a write, checks the limit, and verifies
   input resumes in order. It checks that an accepted mouse press gets its
   release even when the queue fills and a rejected press leaves no capture.
+  Leaving the terminal during a drag releases the button at its last position.
+  The browser fixture verifies that the later pointer-up adds no second release.
   If a later chunk of a bracketed paste fails, the input queue attempts to
   end the paste before sending subsequent keys and reports the write error.
 
