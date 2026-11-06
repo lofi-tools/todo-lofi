@@ -50,7 +50,11 @@ fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, 
 /// Build and run the window. A startup failure is returned so `main` can report
 /// it and exit with a non-zero status.
 pub fn run() -> Result<(), tauri::Error> {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(
+        tauri::plugin::Builder::<_, ()>::new("preview-annotation")
+            .js_init_script_on_all_frames(include_str!("../../ui/src/preview-annotation.js"))
+            .build(),
+    );
     #[cfg(target_os = "macos")]
     let builder = {
         use tauri::menu::{Menu, MenuItem, MenuItemKind};

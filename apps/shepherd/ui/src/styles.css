@@ -1417,6 +1417,10 @@ textarea {
   color: var(--text-disabled);
 }
 
+.preview-pane__view {
+  height: 100%;
+}
+
 .preview-pane {
   display: flex;
   flex-direction: column;
@@ -1439,10 +1443,38 @@ textarea {
 .preview-pane iframe {
   flex: 1;
   width: 100%;
-  min-height: 0;
+  min-height: 8rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: white;
+}
+
+.preview-pane__note,
+.preview-pane__note label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.preview-pane__note p,
+.preview-pane__note ul {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview-pane__note ul {
+  padding-inline-start: 18px;
+}
+
+.preview-pane__note textarea {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
 }
 
 .terminal-pane__body {

@@ -4,6 +4,7 @@
  * core is replaced by canned snapshots.
  */
 
+import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 
 import type { AgentTerminal, Entry, Event as ShepherdEvent, FileChange, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
@@ -814,6 +815,55 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await save.click()
   await expect(page.getByText('Set a preview URL for this project.')).toBeVisible()
   await expect(page.getByTitle('Project website')).toHaveCount(0)
+})
+
+test('selects a preview element without activating it and adds an editable note to the prompt', async ({ context, page }) => {
+  await context.addInitScript({ path: fileURLToPath(new URL('../src/preview-annotation.js', import.meta.url)) })
+  const url = 'http://localhost:1431/annotation-fixture'
+  await page.route(url, (route) => route.fulfill({ contentType: 'text/html', body: `
+    <button id="buy:now" onclick="this.textContent = 'Activated'">Buy now</button>` }))
+  await page.goto('/')
+  const preview = page.getByRole('tab', { name: 'Preview' })
+  await preview.click()
+  await page.getByRole('button', { name: 'Project settings', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Preview URL' }).fill(url)
+  await page.getByRole('button', { name: 'Save preview URL' }).click()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true })
+  await prompt.fill('Review the checkout screen.')
+  const button = page.frameLocator('iframe[title="Project website"]').getByRole('button', { name: 'Buy now' })
+  await expect(button).toBeVisible()
+  const annotate = page.getByRole('button', { name: 'Annotate', exact: true })
+  await annotate.click()
+  await expect(page.getByText('Click an element or press Escape.')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(annotate).toBeVisible()
+
+  await annotate.click()
+  await expect(page.getByText('Click an element or press Escape.')).toBeVisible()
+  const bounds = await button.boundingBox()
+  if (!bounds) throw new Error('Fixture button has no bounds')
+  await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)
+  await expect(button).toBeVisible()
+  const note = page.getByRole('textbox', { name: 'Annotation note' })
+  await expect(note).toBeFocused()
+  await note.fill('Increase the contrast of this action.')
+  await page.getByRole('button', { name: 'Queue annotation' }).click()
+  await page.getByRole('tab', { name: 'Files' }).click()
+  await preview.click()
+  await expect(page.getByRole('list', { name: 'Queued annotations' })).toContainText('Increase the contrast')
+  await page.getByRole('button', { name: 'Add to prompt' }).click()
+  await expect(prompt).toBeFocused()
+  const text = await prompt.inputValue()
+  const prefix = 'Review the checkout screen.\n\nPreview annotations\n'
+  expect(text.startsWith(prefix)).toBe(true)
+  expect(JSON.parse(text.slice(prefix.length))).toEqual([{
+    url, selector: '#buy\\:now', excerpt: 'Buy now', note: 'Increase the contrast of this action.',
+    bounds: { x: expect.any(Number), y: expect.any(Number), width: bounds.width, height: bounds.height },
+  }])
+  await expect(page.getByRole('list', { name: 'Queued annotations' })).toHaveCount(0)
+  await button.click()
+  await expect(page.frameLocator('iframe[title="Project website"]').getByRole('button', { name: 'Activated' })).toBeVisible()
 })
 
 test('browses a worktree and project root with lazy folders and read-only previews', async ({ page }) => {

@@ -309,6 +309,7 @@ export function App() {
     return state === 'draft' || state === 'ready' || canStartTask()
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
+  const canAddPreviewNote = () => canCompose() && !pending() && !settingsOpen() && !freebuffProjectId()
   const canCancel = () => {
     const current = workspace()
     return !!current?.capabilities?.cancel && LIVE_STATES.includes(current.task.state)
@@ -561,6 +562,13 @@ export function App() {
     void firstDraft(projectId).then(() => loadTasks(projectId)).catch((failure) => {
       if (selectedProjectId() === projectId) setError(describe(failure))
     })
+  }
+
+  function addPreviewNote(text: string) {
+    if (!canAddPreviewNote()) return
+    const current = prompt().trimEnd()
+    updatePrompt(current ? `${current}\n\n${text}` : text)
+    promptInput?.focus()
   }
 
   function discardDraft() {
@@ -1152,11 +1160,13 @@ export function App() {
                 />}
               </Show>
             </div>
-            <Show when={inspectorTab() === 'preview'}>
-              <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
-                {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
-                  onProjectSettings={() => openProjectSettings(projectId)} />}
-              </Show>
+            <Show when={selectedProjectId()} keyed>
+              {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
+                shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
+                onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
+            </Show>
+            <Show when={inspectorTab() === 'preview' && !selectedProjectId()}>
+              <p class="empty">Select a project to preview.</p>
             </Show>
             <Show when={inspectorTab() === 'review'}>
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>

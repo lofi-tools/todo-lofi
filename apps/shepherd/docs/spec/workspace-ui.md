@@ -67,6 +67,9 @@ current layout and give future changes a point of comparison.
   URL. When it is configured, show the address, **Reload**, **Open in browser**,
   and **Project settings** above the sandboxed page. The preview uses a separate
   origin from the shell so the project can load its own modules and assets.
+  **Annotate** pauses interaction with the page so a click selects an element.
+  Write a note and queue it in Preview. **Add to prompt** appends the queued
+  annotations as editable text in the active composer and clears the queue.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 
