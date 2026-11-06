@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
-use agent_harness::PromptAttachment;
+use agent_harness::{AttachmentMetadata, PromptAttachment};
 use sha2::{Digest, Sha256};
 
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 50_000_000;
@@ -88,9 +88,14 @@ pub(crate) fn prompt_file(path: &Path, id: &str) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn resolve_prompt_file(path: &Path, id: &str) -> io::Result<PromptAttachment> {
-    let path = prompt_file(path, id)?;
+    let file_path = prompt_file(path, id)?;
+    let relative_path = file_path
+        .strip_prefix(path.canonicalize()?)
+        .map_err(|_| invalid("The attachment is outside the task cache."))?;
+    let file = fs::File::open(&file_path)?;
+    let bytes = file.metadata()?.len();
     let mut header = Vec::with_capacity(12);
-    fs::File::open(&path)?.take(12).read_to_end(&mut header)?;
+    file.take(12).read_to_end(&mut header)?;
     let image_mime_type = match header.as_slice() {
         [137, b'P', b'N', b'G', 13, 10, 26, 10, ..] => Some("image/png"),
         [255, 216, 255, ..] => Some("image/jpeg"),
@@ -98,9 +103,23 @@ pub(crate) fn resolve_prompt_file(path: &Path, id: &str) -> io::Result<PromptAtt
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P'] => Some("image/webp"),
         _ => None,
     };
+    let mime = match image_mime_type {
+        Some(mime) => mime.to_owned(),
+        None => mime_guess::from_path(relative_path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_owned(),
+    };
+    let metadata = AttachmentMetadata {
+        id: id.to_owned(),
+        relative_path: relative_path.to_owned(),
+        mime,
+        bytes,
+    };
     Ok(PromptAttachment {
-        path,
+        path: file_path,
         image_mime_type: image_mime_type.map(str::to_owned),
+        metadata: Some(metadata),
     })
 }
 

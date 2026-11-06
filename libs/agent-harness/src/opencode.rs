@@ -1640,6 +1640,7 @@ exec sleep 60
                     attachments: vec![crate::PromptAttachment {
                         path,
                         image_mime_type: Some("image/png".into()),
+                        metadata: None,
                     }],
                 })
                 .await?;

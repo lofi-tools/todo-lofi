@@ -987,8 +987,9 @@ and the task header never overstates the tier.
   Native OpenCode sends structured file URIs when the API advertises them.
   ACP receives image bytes when negotiated and file links otherwise. ACP can
   read the selected linked text files through Shepherd's bridge during the
-  sending turn. Attachment metadata and cap overrides, mentions, and model
-  and mode controls are still pending.
+  sending turn. Turso saves composer attachment metadata with the prompt
+  entry and restores the attachment order when reopening a task. Cap
+  overrides, mentions, and model and mode controls are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1018,6 +1019,8 @@ and the task header never overstates the tier.
   fixture with matching bytes.
   ACP fixtures verify turn-scoped reads, write denial, and isolation from
   neighboring cache files and symlink redirects.
+  Turso fixtures verify attachment metadata after reopen, rollback on an
+  invalid path, and removal with the task record.
 - [ ] Corrupt settings file falls back with a banner and backup.
 - [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
   The query plan uses the FTS index. Database fixtures cover exact-term ranking,

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_harness::Entry;
+use agent_harness::{AttachmentMetadata, Entry, EntryKind};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -148,6 +148,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0010_entries_search.sql",
         sql: include_str!("../toasty/migrations/0010_entries_search.sql"),
     },
+    Migration {
+        name: "0011_attachments.sql",
+        sql: include_str!("../toasty/migrations/0011_attachments.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -239,7 +243,8 @@ impl Store for TursoStore {
                 .bind(task_id.as_str())
                 .exec(&mut *db)
                 .await?;
-        rows.into_iter()
+        let mut entries = rows
+            .into_iter()
             .map(|row| {
                 let Value::Record(fields) = row else {
                     return Err(StoreError::InvalidRow(
@@ -247,11 +252,49 @@ impl Store for TursoStore {
                     ));
                 };
                 let json = required_string(fields.first())?;
-                serde_json::from_str(&json).map_err(|error| {
+                serde_json::from_str::<Entry>(&json).map_err(|error| {
                     StoreError::InvalidRow(format!("invalid transcript entry: {error}"))
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        if entries.is_empty() {
+            return Ok(entries);
+        }
+        let rows = toasty::sql::query(
+            "SELECT entry_id, id, relative_path, mime, bytes FROM attachments
+             WHERE task_id = ?1 ORDER BY entry_id, position",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::I64,
+        ])
+        .bind(task_id.as_str())
+        .exec(&mut *db)
+        .await?;
+        let mut by_entry = BTreeMap::<String, Vec<AttachmentMetadata>>::new();
+        for row in rows {
+            let Value::Record(fields) = row else {
+                return Err(StoreError::InvalidRow(
+                    "expected an attachment record".into(),
+                ));
+            };
+            by_entry
+                .entry(required_string(fields.first())?)
+                .or_default()
+                .push(AttachmentMetadata {
+                    id: required_string(fields.get(1))?,
+                    relative_path: PathBuf::from(required_string(fields.get(2))?),
+                    mime: required_string(fields.get(3))?,
+                    bytes: required_u64(fields.get(4))?,
+                });
+        }
+        for entry in &mut entries {
+            entry.attachments = by_entry.remove(&entry.id).unwrap_or_default();
+        }
+        Ok(entries)
     }
 
     async fn save_transcript_entries(
@@ -266,9 +309,12 @@ impl Store for TursoStore {
         let mut transaction = db.transaction().await?;
         let created_at = crate::projects::now_millis() as i64;
         for entry in entries {
-            let payload = serde_json::to_value(entry).map_err(|error| {
+            let mut payload = serde_json::to_value(entry).map_err(|error| {
                 StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
             })?;
+            if let Some(fields) = payload.as_object_mut() {
+                fields.remove("attachments");
+            }
             let kind = payload
                 .pointer("/kind/type")
                 .and_then(serde_json::Value::as_str)
@@ -291,6 +337,50 @@ impl Store for TursoStore {
             .bind(entry_text(&entry.kind))
             .exec(&mut transaction)
             .await?;
+            if matches!(entry.kind, EntryKind::UserMessage { .. }) {
+                for (position, attachment) in entry.attachments.iter().enumerate() {
+                    let path = attachment
+                        .relative_path
+                        .to_str()
+                        .filter(|path| {
+                            !path.is_empty()
+                                && attachment
+                                    .relative_path
+                                    .components()
+                                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+                        })
+                        .ok_or_else(|| {
+                            StoreError::InvalidRow("expected a relative attachment path".into())
+                        })?;
+                    let bytes = i64::try_from(attachment.bytes).map_err(|_| {
+                        StoreError::InvalidRow("attachment size exceeds database range".into())
+                    })?;
+                    toasty::sql::statement(
+                        "INSERT INTO attachments (task_id, entry_id, position, id, relative_path, mime, bytes, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(task_id, entry_id, position) DO UPDATE SET id = excluded.id,
+                             relative_path = excluded.relative_path, mime = excluded.mime, bytes = excluded.bytes",
+                    )
+                    .bind(session.task_id.as_str())
+                    .bind(&entry.id)
+                    .bind(position as i64)
+                    .bind(&attachment.id)
+                    .bind(path)
+                    .bind(&attachment.mime)
+                    .bind(bytes)
+                    .bind(created_at)
+                    .exec(&mut transaction)
+                    .await?;
+                }
+                toasty::sql::statement(
+                    "DELETE FROM attachments WHERE task_id = ?1 AND entry_id = ?2 AND position >= ?3",
+                )
+                .bind(session.task_id.as_str())
+                .bind(&entry.id)
+                .bind(entry.attachments.len() as i64)
+                .exec(&mut transaction)
+                .await?;
+            }
         }
         transaction.commit().await?;
         Ok(())
@@ -514,6 +604,7 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         for statement in [
+            "DELETE FROM attachments WHERE task_id = ?1",
             "DELETE FROM entries WHERE task_id = ?1",
             "DELETE FROM sessions WHERE task_id = ?1",
             "DELETE FROM tasks WHERE id = ?1",
@@ -1399,6 +1490,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turso_restores_attachment_order_and_removes_metadata_with_its_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let project = Project::new(database.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Attachment test", database.path());
+        let session = SessionRecord::started(task.id.clone(), "codex", None);
+        let text = AttachmentMetadata {
+            id: "text".into(),
+            relative_path: PathBuf::from("file-text/notes.txt"),
+            mime: "text/plain".into(),
+            bytes: 50,
+        };
+        let image = AttachmentMetadata {
+            id: "image".into(),
+            relative_path: PathBuf::from("file-image/image.png"),
+            mime: "image/png".into(),
+            bytes: 300,
+        };
+        let mut transcript = agent_harness::Transcript::default();
+        transcript.push_user_message_with_attachments(
+            "Review the files.",
+            vec![text.clone(), image, text.clone()],
+        );
+        transcript.push_user_message_with_attachments("Review the text again.", vec![text]);
+        let first = transcript.entry(0).ok_or("missing prompt")?;
+        let second = transcript.entry(1).ok_or("missing second prompt")?;
+
+        let store = TursoStore::open(&uri).await?;
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        store.save_session(&session).await?;
+        store
+            .save_transcript_entries(&session, &[first, second])
+            .await?;
+        store.save_transcript_entries(&session, &[first]).await?;
+        let mut invalid = second.clone();
+        invalid
+            .attachments
+            .first_mut()
+            .ok_or("missing attachment")?
+            .relative_path = "../outside".into();
+        if let EntryKind::UserMessage { text } = &mut invalid.kind {
+            *text = "This failed update must roll back.".into();
+        }
+        assert!(
+            store
+                .save_transcript_entries(&session, &[&invalid])
+                .await
+                .is_err()
+        );
+        drop(store);
+
+        let reopened = TursoStore::open(&uri).await?;
+        assert_eq!(
+            reopened.load_transcript(&task.id).await?,
+            transcript.entries()
+        );
+        reopened.delete_task(&task.id).await?;
+        let mut db = reopened.db.lock().await;
+        let rows = toasty::sql::query("SELECT id FROM attachments WHERE task_id = ?1")
+            .column_types([Type::String])
+            .bind(task.id.as_str())
+            .exec(&mut *db)
+            .await?;
+        assert!(rows.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn turso_schema_migrates_and_persists_across_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = TestDatabase::new()?;
@@ -1415,7 +1576,7 @@ mod tests {
         {
             let store = TursoStore::open(&uri).await?;
             let tables = table_names(&store).await?;
-            for expected in ["projects", "tasks", "sessions", "entries"] {
+            for expected in ["projects", "tasks", "sessions", "entries", "attachments"] {
                 assert!(tables.iter().any(|table| table == expected));
             }
             assert!(tables.iter().any(|table| table == "_migrations_history"));

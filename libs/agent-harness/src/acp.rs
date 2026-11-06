@@ -1216,6 +1216,7 @@ mod tests {
                 attachments: vec![crate::PromptAttachment {
                     path: selected.clone(),
                     image_mime_type: None,
+                    metadata: None,
                 }],
             })
             .await?;
@@ -1263,10 +1264,12 @@ mod tests {
                         crate::PromptAttachment {
                             path: image_path.clone(),
                             image_mime_type: Some("image/png".into()),
+                            metadata: None,
                         },
                         crate::PromptAttachment {
                             path: file_path.clone(),
                             image_mime_type: None,
+                            metadata: None,
                         },
                     ],
                 })

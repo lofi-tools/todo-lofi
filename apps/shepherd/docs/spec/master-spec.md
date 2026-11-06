@@ -956,7 +956,7 @@ core is the only writer.
 | `entries_search` | Turso full-text index (Tantivy-backed) over entry text, task title and project name |
 | `permissions` | id, project_id, agent_profile_id, tool_key, decision, scope, source, created_at |
 | `terminals` | id, project_id, task_id (null for shared), scope, title, cwd, command, profile, created_at, ended_at, exit_code |
-| `attachments` | id, task_id, entry_id, relative_path, mime, bytes, created_at |
+| `attachments` | id, task_id, entry_id, position, relative_path, mime, bytes, created_at |
 | `terminal_profiles` | id, label, command, args_json, cwd_policy, env_json, prompt_prefix |
 | `terminal_layouts` | project_id (unique), layout_json, updated_at |
 | `layouts` | task_id (unique), workspace_json, updated_at |
@@ -968,6 +968,11 @@ Rules: entry writes are batched per settled message or tool call, never per toke
 `terminal_layouts.layout_json` stores the terminal split tree, the selected
 inspector tab and each slot's scope. A terminal row with scope `project` has a
 null `task_id`; scope `task` has a task id.
+
+Composer attachment records save with their transcript entry in one
+transaction. Paths are relative to the task's attachment cache. A cached
+file can belong to multiple entries, and each entry restores its own
+attachment order.
 
 ### 11.1 Settings files
 

@@ -180,6 +180,7 @@ export interface Entry {
   id: string
   sequence: number
   kind: EntryKind
+  attachments?: Array<{ id: string; relativePath: string; mime: string; bytes: number }>
 }
 
 export interface AgentDiagnostics {

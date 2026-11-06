@@ -2917,7 +2917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_attachments_are_resolved_from_the_selected_task()
+    async fn prompt_attachments_are_resolved_and_restored_for_the_selected_task()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let repository = TestRepository::new()?;
@@ -2959,17 +2959,18 @@ mod tests {
             Some("attachments")
         );
         let sent = state
-            .send_prompt_with_files(task, String::new(), vec![id])
+            .send_prompt_with_files(task.clone(), String::new(), vec![id.clone()])
             .await?;
-        let references = sent
+        let entry = sent
             .transcript
             .iter()
-            .find_map(|entry| match &entry.kind {
-                agent_harness::EntryKind::UserMessage { text } => {
-                    text.strip_prefix("Use the attached files.\n\nAttached files\n")
-                }
-                _ => None,
-            })
+            .find(|entry| matches!(entry.kind, agent_harness::EntryKind::UserMessage { .. }))
+            .ok_or("missing prompt")?;
+        let agent_harness::EntryKind::UserMessage { text } = &entry.kind else {
+            return Err("expected a user prompt".into());
+        };
+        let references = text
+            .strip_prefix("Use the attached files.\n\nAttached files\n")
             .ok_or("missing file references in prompt")?;
         let paths = serde_json::from_str::<Vec<PathBuf>>(references)?;
         let [file] = paths.as_slice() else {
@@ -2977,7 +2978,30 @@ mod tests {
         };
         assert!(file.ends_with("fixture.txt"));
         assert_eq!(std::fs::read(file)?, contents);
+        assert_eq!(
+            entry.attachments,
+            vec![agent_harness::AttachmentMetadata {
+                relative_path: PathBuf::from(format!("file-{id}")).join("fixture.txt"),
+                id,
+                mime: "text/plain".into(),
+                bytes: contents.len() as u64,
+            }]
+        );
         state.quit(true).await?;
+        drop(state);
+        let reopened = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let restored = reopened.task_workspace(task).await?;
+        let restored_entry = restored
+            .transcript
+            .iter()
+            .find(|row| row.id == entry.id)
+            .ok_or("missing restored prompt")?;
+        assert_eq!(restored_entry, entry);
         Ok(())
     }
 

@@ -382,6 +382,16 @@ impl PromptInput {
 pub struct PromptAttachment {
     pub path: PathBuf,
     pub image_mime_type: Option<String>,
+    pub metadata: Option<AttachmentMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentMetadata {
+    pub id: String,
+    pub relative_path: PathBuf,
+    pub mime: String,
+    pub bytes: u64,
 }
 
 impl PromptAttachment {
@@ -600,6 +610,8 @@ pub struct Entry {
     /// Stable per-session order.
     pub sequence: u64,
     pub kind: EntryKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMetadata>,
     /// The adapter item this row came from, when it has one. Persisted with the
     /// row so a restored transcript re-attaches later updates to it instead of
     /// appending a duplicate.
@@ -804,7 +816,19 @@ impl Transcript {
     /// Record the user's prompt. Agents normally echo it back; the transcript
     /// deliberately ignores those echoes.
     pub fn push_user_message(&mut self, text: impl Into<String>) -> TranscriptChange {
-        self.append(EntryKind::UserMessage { text: text.into() })
+        self.push_user_message_with_attachments(text, Vec::new())
+    }
+
+    pub fn push_user_message_with_attachments(
+        &mut self,
+        text: impl Into<String>,
+        attachments: Vec<AttachmentMetadata>,
+    ) -> TranscriptChange {
+        self.append_entry(
+            EntryKind::UserMessage { text: text.into() },
+            None,
+            attachments,
+        )
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>, is_error: bool) -> TranscriptChange {
@@ -1140,6 +1164,15 @@ impl Transcript {
     }
 
     fn append_from(&mut self, kind: EntryKind, source_id: Option<String>) -> TranscriptChange {
+        self.append_entry(kind, source_id, Vec::new())
+    }
+
+    fn append_entry(
+        &mut self,
+        kind: EntryKind,
+        source_id: Option<String>,
+        attachments: Vec<AttachmentMetadata>,
+    ) -> TranscriptChange {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         let index = self.entries.len();
@@ -1147,6 +1180,7 @@ impl Transcript {
             id: format!("entry-{sequence}"),
             sequence,
             kind,
+            attachments,
             source_id,
         });
         TranscriptChange {

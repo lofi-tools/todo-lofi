@@ -176,7 +176,14 @@ impl HarnessSession {
     pub async fn prompt(&mut self, input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
         // Completed messages stay separate even if the adapter reuses an item ID.
         self.transcript.clear_streaming_row_keys();
-        let change = self.transcript.push_user_message(input.text.clone());
+        let attachments = input
+            .attachments
+            .iter()
+            .filter_map(|file| file.metadata.clone())
+            .collect();
+        let change = self
+            .transcript
+            .push_user_message_with_attachments(input.text.clone(), attachments);
         self.track_entry(change);
         self.harness.prompt(input).await?;
         Ok(self.pump())

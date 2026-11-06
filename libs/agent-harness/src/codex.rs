@@ -2583,6 +2583,7 @@ done
                 attachments: vec![crate::PromptAttachment {
                     path: path.clone(),
                     image_mime_type: Some("image/png".into()),
+                    metadata: None,
                 }],
             })
             .await?;
@@ -3385,6 +3386,7 @@ sleep 30
                 attachments: vec![crate::PromptAttachment {
                     path: path.clone(),
                     image_mime_type: Some("image/png".into()),
+                    metadata: None,
                 }],
             })
             .await?;
