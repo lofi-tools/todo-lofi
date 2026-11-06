@@ -568,8 +568,10 @@ task-scoped, persistent and fast enough.
   Coalesce paints and defer canvas work while the tab is hidden. Rate-limit
   frame delivery from the previous send so an idle pane can update immediately.
   Each terminal view limits queued input to 128 operations and 1 MiB of
-  payload. Kitty key presses reserve room for their releases. The browser
-  fixture stalls a write, checks the limit, and verifies input resumes in order.
+  payload. Kitty key presses and reported mouse buttons reserve room for their
+  releases. The browser fixture stalls a write, checks the limit, and verifies
+  input resumes in order. It checks that an accepted mouse press gets its
+  release even when the queue fills and a rejected press leaves no capture.
   If a later chunk of a bracketed paste fails, the input queue attempts to
   end the paste before sending subsequent keys and reports the write error.
 

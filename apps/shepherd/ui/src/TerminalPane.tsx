@@ -515,7 +515,7 @@ const MOUSE_UTF8 = 1 << 14
 const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 const MAX_PENDING_INPUT_WRITES = 128
 const MAX_PENDING_INPUT_BYTES = 1024 * 1024
-const KEY_RELEASE_BUDGET = 128
+const INPUT_RELEASE_BUDGET = 128
 
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
@@ -683,35 +683,37 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1): boolean {
+  function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1): boolean | undefined {
+    // Only unhandled events fall through to local selection or scrolling.
     const current = frame
     const cell = cellAt(event)
-    if (!current || !cell || current.displayOffset || (event.shiftKey && action !== 'release') || !(current.modes & MOUSE_REPORTING)) return false
+    if (!current || !cell || current.displayOffset || (event.shiftKey && action !== 'release') || !(current.modes & MOUSE_REPORTING)) return
     const position = `${cell.column},${cell.row}`
     if (action === 'move') {
-      if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || !mouseCapture)) return false
-      if (mousePosition === position) return true
+      if (!(current.modes & MOUSE_MOTION) && (!(current.modes & MOUSE_DRAG) || !mouseCapture)) return
+      if (mousePosition === position) return false
       button += 32
     }
-    mousePosition = position
     const modifiers = (event.altKey ? 8 : 0) + (event.ctrlKey ? 16 : 0)
     const column = cell.column + 1
     const row = cell.row + 1
+    let data: string | number[]
     if (current.modes & MOUSE_SGR) {
-      write(`\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat), false)
+      data = `\x1b[<${button + modifiers};${column};${row}${action === 'release' ? 'm' : 'M'}`.repeat(repeat)
     } else {
       const utf8 = (current.modes & MOUSE_UTF8) !== 0
       const limit = utf8 ? 2015 : 223
-      if (column <= limit && row <= limit) {
-        const code = (action === 'release' ? 3 : button) + modifiers + 32
-        const prefix = [27, 91, 77, code]
-        const coordinates = utf8
-          ? Array.from(new TextEncoder().encode(String.fromCodePoint(column + 32, row + 32)))
-          : [column + 32, row + 32]
-        write(Array.from({ length: repeat }, () => [...prefix, ...coordinates]).flat(), false)
-      }
+      if (column > limit || row > limit) return false
+      const code = (action === 'release' ? 3 : button) + modifiers + 32
+      const prefix = [27, 91, 77, code]
+      const coordinates = utf8
+        ? Array.from(new TextEncoder().encode(String.fromCodePoint(column + 32, row + 32)))
+        : [column + 32, row + 32]
+      data = Array.from({ length: repeat }, () => [...prefix, ...coordinates]).flat()
     }
-    return true
+    const queued = write(data, false, action === 'press' && button < 3)
+    if (queued) mousePosition = position
+    return queued
   }
 
   function onPointerDown(event: PointerEvent & { currentTarget: HTMLCanvasElement }) {
@@ -728,10 +730,13 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       }
     }
     const button = [0, 1, 2][event.button]
-    if (button !== undefined && reportMouse(event, button, 'press')) {
+    const reported = button === undefined ? undefined : reportMouse(event, button, 'press')
+    if (reported !== undefined) {
       event.preventDefault()
-      mouseCapture = { pointerId: event.pointerId, button }
-      event.currentTarget.setPointerCapture(event.pointerId)
+      if (reported) {
+        mouseCapture = { pointerId: event.pointerId, button }
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }
       return
     }
     if (event.button !== 0) return
@@ -745,7 +750,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
 
   function onPointerMove(event: PointerEvent) {
     if (mouseCapture && mouseCapture.pointerId !== event.pointerId) return
-    if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move')) return
+    if (selecting === undefined && reportMouse(event, mouseCapture?.button ?? 3, 'move') !== undefined) return
     const cell = cellAt(event)
     if (!cell || !frame || selectionAnchor === undefined || event.pointerId !== selecting) return
     const end = cell.row * frame.columns + cell.column
@@ -756,8 +761,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
 
   function releaseMouse(event: PointerEvent) {
     if (mouseCapture?.pointerId === event.pointerId) {
-      reportMouse(event, mouseCapture.button, 'release')
+      const { button } = mouseCapture
       mouseCapture = undefined
+      reportMouse(event, button, 'release')
     }
     if (selecting === event.pointerId) {
       selecting = undefined
@@ -841,11 +847,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }
   }
 
-  function queueInput(send: () => Promise<void>, bytes = 0, reservesKeyRelease = false): boolean {
+  function queueInput(send: () => Promise<void>, bytes = 0, reservesRelease = false): boolean {
     // A press accepted before the queue fills still needs room for its release.
-    const reservedReleases = reportedKeys.size + Number(reservesKeyRelease)
+    const reservedReleases = reportedKeys.size + Number(!!mouseCapture) + Number(reservesRelease)
     if (pendingInputWrites + reservedReleases >= MAX_PENDING_INPUT_WRITES ||
-        pendingInputBytes + bytes + reservedReleases * KEY_RELEASE_BUDGET > MAX_PENDING_INPUT_BYTES) {
+        pendingInputBytes + bytes + reservedReleases * INPUT_RELEASE_BUDGET > MAX_PENDING_INPUT_BYTES) {
       setError('Terminal input is full. Try again after the terminal catches up.')
       return false
     }
@@ -859,9 +865,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     return true
   }
 
-  function write(data: string | number[], followOutput = true, reservesKeyRelease = false): boolean {
+  function write(data: string | number[], followOutput = true, reservesRelease = false): boolean {
     const bytes = typeof data === 'string' ? data.length * 3 : data.length
-    return bytes > 0 && queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput), bytes, reservesKeyRelease)
+    return bytes > 0 && queueInput(() => bridge.terminalWrite(props.terminalId, data, followOutput), bytes, reservesRelease)
   }
 
   function reportFocus(focused: boolean) {
@@ -1095,7 +1101,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       wheelRemainder -= steps
       const count = Math.min(120, Math.abs(steps))
       if (!count) return
-      if (reportMouse(event, steps < 0 ? 64 : 65, 'press', count)) return
+      if (reportMouse(event, steps < 0 ? 64 : 65, 'press', count) !== undefined) return
       if (!event.shiftKey && (frame.modes & (ALT_SCREEN | ALTERNATE_SCROLL)) === (ALT_SCREEN | ALTERNATE_SCROLL)) {
         const prefix = frame.modes & APP_CURSOR ? '\x1bO' : '\x1b['
         write((prefix + (steps < 0 ? 'A' : 'B')).repeat(count))

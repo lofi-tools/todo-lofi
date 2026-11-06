@@ -404,6 +404,9 @@ test.beforeEach(async ({ context }) => {
             if (options.has('kitty-shortcuts')) {
               new DataView(update.buffer).setUint32(14, (3 << 18) | 1025, true)
             }
+            if (options.has('mouse-terminal')) {
+              new DataView(update.buffer).setUint32(14, (1 << 3) | (1 << 5) | 1025, true)
+            }
             if (options.has('interrupted-terminal-paste')) {
               new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
             }
@@ -643,6 +646,42 @@ test('bounds stalled terminal input and reserves room for key release', async ({
 
   await input.press('b')
   await expect.poll(async () => (await writes()).slice(-2)).toEqual(['\x1b[98;;98u', '\x1b[98;1:3u'])
+})
+
+test('pairs terminal mouse presses and releases when the input queue fills', async ({ page }) => {
+  const loadTerminal = async () => {
+    await page.goto('/?mouse-terminal&blocked-terminal-write')
+    await expect(page.getByText('BB', { exact: true })).toBeAttached()
+    await page.locator('.terminal-view__canvas').hover({ position: { x: 2, y: 2 } })
+  }
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const writes = () => page.evaluate(() => window.__writes)
+  const resumeWrites = () => page.evaluate(() => window.__releaseTerminalWrite())
+  const fillQueue = () => input.evaluate((element) => {
+    for (let index = 0; index < 130; index++) {
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }))
+    }
+  })
+
+  await loadTerminal()
+  await page.mouse.down()
+  await fillQueue()
+  await expect(page.getByText('Terminal input is full.', { exact: false })).toBeVisible()
+  await expect.poll(writes).toEqual(['\x1b[<0;1;1M'])
+  await page.mouse.up()
+  await resumeWrites()
+  await expect.poll(async () => (await writes()).length).toBe(128)
+  expect((await writes()).at(-1)).toBe('\x1b[<0;1;1m')
+
+  await loadTerminal()
+  await fillQueue()
+  await expect.poll(writes).toEqual(['a'])
+  await page.mouse.down()
+  await resumeWrites()
+  await expect.poll(async () => (await writes()).length).toBe(128)
+  await page.mouse.up()
+  await input.press('b')
+  await expect.poll(async () => (await writes()).slice(128)).toEqual(['b'])
 })
 
 test('ends a partial bracketed paste before sending the next key', async ({ page }) => {
