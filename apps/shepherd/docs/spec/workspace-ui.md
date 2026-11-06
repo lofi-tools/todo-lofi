@@ -51,6 +51,10 @@ current layout and give future changes a point of comparison.
   key still sends a terminal chord.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
+- In Files, name the active root above the tree and let the user choose the
+  project root or the selected task's worktree. Expand folders in place on
+  demand. Hide dotfiles by default with a **Show dotfiles** toggle. Open text
+  in a read-only, line-numbered viewer inside the inspector.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

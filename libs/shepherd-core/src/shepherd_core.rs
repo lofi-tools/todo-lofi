@@ -6,6 +6,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod files;
 pub mod git;
 pub mod harness;
 pub mod input;
@@ -368,7 +369,7 @@ impl Core {
         }
     }
 
-    pub fn terminal_directory(
+    pub fn workspace_directory(
         &self,
         project_id: &ProjectId,
         task_id: Option<&TaskId>,

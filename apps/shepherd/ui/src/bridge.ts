@@ -660,6 +660,30 @@ export function gitFileDiff(taskId: string, file: string): Promise<GitFileDiff> 
   return invoke('git_file_diff', { taskId, file })
 }
 
+export interface WorkspaceFileEntry {
+  name: string
+  path: string
+  directory: boolean
+}
+
+export interface DirectoryListing {
+  entries: WorkspaceFileEntry[]
+  incomplete: boolean
+}
+
+export interface TextFile {
+  lines: Array<Array<{ text: string; color: string | null }>>
+  truncated: boolean
+}
+
+export function listFiles(projectId: string, taskId: string | null, path: string, showDotfiles: boolean): Promise<DirectoryListing> {
+  return invoke('list_files', { projectId, taskId, path, showDotfiles })
+}
+
+export function readWorkspaceFile(projectId: string, taskId: string | null, path: string): Promise<TextFile> {
+  return invoke('read_workspace_file', { projectId, taskId, path })
+}
+
 export type GitMutation =
   | { type: 'stage'; path: string | null }
   | { type: 'unstage'; path: string }

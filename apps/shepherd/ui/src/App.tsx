@@ -10,6 +10,7 @@ import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
 import { GitPane } from './GitPane'
@@ -1151,6 +1152,13 @@ export function App() {
                 </Show>
               </Show>
             </Show>
+            <Show when={inspectorTab() === 'files'}>
+              <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
+                fallback={<p class="empty">Select an available project to browse its files.</p>}>
+                {(projectId) => <FilesPane projectId={projectId}
+                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null} />}
+              </Show>
+            </Show>
           </div>
         </aside>
       </WorkspaceFrame>
@@ -1556,7 +1564,7 @@ const INSPECTOR_TABS: InspectorTabOption[] = [
   { id: 'preview', label: 'Preview', enabled: false, icon: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z' },
   { id: 'review', label: 'Review', enabled: true, icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 14l3 3 5-5' },
   { id: 'git', label: 'Git', enabled: true, icon: 'M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 6v12M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0c0 4-4 6-12 6' },
-  { id: 'files', label: 'Files', enabled: false, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },
+  { id: 'files', label: 'Files', enabled: true, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },
 ]
 
 function ReviewBadge() {

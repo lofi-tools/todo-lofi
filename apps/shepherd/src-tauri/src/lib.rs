@@ -183,6 +183,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::review_task,
             bridge::commands::git_file_diff,
             bridge::commands::git_snapshot,
+            bridge::commands::list_files,
+            bridge::commands::read_workspace_file,
             bridge::commands::mutate_git,
             bridge::commands::terminal_layout,
             bridge::commands::save_terminal_layout,

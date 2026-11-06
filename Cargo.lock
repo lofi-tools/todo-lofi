@@ -10150,9 +10150,12 @@ version = "0.1.0"
 dependencies = [
  "agent-harness",
  "async-trait",
+ "ignore",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "syntect",
  "tempfile",
  "thiserror 1.0.69",
  "toasty",

@@ -20,6 +20,7 @@ use agent_harness::acp::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use shepherd_core::files::{self, DirectoryListing, TextFile};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
@@ -84,6 +85,12 @@ impl From<CoreError> for BridgeError {
             });
         }
         bridge_error
+    }
+}
+
+impl From<files::FileError> for BridgeError {
+    fn from(error: files::FileError) -> Self {
+        Self::new("files", error.to_string())
     }
 }
 
@@ -757,6 +764,17 @@ impl ShellState {
         Ok(core.task_workspace(&task_id)?)
     }
 
+    async fn files_directory(
+        &self,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<PathBuf, BridgeError> {
+        Ok(self.core.lock().await.workspace_directory(
+            &ProjectId::new(project_id),
+            task_id.map(TaskId::new).as_ref(),
+        )?)
+    }
+
     pub async fn terminal_list(&self, project_id: String) -> TerminalList {
         self.core
             .lock()
@@ -776,7 +794,7 @@ impl ShellState {
         let task_id = task_id.map(TaskId::new);
         let (cwd, title) = {
             let core = self.core.lock().await;
-            let cwd = core.terminal_directory(&project_id, task_id.as_ref())?;
+            let cwd = core.workspace_directory(&project_id, task_id.as_ref())?;
             let title = format!("Terminal {}", core.terminals_for(&project_id).len() + 1);
             (cwd, title)
         };
@@ -1410,6 +1428,47 @@ pub mod commands {
             .lock()
             .await
             .git_snapshot(&TaskId::new(task_id))?)
+    }
+
+    #[tauri::command]
+    pub async fn list_files(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+        path: String,
+        show_dotfiles: bool,
+    ) -> Result<DirectoryListing, BridgeError> {
+        let root = state.files_directory(project_id, task_id).await?;
+        Ok(tokio::task::spawn_blocking(move || {
+            files::list_directory(&root, Path::new(&path), show_dotfiles)
+        })
+        .await
+        .map_err(|error| {
+            BridgeError::new(
+                "files",
+                format!("Could not finish reading the folder: {error}"),
+            )
+        })??)
+    }
+
+    #[tauri::command]
+    pub async fn read_workspace_file(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+        path: String,
+    ) -> Result<TextFile, BridgeError> {
+        let root = state.files_directory(project_id, task_id).await?;
+        Ok(
+            tokio::task::spawn_blocking(move || files::read_file(&root, Path::new(&path)))
+                .await
+                .map_err(|error| {
+                    BridgeError::new(
+                        "files",
+                        format!("Could not finish reading the file: {error}"),
+                    )
+                })??,
+        )
     }
 
     #[tauri::command]

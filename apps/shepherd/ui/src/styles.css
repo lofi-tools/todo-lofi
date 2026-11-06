@@ -1642,6 +1642,80 @@ textarea {
   background: var(--surface-raised);
 }
 
+.files-pane {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+
+.files-pane__toolbar {
+  flex-wrap: wrap;
+}
+
+.files-pane__tree {
+  max-height: 32vh;
+  overflow: auto;
+}
+
+.files-tree {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.files-tree .files-tree {
+  padding-inline-start: 1em;
+}
+
+.files-tree__entry {
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.files-tree__entry:hover,
+.files-tree__entry[aria-pressed='true'] {
+  background: var(--surface-raised);
+}
+
+.files-viewer {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.files-viewer__source {
+  max-height: 48vh;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.files-viewer__line {
+  display: flex;
+  gap: 12px;
+  min-height: 1lh;
+}
+
+.files-viewer__number {
+  flex: 0 0 4ch;
+  color: var(--text-muted);
+  text-align: end;
+  user-select: none;
+}
+
 .terminal-tab {
   height: 100%;
 }

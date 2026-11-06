@@ -17,6 +17,7 @@ test.beforeEach(async ({ context }) => {
     let eventChannel
     let eventIndex = 0
     let cancelRequests = 0
+    const fileListings: string[] = []
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
@@ -346,6 +347,23 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'list_files': {
+            fileListings.push(args.path)
+            if (args.path === 'src') {
+              return { entries: [{ name: 'main.rs', path: 'src/main.rs', directory: false }], incomplete: false }
+            }
+            const name = args.taskId ? 'worktree.txt' : 'README.md'
+            return { entries: [
+              { name: 'src', path: 'src', directory: true },
+              { name, path: name, directory: false },
+              ...(args.showDotfiles ? [{ name: '.env.example', path: '.env.example', directory: false }] : []),
+            ], incomplete: false }
+          }
+          case 'read_workspace_file':
+            return { lines: [
+              [{ text: args.path === 'src/main.rs' ? 'fn main() {}' : '<file>', color: '#a3be8c' }],
+              [{ text: '// second line', color: null }],
+            ], truncated: false }
           case 'save_workspace_layout':
             workspaceLayouts.set(args.taskId, args.layout)
             return args.layout
@@ -596,6 +614,7 @@ test.beforeEach(async ({ context }) => {
     window.__releaseTerminalWrite = () => releaseTerminalWrite?.()
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
+    window.__fileListings = fileListings
     window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
     window.__emitCoreEvent = (event: ShepherdEvent) =>
@@ -663,6 +682,38 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('browses a worktree and project root with lazy folders and read-only previews', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  expect(await page.evaluate(() => window.__fileListings)).toEqual([])
+  await page.getByRole('tab', { name: 'Files' }).click()
+
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const root = files.getByLabel('File root')
+  await expect(root).toHaveValue('worktree')
+  await expect(files.getByRole('button', { name: 'worktree.txt' })).toBeVisible()
+  expect(await page.evaluate(() => window.__fileListings)).toEqual([''])
+  const folder = files.getByRole('button', { name: 'src' })
+  await expect(folder).toHaveAttribute('aria-expanded', 'false')
+  await folder.click()
+  await files.getByRole('button', { name: 'main.rs' }).click()
+  expect(await page.evaluate(() => window.__fileListings)).toEqual(['', 'src'])
+  const viewer = files.getByRole('region', { name: 'File preview' })
+  await expect(viewer.getByText('src/main.rs')).toBeVisible()
+  await expect(viewer.getByText('fn main() {}')).toHaveCSS('color', 'rgb(163, 190, 140)')
+  await expect(viewer.locator('.files-viewer__number')).toHaveText(['1', '2'])
+
+  await root.selectOption('project')
+  await expect(viewer).toHaveCount(0)
+  await expect(files.getByRole('button', { name: 'README.md' })).toBeVisible()
+  await expect(files.getByRole('button', { name: 'worktree.txt' })).toHaveCount(0)
+  await expect(files.getByRole('button', { name: '.env.example' })).toHaveCount(0)
+  await files.getByLabel('Show dotfiles').check()
+  await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
+  await files.getByRole('button', { name: 'README.md' }).click()
+  await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
 })
 
 test('resumes an interrupted task from its conversation header', async ({ page }) => {
