@@ -38,7 +38,9 @@ use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::store::{MemoryStore, Store, StoreError};
-use crate::terminal::{InspectorTab, TerminalId, TerminalLayout, TerminalRecord, TerminalSnapshot};
+use crate::terminal::{
+    InspectorTab, TerminalId, TerminalLayout, TerminalList, TerminalRecord, TerminalSnapshot,
+};
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -146,6 +148,7 @@ pub struct Core {
     session_records: BTreeMap<TaskId, SessionRecord>,
     terminal_layouts: BTreeMap<ProjectId, TerminalLayout>,
     terminals: BTreeMap<TerminalId, TerminalRecord>,
+    terminal_list_revision: u64,
     store: Box<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
@@ -184,6 +187,7 @@ impl Core {
             session_records: BTreeMap::new(),
             terminal_layouts: BTreeMap::new(),
             terminals: BTreeMap::new(),
+            terminal_list_revision: 0,
             store,
             harness_factory,
             shutdown: ShutdownState::Running,
@@ -350,6 +354,14 @@ impl Core {
             .collect()
     }
 
+    pub fn terminal_list(&self, project_id: &ProjectId) -> TerminalList {
+        TerminalList {
+            project_id: project_id.clone(),
+            revision: self.terminal_list_revision,
+            terminals: self.terminals_for(project_id),
+        }
+    }
+
     pub fn terminal_directory(
         &self,
         project_id: &ProjectId,
@@ -471,10 +483,7 @@ impl Core {
     pub async fn record_terminal(&mut self, terminal: &TerminalRecord) -> Result<(), CoreError> {
         self.store.save_terminal(terminal).await?;
         self.terminals.insert(terminal.id.clone(), terminal.clone());
-        self.emit(Event::TerminalListChanged {
-            project_id: terminal.project_id.clone(),
-            terminals: self.terminals_for(&terminal.project_id),
-        });
+        self.publish_terminal_list(&terminal.project_id);
         Ok(())
     }
 
@@ -498,11 +507,13 @@ impl Core {
         self.store.save_terminal(&terminal).await?;
         let project_id = terminal.project_id.clone();
         self.terminals.insert(terminal_id.clone(), terminal);
-        self.emit(Event::TerminalListChanged {
-            project_id: project_id.clone(),
-            terminals: self.terminals_for(&project_id),
-        });
+        self.publish_terminal_list(&project_id);
         Ok(())
+    }
+
+    fn publish_terminal_list(&mut self, project_id: &ProjectId) {
+        self.terminal_list_revision += 1;
+        self.emit(Event::TerminalListChanged(self.terminal_list(project_id)));
     }
 
     pub fn shutdown_state(&self) -> ShutdownState {

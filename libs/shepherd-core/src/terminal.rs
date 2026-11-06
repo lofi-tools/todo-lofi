@@ -124,6 +124,14 @@ pub struct TerminalSnapshot {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalList {
+    pub project_id: ProjectId,
+    pub revision: u64,
+    pub terminals: Vec<TerminalSnapshot>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalLayout {

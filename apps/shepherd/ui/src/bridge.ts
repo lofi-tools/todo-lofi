@@ -197,6 +197,12 @@ export interface TerminalSnapshot {
   exitCode: number | null
 }
 
+export interface TerminalList {
+  projectId: string
+  revision: number
+  terminals: TerminalSnapshot[]
+}
+
 export interface FrameCell {
   text: string
   width: number
@@ -227,7 +233,7 @@ export interface TerminalFrame {
 export type Event =
   | { type: 'projectListChanged'; data: ProjectList }
   | { type: 'terminalBell'; data: { projectId: string; taskId: string | null; terminalId: string } }
-  | { type: 'terminalListChanged'; data: { projectId: string; terminals: TerminalSnapshot[] } }
+  | { type: 'terminalListChanged'; data: TerminalList }
   | { type: 'taskListChanged'; data: TaskList }
   | { type: 'taskChanged'; data: TaskSummary }
   | { type: 'taskWorkspaceChanged'; data: TaskWorkspace }
@@ -335,8 +341,8 @@ export function saveInspectorTab(projectId: string, tab: InspectorTab): Promise<
   return invoke('save_inspector_tab', { projectId, tab })
 }
 
-export function terminalList(projectId: string): Promise<TerminalSnapshot[]> {
-  return invoke<TerminalSnapshot[]>('terminal_list', { projectId })
+export function terminalList(projectId: string): Promise<TerminalList> {
+  return invoke('terminal_list', { projectId })
 }
 
 export function startTerminal(
@@ -344,11 +350,11 @@ export function startTerminal(
   taskId: string | null,
   columns: number,
   rows: number,
-): Promise<TerminalSnapshot[]> {
-  return invoke<TerminalSnapshot[]>('start_terminal', { projectId, taskId, columns, rows })
+): Promise<TerminalList> {
+  return invoke('start_terminal', { projectId, taskId, columns, rows })
 }
 
-export function restartTerminal(terminalId: string, columns: number, rows: number): Promise<TerminalSnapshot[]> {
+export function restartTerminal(terminalId: string, columns: number, rows: number): Promise<TerminalList> {
   return invoke('restart_terminal', { terminalId, columns, rows })
 }
 

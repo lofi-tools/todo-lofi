@@ -20,7 +20,7 @@ use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
-    InspectorTab, TerminalEvent, TerminalId, TerminalRecord, TerminalService, TerminalSnapshot,
+    InspectorTab, TerminalEvent, TerminalId, TerminalList, TerminalRecord, TerminalService,
     TerminalSpec,
 };
 use shepherd_core::{
@@ -490,11 +490,11 @@ impl ShellState {
         Ok(core.task_workspace(&task_id)?)
     }
 
-    pub async fn terminal_list(&self, project_id: String) -> Vec<TerminalSnapshot> {
+    pub async fn terminal_list(&self, project_id: String) -> TerminalList {
         self.core
             .lock()
             .await
-            .terminals_for(&ProjectId::new(project_id))
+            .terminal_list(&ProjectId::new(project_id))
     }
 
     pub async fn start_terminal(
@@ -503,7 +503,7 @@ impl ShellState {
         task_id: Option<String>,
         columns: u16,
         rows: u16,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         let _guard = self.terminal_lifecycle.lock().await;
         let project_id = ProjectId::new(project_id);
         let task_id = task_id.map(TaskId::new);
@@ -533,7 +533,7 @@ impl ShellState {
         terminal_id: String,
         columns: u16,
         rows: u16,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         let _guard = self.terminal_lifecycle.lock().await;
         let mut record = self
             .core
@@ -583,7 +583,7 @@ impl ShellState {
         record: TerminalRecord,
         columns: u16,
         rows: u16,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         let project_id = record.project_id.clone();
         self.spawn_terminal(
             TerminalSpec {
@@ -598,7 +598,7 @@ impl ShellState {
             Some(record),
         )
         .await?;
-        Ok(self.core.lock().await.terminals_for(&project_id))
+        Ok(self.core.lock().await.terminal_list(&project_id))
     }
 
     async fn spawn_terminal(
@@ -1291,7 +1291,7 @@ pub mod commands {
     pub async fn terminal_list(
         state: State<'_, ShellState>,
         project_id: String,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         Ok(state.inner().terminal_list(project_id).await)
     }
 
@@ -1302,7 +1302,7 @@ pub mod commands {
         task_id: Option<String>,
         columns: u16,
         rows: u16,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         state
             .inner()
             .start_terminal(project_id, task_id, columns, rows)
@@ -1323,7 +1323,7 @@ pub mod commands {
         terminal_id: String,
         columns: u16,
         rows: u16,
-    ) -> Result<Vec<TerminalSnapshot>, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         state
             .inner()
             .restart_terminal(terminal_id, columns, rows)
@@ -1729,7 +1729,13 @@ mod tests {
             Ok::<(), BridgeError>(())
         })
         .await??;
-        assert!(state.terminal_list(project.id.clone()).await.is_empty());
+        assert!(
+            state
+                .terminal_list(project.id.clone())
+                .await
+                .terminals
+                .is_empty()
+        );
         state.close_terminal(terminal.as_str().to_owned()).await?;
         Ok(())
     }
@@ -1774,7 +1780,7 @@ mod tests {
         let list = state
             .restart_terminal(saved.id.as_str().into(), 80, 24)
             .await?;
-        let [running] = list.as_slice() else {
+        let [running] = list.terminals.as_slice() else {
             return Err("restart should reuse one terminal record".into());
         };
         assert_eq!(running.id, saved.id.as_str());
@@ -1784,6 +1790,37 @@ mod tests {
         assert_eq!(running.command, saved.command);
         assert_eq!((running.ended_at, running.exit_code), (None, None));
         assert!(state.screens.lock().await.contains_key(saved.id.as_str()));
+
+        let mut events = state.subscribe();
+        state
+            .terminal_write(
+                saved.id.as_str().into(),
+                TerminalInput::Text("exit 23\r".into()),
+                true,
+            )
+            .await?;
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::TerminalListChanged(snapshot) = events.recv().await?
+                    && snapshot.revision > list.revision
+                {
+                    return Ok::<_, broadcast::error::RecvError>(snapshot);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(ended.project_id.as_str(), project.id);
+        assert_eq!(
+            ended
+                .terminals
+                .first()
+                .and_then(|terminal| terminal.exit_code),
+            Some(23)
+        );
+        assert_eq!(
+            state.terminal_list(project.id.clone()).await.revision,
+            ended.revision
+        );
         state.quit(true).await?;
         Ok(())
     }

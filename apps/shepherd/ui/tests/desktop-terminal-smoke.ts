@@ -248,7 +248,7 @@ async function exerciseNativeIme(
   const start = await enabledButton('New shared terminal')
   start.click()
   const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
-  const [terminal] = await bridge.terminalList(project.id)
+  const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
   await waitFor('initial terminal frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
   await ptyColumns(terminal.id, terminal.title, 'NATIVE_IME_SIZED')
@@ -526,7 +526,7 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
     const pane = terminalPane(title)
     return pane && terminalOutput(pane).includes(identity)
   })
-  const terminals = await bridge.terminalList(projectId)
+  const { terminals } = await bridge.terminalList(projectId)
   if (terminals.length !== 2 || terminals.some((entry) => entry.endedAt !== null)) {
     throw new Error('Hiding and reopening changed the live terminal records')
   }
@@ -672,7 +672,7 @@ async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridg
     return tab?.getAttribute('aria-selected') === 'true'
   })
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
-  const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.taskId === task.id)
+  const scoped = (await bridge.terminalList(project.id)).terminals.find((entry) => entry.taskId === task.id)
   if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
     throw new Error('The task terminal should run in the task worktree')
   }
@@ -997,7 +997,7 @@ async function smoke() {
   start.click()
   const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
   await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
-  const [terminal] = await bridge.terminalList(project.id)
+  const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
   await exerciseInspectorResize(terminal)
   input.focus()
@@ -1034,7 +1034,7 @@ async function restore() {
   const { projects } = await bridge.projectList()
   const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not restored')
-  const terminals = (await bridge.terminalList(project.id)).filter((entry) => entry.scope === 'project')
+  const terminals = (await bridge.terminalList(project.id)).terminals.filter((entry) => entry.scope === 'project')
   const [first] = terminals
   if (!first || terminals.length !== 2 || terminals.some((entry) => entry.endedAt === null)) {
     throw new Error('Both terminal records should be restored as ended')
@@ -1051,7 +1051,7 @@ async function restore() {
   })
   restart.click()
   await waitFor('restarted terminal frame', () => terminalPane(first.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  const reopened = await bridge.terminalList(project.id)
+  const { terminals: reopened } = await bridge.terminalList(project.id)
   if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
     throw new Error('Restart should reuse the restored terminal ID')
   }
@@ -1060,7 +1060,7 @@ async function restore() {
     const pane = terminalPane(first.title)
     return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_RESTORED')
   })
-  const scoped = (await bridge.terminalList(project.id)).find((entry) => entry.scope === 'task')
+  const scoped = (await bridge.terminalList(project.id)).terminals.find((entry) => entry.scope === 'task')
   const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.id === scoped?.taskId)
   if (!task?.worktreePath || !scoped || scoped.cwd !== task.worktreePath || scoped.endedAt === null) {
     throw new Error('The task terminal should restore as ended with its worktree')

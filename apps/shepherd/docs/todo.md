@@ -577,8 +577,11 @@ task-scoped, persistent and fast enough.
   directly from the PTY.
 - [x] Persist terminal metadata and layout; restore ended terminals honestly.
   Restart returns keyboard focus to the terminal. The native smoke types
-  directly into both restarted PTYs. A missing terminal record restores as a
-  removable placeholder alongside the other panes in the saved split.
+  directly into both restarted PTYs. Terminal list replies and events carry
+  the core's revision. Browser regressions verify that an immediate exit
+  stays ended when an older start or restart reply arrives after the exit.
+  A missing terminal record restores as a removable placeholder alongside
+  the other panes in the saved split.
   An unreadable layout falls back to the default for that project and leaves
   other projects available. The startup warning identifies the affected layout.
 - [x] Measure parser and encoder throughput on a 1 MiB output burst.

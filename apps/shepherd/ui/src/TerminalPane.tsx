@@ -64,13 +64,14 @@ interface TerminalPaneProps {
   onLayoutLoaded: (layout: bridge.TerminalLayout) => void
   attention: string[]
   onTerminalFocus: (id: string | null) => void
-  listEvent: { projectId: string; terminals: bridge.TerminalSnapshot[] } | undefined
+  listEvent: bridge.TerminalList | undefined
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
   let region: HTMLDivElement | undefined
   const measuredSizes = new Map<string, TerminalSize>()
-  const [terminals, setTerminals] = createSignal<bridge.TerminalSnapshot[]>([])
+  const [terminalList, setTerminalList] = createSignal<bridge.TerminalList>()
+  const terminals = () => terminalList()?.terminals ?? []
   const [layout, setLayout] = createSignal<bridge.TerminalLayout>({ revision: 0, root: null, inspectorTab: 'terminals' })
   const [layoutLoaded, setLayoutLoaded] = createSignal(false)
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
@@ -106,6 +107,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
   const attached = () => paneIds(root())
   const attachedVisible = () => attached().filter((id) => terminal(id))
+
+  function applyTerminalList(snapshot: bridge.TerminalList) {
+    if (snapshot.projectId !== props.projectId) return
+    setTerminalList((current) => current && current.revision >= snapshot.revision ? current : snapshot)
+  }
 
   async function run(action: () => Promise<void>) {
     if (pending()) return
@@ -188,8 +194,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     void run(async () => {
       const before = new Set(terminals().map((terminal) => terminal.id))
       const list = await bridge.startTerminal(props.projectId, taskId, columns, rows)
-      setTerminals(list)
-      const created = list.find((terminal) => !before.has(terminal.id))
+      applyTerminalList(list)
+      const created = list.terminals.find((terminal) => !before.has(terminal.id))
       if (created) await show(created.id, axis)
     })
   }
@@ -211,13 +217,13 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   createEffect(() => {
     const event = props.listEvent
-    if (event?.projectId === props.projectId) setTerminals(event.terminals)
+    if (event) applyTerminalList(event)
   })
 
   function restart(id: string) {
     const { columns, rows } = measuredSizes.get(id) ?? DEFAULT_TERMINAL_SIZE
     void run(async () => {
-      setTerminals(await bridge.restartTerminal(id, columns, rows))
+      applyTerminalList(await bridge.restartTerminal(id, columns, rows))
       setSelectedId(id)
       if (props.shown && terminal(id)?.endedAt === null) setFocusRequest({ id })
     })
@@ -256,12 +262,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     onCleanup(() => region?.removeEventListener('keydown', handleShortcut, true))
     onCleanup(() => window.removeEventListener('keydown', handleTaskTerminalShortcut, true))
     let disposed = false
-    const initialEvent = props.listEvent
     void run(async () => {
       const [list, saved] = await Promise.all([bridge.terminalList(props.projectId), bridge.terminalLayout(props.projectId)])
       if (disposed) return
       batch(() => {
-        if (props.listEvent === initialEvent) setTerminals(list)
+        applyTerminalList(list)
         setLayout(saved)
         props.onLayoutLoaded(saved)
         setLayoutLoaded(true)

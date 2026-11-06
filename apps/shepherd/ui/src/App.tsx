@@ -324,7 +324,10 @@ export function App() {
         setTerminalAttention((bells) => bells.some((bell) => bell.terminalId === event.data.terminalId) ? bells : [...bells, event.data])
         break
       case 'terminalListChanged':
-        if (event.data.projectId === selectedProjectId()) setTerminalListEvent(event.data)
+        if (event.data.projectId === selectedProjectId()) {
+          setTerminalListEvent((current) => current?.projectId === event.data.projectId &&
+            current.revision >= event.data.revision ? current : event.data)
+        }
         break
       case 'error':
         setError(event.data.message)

@@ -381,8 +381,28 @@ test.beforeEach(async ({ context }) => {
             else otherInspectorTabs.set(args.projectId, args.tab)
             return null
           case 'terminal_list':
+            return { projectId: args.projectId, revision: 0, terminals: [...terminals] }
           case 'start_terminal':
-            return [...terminals]
+          case 'restart_terminal': {
+            if (options.has('early-terminal-exit')) {
+              const id = args.terminalId ?? 'terminal-early-exit'
+              const running = { ...terminals[0], id, title: 'Short-lived shell' }
+              const remaining = terminals.filter((terminal) => terminal.id !== id)
+              const live = { projectId: project.id, revision: 1, terminals: [...remaining, running] }
+              const ended = { ...running, endedAt: 1_760_000_300_000, exitCode: 23 }
+              window.__replayTerminalList = () => window.__emitCoreEvent({ type: 'terminalListChanged', data: live })
+              return new Promise((resolve) => {
+                window.__finishTerminalLaunch = () => {
+                  window.__emitCoreEvent({
+                    type: 'terminalListChanged',
+                    data: { projectId: project.id, revision: 2, terminals: [...remaining, ended] },
+                  })
+                  resolve(live)
+                }
+              })
+            }
+            return { projectId: args.projectId ?? project.id, revision: 0, terminals: [...terminals] }
+          }
           case 'start_freebuff_terminal':
             return 'freebuff-fixture'
           case 'subscribe_terminal': {
@@ -1124,6 +1144,26 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   await expect(page.getByText('ended with exit code 0', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible()
 })
+
+for (const restart of [false, true]) {
+  test(`keeps an immediate terminal exit after ${restart ? 'restart' : 'start'}`, async ({ page }) => {
+    await page.goto('/?early-terminal-exit')
+    if (restart) {
+      await page.getByRole('button', { name: /Terminal 2.*ended/ }).click()
+      await page.getByRole('button', { name: 'Restart' }).click()
+    } else {
+      await page.getByRole('button', { name: 'New shared terminal' }).click()
+    }
+    await page.waitForFunction(() => typeof window.__finishTerminalLaunch === 'function')
+    await page.evaluate(() => window.__finishTerminalLaunch())
+    const pane = page.getByRole('region', { name: 'Short-lived shell' })
+    await expect(pane).toContainText('ended with exit code 23')
+    await expect(pane.getByRole('button', { name: 'Restart' })).toBeEnabled()
+    await page.evaluate(() => window.__replayTerminalList())
+    await expect(pane).toContainText('ended with exit code 23')
+    await expect(pane.getByRole('textbox')).toHaveCount(0)
+  })
+}
 
 test('keeps the shared terminal attached while switching task terminals', async ({ page }) => {
   await page.goto('/?scoped-terminals')
