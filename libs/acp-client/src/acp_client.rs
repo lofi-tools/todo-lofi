@@ -26,7 +26,7 @@ pub use acp::schema::v1 as schema;
 use agent_client_protocol as acp;
 
 pub use agent::{AgentServer, OpenCodeAgent, OpencodeVersion, SpawnSpec, detect_opencode_version};
-pub use connection::{AcpConnection, AgentInfo, ConnectOptions, Requester, connect};
+pub use connection::{AcpConnection, AgentInfo, ConnectOptions, Requester, connect, connect_spawn};
 pub use fs::SessionRoots;
 pub use permissions::{
     PatternRule, PermissionDecision, PermissionReply, PermissionRule, ToolPermissions, ToolRule,

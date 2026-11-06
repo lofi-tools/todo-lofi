@@ -25,6 +25,8 @@ use agent_client_protocol::schema::v1::{
 /// What the fake agent should do during a prompt.
 #[derive(Clone, Debug, Default)]
 pub struct FakeScript {
+    /// Override the negotiated protocol version to test compatibility failures.
+    pub protocol_version: Option<acp::schema::ProtocolVersion>,
     /// Text delivered as streamed agent messages.
     pub chunks: Vec<String>,
     /// A tool call announced before the prompt finishes.
@@ -73,6 +75,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
     let script = Arc::new(script);
 
     let initialize_observations = observations.clone();
+    let protocol_version = script.protocol_version;
     let new_session_observations = observations.clone();
     let config_observations = observations.clone();
     let load_observations = observations.clone();
@@ -91,12 +94,14 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         state.initialize_count += 1;
                     }
                     responder.respond(
-                        InitializeResponse::new(initialize.protocol_version)
-                            .agent_capabilities(
-                                AgentCapabilities::default()
-                                    .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
-                            )
-                            .agent_info(Implementation::new("fake-agent", "1.0")),
+                        InitializeResponse::new(
+                            protocol_version.unwrap_or(initialize.protocol_version),
+                        )
+                        .agent_capabilities(
+                            AgentCapabilities::default()
+                                .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
+                        )
+                        .agent_info(Implementation::new("fake-agent", "1.0")),
                     )
                 },
                 acp::on_receive_request!(),
@@ -381,6 +386,27 @@ mod tests {
     /// Ask for everything: the default policy.
     fn confirm_all() -> ToolPermissions {
         ToolPermissions::default()
+    }
+
+    #[tokio::test]
+    async fn refuses_an_unsupported_protocol_version() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (transport, _) = spawn_fake_agent(FakeScript {
+            protocol_version: Some(acp::schema::ProtocolVersion::V0),
+            ..FakeScript::default()
+        });
+        let result = connect_over(
+            move |_, _| transport,
+            ConnectOptions {
+                roots: SessionRoots::new([directory.path().to_path_buf()]),
+                tool_permissions: confirm_all(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::AcpError::UnsupportedVersion { agent }) if agent == "0")
+        );
+        Ok(())
     }
 
     /// Auto-approve everything: the old toggle's "on" position, as a policy.

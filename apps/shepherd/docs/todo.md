@@ -876,6 +876,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   `packages/coding-agent/docs/rpc.md` at `a7a75a9dc6891281eed58906c07c55929e7b6c13`.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
+  The shared client accepts an exact configured command, validates ACP v1,
+  and reports child exit independently of wire shutdown. The installed
+  OpenCode 2.0.14 smoke verifies initialization, shutdown and session load.
+  Shepherd's transcript and fallback routing remain open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have

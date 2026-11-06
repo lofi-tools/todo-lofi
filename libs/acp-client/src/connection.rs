@@ -277,7 +277,14 @@ pub async fn connect(
 ) -> Result<AcpConnection, AcpError> {
     let (cwd, _additional) = spec.resolve().ok_or(AcpError::NoProjectDirectory)?;
     let spawn = agent.spawn_spec(&cwd)?;
-    let options = options_for(&cwd);
+    connect_spawn(spawn, options_for(&cwd)).await
+}
+
+/// Connect with an already resolved executable and arguments.
+pub async fn connect_spawn(
+    spawn: SpawnSpec,
+    options: ConnectOptions,
+) -> Result<AcpConnection, AcpError> {
     connect_over(
         move |events, stderr| ProjectAgent::new(spawn).with_stderr_reporting(events, stderr),
         options,
@@ -508,13 +515,27 @@ where
             acp::on_receive_request!(),
         )
         .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
+            let mut shutdown_rx = shutdown_rx;
             let initialize = cx
                 .send_request(
-                    InitializeRequest::new(ProtocolVersion::V1)
-                        .client_capabilities(capabilities),
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(capabilities),
                 )
-                .block_task()
-                .await?;
+                .block_task();
+            let initialize = tokio::select! {
+                initialize = initialize => initialize?,
+                _ = &mut shutdown_rx => return Ok(()),
+            };
+            if initialize.protocol_version != ProtocolVersion::V1 {
+                if ready_tx
+                    .send(Err(AcpError::UnsupportedVersion {
+                        agent: initialize.protocol_version.to_string(),
+                    }))
+                    .is_err()
+                {
+                    tracing::debug!("ACP caller dropped during protocol negotiation");
+                }
+                return Ok(());
+            }
             let info = AgentInfo {
                 name: initialize
                     .agent_info
@@ -531,7 +552,7 @@ where
                 mcp_sse: initialize.agent_capabilities.mcp_capabilities.sse,
                 auth_methods: initialize.auth_methods.clone(),
             };
-            if ready_tx.send((cx.clone(), info)).is_err() {
+            if ready_tx.send(Ok((cx.clone(), info))).is_err() {
                 return Ok(());
             }
             // Stay connected until the handle is dropped.
@@ -550,7 +571,10 @@ where
     });
 
     let (requester, info) = match ready_rx.await {
-        Ok((connection, info)) => (Requester { connection }, info),
+        Ok(result) => {
+            let (connection, info) = result?;
+            (Requester { connection }, info)
+        }
         Err(_) => {
             // The ready channel and the stderr drain task race on the process's
             // final output; give the drain a moment to flush before capturing
@@ -670,7 +694,8 @@ impl ProjectAgent {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         command.spawn()
     }
 }
@@ -695,12 +720,12 @@ impl ConnectTo<Client> for ProjectAgent {
             .ok_or_else(|| acp::Error::internal_error().data("agent stdout unavailable"))?;
         let stderr = child.stderr.take();
 
-        if let (Some(stderr), Some(events), Some(buffer)) =
+        let stderr_task = if let (Some(stderr), Some(events), Some(buffer)) =
             (stderr, self.events.clone(), self.stderr.clone())
         {
             // stderr has no protocol framing, so it is drained on its own task:
             // a full pipe from a chatty agent would otherwise stall the child.
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Some(Ok(line)) = futures::StreamExt::next(&mut lines).await {
                     if let Ok(mut buffer) = buffer.lock() {
@@ -713,8 +738,10 @@ impl ConnectTo<Client> for ProjectAgent {
                         break;
                     }
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         let incoming = BufReader::new(stdout).lines();
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
@@ -723,17 +750,97 @@ impl ConnectTo<Client> for ProjectAgent {
             Ok::<_, std::io::Error>(writer)
         });
 
+        // The SDK may drop the wire future on shutdown. Reaping and reporting
+        // the subprocess must outlive that future.
+        let (wire_finished, finished) = oneshot::channel();
+        let supervisor = tokio::spawn(supervise_agent(
+            child,
+            finished,
+            stderr_task,
+            self.events,
+            self.stderr,
+        ));
         let result = ConnectTo::<Client>::connect_to(Lines::new(outgoing, incoming), client).await;
-
-        // The connection is over: make sure the process tree is gone. Killing
-        // here (rather than in a guard) keeps the failure path explicit.
-        if let Err(error) = child.kill() {
-            tracing::debug!("agent process was already gone: {error}");
+        if wire_finished.send(()).is_err() {
+            tracing::debug!("ACP agent exited before the wire closed");
         }
-        drop(child.status().await);
-
+        if let Err(error) = supervisor.await {
+            tracing::debug!(%error, "ACP process supervision ended");
+        }
         result
     }
+}
+
+async fn supervise_agent(
+    mut child: async_process::Child,
+    mut wire_finished: oneshot::Receiver<()>,
+    mut stderr_task: Option<tokio::task::JoinHandle<()>>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
+    stderr: Option<Arc<Mutex<VecDeque<String>>>>,
+) {
+    let status = tokio::select! {
+        status = child.status() => {
+            // Give the wire time to deliver any protocol records already in the pipe.
+            if tokio::time::timeout(Duration::from_millis(250), &mut wire_finished).await.is_err() {
+                tracing::debug!("ACP wire remained open after process exit");
+            }
+            status
+        }
+        _ = &mut wire_finished => {
+            // EOF can precede a natural exit. Preserve its status when the
+            // agent leaves on its own and terminate it if it outlives the wire.
+            match tokio::time::timeout(Duration::from_millis(250), child.status()).await {
+                Ok(status) => status,
+                Err(_) => match kill_agent_process(&mut child) {
+                    Ok(()) => child.status().await,
+                    Err(error) => Err(error),
+                },
+            }
+        }
+    };
+    let code = match status {
+        Ok(status) => status.code(),
+        Err(error) => {
+            tracing::debug!(%error, "could not reap the ACP agent");
+            None
+        }
+    };
+    if let Some(stderr_task) = &mut stderr_task
+        && tokio::time::timeout(Duration::from_millis(100), &mut *stderr_task)
+            .await
+            .is_err()
+    {
+        stderr_task.abort();
+    }
+    if let Some(events) = events {
+        let stderr = stderr
+            .as_ref()
+            .and_then(|buffer| buffer.lock().ok())
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default();
+        if let Err(error) = events.send(AcpEvent::Exited { code, stderr }) {
+            tracing::debug!(%error, "ACP exit receiver closed");
+        }
+    }
+}
+
+fn kill_agent_process(child: &mut async_process::Child) -> std::io::Result<()> {
+    if child.try_status()?.is_some() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let group = libc::pid_t::try_from(child.id()).map_err(std::io::Error::other)?;
+        // `command()` puts the still-owned child in its own process group.
+        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::debug!(%error, "could not stop the ACP process group");
+        }
+    }
+    child.kill()
 }
 
 /// The trailing stderr lines worth showing in an error state.
@@ -744,6 +851,83 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires the configured OpenCode executable and loopback permission"]
+    async fn installed_opencode_initializes_and_loads_an_acp_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let program = PathBuf::from(
+            std::env::var_os("SHEPHERD_OPENCODE_ACP_TEST_EXECUTABLE")
+                .ok_or("set SHEPHERD_OPENCODE_ACP_TEST_EXECUTABLE to an absolute path")?,
+        );
+        if !program.is_absolute() {
+            return Err("the OpenCode executable path must be absolute".into());
+        }
+        let root = tempfile::tempdir()?;
+        let cwd = root.path().join("project");
+        std::fs::create_dir(&cwd)?;
+        let cwd = cwd.canonicalize()?;
+        let mut env = [
+            ("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into()),
+            ("OPENCODE_DISABLE_MODELS_FETCH".into(), "1".into()),
+            ("HOME".into(), root.path().to_string_lossy().into_owned()),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        for (variable, directory) in [
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_STATE_HOME", "state"),
+        ] {
+            env.insert(
+                variable.into(),
+                root.path().join(directory).to_string_lossy().into_owned(),
+            );
+        }
+        let launch = SpawnSpec {
+            program,
+            args: vec!["acp".into()],
+            cwd: cwd.clone(),
+            env,
+        };
+        let options = ConnectOptions {
+            roots: SessionRoots::new([cwd.clone()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let mut first = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_spawn(launch.clone(), options.clone()),
+        )
+        .await??;
+        assert!(first.info.load_session);
+        let (session, _, _) = first
+            .requester
+            .new_session(cwd.clone(), Vec::new(), Vec::new())
+            .await?;
+        let mut events = first.take_events();
+        first.close();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, AcpEvent::Exited { .. }) {
+                    return Ok(());
+                }
+            }
+            Err("the ACP process did not report its exit")
+        })
+        .await??;
+        let second =
+            tokio::time::timeout(Duration::from_secs(10), connect_spawn(launch, options)).await??;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            second
+                .requester
+                .load_session(session, cwd, Vec::new(), Vec::new()),
+        )
+        .await??;
+        second.close();
+        Ok(())
+    }
 
     /// Regression test: converting the std command via
     /// `async_process::Command::from` used to silently replace the piped

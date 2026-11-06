@@ -101,6 +101,7 @@ dependencies = [
  "async-process",
  "dirs 6.0.0",
  "futures",
+ "libc",
  "regex",
  "serde",
  "serde_json",
