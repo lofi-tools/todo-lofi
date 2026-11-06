@@ -476,14 +476,15 @@ Each native adapter records the exact command and protocol version used, shown i
 
 ### 4.4 Freebuff terminal
 
-Choosing **Freebuff (terminal)** runs `freebuff` directly in a PTY in the
-selected project's directory. The terminal replaces the conversation pane.
+Choosing **Freebuff (terminal)** starts the `freebuff` executable directly as
+the PTY process in the selected project's directory. The terminal replaces
+the conversation pane.
 Freebuff handles all prompts, approvals, and session behaviour in its own TUI.
 Shepherd renders the terminal screen and forwards terminal input. The PTY is
 temporary and sits outside the task lifecycle, worktrees, transcript, inspector
 layout, and persisted terminal records. The terminal fills the conversation
-pane. **Back to chat** in the window header closes it. Verify this path with
-fixtures only.
+pane. **Back to chat** in the window header closes it. Use mocked terminal IPC
+and a local shell fixture for tests. Test suites must never launch Freebuff.
 
 ### 4.5 ACP path
 

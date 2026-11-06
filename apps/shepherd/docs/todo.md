@@ -668,10 +668,13 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 ### Proof
 
 - [ ] Contract fixtures per adapter.
-- [ ] One live smoke per installed integrated CLI, gated in CI.
+- [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
+  gated in CI.
 - [ ] Approval, cancel, resume and failure paths where the tier supports them.
 - [ ] A missing capability hides the control instead of showing a dead button.
-- [x] Freebuff uses the plain terminal path. Verify it with fixtures only.
+- [x] Mocked IPC verifies that the Freebuff terminal replaces the conversation
+  pane. A local shell fixture verifies the standalone PTY path. Test suites
+  must never launch Freebuff.
 
 ### Gate
 
