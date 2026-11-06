@@ -19,10 +19,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
+use crate::acp::AcpHarness;
 use crate::{
-    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
-    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
-    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
+    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
+    Decision, DeltaKind, Entry, HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput,
+    SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
+    command_line,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -159,6 +161,7 @@ pub struct OpenCodeHarness {
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     diagnostics: AgentDiagnostics,
+    fallback: Option<AcpHarness>,
 }
 
 impl Default for OpenCodeHarness {
@@ -171,6 +174,7 @@ impl Default for OpenCodeHarness {
             sender,
             receiver,
             diagnostics: AgentDiagnostics::default(),
+            fallback: None,
         }
     }
 }
@@ -190,20 +194,70 @@ impl Drop for ActiveTurn {
 #[async_trait]
 impl AgentHarness for OpenCodeHarness {
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
-        &mut self.receiver
+        match &mut self.fallback {
+            Some(fallback) => fallback.events(),
+            None => &mut self.receiver,
+        }
     }
 
     fn diagnostics(&self) -> AgentDiagnostics {
-        self.diagnostics.clone()
+        if let Some(fallback) = &self.fallback {
+            let mut diagnostics = fallback.diagnostics();
+            diagnostics.protocol = format!(
+                "{} (native unavailable: {})",
+                diagnostics.protocol, self.diagnostics.protocol
+            );
+            diagnostics
+        } else {
+            self.diagnostics.clone()
+        }
+    }
+
+    fn tier(&self) -> AdapterTier {
+        if self.fallback.is_some() {
+            AdapterTier::Acp
+        } else {
+            AdapterTier::Native
+        }
+    }
+
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        self.fallback
+            .as_mut()
+            .map_or_else(Vec::new, AgentHarness::take_replayed_transcript)
     }
 
     async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
-        if self.server.is_some() {
+        if self.server.is_some() || self.fallback.is_some() {
             return Err(HarnessError::Protocol(
                 "OpenCode harness is already started".into(),
             ));
         }
-        let server = OpenCodeServer::start(&spec).await?;
+        require_absolute_executable(Path::new(&spec.program))?;
+        let native = async {
+            let server = OpenCodeServer::start(&spec).await?;
+            server.subscribe().await?;
+            Ok::<_, HarnessError>(server)
+        };
+        let server = match native.await {
+            Ok(server) => server,
+            Err(HarnessError::Protocol(reason)) => {
+                spec.args.push("acp".into());
+                spec.environment
+                    .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
+                let mut fallback = AcpHarness::default();
+                self.diagnostics.command = command_line(&spec);
+                self.diagnostics.protocol = reason.clone();
+                let capabilities = fallback.start(spec).await.map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "OpenCode native server unavailable: {reason}. ACP fallback failed: {error}"
+                    ))
+                })?;
+                self.fallback = Some(fallback);
+                return Ok(capabilities);
+            }
+            Err(error) => return Err(error),
+        };
         let probe = server.probe();
         let capabilities = Capabilities {
             streaming: true,
@@ -224,6 +278,9 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.open_session(resume).await;
+        }
         if self.session.is_some() {
             return Err(HarnessError::Protocol(
                 "OpenCode session is already open".into(),
@@ -245,6 +302,9 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.prompt(input).await;
+        }
         if self
             .turn
             .as_ref()
@@ -312,6 +372,9 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn cancel(&mut self) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.cancel().await;
+        }
         let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
         let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
         if let Some(turn) = &self.turn
@@ -323,6 +386,9 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.respond(approval_id, decision).await;
+        }
         let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
         let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
         let id = approval_id.as_str();
@@ -344,6 +410,9 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.shutdown().await;
+        }
         self.turn = None;
         self.session = None;
         if let Some(server) = self.server.take() {
@@ -788,7 +857,8 @@ impl OpenCodeServer {
                 .await
                 .map_err(|error| protocol_error("could not read OpenCode startup", error))?
             {
-                if let Some(address) = line.trim().strip_prefix("server listening on ") {
+                let banner = line.trim().trim_start_matches("opencode ");
+                if let Some(address) = banner.strip_prefix("server listening on ") {
                     return loopback_address(address);
                 }
             }
@@ -1298,45 +1368,136 @@ mod tests {
         let outcome = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
+            assert_eq!(harness.tier(), AdapterTier::Native);
             harness.open_session(None).await?;
-            harness
-                .prompt(PromptInput {
-                    text: "Reply with local fixture text only".into(),
-                })
-                .await?;
-            let mut transcript = crate::Transcript::default();
-            let reason = timeout(REQUEST_TIMEOUT, async {
-                loop {
-                    let event = harness
-                        .events()
-                        .recv()
-                        .await
-                        .ok_or(HarnessError::ChannelClosed)?;
-                    transcript.apply(&event);
-                    match event {
-                        HarnessEvent::TurnFinished { reason } => return Ok(reason),
-                        HarnessEvent::Exited { stderr, .. } => {
-                            return Err(HarnessError::Protocol(stderr));
-                        }
-                        _ => {}
-                    }
-                }
-            })
-            .await
-            .map_err(|error| protocol_error("fixture turn timed out", error))??;
+            let transcript = fixture_reply(&mut harness).await?;
             harness.shutdown().await?;
-            Ok::<_, HarnessError>((reason, transcript))
+            Ok::<_, HarnessError>(transcript)
         }
         .await;
         provider.abort();
-        let (reason, transcript) = outcome?;
-        assert_eq!(reason, TurnFinishReason::Completed);
+        let transcript = outcome?;
         assert_eq!(transcript.len(), 1);
         assert_eq!(
             transcript.entry(0).map(crate::Entry::summary).as_deref(),
             Some("agent: local fixture reply")
         );
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn falls_back_to_acp_and_streams_a_turn() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            root.path(),
+            r#"#!/bin/sh
+if [ "$1" != acp ]; then exit 78; fi
+while IFS= read -r record; do
+    request_id=$(printf '%s\n' "$record" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+    case "$record" in
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$request_id";;
+        *'"method":"session/new"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"fixture"}}\n' "$request_id";;
+        *'"method":"session/prompt"'*)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ACP fixture reply"}}}}'
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$request_id";;
+    esac
+done
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: root.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let mut harness = OpenCodeHarness::default();
+        harness.start(spec).await?;
+        assert_eq!(harness.tier(), AdapterTier::Acp);
+        let diagnostics = harness.diagnostics();
+        assert!(diagnostics.command.ends_with(" acp"));
+        assert!(diagnostics.protocol.contains("native unavailable"));
+        assert_eq!(harness.open_session(None).await?.as_str(), "fixture");
+        let transcript = fixture_reply(&mut harness).await?;
+        assert_eq!(
+            transcript.entry(0).map(crate::Entry::summary).as_deref(),
+            Some("agent: ACP fixture reply")
+        );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_falls_back_to_acp_and_loads_a_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut spec = installed_fixture_spec(root.path())?;
+        let launcher = fixture_launcher(
+            root.path(),
+            "#!/bin/sh\nif [ \"$1\" = serve ]; then exit 78; fi\nexec \"$SHEPHERD_OPENCODE_FIXTURE_EXEC\" \"$@\"\n",
+        )?;
+        let program = std::mem::replace(&mut spec.program, launcher);
+        spec.environment
+            .insert("SHEPHERD_OPENCODE_FIXTURE_EXEC".into(), program);
+        let mut first = OpenCodeHarness::default();
+        assert!(first.start(spec.clone()).await?.resume);
+        assert_eq!(first.tier(), AdapterTier::Acp);
+        let session = first.open_session(None).await?;
+        first.shutdown().await?;
+        let mut reopened = OpenCodeHarness::default();
+        reopened.start(spec).await?;
+        assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+        reopened.shutdown().await?;
+        Ok(())
+    }
+
+    async fn fixture_reply(harness: &mut OpenCodeHarness) -> HarnessResult<crate::Transcript> {
+        harness
+            .prompt(PromptInput {
+                text: "Reply with local fixture text only".into(),
+            })
+            .await?;
+        let mut transcript = crate::Transcript::default();
+        timeout(REQUEST_TIMEOUT, async {
+            loop {
+                let event = harness
+                    .events()
+                    .recv()
+                    .await
+                    .ok_or(HarnessError::ChannelClosed)?;
+                transcript.apply(&event);
+                match event {
+                    HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Completed,
+                    } => return Ok(transcript),
+                    HarnessEvent::TurnFinished { reason } => {
+                        return Err(protocol_error(
+                            "fixture turn ended",
+                            format_args!("{reason:?}"),
+                        ));
+                    }
+                    HarnessEvent::TurnError { text, .. }
+                    | HarnessEvent::Exited { stderr: text, .. } => {
+                        return Err(HarnessError::Protocol(text));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|error| protocol_error("fixture turn timed out", error))?
+    }
+
+    #[cfg(unix)]
+    fn fixture_launcher(directory: &Path, script: &str) -> std::io::Result<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join("opencode-acp-fixture");
+        std::fs::write(&path, script)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        Ok(path.to_string_lossy().into_owned())
     }
 
     fn installed_fixture_spec(root: &Path) -> Result<SpawnSpec, Box<dyn std::error::Error>> {

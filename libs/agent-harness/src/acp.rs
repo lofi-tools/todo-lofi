@@ -20,10 +20,10 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::{
-    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
-    Entry, FailureKind, FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow,
-    PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, Transcript,
-    TurnFinishReason, TurnId, command_line, limit_command_output,
+    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
+    Decision, DeltaKind, Entry, FailureKind, FileDiff, HarnessError, HarnessEvent, HarnessResult,
+    ItemId, PlanRow, PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus,
+    Transcript, TurnFinishReason, TurnId, command_line, limit_command_output,
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -99,6 +99,10 @@ impl AgentHarness for AcpHarness {
             diagnostics.stderr_tail = connection.recent_stderr().join("\n");
         }
         diagnostics
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::Acp
     }
 
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {

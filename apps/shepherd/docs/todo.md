@@ -881,8 +881,11 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   OpenCode 2.0.14 smoke verifies initialization, shutdown and session load.
   Shepherd maps ACP history, text, thoughts, tools, plan, usage, approvals
   and turn outcomes. The fixture covers session replay, one-time approval,
-  cancellation and worktree-confined atomic writes. Desktop fallback routing,
-  Claude Code configuration and scoped approval choices remain open.
+  cancellation and worktree-confined atomic writes. OpenCode uses its configured
+  executable for both tiers and records ACP when the native probe fails. The
+  installed fallback smoke opens and reloads a session, and a subprocess
+  fixture verifies a complete fallback turn. Claude Code configuration and
+  scoped approval choices remain open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have

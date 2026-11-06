@@ -7,11 +7,11 @@
 use std::path::PathBuf;
 
 use agent_harness::{
-    AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, Entry, FailureKind,
-    HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
+    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, Entry,
+    FailureKind, HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
 };
 
-use crate::{Agent, CoreError};
+use crate::{Agent, AgentTier, CoreError};
 
 /// Creates one adapter instance for a task. The shell or test supplies the
 /// implementation; the core never chooses a concrete CLI here.
@@ -203,6 +203,13 @@ impl HarnessSession {
 
     pub fn diagnostics(&self) -> AgentDiagnostics {
         self.harness.diagnostics()
+    }
+
+    pub fn tier(&self) -> AgentTier {
+        match self.harness.tier() {
+            AdapterTier::Native => AgentTier::Native,
+            AdapterTier::Acp => AgentTier::Acp,
+        }
     }
 
     pub fn session_id(&self) -> Option<&SessionId> {

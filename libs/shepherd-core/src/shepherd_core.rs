@@ -1397,6 +1397,9 @@ impl Core {
             Some(session_id.as_str().to_string()),
         );
         self.store.save_session(&record).await?;
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.tier = session.tier();
+        }
         self.session_records.insert(task_id.clone(), record);
         self.sessions.insert(task_id.clone(), session);
         Ok(opened)

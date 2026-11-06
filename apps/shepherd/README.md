@@ -107,12 +107,15 @@ it is `dev.shepherd.shell/settings.json` under `$XDG_CONFIG_HOME` (by default
 ```
 
 Restart Shepherd, then select **OpenCode** from the agent picker in an empty
-conversation or a draft. Shepherd launches the configured executable and uses
-OpenCode's native 2.x HTTP API. The task keeps its agent after the first prompt.
+conversation or a draft. Shepherd probes OpenCode's native 2.x HTTP API and
+falls back to ACP with the same executable when the native probe fails.
+The task keeps its agent after the first prompt. The diagnostics show which
+protocol ran and why Shepherd selected the fallback.
 
 To run the opt-in smoke tests, set `SHEPHERD_OPENCODE_TEST_SETTINGS` to the
 absolute path of a settings file with that key. The tests use a disposable
-OpenCode profile and a loopback model fixture.
+OpenCode profile. The native turn smoke uses a loopback model fixture, and
+the installed ACP fallback smoke checks session creation and reload.
 
 ```sh
 direnv exec . cargo test -p agent-harness opencode::tests::installed_ -- --ignored

@@ -315,6 +315,13 @@ pub struct Capabilities {
     pub patches_in_approvals: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdapterTier {
+    #[default]
+    Native,
+    Acp,
+}
+
 impl Capabilities {
     /// The capability set of the deterministic test harness.
     pub fn fake() -> Self {
@@ -1028,6 +1035,10 @@ pub trait AgentHarness: Send {
     /// empty, so a test adapter need not invent values.
     fn diagnostics(&self) -> AgentDiagnostics {
         AgentDiagnostics::default()
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::Native
     }
 
     /// History returned while opening a persisted agent session.
