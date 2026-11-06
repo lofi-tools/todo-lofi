@@ -1,28 +1,35 @@
 //! OpenCode's private HTTP server and session control.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use reqwest::{Client, Method, RequestBuilder, Response, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::time::timeout;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::{
-    ApprovalId, ApprovalRequest, Decision, DeltaKind, HarnessError, HarnessEvent, HarnessResult,
-    ItemId, SessionId, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason,
+    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
+    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const USERNAME: &str = "opencode";
+const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
 
 #[derive(Deserialize)]
 struct Settings {
@@ -104,6 +111,7 @@ impl Api {
             ("post", "/api/session"),
             ("post", "/api/session/{sessionID}/prompt"),
             ("post", "/api/session/{sessionID}/interrupt"),
+            ("delete", "/api/session/{sessionID}/inbox/{inboxID}"),
             (
                 "post",
                 "/api/session/{sessionID}/permission/{requestID}/reply",
@@ -142,6 +150,282 @@ struct ResponseData<T> {
 #[derive(Deserialize)]
 struct InterruptResponse {
     interrupted: bool,
+}
+
+pub struct OpenCodeHarness {
+    server: Option<OpenCodeServer>,
+    session: Option<SessionId>,
+    turn: Option<ActiveTurn>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    diagnostics: AgentDiagnostics,
+}
+
+impl Default for OpenCodeHarness {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            server: None,
+            session: None,
+            turn: None,
+            sender,
+            receiver,
+            diagnostics: AgentDiagnostics::default(),
+        }
+    }
+}
+
+struct ActiveTurn {
+    id: String,
+    finished: Arc<AtomicBool>,
+    reader: JoinHandle<()>,
+}
+
+impl Drop for ActiveTurn {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.receiver
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        self.diagnostics.clone()
+    }
+
+    async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        if self.server.is_some() {
+            return Err(HarnessError::Protocol(
+                "OpenCode harness is already started".into(),
+            ));
+        }
+        let server = OpenCodeServer::start(&spec).await?;
+        let probe = server.probe();
+        let capabilities = Capabilities {
+            streaming: true,
+            thoughts: true,
+            tool_calls: true,
+            approvals: true,
+            resume: probe.resume,
+            ..Capabilities::default()
+        };
+        spec.args.extend(SERVER_ARGS.map(str::to_owned));
+        self.diagnostics = AgentDiagnostics {
+            command: command_line(&spec),
+            protocol: format!("OpenCode {} native HTTP", probe.version),
+            ..AgentDiagnostics::default()
+        };
+        self.server = Some(server);
+        Ok(capabilities)
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if self.session.is_some() {
+            return Err(HarnessError::Protocol(
+                "OpenCode session is already open".into(),
+            ));
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = match resume {
+            Some(session) => server.resume_session(&session).await?,
+            None => server.create_session().await?,
+        };
+        self.session = Some(session.clone());
+        publish(
+            &self.sender,
+            HarnessEvent::SessionState {
+                state: SessionState::Ready,
+            },
+        )?;
+        Ok(session)
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.finished.load(Ordering::Acquire))
+        {
+            return Err(HarnessError::Protocol(
+                "OpenCode turn is already running".into(),
+            ));
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.clone().ok_or(HarnessError::SessionMissing)?;
+        let path = session_path(&session)?;
+        let events = server.subscribe().await?;
+        let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        if let Err(error) = server
+            .enqueue_prompt(&session, &id, &input.text, true)
+            .await
+        {
+            if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
+                tracing::warn!(%cleanup, "could not clean up an unconfirmed OpenCode prompt");
+            }
+            return Err(error);
+        }
+        publish(
+            &self.sender,
+            HarnessEvent::TurnStarted {
+                turn_id: TurnId::new(id.clone()),
+            },
+        )?;
+        let finished = Arc::new(AtomicBool::new(false));
+        let reader = tokio::spawn({
+            let id = id.clone();
+            let sender = self.sender.clone();
+            let finished = finished.clone();
+            let remove = server.request(Method::DELETE, &format!("{path}/inbox/{id}"));
+            let interrupt = server.request(Method::POST, &format!("{path}/interrupt"));
+            async move {
+                let terminal = match read_turn(events, session, &id, &sender).await {
+                    Ok(event) => event,
+                    Err(error) => {
+                        if let Err(cleanup) = send_request(remove).await {
+                            tracing::warn!(%cleanup, "could not remove the disconnected OpenCode prompt");
+                        }
+                        if let Err(cleanup) = send_request(interrupt).await {
+                            tracing::warn!(%cleanup, "could not interrupt the disconnected OpenCode turn");
+                        }
+                        HarnessEvent::Exited {
+                            code: None,
+                            stderr: error.to_string(),
+                        }
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                if let Err(error) = publish(&sender, terminal) {
+                    tracing::debug!(%error, "could not deliver OpenCode turn outcome");
+                }
+            }
+        });
+        self.turn = Some(ActiveTurn {
+            id,
+            finished,
+            reader,
+        });
+        Ok(())
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        if let Some(turn) = &self.turn
+            && !turn.finished.load(Ordering::Acquire)
+        {
+            server.cancel_prompt(session, &turn.id).await?;
+        }
+        Ok(())
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        let id = approval_id.as_str();
+        if !id.starts_with("per") || !valid_id(id) {
+            return Err(HarnessError::NoPendingApproval);
+        }
+        let path = format!("{}/permission/{id}/reply", session_path(session)?);
+        let reply = match decision {
+            Decision::Allow => "once",
+            Decision::Deny => "reject",
+        };
+        send_request(
+            server
+                .request(Method::POST, &path)
+                .json(&json!({"decision": reply})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        self.turn = None;
+        self.session = None;
+        if let Some(server) = self.server.take() {
+            server.shutdown().await?;
+            publish(
+                &self.sender,
+                HarnessEvent::Exited {
+                    code: Some(0),
+                    stderr: String::new(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn publish(sender: &mpsc::UnboundedSender<HarnessEvent>, event: HarnessEvent) -> HarnessResult<()> {
+    sender.send(event).map_err(|_| HarnessError::ChannelClosed)
+}
+
+async fn read_turn(
+    mut events: OpenCodeEvents,
+    session: SessionId,
+    prompt_id: &str,
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+) -> HarnessResult<HarnessEvent> {
+    let mut transcript = OpenCodeTranscript::new(session.clone());
+    let mut admitted = false;
+    let mut approvals = HashSet::new();
+    let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let event = if admitted {
+            events.next().await?
+        } else {
+            timeout_at(admission_deadline, events.next())
+                .await
+                .map_err(|_| {
+                    HarnessError::Protocol("OpenCode prompt admission event timed out".into())
+                })??
+        };
+        if event.data["sessionID"] != session.as_str() {
+            continue;
+        }
+        if event.data["inboxID"] == prompt_id {
+            match event.kind.as_str() {
+                "session.inbox.enqueued" => admitted = true,
+                "session.inbox.cancelled" => {
+                    return Ok(HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Cancelled,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !admitted {
+            continue;
+        }
+        if event.kind == "form.created" {
+            return Err(HarnessError::Protocol(
+                "OpenCode requested a form that Shepherd cannot display".into(),
+            ));
+        }
+        let Some(event) = transcript.apply(event)? else {
+            continue;
+        };
+        match &event {
+            HarnessEvent::ApprovalRequested { request } => {
+                approvals.insert(request.approval_id.clone());
+            }
+            HarnessEvent::ApprovalResolved { approval_id, .. } => {
+                approvals.remove(approval_id);
+            }
+            HarnessEvent::TurnFinished { .. } => {
+                for approval_id in approvals {
+                    publish(sender, HarnessEvent::ApprovalWithdrawn { approval_id })?;
+                }
+                return Ok(event);
+            }
+            _ => {}
+        }
+        publish(sender, event)?;
+    }
 }
 
 /// A loopback server owned by one Shepherd task.
@@ -479,7 +763,7 @@ impl OpenCodeServer {
         let password = uuid::Uuid::new_v4().to_string();
         let mut child = Command::new(&spec.program)
             .args(&spec.args)
-            .args(["serve", "--hostname", "127.0.0.1", "--port", "0"])
+            .args(SERVER_ARGS)
             .current_dir(&directory)
             .envs(&spec.environment)
             .env("OPENCODE_PASSWORD", &password)
@@ -616,6 +900,35 @@ impl OpenCodeServer {
         Ok(response.interrupted)
     }
 
+    async fn enqueue_prompt(
+        &self,
+        session: &SessionId,
+        prompt_id: &str,
+        text: &str,
+        resume: bool,
+    ) -> HarnessResult<()> {
+        let path = format!("{}/prompt", session_path(session)?);
+        let response: ResponseData<Value> = response_json(
+            self.request(Method::POST, &path)
+                .json(&json!({"id": prompt_id, "text": text, "resume": resume})),
+        )
+        .await?;
+        if response.data["id"] != prompt_id || response.data["sessionID"] != session.as_str() {
+            return Err(HarnessError::Protocol(
+                "OpenCode admitted a different prompt".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn cancel_prompt(&self, session: &SessionId, prompt_id: &str) -> HarnessResult<()> {
+        let path = format!("{}/inbox/{prompt_id}", session_path(session)?);
+        // The prompt may still be queued when Cancel arrives. Deleting a delivered item is a no-op.
+        send_request(self.request(Method::DELETE, &path)).await?;
+        self.interrupt_session(session).await?;
+        Ok(())
+    }
+
     pub async fn shutdown(mut self) -> HarnessResult<()> {
         self.child
             .kill()
@@ -665,23 +978,30 @@ fn loopback_address(address: &str) -> HarnessResult<Url> {
 
 fn session_path(session: &SessionId) -> HarnessResult<String> {
     let id = session.as_str();
-    if id.is_empty()
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-    {
+    if !valid_id(id) {
         return Err(HarnessError::Protocol("invalid OpenCode session ID".into()));
     }
     Ok(format!("/api/session/{id}"))
 }
 
-async fn response_json<T: DeserializeOwned>(request: RequestBuilder) -> HarnessResult<T> {
-    let mut response = request
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+}
+
+async fn send_request(request: RequestBuilder) -> HarnessResult<Response> {
+    request
         .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| protocol_error("OpenCode HTTP request failed", error.without_url()))?;
+        .map_err(|error| protocol_error("OpenCode HTTP request failed", error.without_url()))
+}
+
+async fn response_json<T: DeserializeOwned>(request: RequestBuilder) -> HarnessResult<T> {
+    let mut response = send_request(request).await?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -736,6 +1056,7 @@ mod tests {
             "/api/event": {"get": {}},
             "/api/session": {"post": {}},
             "/api/session/{sessionID}/prompt": {"post": {}},
+            "/api/session/{sessionID}/inbox/{inboxID}": {"delete": {}},
             "/api/session/{sessionID}/interrupt": {"post": {}}
         }}))?;
         let health = || Health {
@@ -945,6 +1266,24 @@ mod tests {
         let restarted = OpenCodeServer::start(&spec).await?;
         assert_eq!(restarted.resume_session(&session).await?, session);
         assert!(!restarted.interrupt_session(&session).await?);
+        let events = restarted.subscribe().await?;
+        let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        restarted
+            .enqueue_prompt(&session, &prompt_id, "queued fixture", false)
+            .await?;
+        restarted.cancel_prompt(&session, &prompt_id).await?;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let terminal = timeout(
+            REQUEST_TIMEOUT,
+            read_turn(events, session, &prompt_id, &sender),
+        )
+        .await??;
+        assert!(matches!(
+            terminal,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Cancelled
+            }
+        ));
         restarted.shutdown().await?;
         Ok(())
     }
