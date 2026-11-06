@@ -1556,7 +1556,7 @@ textarea {
   align-items: center;
   gap: 8px;
   height: var(--status-height);
-  padding: 0 12px;
+  padding: 0 12px 4px;
   color: color-mix(in srgb, var(--text-muted) 75%, var(--text-disabled));
   font-size: 12px;
 }
