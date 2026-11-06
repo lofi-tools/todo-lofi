@@ -28,12 +28,26 @@ case "${1:-}" in
       exit 2
     fi
     command -v python3 >/dev/null
-    phases=(macos-ime)
     duration=300s
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
-    printf '%s\n' 'Use Pinyin - Simplified. Wait for each IME prompt before typing ni.' \
-      'At IME1>, check the candidate panel position, then press Space and Return.' \
-      'At IME2>, check the new position, select a different candidate, then press Return to submit it.'
+    case "${2:-pinyin}" in
+      pinyin)
+        phases=(macos-ime)
+        printf '%s\n' 'Use Pinyin - Simplified. Wait for each IME prompt before typing ni.' \
+          'At IME1>, check the candidate panel position, then press Space and Return.' \
+          'At IME2>, check the new position, select a different candidate, then press Return to submit it.'
+        ;;
+      british)
+        phases=(macos-dead-key)
+        printf '%s\n' 'Use the British layout. Wait for each IME prompt before typing.' \
+          'At IME1>, press Option+E, then E and Return.' \
+          'At IME2>, press Option+U, then U and Return.'
+        ;;
+      *)
+        printf '%s\n' 'Usage: --macos-ime [pinyin|british]' >&2
+        exit 2
+        ;;
+    esac
     ;;
   --codex-approval)
     command -v python3 >/dev/null
@@ -68,7 +82,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime [pinyin|british]|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac

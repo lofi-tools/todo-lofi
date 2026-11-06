@@ -656,11 +656,13 @@ their session variables. After relaunch, all three shells appeared ended
 with Restart actions. Restarting the task shell opened its original worktree
 and focused terminal input.
 
-The packaged macOS test app used a disposable database and the British keyboard
-layout. With the cursor moved by a shell command, Option+E followed by E
-delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
-selection and candidate-window placement still need a system IME with
-conversion candidates on macOS.
+With the existing British layout, the packaged macOS test app recorded one
+trusted composition event and one matching PTY input at each of two cursor
+positions. Option+E followed by E produced `é`, and Option+U followed by U
+produced `ü`. Run this check with
+`./scripts/smoke-shepherd-terminal.sh --macos-ime british` from the Nix shell.
+The British dead keys exercise character composition. Candidate selection
+and candidate-window placement still need a separate macOS check.
 
 Run the candidate check from the Nix shell with
 `./scripts/smoke-shepherd-terminal.sh --macos-ime`. Use the system
