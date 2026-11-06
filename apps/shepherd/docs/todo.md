@@ -953,8 +953,11 @@ and the task header never overstates the tier.
   The Files tab browses a project root or task worktree with lazy folder
   expansion, a dotfile toggle, `.gitignore` and `.shepherdignore`. The
   read-only UTF-8 viewer shows line numbers and syntax highlighting within
-  preview limits. File filtering and search, live Git badges, and external
-  editor and file manager actions remain open.
+  preview limits. Filename filtering searches the selected root as the user
+  types. Submitted content searches run in the background and support cancel,
+  and opening a result jumps to its line. Scans cap entries, content bytes and
+  results, and label incomplete results. Live Git badges and external editor
+  and file manager actions remain open.
 - [ ] Preview tab: project URL, element annotation, structured prompt context,
   screenshot fallback when framing or injection is blocked.
 - [ ] Cross-task search over Turso FTS.

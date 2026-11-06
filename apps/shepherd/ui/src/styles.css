@@ -1653,6 +1653,17 @@ textarea {
   flex-wrap: wrap;
 }
 
+.files-pane__toolbar input[type='search'] {
+  flex: 1 1 12ch;
+  min-width: 8ch;
+}
+
+.files-search__excerpt {
+  display: block;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
 .files-pane__tree {
   max-height: 32vh;
   overflow: auto;
@@ -1707,6 +1718,10 @@ textarea {
   display: flex;
   gap: 12px;
   min-height: 1lh;
+}
+
+.files-viewer__line[aria-current='location'] {
+  background: color-mix(in srgb, var(--focus) 14%, transparent);
 }
 
 .files-viewer__number {

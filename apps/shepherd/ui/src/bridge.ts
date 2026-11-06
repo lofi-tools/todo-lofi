@@ -672,6 +672,7 @@ export interface DirectoryListing {
 }
 
 export interface TextFile {
+  firstLine: number
   lines: Array<Array<{ text: string; color: string | null }>>
   truncated: boolean
 }
@@ -680,8 +681,31 @@ export function listFiles(projectId: string, taskId: string | null, path: string
   return invoke('list_files', { projectId, taskId, path, showDotfiles })
 }
 
-export function readWorkspaceFile(projectId: string, taskId: string | null, path: string): Promise<TextFile> {
-  return invoke('read_workspace_file', { projectId, taskId, path })
+export function readWorkspaceFile(projectId: string, taskId: string | null, path: string, line: number | null): Promise<TextFile> {
+  return invoke('read_workspace_file', { projectId, taskId, path, line })
+}
+
+export interface FileSearchQuery {
+  mode: 'name' | 'contents'
+  query: string
+  showDotfiles: boolean
+}
+
+export interface FileSearchResult {
+  matches: Array<{ path: string; line: number | null; excerpt: string | null }>
+  incomplete: boolean
+}
+
+export function reserveFileSearch(): Promise<string> {
+  return invoke('reserve_file_search')
+}
+
+export function searchWorkspaceFiles(searchId: string, projectId: string, taskId: string | null, query: FileSearchQuery): Promise<FileSearchResult> {
+  return invoke('search_workspace_files', { searchId, projectId, taskId, query })
+}
+
+export function cancelFileSearch(searchId: string): Promise<void> {
+  return invoke('cancel_file_search', { searchId })
 }
 
 export type GitMutation =

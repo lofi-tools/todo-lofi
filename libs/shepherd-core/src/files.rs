@@ -1,10 +1,11 @@
-use std::fs::File;
+use std::fs::{self, DirEntry, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -14,6 +15,11 @@ const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
 const MAX_VIEW_BYTES: usize = 256 * 1024;
 const MAX_VIEW_LINES: usize = 4_000;
 const MAX_HIGHLIGHT_LINE_BYTES: usize = 4_096;
+const MAX_SEARCH_ENTRIES: usize = 20_000;
+const MAX_SEARCH_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SEARCH_MATCHES: usize = 200;
+const MAX_SEARCH_DEPTH: usize = 128;
+const MAX_QUERY_BYTES: usize = 512;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
@@ -35,6 +41,10 @@ pub enum FileError {
     Io(#[from] io::Error),
     #[error("Could not read a workspace ignore file: {0}")]
     Ignore(String),
+    #[error("The search query must contain 1 to {MAX_QUERY_BYTES} bytes.")]
+    InvalidQuery,
+    #[error("File search cancelled.")]
+    Cancelled,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,7 +62,9 @@ pub struct FileEntry {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TextFile {
+    first_line: usize,
     lines: Vec<Vec<TextSpan>>,
     truncated: bool,
 }
@@ -62,6 +74,36 @@ pub struct TextSpan {
     text: String,
     color: Option<String>,
 }
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileSearchMode {
+    Name,
+    Contents,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchQuery {
+    mode: FileSearchMode,
+    query: String,
+    show_dotfiles: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct FileSearchResult {
+    matches: Vec<FileMatch>,
+    incomplete: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct FileMatch {
+    path: String,
+    line: Option<usize>,
+    excerpt: Option<String>,
+}
+
+type IgnoreRules = [Vec<Gitignore>; 2];
 
 pub fn list_directory(
     root: &Path,
@@ -75,14 +117,7 @@ pub fn list_directory(
     let mut ancestors = relative.iter();
     let mut rules = [Vec::new(), Vec::new()];
     loop {
-        for (name, matchers) in [".shepherdignore", ".gitignore"]
-            .into_iter()
-            .zip(&mut rules)
-        {
-            if let Some(matcher) = read_ignore(&root, &directory, name)? {
-                matchers.push(matcher);
-            }
-        }
+        load_rules(&root, &directory, &mut rules)?;
         let Some(name) = ancestors.next() else { break };
         directory.push(name);
         if (!show_dotfiles && is_dotfile(name)) || is_ignored(&rules, &directory, true) {
@@ -93,17 +128,13 @@ pub fn list_directory(
 
     let mut entries = Vec::new();
     let mut incomplete = false;
-    for entry in std::fs::read_dir(&directory)? {
+    for entry in fs::read_dir(&directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        if is_git_metadata(&name) || (!show_dotfiles && is_dotfile(&name)) {
-            continue;
-        }
-        let kind = entry.file_type()?;
         let path = entry.path();
-        if !(kind.is_dir() || kind.is_file()) || is_ignored(&rules, &path, kind.is_dir()) {
+        let Some(is_directory) = visible_entry(&entry, &name, &path, &rules, show_dotfiles)? else {
             continue;
-        }
+        };
         let Some((name, path)) = name.to_str().zip(
             path.strip_prefix(&root)
                 .map_err(|_| FileError::InvalidPath)?
@@ -119,7 +150,7 @@ pub fn list_directory(
         entries.push(FileEntry {
             name: name.into(),
             path: path.into(),
-            directory: kind.is_dir(),
+            directory: is_directory,
         });
     }
     entries.sort_by(|left, right| {
@@ -134,7 +165,11 @@ pub fn list_directory(
     })
 }
 
-pub fn read_file(root: &Path, relative: &Path) -> Result<TextFile, FileError> {
+pub fn read_file(
+    root: &Path,
+    relative: &Path,
+    focus_line: Option<usize>,
+) -> Result<TextFile, FileError> {
     let relative = checked_path(relative)?;
     check_directory(root)?;
     let root = root.canonicalize()?;
@@ -152,7 +187,186 @@ pub fn read_file(root: &Path, relative: &Path) -> Result<TextFile, FileError> {
     if content.contains('\0') {
         return Err(FileError::NonText);
     }
-    Ok(highlight(&relative, content))
+    Ok(highlight(&relative, content, focus_line))
+}
+
+pub fn search_files(
+    root: &Path,
+    query: FileSearchQuery,
+    cancelled: &AtomicBool,
+) -> Result<FileSearchResult, FileError> {
+    let text = query.query.trim();
+    if text.is_empty() || text.len() > MAX_QUERY_BYTES {
+        return Err(FileError::InvalidQuery);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(FileError::Cancelled);
+    }
+    check_directory(root)?;
+    let root = root.canonicalize()?;
+    let mut search = Search {
+        root: &root,
+        mode: query.mode,
+        text: text.to_lowercase(),
+        show_dotfiles: query.show_dotfiles,
+        cancelled,
+        visited: 0,
+        remaining_bytes: MAX_SEARCH_BYTES,
+        result: FileSearchResult::default(),
+    };
+    search.directory(&root, &mut Default::default(), 0)?;
+    search.check_cancelled()?;
+    search.result.matches.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.line.cmp(&right.line))
+    });
+    Ok(search.result)
+}
+
+struct Search<'a> {
+    root: &'a Path,
+    mode: FileSearchMode,
+    text: String,
+    show_dotfiles: bool,
+    cancelled: &'a AtomicBool,
+    visited: usize,
+    remaining_bytes: usize,
+    result: FileSearchResult,
+}
+
+impl Search<'_> {
+    fn check_cancelled(&self) -> Result<(), FileError> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(FileError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn at_limit(&self) -> bool {
+        self.visited == MAX_SEARCH_ENTRIES
+            || self.remaining_bytes == 0
+            || self.result.matches.len() == MAX_SEARCH_MATCHES
+    }
+
+    fn directory(
+        &mut self,
+        directory: &Path,
+        rules: &mut IgnoreRules,
+        depth: usize,
+    ) -> Result<(), FileError> {
+        self.check_cancelled()?;
+        if depth == MAX_SEARCH_DEPTH {
+            self.result.incomplete = true;
+            return Ok(());
+        }
+        check_directory(directory)?;
+        let [shepherd, git] = rules.each_ref().map(Vec::len);
+        let outcome = (|| {
+            load_rules(self.root, directory, rules)?;
+            for entry in fs::read_dir(directory)? {
+                self.check_cancelled()?;
+                if self.at_limit() {
+                    self.result.incomplete = true;
+                    break;
+                }
+                self.visited += 1;
+                match entry {
+                    Ok(entry) => match self.entry(&entry, rules, depth) {
+                        Err(FileError::Cancelled) => return Err(FileError::Cancelled),
+                        Err(_) => self.result.incomplete = true,
+                        Ok(()) => {}
+                    },
+                    Err(_) => self.result.incomplete = true,
+                }
+            }
+            Ok(())
+        })();
+        let [shepherd_rules, git_rules] = rules;
+        shepherd_rules.truncate(shepherd);
+        git_rules.truncate(git);
+        outcome
+    }
+
+    fn entry(
+        &mut self,
+        entry: &DirEntry,
+        rules: &mut IgnoreRules,
+        depth: usize,
+    ) -> Result<(), FileError> {
+        let path = entry.path();
+        let name = entry.file_name();
+        match visible_entry(entry, &name, &path, rules, self.show_dotfiles)? {
+            Some(true) => self.directory(&path, rules, depth + 1),
+            Some(false) => {
+                let relative = path
+                    .strip_prefix(self.root)
+                    .map_err(|_| FileError::InvalidPath)?;
+                let Some((name, relative)) = name.to_str().zip(relative.to_str()) else {
+                    self.result.incomplete = true;
+                    return Ok(());
+                };
+                match self.mode {
+                    FileSearchMode::Name if name.to_lowercase().contains(&self.text) => {
+                        self.result.matches.push(FileMatch {
+                            path: relative.into(),
+                            line: None,
+                            excerpt: None,
+                        });
+                    }
+                    FileSearchMode::Contents => self.file(relative)?,
+                    FileSearchMode::Name => {}
+                }
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn file(&mut self, relative: &str) -> Result<(), FileError> {
+        let file = open_file(self.root, Path::new(relative))?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Ok(());
+        }
+        let limit = MAX_VIEW_BYTES.min(self.remaining_bytes);
+        if metadata.len() > limit as u64 {
+            self.result.incomplete = true;
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+        self.remaining_bytes = self.remaining_bytes.saturating_sub(bytes.len());
+        if bytes.len() > limit {
+            self.result.incomplete = true;
+            return Ok(());
+        }
+        let Ok(content) = std::str::from_utf8(&bytes) else {
+            return Ok(());
+        };
+        if content.contains('\0') {
+            return Ok(());
+        }
+        for (index, line) in content.lines().enumerate() {
+            self.check_cancelled()?;
+            let lowercase = line.to_lowercase();
+            let Some(offset) = lowercase.find(&self.text) else {
+                continue;
+            };
+            if self.result.matches.len() == MAX_SEARCH_MATCHES {
+                self.result.incomplete = true;
+                break;
+            }
+            let start = lowercase[..offset].chars().count().saturating_sub(60);
+            let excerpt = line.chars().skip(start).take(200).collect::<String>();
+            self.result.matches.push(FileMatch {
+                path: relative.into(),
+                line: Some(index + 1),
+                excerpt: Some(excerpt.trim().into()),
+            });
+        }
+        Ok(())
+    }
 }
 
 fn checked_path(path: &Path) -> Result<PathBuf, FileError> {
@@ -187,7 +401,31 @@ fn check_directory(path: &Path) -> Result<(), FileError> {
     Ok(())
 }
 
-fn is_ignored(rules: &[Vec<Gitignore>; 2], path: &Path, directory: bool) -> bool {
+fn visible_entry(
+    entry: &DirEntry,
+    name: &std::ffi::OsStr,
+    path: &Path,
+    rules: &IgnoreRules,
+    show_dotfiles: bool,
+) -> io::Result<Option<bool>> {
+    if is_git_metadata(name) || (!show_dotfiles && is_dotfile(name)) {
+        return Ok(None);
+    }
+    let kind = entry.file_type()?;
+    let directory = kind.is_dir();
+    Ok(((directory || kind.is_file()) && !is_ignored(rules, path, directory)).then_some(directory))
+}
+
+fn load_rules(root: &Path, directory: &Path, rules: &mut IgnoreRules) -> Result<(), FileError> {
+    for (name, matchers) in [".shepherdignore", ".gitignore"].into_iter().zip(rules) {
+        if let Some(matcher) = read_ignore(root, directory, name)? {
+            matchers.push(matcher);
+        }
+    }
+    Ok(())
+}
+
+fn is_ignored(rules: &IgnoreRules, path: &Path, directory: bool) -> bool {
     rules
         .iter()
         .flat_map(|group| group.iter().rev())
@@ -268,7 +506,7 @@ fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
     Ok(File::open(path)?)
 }
 
-fn highlight(path: &Path, content: &str) -> TextFile {
+fn highlight(path: &Path, content: &str, focus_line: Option<usize>) -> TextFile {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     static THEMES: OnceLock<ThemeSet> = OnceLock::new();
 
@@ -289,16 +527,21 @@ fn highlight(path: &Path, content: &str) -> TextFile {
                 .and_then(|extension| extension.to_str())
                 .and_then(|extension| syntaxes.find_syntax_by_extension(extension))
         });
+    let first_line = focus_line
+        .filter(|line| *line > MAX_VIEW_LINES)
+        .map_or(1, |line| {
+            line.min(content.lines().count()).saturating_sub(40).max(1)
+        });
+    let mut lines = content.split_inclusive('\n').skip(first_line - 1);
     let mut highlighter = syntax
         .zip(themes.themes.get("base16-ocean.dark"))
         .filter(|_| {
-            content
-                .lines()
+            lines
+                .clone()
                 .take(MAX_VIEW_LINES)
                 .all(|line| line.len() <= MAX_HIGHLIGHT_LINE_BYTES)
         })
         .map(|(syntax, theme)| HighlightLines::new(syntax, theme));
-    let mut lines = content.split_inclusive('\n');
     let visible = lines
         .by_ref()
         .take(MAX_VIEW_LINES)
@@ -325,15 +568,14 @@ fn highlight(path: &Path, content: &str) -> TextFile {
         })
         .collect();
     TextFile {
+        first_line,
         lines: visible,
-        truncated: lines.next().is_some(),
+        truncated: first_line > 1 || lines.next().is_some(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
 
     #[test]
@@ -393,7 +635,7 @@ mod tests {
             root.join("main.rs"),
             "fn main() {\r\n    println!(\"héllo\");\r\n}\r\n",
         )?;
-        let view = read_file(root, Path::new("main.rs"))?;
+        let view = read_file(root, Path::new("main.rs"), None)?;
         assert_eq!(view.lines.len(), 3);
         assert!(view.lines.iter().flatten().any(|span| span.color.is_some()));
         assert_eq!(
@@ -407,18 +649,120 @@ mod tests {
         );
         fs::write(root.join("binary.bin"), [0, 255])?;
         assert!(matches!(
-            read_file(root, Path::new("binary.bin")),
+            read_file(root, Path::new("binary.bin"), None),
             Err(FileError::NonText)
         ));
         fs::write(root.join("large.txt"), vec![b'x'; MAX_VIEW_BYTES + 1])?;
         assert!(matches!(
-            read_file(root, Path::new("large.txt")),
+            read_file(root, Path::new("large.txt"), None),
             Err(FileError::TooLarge)
         ));
         fs::write(root.join("lines.txt"), "\n".repeat(MAX_VIEW_LINES + 1))?;
-        let view = read_file(root, Path::new("lines.txt"))?;
+        let view = read_file(root, Path::new("lines.txt"), None)?;
         assert!(view.truncated);
         assert_eq!(view.lines.len(), MAX_VIEW_LINES);
+        Ok(())
+    }
+
+    #[test]
+    fn searches_names_and_utf8_lines_with_the_same_workspace_rules()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::create_dir_all(root.join("src/deep"))?;
+        fs::create_dir(root.join(".git"))?;
+        fs::write(root.join(".gitignore"), "src/ignored.txt\n")?;
+        fs::write(root.join("src/.shepherdignore"), "Debug*\n")?;
+        fs::write(root.join("src/deep/Needle.rs"), "header\nA Néedle result\n")?;
+        fs::write(root.join("src/ignored.txt"), "Néedle ignored")?;
+        fs::write(root.join("src/DebugNeedle.txt"), "Néedle ignored")?;
+        fs::write(root.join(".hidden-Needle"), "Néedle hidden")?;
+        fs::write(root.join(".git/Needle"), "Néedle metadata")?;
+        fs::write(root.join("large.txt"), vec![b'x'; MAX_VIEW_BYTES + 1])?;
+        fs::write(root.join("binary.bin"), "Néedle\0")?;
+        let cancelled = AtomicBool::new(false);
+        let search = |mode, query: &str, show_dotfiles| {
+            search_files(
+                root,
+                FileSearchQuery {
+                    mode,
+                    query: query.into(),
+                    show_dotfiles,
+                },
+                &cancelled,
+            )
+        };
+        let names = search(FileSearchMode::Name, " needle ", false)?;
+        assert_eq!(
+            names
+                .matches
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            ["src/deep/Needle.rs"]
+        );
+        assert_eq!(
+            search(FileSearchMode::Name, "needle", true)?.matches.len(),
+            2
+        );
+        let contents = search(FileSearchMode::Contents, "NÉEDLE", false)?;
+        let hit = contents.matches.first().ok_or("expected a content match")?;
+        assert_eq!(contents.matches.len(), 1);
+        assert_eq!(hit.path, "src/deep/Needle.rs");
+        assert_eq!(hit.line, Some(2));
+        assert_eq!(hit.excerpt.as_deref(), Some("A Néedle result"));
+        assert!(contents.incomplete);
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            search(FileSearchMode::Contents, "Néedle", false),
+            Err(FileError::Cancelled)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn limits_search_hits_and_can_preview_a_match_past_the_initial_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        fs::write(
+            root.join("long.txt"),
+            format!(
+                "{}{}",
+                "\n".repeat(MAX_VIEW_LINES + 5),
+                "match\n".repeat(MAX_SEARCH_MATCHES + 1)
+            ),
+        )?;
+        let results = search_files(
+            root,
+            FileSearchQuery {
+                mode: FileSearchMode::Contents,
+                query: "match".into(),
+                show_dotfiles: false,
+            },
+            &AtomicBool::new(false),
+        )?;
+        assert_eq!(results.matches.len(), MAX_SEARCH_MATCHES);
+        assert!(results.incomplete);
+        let line = results
+            .matches
+            .first()
+            .and_then(|hit| hit.line)
+            .ok_or("expected a line number")?;
+        assert_eq!(line, MAX_VIEW_LINES + 6);
+        let preview = read_file(root, Path::new("long.txt"), Some(line))?;
+        assert!(preview.first_line > 1 && preview.truncated);
+        let source = preview
+            .lines
+            .get(line - preview.first_line)
+            .ok_or("match is inside the preview")?;
+        assert_eq!(
+            source
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>(),
+            "match"
+        );
         Ok(())
     }
 
@@ -446,7 +790,7 @@ mod tests {
         let linked_root = directory.path().join("linked-root");
         std::os::unix::fs::symlink(&root, &linked_root)?;
         assert!(matches!(
-            read_file(&linked_root, Path::new("visible.txt")),
+            read_file(&linked_root, Path::new("visible.txt"), None),
             Err(FileError::SymbolicLink)
         ));
         assert!(matches!(
@@ -459,7 +803,7 @@ mod tests {
             Path::new("link.txt"),
             Path::new("parent/private.txt"),
         ] {
-            assert!(read_file(&root, path).is_err(), "{}", path.display());
+            assert!(read_file(&root, path, None).is_err(), "{}", path.display());
         }
         Ok(())
     }

@@ -1,10 +1,20 @@
-import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup } from 'solid-js'
 
-import { listFiles, readWorkspaceFile, type WorkspaceFileEntry } from './bridge'
+import { cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 
 interface FileLocation {
   projectId: string
   taskId: string | null
+}
+
+interface FileSelection {
+  path: string
+  line: number | null
+}
+
+interface PendingSearch {
+  timer?: number
+  id?: string
 }
 
 export function FilesPane(props: { projectId: string; worktreeTaskId: string | null }) {
@@ -31,15 +41,99 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
 }
 
 function FileBrowser(props: FileLocation & { showDotfiles: boolean }) {
-  const [selected, setSelected] = createSignal<string | null>(null)
+  const [selected, setSelected] = createSignal<FileSelection | null>(null)
+  const [query, setQuery] = createSignal('')
+  const [results, setResults] = createSignal<FileSearchResult>()
+  const [error, setError] = createSignal<string>()
+  const [status, setStatus] = createSignal<'idle' | 'searching' | 'cancelled'>('idle')
+  let active: PendingSearch | undefined
+
+  function stopSearch() {
+    const previous = active
+    active = undefined
+    if (previous?.timer !== undefined) window.clearTimeout(previous.timer)
+    if (previous?.id) void cancelFileSearch(previous.id).catch((failure) => console.warn('Could not cancel the file search', failure))
+  }
+
+  function search(mode: FileSearchQuery['mode']) {
+    stopSearch()
+    const text = query().trim()
+    setResults(undefined)
+    setError(undefined)
+    setStatus(text ? 'searching' : 'idle')
+    if (!text) return
+    const request: PendingSearch = {}
+    const parameters = { mode, query: text, showDotfiles: props.showDotfiles }
+    active = request
+    async function run() {
+      try {
+        const id = await reserveFileSearch()
+        if (active !== request) {
+          await cancelFileSearch(id)
+          return
+        }
+        request.id = id
+        const result = await searchWorkspaceFiles(id, props.projectId, props.taskId, parameters)
+        if (active === request) setResults(result)
+      } catch (failure) {
+        if (active === request) setError(failureMessage(failure))
+        else console.debug('A superseded file search ended', failure)
+      } finally {
+        if (active === request) {
+          active = undefined
+          setStatus('idle')
+        }
+      }
+    }
+    if (mode === 'name') request.timer = window.setTimeout(() => void run(), 80)
+    else void run()
+  }
+
+  createEffect(() => search('name'))
+  onCleanup(stopSearch)
+
   return (
     <>
-      <div class="files-pane__tree" aria-label="File tree">
+      <form class="terminal-pane__bar files-pane__toolbar" onSubmit={(event) => {
+        event.preventDefault()
+        search('contents')
+      }}>
+        <input type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
+          onInput={(event) => setQuery(event.currentTarget.value)} />
+        <button type="submit" disabled={!query().trim()}>Search contents</button>
+        <Show when={status() === 'searching'}>
+          <button type="button" onClick={() => { stopSearch(); setStatus('cancelled') }}>Cancel search</button>
+        </Show>
+      </form>
+      <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
-          selected={selected()} onSelect={setSelected} />
+          selected={selected()?.path ?? null} onSelect={(path) => setSelected({ path, line: null })} />
       </div>
+      <Show when={query().trim()}>
+        <section class="files-pane__tree" aria-label="File search results">
+          <Show when={status() === 'searching'}><p class="empty empty--tight" role="status">Searching files…</p></Show>
+          <Show when={status() === 'cancelled'}><p class="empty empty--tight" role="status">Search cancelled.</p></Show>
+          <Show when={error()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
+          <Show when={results()}>{(result) => <>
+            <Show when={result().matches.length} fallback={<p class="empty empty--tight">No matching files.</p>}>
+              <ul class="files-tree">
+                <For each={result().matches}>{(match) => (
+                  <li>
+                    <button type="button" class="files-tree__entry" onClick={() => setSelected(match)}
+                      aria-pressed={selected()?.path === match.path && selected()?.line === match.line}>
+                      {match.path}{match.line === null ? '' : `:${match.line}`}
+                      <Show when={match.excerpt}>{(excerpt) => <span class="files-search__excerpt">{excerpt()}</span>}</Show>
+                    </button>
+                  </li>
+                )}</For>
+              </ul>
+            </Show>
+            <Show when={result().incomplete}><p class="empty empty--tight">Some files or results were skipped.</p></Show>
+          </>}</Show>
+        </section>
+      </Show>
       <Show when={selected()} keyed>
-        {(path) => <FileViewer projectId={props.projectId} taskId={props.taskId} path={path} />}
+        {(file) => <FileViewer projectId={props.projectId} taskId={props.taskId} {...file} />}
       </Show>
     </>
   )
@@ -93,10 +187,10 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
   )
 }
 
-function FileViewer(props: FileLocation & { path: string }) {
+function FileViewer(props: FileLocation & FileSelection) {
   const [file] = createResource(
-    () => [props.projectId, props.taskId, props.path] as const,
-    ([projectId, taskId, path]) => readWorkspaceFile(projectId, taskId, path),
+    () => [props.projectId, props.taskId, props.path, props.line] as const,
+    ([projectId, taskId, path, line]) => readWorkspaceFile(projectId, taskId, path, line),
   )
   return (
     <section class="files-viewer" aria-label="File preview">
@@ -108,14 +202,19 @@ function FileViewer(props: FileLocation & { path: string }) {
           <Show when={current().lines.length} fallback={<p class="empty empty--tight">Empty file.</p>}>
             <pre class="files-viewer__source" tabindex="0" aria-label="Read-only file contents"><code>
               <For each={current().lines}>{(line, index) => (
-                <span class="files-viewer__line">
-                  <span class="files-viewer__number" aria-hidden="true">{index() + 1}</span>
+                <span class="files-viewer__line" aria-current={current().firstLine + index() === props.line ? 'location' : undefined}
+                  ref={(row) => {
+                    if (current().firstLine + index() === props.line) queueMicrotask(() => {
+                      if (row.isConnected) row.scrollIntoView({ block: 'nearest' })
+                    })
+                  }}>
+                  <span class="files-viewer__number" aria-hidden="true">{current().firstLine + index()}</span>
                   <span><For each={line}>{(part) => <span style={{ color: part.color ?? undefined }}>{part.text}</span>}</For></span>
                 </span>
               )}</For>
             </code></pre>
           </Show>
-          <Show when={current().truncated}><p class="empty empty--tight">The preview shows the first 4,000 lines.</p></Show>
+          <Show when={current().truncated}><p class="empty empty--tight">Showing lines {current().firstLine}–{current().firstLine + current().lines.length - 1}.</p></Show>
         </>}
       </Show>
     </section>

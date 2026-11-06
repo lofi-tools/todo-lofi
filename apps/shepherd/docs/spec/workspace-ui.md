@@ -54,7 +54,9 @@ current layout and give future changes a point of comparison.
 - In Files, name the active root above the tree and let the user choose the
   project root or the selected task's worktree. Expand folders in place on
   demand. Hide dotfiles by default with a **Show dotfiles** toggle. Open text
-  in a read-only, line-numbered viewer inside the inspector.
+  in a read-only, line-numbered viewer inside the inspector. **Find files**
+  filters filenames as the user types. **Search contents** and Enter start a
+  cancellable literal search. Selecting a content match opens its line.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

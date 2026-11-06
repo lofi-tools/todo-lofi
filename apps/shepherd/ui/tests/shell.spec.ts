@@ -18,6 +18,10 @@ test.beforeEach(async ({ context }) => {
     let eventIndex = 0
     let cancelRequests = 0
     const fileListings: string[] = []
+    const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
+    const cancelledFileSearches: string[] = []
+    const pendingFileSearches = new Map<string, () => void>()
+    let nextFileSearch = 1
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
@@ -360,10 +364,27 @@ test.beforeEach(async ({ context }) => {
             ], incomplete: false }
           }
           case 'read_workspace_file':
-            return { lines: [
+            return { firstLine: args.line === 120 ? 119 : 1, lines: [
               [{ text: args.path === 'src/main.rs' ? 'fn main() {}' : '<file>', color: '#a3be8c' }],
               [{ text: '// second line', color: null }],
             ], truncated: false }
+          case 'reserve_file_search':
+            return `search-${nextFileSearch++}`
+          case 'search_workspace_files': {
+            fileSearches.push({ id: args.searchId, taskId: args.taskId, mode: args.query.mode })
+            if (args.query.mode === 'name') {
+              const matches = 'main.rs'.includes(args.query.query)
+                ? [{ path: 'src/main.rs', line: null, excerpt: null }] : []
+              return { matches, incomplete: false }
+            }
+            return new Promise((resolve) => pendingFileSearches.set(args.searchId, () => {
+              pendingFileSearches.delete(args.searchId)
+              resolve({ matches: [{ path: 'src/main.rs', line: 120, excerpt: '// second line' }], incomplete: true })
+            }))
+          }
+          case 'cancel_file_search':
+            cancelledFileSearches.push(args.searchId)
+            return null
           case 'save_workspace_layout':
             workspaceLayouts.set(args.taskId, args.layout)
             return args.layout
@@ -615,6 +636,9 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__fileListings = fileListings
+    window.__fileSearches = fileSearches
+    window.__cancelledFileSearches = cancelledFileSearches
+    window.__finishFileSearch = (id: string) => pendingFileSearches.get(id)?.()
     window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
     window.__emitCoreEvent = (event: ShepherdEvent) =>
@@ -714,6 +738,54 @@ test('browses a worktree and project root with lazy folders and read-only previe
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
   await files.getByRole('button', { name: 'README.md' }).click()
   await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
+})
+
+test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const query = files.getByRole('searchbox', { name: 'Find files' })
+  const results = files.getByRole('region', { name: 'File search results' })
+  const searches = () => page.evaluate(() => window.__fileSearches)
+  const cancelled = () => page.evaluate(() => window.__cancelledFileSearches)
+  const contentRequest = async (count: number) => {
+    await expect.poll(async () => (await searches()).filter((request) => request.mode === 'contents').length).toBe(count)
+    const request = (await searches()).filter((request) => request.mode === 'contents').at(-1)
+    if (!request) throw new Error('Expected a content search')
+    return request.id
+  }
+  const finish = (id: string) => page.evaluate((searchId) => window.__finishFileSearch(searchId), id)
+
+  await query.fill('main')
+  await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
+  expect(await searches()).toEqual([{ id: 'search-1', taskId: 'task-1', mode: 'name' }])
+
+  await query.press('Enter')
+  const first = await contentRequest(1)
+  await files.getByRole('button', { name: 'Cancel search' }).click()
+  await expect.poll(cancelled).toContain(first)
+  await finish(first)
+  await expect(results.getByRole('status')).toHaveText('Search cancelled.')
+  await expect(results.getByText('// second line')).toHaveCount(0)
+
+  await files.getByRole('button', { name: 'Search contents' }).click()
+  await finish(await contentRequest(2))
+  await expect(results.getByText('Some files or results were skipped.')).toBeVisible()
+  await results.getByRole('button', { name: /src\/main\.rs:120/ }).click()
+  const match = files.locator('.files-viewer__line[aria-current="location"]')
+  await expect(match).toContainText('// second line')
+  await expect(match.locator('.files-viewer__number')).toHaveText('120')
+
+  await files.getByRole('button', { name: 'Search contents' }).click()
+  const third = await contentRequest(3)
+  await files.getByLabel('File root').selectOption('project')
+  await expect.poll(cancelled).toContain(third)
+  await finish(third)
+  await expect(results).toHaveCount(0)
+  await query.fill('main')
+  await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
+  expect((await searches()).at(-1)).toMatchObject({ taskId: null, mode: 'name' })
 })
 
 test('resumes an interrupted task from its conversation header', async ({ page }) => {

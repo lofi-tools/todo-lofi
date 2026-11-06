@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use agent_harness::Decision;
@@ -20,7 +21,7 @@ use agent_harness::acp::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use shepherd_core::files::{self, DirectoryListing, TextFile};
+use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
@@ -428,6 +429,13 @@ pub struct ShellState {
     terminal_lifecycle: Mutex<()>,
     terminals: TerminalHost,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
+    file_searches: Mutex<BTreeMap<String, FileSearch>>,
+}
+
+#[derive(Default)]
+struct FileSearch {
+    cancelled: Arc<AtomicBool>,
+    started: bool,
 }
 
 impl ShellState {
@@ -448,6 +456,7 @@ impl ShellState {
             terminal_lifecycle: Mutex::new(()),
             terminals,
             scan: Arc::new(Mutex::new(None)),
+            file_searches: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -773,6 +782,67 @@ impl ShellState {
             &ProjectId::new(project_id),
             task_id.map(TaskId::new).as_ref(),
         )?)
+    }
+
+    async fn reserve_file_search(&self) -> Result<String, BridgeError> {
+        let mut searches = self.file_searches.lock().await;
+        if searches.len() >= 8 {
+            return Err(BridgeError::new(
+                "files",
+                "Too many file searches are pending.",
+            ));
+        }
+        let search_id = uuid::Uuid::new_v4().to_string();
+        searches.insert(search_id.clone(), FileSearch::default());
+        Ok(search_id)
+    }
+
+    async fn cancel_file_search(&self, search_id: &str) {
+        let mut searches = self.file_searches.lock().await;
+        if let Some(search) = searches.get(search_id).filter(|search| search.started) {
+            search.cancelled.store(true, Ordering::Relaxed);
+        } else {
+            searches.remove(search_id);
+        }
+    }
+
+    async fn search_workspace_files(
+        &self,
+        search_id: &str,
+        project_id: String,
+        task_id: Option<String>,
+        query: FileSearchQuery,
+    ) -> Result<FileSearchResult, BridgeError> {
+        let cancelled = {
+            let mut searches = self.file_searches.lock().await;
+            let search = searches
+                .get_mut(search_id)
+                .ok_or(files::FileError::Cancelled)?;
+            if search.started {
+                return Err(BridgeError::new(
+                    "files",
+                    "This file search is already running.",
+                ));
+            }
+            search.started = true;
+            search.cancelled.clone()
+        };
+        let result = async {
+            let root = self.files_directory(project_id, task_id).await?;
+            Ok(
+                tokio::task::spawn_blocking(move || files::search_files(&root, query, &cancelled))
+                    .await
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "files",
+                            format!("Could not finish the file search: {error}"),
+                        )
+                    })??,
+            )
+        }
+        .await;
+        self.file_searches.lock().await.remove(search_id);
+        result
     }
 
     pub async fn terminal_list(&self, project_id: String) -> TerminalList {
@@ -1457,10 +1527,11 @@ pub mod commands {
         project_id: String,
         task_id: Option<String>,
         path: String,
+        line: Option<usize>,
     ) -> Result<TextFile, BridgeError> {
         let root = state.files_directory(project_id, task_id).await?;
         Ok(
-            tokio::task::spawn_blocking(move || files::read_file(&root, Path::new(&path)))
+            tokio::task::spawn_blocking(move || files::read_file(&root, Path::new(&path), line))
                 .await
                 .map_err(|error| {
                     BridgeError::new(
@@ -1469,6 +1540,33 @@ pub mod commands {
                     )
                 })??,
         )
+    }
+
+    #[tauri::command]
+    pub async fn reserve_file_search(state: State<'_, ShellState>) -> Result<String, BridgeError> {
+        state.reserve_file_search().await
+    }
+
+    #[tauri::command]
+    pub async fn search_workspace_files(
+        state: State<'_, ShellState>,
+        search_id: String,
+        project_id: String,
+        task_id: Option<String>,
+        query: FileSearchQuery,
+    ) -> Result<FileSearchResult, BridgeError> {
+        state
+            .search_workspace_files(&search_id, project_id, task_id, query)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn cancel_file_search(
+        state: State<'_, ShellState>,
+        search_id: String,
+    ) -> Result<(), BridgeError> {
+        state.cancel_file_search(&search_id).await;
+        Ok(())
     }
 
     #[tauri::command]
@@ -1766,6 +1864,48 @@ mod tests {
 
     fn state_with(core: Core) -> ShellState {
         ShellState::new(core)
+    }
+
+    #[tokio::test]
+    async fn file_search_reservations_are_cancellable_and_used_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        std::fs::write(directory.join("notes.txt"), "searchable text")?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project_id = &projects.projects.first().ok_or("project not added")?.id;
+        let query = || {
+            serde_json::from_value(serde_json::json!({
+                "query": "notes", "mode": "name", "showDotfiles": false,
+            }))
+        };
+        let cancelled = state.reserve_file_search().await?;
+        state.cancel_file_search(&cancelled).await;
+        assert!(
+            matches!(state.search_workspace_files(&cancelled, project_id.clone(), None, query()?).await,
+            Err(error) if error.message.contains("cancelled"))
+        );
+
+        let search = state.reserve_file_search().await?;
+        let result = state
+            .search_workspace_files(&search, project_id.clone(), None, query()?)
+            .await?;
+        assert_eq!(
+            serde_json::to_value(result)?,
+            serde_json::json!({
+                "matches": [{"path": "notes.txt", "line": null, "excerpt": null}], "incomplete": false,
+            })
+        );
+        assert!(
+            state
+                .search_workspace_files(&search, project_id.clone(), None, query()?)
+                .await
+                .is_err()
+        );
+        assert!(state.file_searches.lock().await.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
