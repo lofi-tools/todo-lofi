@@ -862,8 +862,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 
 - [ ] OpenCode probe, session control and transcript mapping.
   The native OpenCode 2 probe reads `app["agents.opencode.executable"]` from
-  `settings.json`. The opt-in harness smoke checks session creation, lookup
-  after a server restart and idle interruption using the installed executable.
+  `settings.json`. The opt-in harness smoke checks event subscription, session
+  creation, lookup after a server restart and idle interruption using the
+  installed executable.
   Transcript mapping and desktop agent routing are still open.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.

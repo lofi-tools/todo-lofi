@@ -1,12 +1,12 @@
 //! OpenCode's private HTTP server and session control.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use reqwest::{Client, Method, RequestBuilder, Url};
+use reqwest::{Client, Method, RequestBuilder, Response, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -151,6 +151,87 @@ pub struct OpenCodeServer {
     probe: OpenCodeProbe,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct OpenCodeEvent {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub data: Value,
+}
+
+pub struct OpenCodeEvents {
+    response: Response,
+    decoder: EventDecoder,
+    pending: VecDeque<HarnessResult<OpenCodeEvent>>,
+}
+
+impl OpenCodeEvents {
+    pub async fn next(&mut self) -> HarnessResult<OpenCodeEvent> {
+        loop {
+            if let Some(event) = self.pending.pop_front() {
+                return event;
+            }
+            let chunk = self.response.chunk().await.map_err(|error| {
+                protocol_error("could not read OpenCode event stream", error.without_url())
+            })?;
+            let chunk = chunk.ok_or_else(|| {
+                HarnessError::Protocol("OpenCode event stream disconnected".into())
+            })?;
+            if let Err(error) = self.decoder.push(&chunk, &mut self.pending) {
+                self.pending.push_back(Err(error));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventDecoder {
+    line: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl EventDecoder {
+    fn push(
+        &mut self,
+        chunk: &[u8],
+        events: &mut VecDeque<HarnessResult<OpenCodeEvent>>,
+    ) -> HarnessResult<()> {
+        for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
+            if self.line.len().saturating_add(fragment.len()) > MAX_RESPONSE_BYTES {
+                return Err(HarnessError::Protocol(
+                    "OpenCode event line is too large".into(),
+                ));
+            }
+            self.line.extend_from_slice(fragment);
+            if !self.line.ends_with(b"\n") {
+                continue;
+            }
+            let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() && !self.data.is_empty() {
+                let event = serde_json::from_slice(&self.data).map_err(|error| {
+                    protocol_error("could not parse OpenCode stream event", error)
+                })?;
+                events.push_back(Ok(event));
+                self.data.clear();
+            } else if let Some(data) = line.strip_prefix(b"data:") {
+                let data = data.strip_prefix(b" ").unwrap_or(data);
+                if self.data.len().saturating_add(data.len()).saturating_add(1) > MAX_RESPONSE_BYTES
+                {
+                    return Err(HarnessError::Protocol("OpenCode event is too large".into()));
+                }
+                self.data.extend_from_slice(data);
+                self.data.push(b'\n');
+            } else if line == b"event: effect/httpapi/stream/failure" {
+                return Err(HarnessError::Protocol(
+                    "OpenCode reported an event stream failure".into(),
+                ));
+            }
+            self.line.clear();
+        }
+        Ok(())
+    }
+}
+
 impl OpenCodeServer {
     pub async fn start(spec: &SpawnSpec) -> HarnessResult<Self> {
         require_absolute_executable(Path::new(&spec.program))?;
@@ -216,7 +297,6 @@ impl OpenCodeServer {
             client
                 .get(format!("{}{path}", address.as_str().trim_end_matches('/')))
                 .basic_auth(USERNAME, Some(&password))
-                .timeout(REQUEST_TIMEOUT)
         };
         let health = response_json(request("/api/info")).await?;
         let api: Api = response_json(request("/openapi.json")).await?;
@@ -233,6 +313,46 @@ impl OpenCodeServer {
 
     pub fn probe(&self) -> &OpenCodeProbe {
         &self.probe
+    }
+
+    pub async fn subscribe(&self) -> HarnessResult<OpenCodeEvents> {
+        let handshake = async {
+            let response = self
+                .request(Method::GET, "/api/event")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await
+                .and_then(Response::error_for_status)
+                .map_err(|error| {
+                    protocol_error(
+                        "could not subscribe to OpenCode events",
+                        error.without_url(),
+                    )
+                })?;
+            let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
+            if !content_type
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(';').next() == Some("text/event-stream"))
+            {
+                return Err(HarnessError::Protocol(
+                    "OpenCode did not return an event stream".into(),
+                ));
+            }
+            let mut events = OpenCodeEvents {
+                response,
+                decoder: EventDecoder::default(),
+                pending: VecDeque::new(),
+            };
+            if events.next().await?.kind != "server.connected" {
+                return Err(HarnessError::Protocol(
+                    "OpenCode did not acknowledge the event stream".into(),
+                ));
+            }
+            Ok(events)
+        };
+        timeout(REQUEST_TIMEOUT, handshake).await.map_err(|_| {
+            HarnessError::Protocol("OpenCode event stream handshake timed out".into())
+        })?
     }
 
     pub async fn create_session(&self) -> HarnessResult<SessionId> {
@@ -283,7 +403,6 @@ impl OpenCodeServer {
                 format!("{}{path}", self.address.as_str().trim_end_matches('/')),
             )
             .basic_auth(USERNAME, Some(&self.password))
-            .timeout(REQUEST_TIMEOUT)
     }
 
     fn session_id(&self, record: SessionRecord) -> HarnessResult<SessionId> {
@@ -331,6 +450,7 @@ fn session_path(session: &SessionId) -> HarnessResult<String> {
 
 async fn response_json<T: DeserializeOwned>(request: RequestBuilder) -> HarnessResult<T> {
     let mut response = request
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
@@ -411,6 +531,33 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn decodes_split_event_lines_and_preserves_events_before_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = EventDecoder::default();
+        let mut events = VecDeque::new();
+        for byte in ": heartbeat\n\r\ndata: {\"type\":\"session.text.delta\",\r\n\
+                     data: \"data\":{\"delta\":\"héllo\"}}\r\n\r\n"
+            .as_bytes()
+            .chunks(1)
+        {
+            decoder.push(byte, &mut events)?;
+        }
+        let error = decoder.push(
+            b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n\
+              event: effect/httpapi/stream/failure\n",
+            &mut events,
+        );
+        let text = events.pop_front().ok_or("expected text event")??;
+        assert_eq!(text.kind, "session.text.delta");
+        assert_eq!(text.data, json!({"delta": "héllo"}));
+        let finished = events.pop_front().ok_or("expected execution event")??;
+        assert_eq!(finished.kind, "session.execution.succeeded");
+        assert!(events.is_empty());
+        assert!(error.is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "requires a configured OpenCode executable and a loopback socket"]
     async fn installed_server_creates_and_resumes_a_session()
@@ -448,7 +595,18 @@ mod tests {
         };
         let server = OpenCodeServer::start(&spec).await?;
         assert!(server.probe().resume);
+        let mut events = server.subscribe().await?;
         let session = server.create_session().await?;
+        let created = timeout(REQUEST_TIMEOUT, async {
+            loop {
+                let event = events.next().await?;
+                if event.kind == "session.created" {
+                    return Ok::<_, HarnessError>(event);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(created.data["sessionID"], session.as_str());
         server.shutdown().await?;
 
         let restarted = OpenCodeServer::start(&spec).await?;
