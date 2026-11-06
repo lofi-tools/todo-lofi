@@ -519,6 +519,7 @@ const KEY_RELEASE_BUDGET = 128
 
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
+  const linux = navigator.platform.startsWith('Linux')
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
@@ -601,8 +602,16 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     canvas.style.width = `${width}px`
     canvas.style.height = `${height}px`
     if (input) {
-      input.style.left = `${8 + current.cursorColumn * cellWidth}px`
-      input.style.top = `${8 + current.cursorRow * LINE_HEIGHT}px`
+      const left = `${8 + current.cursorColumn * cellWidth}px`
+      const top = `${8 + current.cursorRow * LINE_HEIGHT}px`
+      const moved = input.style.left !== left || input.style.top !== top
+      input.style.left = left
+      input.style.top = top
+      if (linux && moved && !composing && !input.value && document.activeElement === input) {
+        // WebKitGTK reports the previous IME caret after CSS-only moves.
+        input.value = ' '
+        input.value = ''
+      }
     }
     context.setTransform(ratio, 0, 0, ratio, 0, 0)
     context.textBaseline = 'top'

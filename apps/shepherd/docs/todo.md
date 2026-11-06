@@ -514,8 +514,9 @@ task-scoped, persistent and fast enough.
   cover reflow and key encoding. The native smoke drives Vim, less and
   composition events. Native PTY probes verify Kitty negotiation and key
   reports, bracketed paste and SGR mouse reports. Interactive fish verifies
-  distinct Ctrl+I and Tab bindings. A system input method still needs a manual
-  pass.
+  distinct Ctrl+I and Tab bindings. Native IBus Pinyin verifies candidate
+  selection and placement on Ubuntu. A candidate-based input source still
+  needs a pass on macOS.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other
@@ -637,7 +638,15 @@ The packaged macOS test app used a disposable database and the British keyboard
 layout. With the cursor moved by a shell command, Option+E followed by E
 delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
 selection and candidate-window placement still need a system IME with
-conversion candidates.
+conversion candidates on macOS.
+
+On Ubuntu 24.04.5 ARM64, a disposable Xvfb session used IBus Pinyin through
+GTK. After the PTY cursor moved, the candidate panel initially opened by the
+previous caret. Refreshing the focused, empty input after moving it fixed the
+anchor. At two cursor positions, the panel opened within one row of the current
+caret. Space committed `你`. Down then Space chose `尼` on the second attempt.
+The shell received each selection once, matching the webview's trusted
+composition events.
 
 The native smoke waits for the composition prompt's cursor row to paint before
 scrolling back. It starts synthetic composition from scrollback and checks
@@ -833,6 +842,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-05 | S3 | Pass | The live desktop reviewed two files, applied a review note in a second turn, staged and committed, and confirmed the squash merge in the Git pane. The cached replay covered the same steps, archived the task, and reopened it in a second native launch after the fixture removed the clean worktree. Git verified the base contents, single parent, retained task branch, and the recreated worktree at the original task commit. |
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim, less and fzf, distinguished Ctrl+I from Tab in interactive fish, and checked composition from scrollback, bracketed paste, SGR mouse reports, and OSC 8 hyperlink dispatch. It verified PTY size changes from both the inspector and split dividers, preserved a shared terminal across task and project switches, and restarted both shared and task terminals after relaunch. After removing the fixed delay on idle frame delivery, a debug run painted the tail of a 1 MiB burst in 102 ms and all 24 paced markers, with a 74 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. Native dead-key input passed in the packaged app. IME candidate selection and placement, Ubuntu, and the manual workday gate remain open. |
 | 2026-11-06 | S4 | Partial | Both scripted native launches passed on Ubuntu 24.04.5 ARM64 with Xvfb. The hosted x86-64 smoke, system IME candidate selection and placement, and the workday trial remain open. |
+| 2026-11-06 | S4 | Partial | Native IBus Pinyin passed after correcting the WebKitGTK caret position. The hosted x86-64 smoke, candidate-based input on macOS, and the workday trial remain open. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |
