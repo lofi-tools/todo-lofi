@@ -526,6 +526,8 @@ task-scoped, persistent and fast enough.
   reports releases for Enter, Tab and Backspace shortcuts. Their unmodified
   forms still send the legacy bytes when all-key reporting is off. The browser
   checks Ctrl+Backspace and Alt+Shift+Tab in legacy mode.
+  The legacy input regression checks the ASCII control aliases, including
+  Ctrl+/ for shell undo, and verifies that non-ASCII keys keep their text.
   A browser regression checks that new output preserves a scrollback selection
   while its visible cells stay in place, and clears it when those cells change.
   A native macOS probe confirmed that Command+C dispatches a trusted copy

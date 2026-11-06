@@ -1,5 +1,9 @@
 const APP_CURSOR = 1 << 1
 const APP_KEYPAD = 1 << 2
+const LEGACY_CONTROL_ALIASES: Partial<Record<string, string>> = {
+  ' ': '\x00', '2': '\x00', '3': '\x1b', '4': '\x1c', '5': '\x1d',
+  '6': '\x1e', '~': '\x1e', '7': '\x1f', '/': '\x1f', '8': '\x7f', '?': '\x7f',
+}
 
 export function encodeLegacyKey(event: KeyboardEvent, modes: number): string | null {
   if (event.metaKey || event.getModifierState('AltGraph')) return null
@@ -42,11 +46,9 @@ export function encodeLegacyKey(event: KeyboardEvent, modes: number): string | n
   let data = controls[key]
   if (!data && [...key].length === 1) {
     data = key
-    if (event.ctrlKey) {
+    if (event.ctrlKey && key.charCodeAt(0) <= 0x7f) {
       const code = key.toUpperCase().charCodeAt(0)
-      if (key === ' ' || key === '2') data = '\x00'
-      else if (key === '?') data = '\x7f'
-      else if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64)
+      data = LEGACY_CONTROL_ALIASES[key] ?? (code >= 64 && code <= 95 ? String.fromCharCode(code - 64) : key)
     }
   }
   if (!data) return null

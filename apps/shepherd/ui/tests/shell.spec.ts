@@ -657,6 +657,25 @@ test('encodes typed keys into terminal input', async ({ page }) => {
     .toEqual(['a', '\u0003', '\r', '\x7f', '\x08', '\x1b\x1b[Z', '\u001bOA'])
 })
 
+test('sends legacy ASCII control aliases to the terminal', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await input.focus()
+
+  for (const key of ['/', '3', '4', '5', '6', '7', '8', '~']) {
+    await input.press(`Control+${key}`)
+  }
+  await input.press('Control+Alt+/')
+  await input.evaluate((element) => element.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'ß', code: 'Minus', ctrlKey: true, bubbles: true, cancelable: true,
+  })))
+
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual([
+    '\x1f', '\x1b', '\x1c', '\x1d', '\x1e', '\x1f', '\x7f', '\x1e', '\x1b\x1f', 'ß',
+  ])
+})
+
 for (const { name, platform, route, writes } of [
   { name: 'macOS legacy', platform: 'MacIntel', route: '/', writes: ['#', '\x1b[1;3D'] },
   { name: 'macOS Kitty', platform: 'MacIntel', route: '/?kitty-terminal',
