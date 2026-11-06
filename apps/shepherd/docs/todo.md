@@ -530,6 +530,8 @@ task-scoped, persistent and fast enough.
   Ctrl+/ for shell undo, and verifies that non-ASCII keys keep their text.
   A browser regression checks that new output preserves a scrollback selection
   while its visible cells stay in place, and clears it when those cells change.
+  Double-click selection follows words across soft wraps, including wide
+  glyphs at the wrap, and stops at a hard line break.
   A native macOS probe confirmed that Command+C dispatches a trusted copy
   event from the focused terminal. Browser regressions intercept the copied
   text for Command+C and Ctrl+Shift+C, and verify that Ctrl+C still sends an

@@ -860,23 +860,22 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (!frame || (!event.shiftKey && !frame.displayOffset && (frame.modes & MOUSE_REPORTING))) return
     const cell = cellAt(event)
     if (!cell) return
-    const first = cell.row * frame.columns
-    const after = first + frame.columns
-    let start = first + cell.column
-    if (start > first && frame.cells[start - 1]?.width === 2) start--
+    const { cells, columns } = frame
+    let start = cell.row * columns + cell.column
     let end = start
     const category = (text: string) => /[\p{L}\p{N}_]/u.test(text) ? 'word' : text.trim() ? 'punctuation' : 'space'
-    const group = category(frame.cells[start]?.text ?? '')
-    const cells = frame.cells
-    const belongs = (index: number) => {
+    const glyphText = (index: number) => {
       const entry = cells[index]
-      if (!entry) return false
-      if (entry.width !== 0) return category(entry.text) === group
-      const leading = index > first ? cells[index - 1] : undefined
-      return leading?.width === 2 && category(leading.text) === group
+      if (entry?.width !== 0) return entry?.text ?? ''
+      const leading = index % columns !== 0 ? cells[index - 1] : undefined
+      if (leading?.width === 2) return leading.text
+      const following = cells[index + 1]
+      return entry.wraps && following?.width === 2 ? following.text : ''
     }
-    while (start > first && belongs(start - 1)) start--
-    while (end + 1 < after && belongs(end + 1)) end++
+    const group = category(glyphText(start))
+    const continuesAfter = (index: number) => (index + 1) % columns !== 0 || cells[index]?.wraps
+    while (start > 0 && continuesAfter(start - 1) && category(glyphText(start - 1)) === group) start--
+    while (end + 1 < cells.length && continuesAfter(end) && category(glyphText(end + 1)) === group) end++
     selection = { start, end }
     scheduleDraw()
   }

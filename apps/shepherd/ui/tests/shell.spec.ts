@@ -409,6 +409,26 @@ test.beforeEach(async ({ context }) => {
           case 'subscribe_terminal': {
             subscriptions.push(args.terminalId)
             const subscriptionId = `subscription-${args.terminalId}-${subscriptions.length}`
+            if (options.has('wrapped-word-selection')) {
+              const rows = [
+                [{ text: 'a', attributes: 1 }, { text: '', attributes: 32 }],
+                [{ text: '界', attributes: 2 }, { text: '', attributes: 32 }],
+                [{ text: 'b', attributes: 1 }, { text: 'c', attributes: 1 }],
+                [{ text: 'd', attributes: 1 }, { text: 'e', attributes: 1 }],
+              ]
+              const bytes = [1, 2, 2, 0, rows.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, rows.length, 0]
+              const encoder = new TextEncoder()
+              for (const [row, cells] of rows.entries()) {
+                bytes.push(row, 0, cells.length, 0)
+                for (const { text, attributes } of cells) {
+                  const encoded = encoder.encode(text)
+                  bytes.push(1, 0, attributes, 234, 230, 230, 0, 22, 19, 19, 0, encoded.length, 0, 0, 0, ...encoded)
+                }
+              }
+              bytes.push(1, 0, 0, 0, 1, 0, 0, 0)
+              callbacks.get(args.channel.id)?.({ index: 0, message: Uint8Array.from(bytes).buffer })
+              return subscriptionId
+            }
             const recovering = options.has('expired-terminal-subscription') && expiringTerminalSubscription !== undefined
             const frame = new Uint8Array([
               1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0,
@@ -892,6 +912,29 @@ test('keeps a selection while new output leaves the selected scrollback unchange
   await emit(6, 'C')
   await expect(output).toHaveText('CC')
   expect(await copy()).toBe('')
+})
+
+test('double-click selects a word across soft wraps and stops at a hard break', async ({ page }) => {
+  await page.goto('/?wrapped-word-selection')
+  await expect(page.getByLabel('Terminal output')).toHaveText(/^a界bc\nde$/)
+  const canvas = page.locator('.terminal-view__canvas')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const bounds = await canvas.boundingBox()
+  if (!bounds) throw new Error('The terminal canvas has no bounds')
+  const copyWord = async (row: number, column: number) => {
+    await canvas.dblclick({ position: { x: (column + 0.5) * bounds.width / 2, y: (row + 0.5) * bounds.height / 4 } })
+    return input.evaluate((element) => {
+      const clipboard = new DataTransfer()
+      element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+      return clipboard.getData('text/plain')
+    })
+  }
+
+  expect(await copyWord(0, 0)).toBe('a界bc')
+  expect(await copyWord(0, 1)).toBe('a界bc')
+  expect(await copyWord(1, 1)).toBe('a界bc')
+  expect(await copyWord(2, 0)).toBe('a界bc')
+  expect(await copyWord(3, 0)).toBe('de')
 })
 
 for (const mac of process.platform === 'darwin' ? [true, false] : [false]) {
