@@ -23,7 +23,8 @@ export async function waitFor<T>(label: string, read: () => T | null | undefined
     if (value) return value
     await new Promise((resolve) => window.setTimeout(resolve, 25))
   }
-  throw new Error(`Timed out waiting for ${label}`)
+  const visibility = document.hidden ? ' The webview is hidden. Keep the smoke window visible.' : ''
+  throw new Error(`Timed out waiting for ${label}.${visibility}`)
 }
 
 function enabledButton(label: string) {
@@ -1002,6 +1003,7 @@ async function restore() {
 void (async () => {
   let result
   try {
+    await waitFor('the smoke window to become visible', () => !document.hidden)
     switch (__SHEPHERD_SMOKE_PHASE__) {
       case 'linux-ime':
         result = await exerciseLinuxIme()

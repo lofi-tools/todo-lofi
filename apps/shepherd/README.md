@@ -44,7 +44,7 @@ bindings when fish 4 or later is installed. The second launch checks the saved
 inspector tab and split layout, then restarts a shared terminal and a task
 terminal in its worktree.
 Run it from an active desktop session with `vim`, `less`, `fzf` and `python3`
-on your path.
+on your path. Keep the smoke window visible so the webview can paint frames.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh

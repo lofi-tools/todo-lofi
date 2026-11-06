@@ -666,6 +666,11 @@ the check.
 The native smoke waits for the composition prompt's cursor row to paint before
 scrolling back. It starts synthetic composition from scrollback and checks
 that the input anchor returns to the live cursor before committing text once.
+In a macOS run where the webview became hidden, the composition prompt was
+present in the text mirror and a fresh subscription reported the expected
+cursor, but the canvas still showed an earlier frame. The smoke now waits for
+a visible window before starting and reports when a wait ends in a hidden
+webview.
 
 The **Shepherd terminal smoke** workflow uses an Ubuntu 24.04 runner and Xvfb
 for the same two native launches. A push to `codex/shepherd-terminal-smoke`
