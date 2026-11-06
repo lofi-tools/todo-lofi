@@ -14,7 +14,10 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
-use crate::{HarnessError, HarnessResult, SessionId, SpawnSpec};
+use crate::{
+    ApprovalId, ApprovalRequest, Decision, DeltaKind, HarnessError, HarnessEvent, HarnessResult,
+    ItemId, SessionId, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason,
+};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -156,6 +159,230 @@ pub struct OpenCodeEvent {
     #[serde(rename = "type")]
     pub kind: String,
     pub data: Value,
+}
+
+/// Maps one OpenCode turn to Shepherd transcript events.
+pub struct OpenCodeTranscript {
+    session: SessionId,
+    fragments: BTreeMap<String, String>,
+    tools: BTreeMap<String, String>,
+}
+
+impl OpenCodeTranscript {
+    pub fn new(session: SessionId) -> Self {
+        Self {
+            session,
+            fragments: BTreeMap::new(),
+            tools: BTreeMap::new(),
+        }
+    }
+
+    pub fn apply(&mut self, event: OpenCodeEvent) -> HarnessResult<Option<HarnessEvent>> {
+        if event.data["sessionID"].as_str() != Some(self.session.as_str()) {
+            return Ok(None);
+        }
+        let mapped = match event.kind.as_str() {
+            "session.text.delta" | "session.text.ended" => {
+                return self.text(event, DeltaKind::Message);
+            }
+            "session.reasoning.delta" | "session.reasoning.ended" => {
+                return self.text(event, DeltaKind::Thought);
+            }
+            "session.tool.input.started" => self.tool(event, ToolStatus::Pending)?,
+            "session.tool.called" => self.tool(event, ToolStatus::Running)?,
+            "session.tool.success" => self.tool(event, ToolStatus::Completed)?,
+            "session.tool.failed" => self.tool(event, ToolStatus::Failed)?,
+            "permission.asked" => HarnessEvent::ApprovalRequested {
+                request: event.decode::<PermissionRequest>()?.into_approval(),
+            },
+            "permission.replied" => {
+                let reply: PermissionReply = event.decode()?;
+                HarnessEvent::ApprovalResolved {
+                    approval_id: ApprovalId::new(reply.request_id),
+                    decision: match reply.reply {
+                        OpenCodeDecision::Once | OpenCodeDecision::Always => Decision::Allow,
+                        OpenCodeDecision::Reject => Decision::Deny,
+                    },
+                }
+            }
+            "session.execution.succeeded" => HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed,
+            },
+            "session.execution.failed" => HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Failed,
+            },
+            "session.execution.interrupted" => HarnessEvent::TurnFinished {
+                reason: if event.data["reason"] == "user" {
+                    TurnFinishReason::Cancelled
+                } else {
+                    TurnFinishReason::Interrupted
+                },
+            },
+            _ => return Ok(None),
+        };
+        Ok(Some(mapped))
+    }
+
+    fn text(
+        &mut self,
+        event: OpenCodeEvent,
+        kind: DeltaKind,
+    ) -> HarnessResult<Option<HarnessEvent>> {
+        let stream = match kind {
+            DeltaKind::Message => "text",
+            DeltaKind::Thought => "reasoning",
+        };
+        let is_delta = event.kind.ends_with(".delta");
+        let part: TextPart = event.decode()?;
+        let id = format!("{}:{stream}:{}", part.message_id, part.ordinal);
+        let text = if is_delta {
+            let delta = part.delta.ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode {stream} delta is missing"))
+            })?;
+            self.fragments
+                .entry(id.clone())
+                .or_default()
+                .push_str(&delta);
+            delta
+        } else {
+            let text = part.text.ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode final {stream} is missing"))
+            })?;
+            let prefix = self.fragments.remove(&id).unwrap_or_default();
+            // The final event repeats the fragments already delivered live.
+            text.strip_prefix(&prefix)
+                .ok_or_else(|| {
+                    HarnessError::Protocol(format!(
+                        "OpenCode final {stream} changed streamed content"
+                    ))
+                })?
+                .to_owned()
+        };
+        Ok((!text.is_empty()).then_some(HarnessEvent::Delta {
+            item_id: ItemId::new(id),
+            kind,
+            text,
+        }))
+    }
+
+    fn tool(&mut self, event: OpenCodeEvent, status: ToolStatus) -> HarnessResult<HarnessEvent> {
+        let tool: ToolUpdate = event.decode()?;
+        let id = tool.source.key();
+        if let Some(name) = tool.name {
+            self.tools.insert(id.clone(), name);
+        }
+        let name = self.tools.get(&id).map_or("Tool", String::as_str);
+        let title = tool.metadata["title"].as_str().unwrap_or(name).to_owned();
+        let output = tool
+            .content
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = if output.is_empty() {
+            tool.error["message"].as_str().map(str::to_owned)
+        } else {
+            Some(output)
+        };
+        Ok(HarnessEvent::ToolCall {
+            tool_call_id: ToolCallId::new(id),
+            title,
+            kind: name.to_owned(),
+            status,
+            output,
+            diffs: Vec::new(),
+            terminal_id: None,
+        })
+    }
+}
+
+impl OpenCodeEvent {
+    fn decode<T: DeserializeOwned>(self) -> HarnessResult<T> {
+        serde_json::from_value(self.data).map_err(|error| {
+            protocol_error(
+                &format!("could not parse OpenCode {} event", self.kind),
+                error,
+            )
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct TextPart {
+    #[serde(rename = "assistantMessageID")]
+    message_id: String,
+    ordinal: u64,
+    delta: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ToolSource {
+    #[serde(rename = "assistantMessageID", alias = "messageID")]
+    message_id: String,
+    id: String,
+}
+
+impl ToolSource {
+    fn key(&self) -> String {
+        format!("{}:{}", self.message_id, self.id)
+    }
+}
+
+#[derive(Deserialize)]
+struct ToolUpdate {
+    #[serde(flatten)]
+    source: ToolSource,
+    name: Option<String>,
+    #[serde(default)]
+    content: Vec<Value>,
+    #[serde(default)]
+    metadata: Value,
+    #[serde(default)]
+    error: Value,
+}
+
+#[derive(Deserialize)]
+struct PermissionRequest {
+    id: String,
+    action: String,
+    resources: Vec<String>,
+    #[serde(default)]
+    metadata: Value,
+    source: Option<ToolSource>,
+    message: Option<String>,
+}
+
+impl PermissionRequest {
+    fn into_approval(self) -> ApprovalRequest {
+        let tool = self
+            .source
+            .map_or_else(|| self.id.clone(), |source| source.key());
+        ApprovalRequest {
+            approval_id: ApprovalId::new(self.id),
+            tool_call_id: ToolCallId::new(tool),
+            title: self.message.unwrap_or(self.action),
+            arguments: json!({"resources": self.resources, "metadata": self.metadata}),
+            paths: Vec::new(),
+            patch: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PermissionReply {
+    #[serde(rename = "requestID")]
+    request_id: String,
+    reply: OpenCodeDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OpenCodeDecision {
+    Once,
+    Always,
+    Reject,
 }
 
 pub struct OpenCodeEvents {
@@ -555,6 +782,112 @@ mod tests {
         assert_eq!(finished.kind, "session.execution.succeeded");
         assert!(events.is_empty());
         assert!(error.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn maps_only_the_task_session_and_appends_the_unstreamed_suffix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let mut transcript = crate::Transcript::default();
+        for (kind, data) in [
+            (
+                "session.text.delta",
+                json!({
+                    "sessionID": "ses_other", "assistantMessageID": "msg_1", "ordinal": 0, "delta": "other"
+                }),
+            ),
+            (
+                "session.text.delta",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "delta": "héllo"
+                }),
+            ),
+            (
+                "session.reasoning.ended",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "text": "considered"
+                }),
+            ),
+            (
+                "session.text.ended",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "text": "héllo world"
+                }),
+            ),
+        ] {
+            if let Some(event) = mapping.apply(OpenCodeEvent {
+                kind: kind.into(),
+                data,
+            })? {
+                transcript.apply(&event);
+            }
+        }
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            transcript.entry(0).map(crate::Entry::summary).as_deref(),
+            Some("agent: héllo world")
+        );
+        assert_eq!(
+            transcript.entry(1).map(crate::Entry::summary).as_deref(),
+            Some("thought: considered")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_one_tool_id_across_execution_and_approval() -> Result<(), Box<dyn std::error::Error>> {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let mut apply = |kind: &str, data| {
+            mapping.apply(OpenCodeEvent {
+                kind: kind.into(),
+                data,
+            })
+        };
+        let started = apply(
+            "session.tool.input.started",
+            json!({
+                "sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "name": "bash"
+            }),
+        )?;
+        assert!(
+            matches!(started, Some(HarnessEvent::ToolCall { tool_call_id, status: ToolStatus::Pending, .. }) if tool_call_id.as_str() == "msg_1:call_1")
+        );
+        let approval = apply(
+            "permission.asked",
+            json!({
+                "sessionID": "ses_1", "id": "per_1", "action": "bash", "resources": ["cargo test"],
+                "source": { "type": "tool", "messageID": "msg_1", "id": "call_1" }
+            }),
+        )?;
+        assert!(
+            matches!(approval, Some(HarnessEvent::ApprovalRequested { request }) if
+            request.tool_call_id.as_str() == "msg_1:call_1" && request.approval_id.as_str() == "per_1")
+        );
+        let replied = apply(
+            "permission.replied",
+            json!({
+                "sessionID": "ses_1", "requestID": "per_1", "reply": "once"
+            }),
+        )?;
+        assert!(matches!(
+            replied,
+            Some(HarnessEvent::ApprovalResolved {
+                decision: Decision::Allow,
+                ..
+            })
+        ));
+        let finished = apply(
+            "session.tool.success",
+            json!({
+                "sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1",
+                "content": [{ "type": "text", "text": "passed" }]
+            }),
+        )?;
+        assert!(
+            matches!(finished, Some(HarnessEvent::ToolCall { tool_call_id, title, status: ToolStatus::Completed, output: Some(output), .. }) if
+            tool_call_id.as_str() == "msg_1:call_1" && title == "bash" && output == "passed")
+        );
         Ok(())
     }
 
