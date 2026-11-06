@@ -157,6 +157,26 @@ selected task's Terminals tab. You can type into it, resize it, hide it, or
 stop the process. Shepherd closes unreleased terminals with their ACP
 session.
 
+## Run the installed-agent smokes
+
+The **Shepherd adapter smoke** GitHub Actions workflow runs on demand from
+the default branch on a self-hosted Nix runner labelled `shepherd-adapters`.
+Choose one preinstalled agent when dispatching it. Set the repository variable
+`SHEPHERD_ADAPTER_TEST_SETTINGS` to an absolute settings file path on the runner
+for OpenCode or Claude Code ACP. For Pi, set `SHEPHERD_PI_TEST_EXECUTABLE` to
+the absolute path of the existing executable.
+
+For a local Claude ACP smoke, set `SHEPHERD_CLAUDE_TEST_SETTINGS` to a settings
+file with the configured command. The smoke initializes ACP and opens a
+session in a disposable project and profile without sending a model prompt.
+The Pi smoke checks RPC framing and a local extension dialog. Pi versions
+without prompt disposition can pass this dialog probe.
+
+```sh
+direnv exec . cargo test -p agent-harness --lib acp::tests::installed_claude_code_opens_an_acp_session -- --ignored
+direnv exec . cargo test -p agent-harness --lib pi::tests::installed_pi_exchanges_extension_dialog_records -- --ignored
+```
+
 ## Live Codex tests
 
 The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at

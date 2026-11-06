@@ -1121,6 +1121,92 @@ mod tests {
         Ok((harness, capabilities, observed))
     }
 
+    async fn configured_claude_session(
+        settings: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let command = crate::settings::AgentSettings::read(settings)?
+            .command("agents.claude")?
+            .ok_or("configure agents.claude.executable in the smoke settings file")?;
+        let root = tempfile::tempdir()?;
+        let project = root.path().join("project");
+        std::fs::create_dir(&project)?;
+        let environment = [
+            ("HOME", "home"),
+            ("CLAUDE_CONFIG_DIR", "claude"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_STATE_HOME", "state"),
+        ]
+        .into_iter()
+        .map(|(name, path)| {
+            let path = root.path().join(path);
+            std::fs::create_dir(&path)?;
+            Ok((name.to_owned(), path.to_string_lossy().into_owned()))
+        })
+        .collect::<std::io::Result<_>>()?;
+        let spec = SpawnSpec {
+            program: command
+                .executable
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "the Claude Code ACP executable path must be UTF-8")?,
+            args: command.args,
+            cwd: project,
+            environment,
+        };
+        let mut harness = AcpHarness::default();
+        harness.start(spec).await?;
+        let opened = harness.open_session(None).await;
+        let shutdown = harness.shutdown().await;
+        assert!(!opened?.as_str().is_empty());
+        shutdown?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured Claude Code ACP executable"]
+    async fn installed_claude_code_opens_an_acp_session() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let settings = std::env::var_os("SHEPHERD_CLAUDE_TEST_SETTINGS")
+            .ok_or("set SHEPHERD_CLAUDE_TEST_SETTINGS to a settings.json path")?;
+        configured_claude_session(&PathBuf::from(settings)).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_smoke_launches_the_configured_command_in_an_isolated_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("claude-acp-fixture.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = "argument with spaces" ] && [ -z "$2" ] || exit 2
+[ -d "$HOME" ] && [ -d "$CLAUDE_CONFIG_DIR" ] && [ "${PWD##*/}" = project ] || exit 3
+while IFS= read -r request; do
+    id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+    case "$request" in
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";;
+        *'"method":"session/new"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"claude-fixture"}}\n' "$id";;
+        *) exit 4;;
+    esac
+done
+"#,
+        )?;
+        let settings = directory.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::to_vec(&serde_json::json!({"app": {
+                "agents.claude.executable": "/bin/sh",
+                "agents.claude.args": [script, "argument with spaces"]
+            }}))?,
+        )?;
+        configured_claude_session(&settings).await
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn separates_sign_in_protocol_and_exit_failures() -> Result<(), Box<dyn std::error::Error>>

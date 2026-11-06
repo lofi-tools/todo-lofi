@@ -915,6 +915,11 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   implemented.
 - [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
+  The opt-in Shepherd adapter smoke workflow selects one preinstalled agent on
+  a configured Nix runner. OpenCode has native and ACP coverage and the Pi
+  smoke exercises its RPC dialog. The Claude ACP command can be tested through
+  the same settings file as the desktop. A run on a configured CI runner and a
+  live Claude Code run remain to be verified.
 - [ ] Approval, cancel, resume and failure paths where the tier supports them.
 - [ ] A missing capability hides the control instead of showing a dead button.
 - [x] Mocked IPC verifies that the Freebuff terminal replaces the conversation
