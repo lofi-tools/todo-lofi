@@ -824,6 +824,8 @@ State comes from adapter events and process exit, never polling.
   contents on submit via a background, capped, cancellable scan.
 - Viewer: read-only, syntax-highlighted, line numbers; **Open in external editor**
   and **Reveal in file manager** commands. Images and PDFs are later.
+  Open in the desktop's default text editor. If the Linux file manager cannot
+  select a file through its desktop interface, open the containing folder.
 - Changed files carry added/modified/deleted/renamed badges from the Git service,
   refreshed by a debounced (150 ms) watcher.
 - Opening a file focuses the Files tab; the tab can browse the project root or the

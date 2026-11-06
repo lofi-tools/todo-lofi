@@ -948,7 +948,7 @@ and the task header never overstates the tier.
 
 ### Build
 
-- [ ] Files tab: tree, ignore rules, filter/search, viewer, changed-file badges,
+- [x] Files tab: tree, ignore rules, filter/search, viewer, changed-file badges,
   external editor.
   The Files tab browses a project root or task worktree with lazy folder
   expansion, a dotfile toggle, `.gitignore` and `.shepherdignore`. The
@@ -958,8 +958,9 @@ and the task header never overstates the tier.
   and opening a result jumps to its line. Scans cap entries, content bytes and
   results, and label incomplete results. A debounced watcher refreshes Git
   badges for the selected root, including changes to the index and HEAD. A
-  separate list shows deleted paths. External editor and file manager actions
-  remain open.
+  separate list shows deleted paths. The preview opens files in the default
+  desktop text editor and reveals them in the file manager. Git and Review
+  diffs can focus the Files tab and open the selected worktree file.
 - [ ] Preview tab: project URL, element annotation, structured prompt context,
   screenshot fallback when framing or injection is blocked.
 - [ ] Cross-task search over Turso FTS.

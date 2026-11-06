@@ -59,6 +59,9 @@ current layout and give future changes a point of comparison.
   cancellable literal search. Selecting a content match opens its line.
   Show Git change badges beside visible paths and list deleted paths below the
   tree. Refresh Git status and open folders after a debounced workspace change.
+  Put **Open in external editor** and **Reveal in file manager** above the file
+  preview. **Open in Files** from a Git or Review diff selects and focuses the
+  Files tab and opens the matching worktree file.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

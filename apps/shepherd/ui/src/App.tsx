@@ -168,6 +168,7 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
+  const [fileRequest, setFileRequest] = createSignal<{ taskId: string; path: string }>()
   const inspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
   let pendingInspectorTabSave = Promise.resolve()
   let inspector: HTMLElement | undefined
@@ -191,6 +192,14 @@ export function App() {
   function restoreInspectorTab(projectId: string, tab: bridge.InspectorTab) {
     if (!INSPECTOR_TABS.some((option) => option.id === tab && option.enabled)) return
     setInspectorTabs((tabs) => tabs.has(projectId) ? tabs : new Map(tabs).set(projectId, tab))
+  }
+
+  function openTaskFile(path: string) {
+    const task = workspace()?.task
+    if (!task?.worktreePath || task.id !== selectedTaskId()) return
+    setFileRequest({ taskId: task.id, path })
+    setInspectorTab('files')
+    inspectorTabList?.querySelector<HTMLButtonElement>('#inspector-tab-files')?.focus()
   }
 
   async function resizeInspector(width: number) {
@@ -1138,6 +1147,7 @@ export function App() {
                 {(taskId) => <ReviewPane
                   task={workspace()!.task}
                   queuedNote={workspace()?.queuedReviewNote}
+                  openFile={openTaskFile}
                   onAction={async (action) => {
                     const updated = await bridge.reviewTask(taskId, action)
                     if (selectedTaskId() === taskId) setWorkspace(updated)
@@ -1148,14 +1158,14 @@ export function App() {
             <Show when={inspectorTab() === 'git'}>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
                 <Show when={workspace()?.task.id} keyed>
-                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
+                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
                 </Show>
               </Show>
             </Show>
             <Show when={inspectorTab() === 'files'}>
               <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
                 fallback={<p class="empty">Select an available project to browse its files.</p>}>
-                {(projectId) => <FilesPane projectId={projectId}
+                {(projectId) => <FilesPane projectId={projectId} initialFile={fileRequest()}
                   worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null} />}
               </Show>
             </Show>

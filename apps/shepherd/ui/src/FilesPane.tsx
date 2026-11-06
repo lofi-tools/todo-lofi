@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
-import { cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
+import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 
 interface FileLocation {
   projectId: string
@@ -17,7 +17,7 @@ interface PendingSearch {
   id?: string
 }
 
-export function FilesPane(props: { projectId: string; worktreeTaskId: string | null }) {
+export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string } }) {
   const [scope, setScope] = createSignal(props.worktreeTaskId ? 'worktree' : 'project')
   const [showDotfiles, setShowDotfiles] = createSignal(false)
   const taskId = () => scope() === 'worktree' ? props.worktreeTaskId : null
@@ -34,14 +34,15 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
         <label><input type="checkbox" checked={showDotfiles()} onChange={(event) => setShowDotfiles(event.currentTarget.checked)} /> Show dotfiles</label>
       </div>
       <Show when={location()} keyed>
-        {(root) => <FileBrowser {...root} showDotfiles={showDotfiles()} />}
+        {(root) => <FileBrowser {...root} showDotfiles={showDotfiles()}
+          initialPath={props.initialFile?.taskId === root.taskId ? props.initialFile?.path : undefined} />}
       </Show>
     </section>
   )
 }
 
-function FileBrowser(props: FileLocation & { showDotfiles: boolean }) {
-  const [selected, setSelected] = createSignal<FileSelection | null>(null)
+function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?: string }) {
+  const [selected, setSelected] = createSignal<FileSelection | null>(props.initialPath ? { path: props.initialPath, line: null } : null)
   const [query, setQuery] = createSignal('')
   const [results, setResults] = createSignal<FileSearchResult>()
   const [error, setError] = createSignal<string>()
@@ -256,13 +257,33 @@ function FileChangeBadge(props: { change: FileChange | undefined }) {
 }
 
 function FileViewer(props: FileLocation & FileSelection) {
+  const [actionPending, setActionPending] = createSignal(false)
+  const [actionError, setActionError] = createSignal<string>()
   const [file] = createResource(
     () => [props.projectId, props.taskId, props.path, props.line] as const,
     ([projectId, taskId, path, line]) => readWorkspaceFile(projectId, taskId, path, line),
   )
+  async function act(action: FileAction) {
+    if (actionPending()) return
+    setActionPending(true)
+    setActionError(undefined)
+    try {
+      await actOnWorkspaceFile(props.projectId, props.taskId, props.path, action)
+    } catch (failure) {
+      setActionError(failureMessage(failure))
+    } finally {
+      setActionPending(false)
+    }
+  }
+
   return (
     <section class="files-viewer" aria-label="File preview">
       <div class="terminal-pane__bar"><code>{props.path}</code></div>
+      <div class="terminal-pane__bar files-pane__toolbar">
+        <button type="button" disabled={actionPending()} onClick={() => void act('edit')}>Open in external editor</button>
+        <button type="button" disabled={actionPending()} onClick={() => void act('reveal')}>Reveal in file manager</button>
+      </div>
+      <Show when={actionError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <Show when={file.loading}><p class="empty empty--tight" role="status">Opening file…</p></Show>
       <Show when={file.error}>{(error) => <p class="error" role="alert">{failureMessage(error())}</p>}</Show>
       <Show when={!file.error && file()}>

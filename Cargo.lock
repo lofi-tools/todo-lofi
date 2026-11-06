@@ -10180,6 +10180,7 @@ dependencies = [
  "alacritty_terminal",
  "async-trait",
  "compact_str",
+ "gio",
  "libc",
  "notify 8.2.1",
  "portable-pty",

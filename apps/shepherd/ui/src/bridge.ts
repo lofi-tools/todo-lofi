@@ -699,6 +699,12 @@ export function readWorkspaceFile(projectId: string, taskId: string | null, path
   return invoke('read_workspace_file', { projectId, taskId, path, line })
 }
 
+export type FileAction = 'edit' | 'reveal'
+
+export function actOnWorkspaceFile(projectId: string, taskId: string | null, path: string, action: FileAction): Promise<void> {
+  return invoke('act_on_workspace_file', { projectId, taskId, path, action })
+}
+
 export interface FileSearchQuery {
   mode: 'name' | 'contents'
   query: string

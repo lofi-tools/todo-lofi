@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
 
-export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; onAction: (action: ReviewAction) => Promise<void> }) {
+export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openFile: (path: string) => void; onAction: (action: ReviewAction) => Promise<void> }) {
   const [review, { refetch }] = createResource(
     () => props.task.worktreePath ? [props.task.id, props.task.updatedAt] as const : false,
     ([taskId]) => reviewSnapshot(taskId),
@@ -94,11 +94,16 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; onAct
               </ul>
             </Show>
             <Show when={selectedFile()}>
-              <Show when={diff.loading}><p role="status" class="empty">Loading diff…</p></Show>
-              <Show when={diff.error}><p role="alert">{diff.error.message ?? String(diff.error)}</p></Show>
-              <Show when={!diff.error && !diff.loading && diff() !== undefined}>
-                <pre class="git-pane__diff" aria-label="File diff">{diff() || 'No net content change.'}</pre>
-              </Show>
+              {(path) => <>
+                <Show when={snapshot().files.some((file) => file.path === path() && file.actionable && file.index !== 'D' && file.worktree !== 'D')}>
+                  <div class="terminal-pane__bar"><button type="button" onClick={() => props.openFile(path())}>Open in Files</button></div>
+                </Show>
+                <Show when={diff.loading}><p role="status" class="empty">Loading diff…</p></Show>
+                <Show when={diff.error}><p role="alert">{diff.error.message ?? String(diff.error)}</p></Show>
+                <Show when={!diff.error && !diff.loading && diff() !== undefined}>
+                  <pre class="git-pane__diff" aria-label="File diff">{diff() || 'No net content change.'}</pre>
+                </Show>
+              </>}
             </Show>
           </>
         )}

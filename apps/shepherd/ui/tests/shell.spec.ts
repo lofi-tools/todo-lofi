@@ -18,6 +18,7 @@ test.beforeEach(async ({ context }) => {
     let eventIndex = 0
     let cancelRequests = 0
     const fileListings: string[] = []
+    const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
     const cancelledFileSearches: string[] = []
     const pendingFileSearches = new Map<string, () => void>()
@@ -354,6 +355,17 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'git_snapshot':
+          case 'review_snapshot':
+            return {
+              branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [],
+              files: [{ path: 'src/main.rs', originalPath: null, actionable: true, index: ' ', worktree: 'M' }],
+              stagedRevision: 'fixture', mergeBlocked: null, stagedDiff: '', unstagedDiff: 'fixture diff',
+            }
+          case 'git_file_diff':
+            return { staged: '', unstaged: 'fixture diff', revision: 'fixture', canDiscard: true }
+          case 'review_file_diff':
+            return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
             if (args.path === 'src') {
@@ -372,6 +384,12 @@ test.beforeEach(async ({ context }) => {
               [{ text: args.path === 'src/main.rs' ? 'fn main() {}' : '<file>', color: '#a3be8c' }],
               [{ text: '// second line', color: null }],
             ], truncated: false }
+          case 'act_on_workspace_file':
+            fileActions.push({ projectId: args.projectId, taskId: args.taskId, path: args.path, action: args.action })
+            if (options.has('file-action-error') && args.action === 'reveal') {
+              throw { message: 'Could not reveal the file in the file manager: opener unavailable' }
+            }
+            return null
           case 'watch_workspace_files': {
             const id = `file-watch-${fileWatchers.size + 1}`
             fileWatchers.set(id, { taskId: args.taskId, channel: args.channel.id, index: 0 })
@@ -648,6 +666,7 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__fileListings = fileListings
+    window.__fileActions = fileActions
     window.__unwatchedFiles = unwatchedFiles
     window.__fileWatchIds = () => [...fileWatchers.keys()]
     window.__publishFileChanges = (id: string, files: FileChange[]) => {
@@ -855,6 +874,40 @@ test('refreshes Git badges and open folders and stops watching the old root', as
   await expect(files.getByText('retired.md')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Terminals' }).click()
   await expect.poll(unwatched).toContain('file-watch-2')
+})
+
+test('focuses Files from Git and Review and opens the selected worktree file', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  for (const tab of ['Git', 'Review']) {
+    await page.getByRole('tab', { name: tab, exact: true }).click()
+    await page.getByRole('button', { name: 'src/main.rs', exact: true }).click()
+    await page.getByRole('button', { name: 'Open in Files', exact: true }).click()
+    const filesTab = page.getByRole('tab', { name: 'Files', exact: true })
+    await expect(filesTab).toHaveAttribute('aria-selected', 'true')
+    await expect(filesTab).toBeFocused()
+    await expect(page.getByLabel('File root')).toHaveValue('worktree')
+    const preview = page.getByRole('region', { name: 'File preview' })
+    await expect(preview.getByText('src/main.rs')).toBeVisible()
+    await expect(preview.getByText('fn main() {}')).toBeVisible()
+  }
+})
+
+test('dispatches external actions for the selected root and shows opener errors', async ({ page }) => {
+  await page.goto('/?file-action-error')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const preview = page.getByRole('region', { name: 'File preview' })
+  await page.getByRole('button', { name: 'worktree.txt', exact: true }).click()
+  await preview.getByRole('button', { name: 'Open in external editor' }).click()
+  await page.getByLabel('File root').selectOption('project')
+  await page.getByRole('button', { name: 'README.md', exact: true }).click()
+  await preview.getByRole('button', { name: 'Reveal in file manager' }).click()
+  await expect(preview.getByRole('alert')).toHaveText('Could not reveal the file in the file manager: opener unavailable')
+  expect(await page.evaluate(() => window.__fileActions)).toEqual([
+    { projectId: 'project-1', taskId: 'task-1', path: 'worktree.txt', action: 'edit' },
+    { projectId: 'project-1', taskId: null, path: 'README.md', action: 'reveal' },
+  ])
 })
 
 test('resumes an interrupted task from its conversation header', async ({ page }) => {

@@ -241,9 +241,7 @@ pub fn read_file(
     relative: &Path,
     focus_line: Option<usize>,
 ) -> Result<TextFile, FileError> {
-    let relative = checked_path(relative)?;
-    check_directory(root)?;
-    let root = root.canonicalize()?;
+    let (root, relative) = workspace_location(root, relative)?;
     let file = open_file(&root, &relative)?;
     if !file.metadata()?.is_file() {
         return Err(FileError::NotFile);
@@ -259,6 +257,30 @@ pub fn read_file(
         return Err(FileError::NonText);
     }
     Ok(highlight(&relative, content, focus_line))
+}
+
+pub fn external_file_path(root: &Path, relative: &Path) -> Result<PathBuf, FileError> {
+    let (root, relative) = workspace_location(root, relative)?;
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, FileType, statat};
+        let (directory, name) = open_parent(&root, &relative)?;
+        let metadata =
+            statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+        match FileType::from_raw_mode(metadata.st_mode) {
+            FileType::RegularFile => Ok(root.join(relative)),
+            FileType::Symlink => Err(FileError::SymbolicLink),
+            _ => Err(FileError::NotFile),
+        }
+    }
+    #[cfg(not(unix))]
+    checked_regular_path(&root, &relative)
+}
+
+fn workspace_location(root: &Path, relative: &Path) -> Result<(PathBuf, PathBuf), FileError> {
+    let relative = checked_path(relative)?;
+    check_directory(root)?;
+    Ok((root.canonicalize()?, relative))
 }
 
 pub fn search_files(
@@ -542,7 +564,10 @@ fn read_ignore(root: &Path, directory: &Path, name: &str) -> Result<Option<Gitig
 }
 
 #[cfg(unix)]
-fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
+fn open_parent<'a>(
+    root: &Path,
+    relative: &'a Path,
+) -> Result<(std::os::fd::OwnedFd, &'a std::ffi::OsStr), FileError> {
     use rustix::fs::{Mode, OFlags, open, openat};
 
     let parent = relative.parent().ok_or(FileError::NotFile)?;
@@ -551,18 +576,35 @@ fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
     let mut directory =
         open(root, flags | OFlags::DIRECTORY, Mode::empty()).map_err(io::Error::from)?;
     // Walk open directory descriptors so a symlink substituted after a check
-    // cannot redirect a preview outside the root.
+    // cannot redirect the selected file outside the root.
     for name in parent {
         directory = openat(&directory, name, flags | OFlags::DIRECTORY, Mode::empty())
             .map_err(io::Error::from)?;
     }
-    let file = openat(&directory, name, flags | OFlags::NONBLOCK, Mode::empty())
-        .map_err(io::Error::from)?;
+    Ok((directory, name))
+}
+
+#[cfg(unix)]
+fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let (directory, name) = open_parent(root, relative)?;
+    let file = openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
     Ok(File::from(file))
 }
 
 #[cfg(not(unix))]
 fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
+    Ok(File::open(checked_regular_path(root, relative)?)?)
+}
+
+#[cfg(not(unix))]
+fn checked_regular_path(root: &Path, relative: &Path) -> Result<PathBuf, FileError> {
     let parent = relative.parent().ok_or(FileError::NotFile)?;
     let name = relative.file_name().ok_or(FileError::NotFile)?;
     let mut path = root.to_path_buf();
@@ -574,7 +616,7 @@ fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
     if !path.symlink_metadata()?.is_file() {
         return Err(FileError::NotFile);
     }
-    Ok(File::open(path)?)
+    Ok(path)
 }
 
 fn highlight(path: &Path, content: &str, focus_line: Option<usize>) -> TextFile {
@@ -895,6 +937,10 @@ mod tests {
             Err(FileError::SymbolicLink)
         ));
         assert!(matches!(
+            external_file_path(&linked_root, Path::new("visible.txt")),
+            Err(FileError::SymbolicLink)
+        ));
+        assert!(matches!(
             list_directory(&root, Path::new("parent"), true),
             Err(FileError::SymbolicLink)
         ));
@@ -903,9 +949,24 @@ mod tests {
             private.as_path(),
             Path::new("link.txt"),
             Path::new("parent/private.txt"),
+            Path::new(".git/config"),
         ] {
             assert!(read_file(&root, path, None).is_err(), "{}", path.display());
+            assert!(
+                external_file_path(&root, path).is_err(),
+                "{}",
+                path.display()
+            );
         }
+        assert_eq!(
+            external_file_path(&root, Path::new("visible.txt"))?,
+            root.canonicalize()?.join("visible.txt")
+        );
+        fs::create_dir(root.join("folder"))?;
+        assert!(matches!(
+            external_file_path(&root, Path::new("folder")),
+            Err(FileError::NotFile)
+        ));
         Ok(())
     }
 }

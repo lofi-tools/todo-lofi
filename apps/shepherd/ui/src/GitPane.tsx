@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
 
-export function GitPane(props: { taskId: string; revision: number; live: boolean; openTerminal: () => void }) {
+export function GitPane(props: { taskId: string; revision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void }) {
   const [git, { refetch, mutate }] = createResource(
     () => [props.taskId, props.revision] as const,
     ([taskId]) => gitSnapshot(taskId),
@@ -122,6 +122,9 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
             <Show when={selectedFile()}>
               {(name) => (
                 <>
+                  <Show when={snapshot().files.some((file) => file.path === name() && file.actionable && file.index !== 'D' && file.worktree !== 'D')}>
+                    <div class="terminal-pane__bar"><button type="button" onClick={() => props.openFile(name())}>Open in Files</button></div>
+                  </Show>
                   <Show when={fileDiff.loading}><p class="empty" role="status">Loading file diff…</p></Show>
                   <Show when={fileDiff.error}><p role="alert">{fileDiff.error.message ?? String(fileDiff.error)}</p></Show>
                   <Show when={!fileDiff.loading && !fileDiff.error && fileDiff()}>

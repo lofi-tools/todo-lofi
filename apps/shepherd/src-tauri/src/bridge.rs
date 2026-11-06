@@ -37,6 +37,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::codex_harness::codex_spawn_spec;
+use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
 use crate::terminal_screen::{Screen, SearchDirection, TerminalFrame};
@@ -1598,6 +1599,27 @@ pub mod commands {
                     )
                 })??,
         )
+    }
+
+    #[tauri::command]
+    pub async fn act_on_workspace_file(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+        path: String,
+        action: FileAction,
+    ) -> Result<(), BridgeError> {
+        let root = state.files_directory(project_id, task_id).await?;
+        let failure = move |error: &dyn std::fmt::Display| {
+            BridgeError::new("files", format!("{}: {error}", action.error_context()))
+        };
+        tokio::task::spawn_blocking(move || {
+            let path = files::external_file_path(&root, Path::new(&path))
+                .map_err(|error| failure(&error))?;
+            file_actions::perform(&path, action).map_err(|error| failure(&error))
+        })
+        .await
+        .map_err(|error| failure(&error))?
     }
 
     #[tauri::command]
