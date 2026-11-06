@@ -610,9 +610,10 @@ Automated:
   resize, task and project switching, reattachment, quit and restart of shared
   and task terminals. The quit warning counts the live task and all three
   running terminals. The smoke verifies that Stop process and Quit both end
-  foreground jobs that ignore SIGHUP, and that the stopped task terminal can
-  restart. Both actions give terminal groups a 200 ms grace period, then stop
-  groups whose leaders still belong to their original PTY sessions.
+  foreground and background jobs that ignore SIGHUP, and that the stopped task
+  terminal can restart. Both actions give terminal groups a 200 ms grace
+  period, then stop groups with members that still belong to their original
+  PTY sessions.
   On macOS, Command+Q and the Quit menu item use the guarded window-close
   path. With a waiting scripted task and one live terminal, Command+Q showed
   both counts. Keep working preserved the task and shell. Confirming quit

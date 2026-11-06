@@ -162,18 +162,18 @@ for phase in "${phases[@]}"; do
   SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s "$duration" "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
   if [[ $phase == prepare ]]; then
-    for action in stop quit; do
-      foreground_pid=$(cat "$fixture/$action-foreground.pid")
-      [[ $foreground_pid =~ ^[1-9][0-9]+$ ]]
+    for job in stop-foreground stop-background quit-foreground quit-background; do
+      job_pid=$(cat "$fixture/$job.pid")
+      [[ $job_pid =~ ^[1-9][0-9]+$ ]]
       for ((attempt = 0; attempt < 20; attempt++)); do
-        foreground_state=$(ps -A -o pid=,stat= | awk -v pid="$foreground_pid" '$1 == pid { print $2 }')
-        if [[ -z $foreground_state || $foreground_state == Z* ]]; then
+        job_state=$(ps -A -o pid=,stat= | awk -v pid="$job_pid" '$1 == pid { print $2 }')
+        if [[ -z $job_state || $job_state == Z* ]]; then
           break
         fi
         sleep 0.1
       done
-      if [[ -n $foreground_state && $foreground_state != Z* ]]; then
-        printf 'Foreground PTY job %s survived the %s action\n' "$foreground_pid" "$action" >&2
+      if [[ -n $job_state && $job_state != Z* ]]; then
+        printf 'PTY fixture job %s (%s) survived shutdown\n' "$job_pid" "$job" >&2
         exit 1
       fi
     done

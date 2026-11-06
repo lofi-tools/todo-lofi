@@ -877,18 +877,23 @@ async function requestQuitWithLiveTask(liveTerminals = 0) {
   }
 }
 
-async function startHangupResistantJob(terminal: bridge.TerminalSnapshot, action: 'stop' | 'quit') {
-  const program = 'import os, signal, sys, time; from pathlib import Path; signal.signal(signal.SIGHUP, signal.SIG_IGN); Path(sys.argv[1]).write_text(str(os.getpid())); print("S4_" + "FOREGROUND_READY"); time.sleep(60)'
-  const pidFile = `${__SHEPHERD_SMOKE_PROJECT__}/../${action}-foreground.pid`
-  await bridge.terminalWrite(terminal.id, `python3 -u -c ${shellQuote(program)} ${shellQuote(pidFile)}\r`)
-  await waitFor(`foreground job ready before ${action}`, () => {
+async function startHangupResistantJobs(terminal: bridge.TerminalSnapshot, action: 'stop' | 'quit') {
+  const job = (scope: 'foreground' | 'background') => {
+    const separateGroup = scope === 'background' ? 'os.setpgid(0, 0); ' : ''
+    const program = `import os, signal, sys, time; from pathlib import Path; ${separateGroup}signal.signal(signal.SIGHUP, signal.SIG_IGN); Path(sys.argv[1]).write_text(str(os.getpid())); print("S4_" + "${scope.toUpperCase()}_READY"); time.sleep(60)`
+    const pidFile = `${__SHEPHERD_SMOKE_PROJECT__}/../${action}-${scope}.pid`
+    return `python3 -u -c ${shellQuote(program)} ${shellQuote(pidFile)}`
+  }
+  await bridge.terminalWrite(terminal.id, `${job('background')} & ${job('foreground')}\r`)
+  await waitFor(`foreground and background jobs ready before ${action}`, () => {
     const pane = terminalPane(terminal.title)
-    return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_FOREGROUND_READY')
+    const lines = pane && terminalOutput(pane).split('\n').map((line) => line.trim())
+    return lines && lines.includes('S4_FOREGROUND_READY') && lines.includes('S4_BACKGROUND_READY')
   })
 }
 
 async function exerciseStopProcess(terminal: bridge.TerminalSnapshot) {
-  await startHangupResistantJob(terminal, 'stop')
+  await startHangupResistantJobs(terminal, 'stop')
   const paneButton = (label: string) => waitFor(`${label} in the task terminal`, () =>
     Array.from(terminalPane(terminal.title)?.querySelectorAll('button') ?? [])
       .find((entry) => entry.textContent === label && !entry.disabled))
@@ -993,7 +998,7 @@ async function smoke() {
   await selectTask(INTERRUPTED_TASK)
   await sendPrompt('Wait for approval while quitting')
   await waitFor('live task awaiting approval', () => chatState() === 'waiting')
-  await startHangupResistantJob(terminal, 'quit')
+  await startHangupResistantJobs(terminal, 'quit')
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, hyperlinkOpened: true, burstPaintMs }

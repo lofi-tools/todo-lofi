@@ -37,17 +37,31 @@ struct Session {
 struct TerminalProcessGroup {
     group: libc::pid_t,
     session: libc::pid_t,
+    members: Vec<libc::pid_t>,
 }
 
 #[cfg(unix)]
 impl TerminalProcessGroup {
     fn still_owned(&self) -> bool {
         self.group > 1
-            && unsafe {
-                self.group != libc::getpgrp()
-                    && libc::getsid(self.group) == self.session
-                    && libc::getpgid(self.group) == self.group
-            }
+            && self.group != unsafe { libc::getpgrp() }
+            && self.members.iter().any(|&process| unsafe {
+                libc::getsid(process) == self.session && libc::getpgid(process) == self.group
+            })
+    }
+
+    fn signal(&self, signal: libc::c_int) -> bool {
+        if !self.still_owned() {
+            return false;
+        }
+        if unsafe { libc::killpg(self.group, signal) } == 0 {
+            return true;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(%error, process_group = self.group, signal, "could not signal terminal process group");
+        }
+        false
     }
 
     fn finish_hangup(mut groups: Vec<Self>) {
@@ -58,49 +72,114 @@ impl TerminalProcessGroup {
             groups.retain(Self::still_owned);
         }
         for group in groups {
-            // The PTY may already have detached from the surviving job. Check
-            // its leader still belongs to the original session before signaling.
-            if group.still_owned() && unsafe { libc::killpg(group.group, libc::SIGKILL) } == -1 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    tracing::warn!(%error, process_group = group.group, "could not stop terminal process group");
-                }
-            }
+            group.signal(libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn list_processes() -> std::io::Result<Vec<libc::pid_t>> {
+    let estimate = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if estimate <= 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut capacity = estimate as usize + 64;
+    loop {
+        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<libc::pid_t>())
+            .map_err(std::io::Error::other)?;
+        let mut processes = vec![0; capacity];
+        let count = unsafe { libc::proc_listallpids(processes.as_mut_ptr().cast(), bytes) };
+        if count <= 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if (count as usize) < capacity {
+            processes.truncate(count as usize);
+            return Ok(processes);
+        }
+        capacity *= 2;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn list_processes() -> std::io::Result<Vec<libc::pid_t>> {
+    let mut processes = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        if let Some(process) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        {
+            processes.push(process);
+        }
+    }
+    Ok(processes)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn list_processes() -> std::io::Result<Vec<libc::pid_t>> {
+    Ok(Vec::new())
+}
+
+#[cfg(unix)]
+fn terminal_processes() -> Vec<libc::pid_t> {
+    match list_processes() {
+        Ok(processes) => processes,
+        Err(error) => {
+            tracing::warn!(%error, "could not enumerate background terminal jobs");
+            Vec::new()
         }
     }
 }
 
 impl Session {
     #[cfg(unix)]
-    fn process_groups(&self) -> impl Iterator<Item = TerminalProcessGroup> {
-        self.session_id.into_iter().flat_map(|session| {
-            let foreground = self
-                .master
-                .process_group_leader()
-                .filter(|group| *group != session);
-            [Some(session), foreground]
-                .into_iter()
-                .flatten()
-                .map(move |group| TerminalProcessGroup { group, session })
-                .filter(TerminalProcessGroup::still_owned)
-        })
+    fn process_groups(&self, processes: &[libc::pid_t]) -> Vec<TerminalProcessGroup> {
+        let Some(session) = self.session_id else {
+            return Vec::new();
+        };
+        let own_group = unsafe { libc::getpgrp() };
+        let mut groups = BTreeMap::<libc::pid_t, Vec<libc::pid_t>>::new();
+        // The shell and foreground leader are still available if the process
+        // table could not be read. Other members can outlive their group leader.
+        let fallback = [Some(session), self.master.process_group_leader()];
+        for process in processes
+            .iter()
+            .copied()
+            .chain(fallback.into_iter().flatten())
+        {
+            if process <= 1 || unsafe { libc::getsid(process) } != session {
+                continue;
+            }
+            let group = unsafe { libc::getpgid(process) };
+            if group > 1 && group != own_group {
+                groups.entry(group).or_default().push(process);
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(group, members)| TerminalProcessGroup {
+                group,
+                session,
+                members,
+            })
+            .collect()
     }
 
-    fn hangup(&mut self) -> std::io::Result<()> {
+    fn hangup(&mut self, #[cfg(unix)] groups: &[TerminalProcessGroup]) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(group) = self
-            .master
-            .process_group_leader()
-            .filter(|group| *group > 1)
         {
-            // The master identifies the foreground group on this PTY. Exclude
-            // Shepherd's own group before signaling a negative process ID.
-            let own_group = unsafe { libc::getpgrp() };
-            if group != own_group && unsafe { libc::killpg(group, libc::SIGHUP) } == -1 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    tracing::warn!(%error, group, "could not hang up terminal foreground group");
+            let mut shell_signalled = false;
+            for group in groups {
+                if group.signal(libc::SIGHUP) && group.group == group.session {
+                    shell_signalled = true;
                 }
+            }
+            if shell_signalled
+                || self
+                    .session_id
+                    .is_some_and(|process| unsafe { libc::getsid(process) != process })
+            {
+                return Ok(());
             }
         }
         match self.killer.kill() {
@@ -138,18 +217,27 @@ impl PtyTerminals {
                 std::mem::take(&mut *error.into_inner())
             }
         };
-        #[cfg(unix)]
-        let groups = sessions
-            .values()
-            .flat_map(Session::process_groups)
-            .collect();
-        for (terminal_id, mut session) in sessions {
-            if let Err(error) = session.hangup() {
-                tracing::warn!(%terminal_id, %error, "could not stop terminal process");
-            }
+        if sessions.is_empty() {
+            return;
         }
         #[cfg(unix)]
-        TerminalProcessGroup::finish_hangup(groups);
+        let processes = terminal_processes();
+        #[cfg(unix)]
+        let mut all_groups = Vec::new();
+        for (terminal_id, mut session) in sessions {
+            #[cfg(unix)]
+            let groups = session.process_groups(&processes);
+            if let Err(error) = session.hangup(
+                #[cfg(unix)]
+                &groups,
+            ) {
+                tracing::warn!(%terminal_id, %error, "could not stop terminal process");
+            }
+            #[cfg(unix)]
+            all_groups.extend(groups);
+        }
+        #[cfg(unix)]
+        TerminalProcessGroup::finish_hangup(all_groups);
     }
 
     pub fn write_reply(
@@ -400,9 +488,12 @@ impl TerminalService for PtyTerminals {
             return Ok(());
         };
         #[cfg(unix)]
-        let groups = session.process_groups().collect();
+        let groups = session.process_groups(&terminal_processes());
         session
-            .hangup()
+            .hangup(
+                #[cfg(unix)]
+                &groups,
+            )
             .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
         session.closing = true;
         drop(sessions);
@@ -531,6 +622,77 @@ mod tests {
         })
         .await?;
         assert!(stopped, "the terminal should report its exit");
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn closing_a_terminal_stops_a_separate_background_process_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(8);
+        let terminal_id = engine.spawn(
+            TerminalSpec {
+                id: TerminalId::new("background-terminal"),
+                columns: 80,
+                rows: 24,
+                cwd: std::env::temp_dir(),
+                command: "/bin/sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    r#"python3 -u -c 'import os, signal, time; os.setpgid(0, 0); signal.signal(signal.SIGHUP, signal.SIG_IGN); print(f"background:{os.getpid()}"); time.sleep(10)' & wait"#.into(),
+                ],
+                environment: BTreeMap::new(),
+            },
+            sender,
+        )?;
+        let process = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut output = String::new();
+            while let Some(TerminalEvent::Output(bytes)) = receiver.recv().await {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+                if let Some(process) = output.lines().find_map(|line| {
+                    line.strip_prefix("background:")?
+                        .parse::<libc::pid_t>()
+                        .ok()
+                }) {
+                    return Some(process);
+                }
+            }
+            None
+        })
+        .await?
+        .ok_or("the background job did not start")?;
+        let session = unsafe { libc::getsid(process) };
+        let group = unsafe { libc::getpgid(process) };
+        assert!(
+            session > 1 && group > 1 && session != group,
+            "session {session}, group {group}"
+        );
+
+        engine.close(&terminal_id)?;
+        let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let status = std::process::Command::new("ps")
+                    .args(["-p", &process.to_string(), "-o", "stat="])
+                    .output()?;
+                let state = String::from_utf8(status.stdout)?;
+                if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                    return Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if !matches!(&stopped, Ok(Ok(())))
+            && unsafe { libc::getsid(process) == session && libc::getpgid(process) == group }
+            && unsafe { libc::kill(process, libc::SIGKILL) } == -1
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+        stopped??;
         Ok(())
     }
 }

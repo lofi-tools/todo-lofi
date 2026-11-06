@@ -574,8 +574,10 @@ quitting the app does, by design (§2.5). A terminal's scope is either the proje
 - Environment: inherited, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, and
   `SHEPHERD_TERMINAL_ID` so integrations can address a pane.
 - Exit is reported with its code and a restart button; nothing auto-restarts.
-- Each terminal runs in its own process group, so shutdown can terminate a shell
-  and its children together.
+- Each terminal runs in its own session. Stop and Quit signal the shell and
+  the foreground and background process groups in that session. Groups that
+  survive the grace period are stopped after checking their session membership
+  again. Processes in separately detached sessions keep running.
 
 ### 5.3 Parsing and rendering
 
