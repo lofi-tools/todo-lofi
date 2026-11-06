@@ -610,6 +610,24 @@ Manual script:
    candidate selection and commit it. Verify that the shell receives the
    committed text once and the candidate UI follows the terminal cursor.
 
+On 2026-11-06, the disposable macOS app split a shared shell with
+Command+Shift+D. After dragging the divider, `stty size` reported 14 columns
+instead of 20 in the first pane and 18 instead of 12 in the second. Hiding and
+reopening a pane kept its shell live. Vim saved an edit to disk, Space paged
+forward in less, and fzf returned `gamma` after filtering with `g`. The
+terminal scrolled from the end of `seq 1 160` back to rows 28–42. One fzf
+launch showed a garbled wrapped command echo in the accessibility mirror,
+while fzf returned the expected selection. A later wrapped `printf` showed
+the correct command and all its arguments. The fzf echo still needs a check
+in both the canvas and the accessibility mirror.
+
+Command+Shift+T opened a task shell in the scripted task's Git worktree.
+Both shared shells stayed visible when switching chats. The task shell hid
+until its owning chat was selected again, and both shell scopes retained
+their session variables. After relaunch, all three shells appeared ended
+with Restart actions. Restarting the task shell opened its original worktree
+and focused terminal input.
+
 The packaged macOS test app used a disposable database and the British keyboard
 layout. With the cursor moved by a shell command, Option+E followed by E
 delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
