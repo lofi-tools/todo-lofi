@@ -21,7 +21,7 @@ These were chosen explicitly and override the pre-interview draft.
 | Primary object | Durable **tasks**, each with its own workspace. Every agent run is a record with state, transcript, worktree and review data; terminals and diffs are views over it. |
 | Layout | **Fixed task workspace**: a required chat region in the centre and an always-on inspector on the right. No pane moves between them. The inspector has one Terminals tab, Preview, Review, Git and Files; terminals split only inside the Terminals tab. Switching tasks swaps the chat and task-specific content; the inspector tab and project-shared terminals stay mounted. |
 | Navigation | Expandable project list with a **flat task list** under the selected project. Switching projects collapses the previous list. Each project row has a folder icon, a context menu and a compose button. |
-| Inspector | **Always-on right inspector** with a thin vertical pane switcher; resizable, never closed or torn out. |
+| Inspector | **Always-on right inspector** with a horizontal pane switcher in the header; resizable, never closed or torn out. |
 | Attention | Task rows and inspector tabs use rings, dots and text badges (`needs input`, `review`), with status-bar counts and the dock badge. |
 | Task browser | Sidebar list only; no board or separate review view in v1. |
 | Terminals | **One Terminals tab per task workspace**, containing a project-saved arrangement of terminal panes. Slots are project-shared or task-specific; there is no global terminal list. |
@@ -89,7 +89,7 @@ PTY ownership, task workspaces and screen-detection manifests for terminal agent
 | **Pane** | A tab or split inside a task workspace: a terminal, preview, review, Git or files view. Chat is a fixed region, not an inspector tab. |
 | **Task workspace** | The fixed chat region plus the always-on inspector for one task; the terminal arrangement is saved per project, not per task. |
 | **Inspector** | The always-on right region that hosts the Terminals, Preview, Review, Git and Files tabs. |
-| **Pane switcher** | The thin vertical tab strip on the inspector edge that selects a tab. |
+| **Pane switcher** | The icon tabs in the header above the inspector. |
 | **Project terminal layout** | The saved arrangement of terminal panes in the Terminals tab, shared by every task in a project. Each slot is project-shared or task-specific. |
 | **Shared terminal** | A terminal instance owned by the project and visible in every task's Terminals tab. |
 | **Task terminal** | A terminal instance owned by one task and shown only while that task is active. |
@@ -123,7 +123,7 @@ detailed treatment of its controls as the rest of the shell is built.
 - The chat takes the remaining width between the sidebar and inspector. In a
   project with no visible tasks, typing a prompt creates a draft. Sending the
   prompt starts the agent.
-- Right: the always-on inspector with a thin vertical tab strip. Tabs are
+- Right: the always-on inspector with its icon tabs in the header. Tabs are
   **Terminals**, **Preview**, **Review**, **Git** and **Files**. The Terminals tab
   contains the project's saved terminal arrangement; shared terminals keep their
   PTY across task switches and task terminals belong to the active task.

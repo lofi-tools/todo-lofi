@@ -1043,7 +1043,7 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   await expect(sharedInput).toBeFocused()
   expect(await page.evaluate(() => (window as unknown as { __writes: string[] }).__writes)).toEqual([])
 
-  await terminalsTab.press('ArrowDown')
+  await terminalsTab.press('ArrowRight')
   await expect(reviewTab).toBeFocused()
   await expect(reviewTab).toHaveAttribute('aria-selected', 'true')
   await expect(terminalsTab).toHaveAttribute('tabindex', '-1')
@@ -1061,7 +1061,16 @@ test('resizes the inspector and restores the saved width for the selected task',
   await page.goto('/?scoped-terminals')
   const divider = page.getByRole('separator', { name: 'Resize inspector' })
   const width = async () => Number(await divider.getAttribute('aria-valuenow'))
+  const inspectorHeader = page.locator('.shell__header-inspector')
+  const inspector = page.getByRole('complementary', { name: 'Inspector', exact: true })
+  const columnBounds = async () => {
+    const header = await inspectorHeader.boundingBox()
+    const pane = await inspector.boundingBox()
+    return header && pane ? [header.x - pane.x, header.width - pane.width] : null
+  }
+  await expect(inspectorHeader.getByRole('tab')).toHaveCount(5)
   await expect.poll(width).toBe(360)
+  await expect.poll(columnBounds).toEqual([0, 0])
   await divider.press('ArrowLeft')
   await expect.poll(width).toBe(392)
   const handle = await divider.boundingBox()
@@ -1073,6 +1082,7 @@ test('resizes the inspector and restores the saved width for the selected task',
   await page.mouse.move(x - 64, y, { steps: 4 })
   await page.mouse.up()
   await expect.poll(width).toBe(456)
+  await expect.poll(columnBounds).toEqual([0, 0])
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect.poll(width).toBe(360)
   await page.getByRole('button', { name: /Ship it/ }).click()
