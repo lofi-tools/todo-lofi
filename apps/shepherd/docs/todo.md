@@ -560,7 +560,10 @@ task-scoped, persistent and fast enough.
   other projects available. The startup warning identifies the affected layout.
 - [x] Measure parser and encoder throughput on a 1 MiB output burst.
 - [x] Measure delivery and paint latency for a 1 MiB burst in the desktop
-  webview before considering WebGL.
+  webview before considering WebGL. On macOS, optimizing the debug builds of
+  Shepherd and `alacritty_terminal` reduced parser and encoder time from
+  126 ms to 43 ms. The native smoke painted the burst tail in 67 ms, down
+  from 135 ms on the same machine, and painted all 24 paced markers.
 - [x] Bound PTY queues and allow one frame in flight per webview subscription.
   Coalesce paints and defer canvas work while the tab is hidden. Rate-limit
   frame delivery from the previous send so an idle pane can update immediately.
