@@ -972,6 +972,9 @@ and the task header never overstates the tier.
   pixel coordinates, dimensions, URL and note. Discarding a draft removes its
   screenshot copies.
 - [ ] Cross-task search over Turso FTS.
+  Task transcripts now persist admitted prompts and batch settled entries in
+  Turso. Opening a task restores its saved entry IDs and order. The full-text
+  index, ranked queries and search UI remain open.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,

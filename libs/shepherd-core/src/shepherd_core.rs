@@ -642,10 +642,14 @@ impl Core {
         for task_id in task_ids {
             let events = match self.sessions.get_mut(&task_id) {
                 Some(session) if !session.is_closed() => session.pump(),
-                Some(_) => continue,
+                Some(_) => Vec::new(),
                 None => continue,
             };
             if events.is_empty() {
+                if self.persist_task_transcript(&task_id).await? {
+                    self.publish_task(&task_id)?;
+                    changed = true;
+                }
                 continue;
             }
             let task = self.task(&task_id)?;
@@ -654,6 +658,8 @@ impl Core {
             let task = self.task(&task_id)?;
             if (task.state, &task.error) != (before.0, &before.1) {
                 self.save_task(&task_id).await?;
+            } else {
+                self.persist_task_transcript(&task_id).await?;
             }
             self.publish_task(&task_id)?;
             changed = true;
@@ -884,6 +890,29 @@ impl Core {
         })
     }
 
+    pub async fn open_task_workspace(
+        &mut self,
+        task_id: &TaskId,
+    ) -> Result<TaskWorkspace, CoreError> {
+        self.touch_archived_worktree(task_id).await?;
+        self.restore_task_transcript(task_id).await?;
+        self.task_workspace(task_id)
+    }
+
+    async fn restore_task_transcript(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        if !self.sessions.contains_key(task_id)
+            && !self.detached_transcripts.contains_key(task_id)
+            && self.session_records.contains_key(task_id)
+        {
+            let entries = self.store.load_transcript(task_id).await?;
+            let mut transcript = Transcript::default();
+            transcript.restore(entries);
+            self.detached_transcripts
+                .insert(task_id.clone(), transcript);
+        }
+        Ok(())
+    }
+
     pub async fn save_workspace_layout(
         &mut self,
         task_id: &TaskId,
@@ -1041,6 +1070,7 @@ impl Core {
         self.tasks.remove(task_id);
         self.workspace_layouts.remove(task_id);
         self.sessions.remove(task_id);
+        self.detached_transcripts.remove(task_id);
 
         let mut updated_project = None;
         if let Some(project) = self.projects.get_mut(&project_id)
@@ -1354,7 +1384,11 @@ impl Core {
 
         self.repair_worktree(task_id).await?;
         self.set_task_state(task_id, TaskState::Starting)?;
-        if self.sessions.remove(task_id).is_some() {
+        if let Some(session) = self.sessions.remove(task_id) {
+            let mut transcript = Transcript::default();
+            transcript.restore(session.transcript().entries().iter().cloned());
+            self.detached_transcripts
+                .insert(task_id.clone(), transcript);
             self.emit(Event::ProjectApprovalsChanged {
                 project_id: self.task(task_id)?.project_id.clone(),
             });
@@ -1479,6 +1513,7 @@ impl Core {
         task_id: &TaskId,
         resume: Option<SessionId>,
     ) -> Result<SessionOpened, CoreError> {
+        self.restore_task_transcript(task_id).await?;
         let carried = match self.sessions.get(task_id) {
             Some(session) if !session.has_failed() && !session.is_closed() => {
                 return Ok(SessionOpened::Fresh);
@@ -1846,6 +1881,15 @@ impl Core {
                 continue;
             };
             if session.is_closed() {
+                if let Some(record) = self.session_records.get(&task_id) {
+                    session
+                        .persist_transcript(
+                            &*self.store,
+                            record,
+                            !self.task(&task_id)?.state.is_live(),
+                        )
+                        .await?;
+                }
                 continue;
             }
             let events = match session.shutdown().await {
@@ -1859,6 +1903,15 @@ impl Core {
                     Vec::new()
                 }
             };
+            if let Some(record) = self.session_records.get(&task_id) {
+                let settled = !self.task(&task_id)?.state.is_live()
+                    || events
+                        .iter()
+                        .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }));
+                session
+                    .persist_transcript(&*self.store, record, settled)
+                    .await?;
+            }
             self.end_session_record(&task_id, &events).await?;
         }
 
@@ -1953,8 +2006,22 @@ impl Core {
     /// (only required to be `Send`) cannot promise.
     async fn save_task(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?.clone();
+        self.persist_task_transcript(task_id).await?;
         self.store.save_task(&task).await?;
         Ok(())
+    }
+
+    async fn persist_task_transcript(&mut self, task_id: &TaskId) -> Result<bool, CoreError> {
+        let settled = !self.task(task_id)?.state.is_live();
+        let (Some(session), Some(record)) = (
+            self.sessions.get_mut(task_id),
+            self.session_records.get(task_id),
+        ) else {
+            return Ok(false);
+        };
+        session
+            .persist_transcript(&*self.store, record, settled)
+            .await
     }
 
     /// Emit the task row, the task workspace and the project's task list after
@@ -2333,14 +2400,14 @@ mod streaming {
     use std::sync::Mutex;
 
     use agent_harness::{
-        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, HarnessEvent, HarnessResult,
+        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, Entry, HarnessEvent, HarnessResult,
         ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec, TurnFinishReason,
     };
     use async_trait::async_trait;
     use tokio::sync::mpsc;
 
     use crate::harness::{HarnessFactory, HarnessSession};
-    use crate::store::TursoStore;
+    use crate::store::{Store, TursoStore};
     use crate::test_support::{TestDatabase, TestRepository};
     use crate::{
         Agent, Command, CommandResult, Core, CoreError, Event, Project, ProjectId, Task, TaskId,
@@ -2553,6 +2620,13 @@ mod streaming {
             kind: DeltaKind::Message,
             text: "streamed".to_string(),
         })?;
+        assert!(core.pump().await?);
+        let store = TursoStore::open(&database.uri()).await?;
+        let persisted = store.load_transcript(&task_id).await?;
+        assert_eq!(
+            persisted.iter().map(Entry::summary).collect::<Vec<_>>(),
+            ["you: go"]
+        );
         sender.send(HarnessEvent::TurnFinished {
             reason: TurnFinishReason::Completed,
         })?;
@@ -2563,6 +2637,7 @@ mod streaming {
         assert_eq!(workspace.task.state, TaskState::Ready);
         assert_eq!(workspace.transcript.len(), 2);
         assert_eq!(workspace.transcript[1].summary(), "agent: streamed");
+        assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
         assert!(
             core.drain_events()
                 .iter()
@@ -3075,7 +3150,7 @@ mod tests {
         .await?;
         let mut scenario = TestCore::with_core(reopened);
 
-        let workspace = scenario.core().task_workspace(&task_id)?;
+        let workspace = scenario.core_mut().open_task_workspace(&task_id).await?;
         assert_eq!(workspace.task.state, TaskState::Interrupted);
         assert_eq!(
             workspace.recovery,
@@ -3087,7 +3162,17 @@ mod tests {
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.resume)
         );
-        assert!(workspace.transcript.is_empty());
+        assert_eq!(
+            summaries(&workspace),
+            [
+                "you: fix it",
+                "agent: working on it",
+                "approval: Run tests (Allow)",
+                "agent: all done",
+                "you: go again",
+            ]
+        );
+        let saved = workspace.transcript;
         assert!(worktree_path.join("README.md").is_file());
         assert_eq!(workspace.project.unfinished_task_count, 1);
 
@@ -3099,12 +3184,12 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Ready);
-        assert_eq!(workspace.transcript.len(), 1);
-        assert!(
-            workspace.transcript[0]
+        assert!(workspace.transcript.starts_with(&saved));
+        assert!(workspace.transcript.last().is_some_and(|entry| {
+            entry
                 .summary()
                 .contains("resumed the previous agent session")
-        );
+        }));
 
         let workspace = workspace_of(
             scenario
@@ -3115,10 +3200,13 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(workspace.transcript.starts_with(&saved));
         assert_eq!(
             workspace.transcript.last().map(Entry::summary),
             Some("agent: resumed answer".to_string())
         );
+        let store = TursoStore::open(&uri).await?;
+        assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
         Ok(())
     }
 
@@ -3680,13 +3768,15 @@ mod tests {
 
         let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
         assert_eq!(workspace.task.state, TaskState::Ready);
-        assert!(
-            workspace.transcript[0]
-                .summary()
-                .contains("resumed the previous agent session"),
-            "unexpected resume note: {:?}",
-            workspace.transcript[0].summary()
+        assert_eq!(
+            workspace.transcript.first().map(Entry::summary).as_deref(),
+            Some("you: start")
         );
+        assert!(workspace.transcript.last().is_some_and(|entry| {
+            entry
+                .summary()
+                .contains("resumed the previous agent session")
+        }));
         Ok(())
     }
 
@@ -3987,13 +4077,11 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Ready);
-        assert!(
-            workspace.transcript[0]
+        assert!(workspace.transcript.last().is_some_and(|entry| {
+            entry
                 .summary()
-                .contains("resumed the previous agent session fake-session-1"),
-            "unexpected resume note: {:?}",
-            workspace.transcript[0].summary()
-        );
+                .contains("resumed the previous agent session fake-session-1")
+        }));
 
         let sessions = TursoStore::open(&uri).await?.load_sessions().await?;
         assert_eq!(sessions.len(), 2, "each session start writes its own row");
@@ -4053,7 +4141,11 @@ mod tests {
 
         let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
         assert_eq!(workspace.task.state, TaskState::Ready);
-        let note = workspace.transcript[0].summary();
+        let note = workspace
+            .transcript
+            .last()
+            .ok_or("missing resume note")?
+            .summary();
         assert!(note.contains("cannot resume"), "unexpected note: {note}");
         assert!(
             note.contains("started a new session"),

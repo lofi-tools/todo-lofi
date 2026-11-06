@@ -4,16 +4,19 @@
 //! owns the session lifecycle: start, open, prompt, pause on approval, cancel and
 //! shutdown. It does not know which CLI is underneath.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_harness::{
     AdapterTier, AgentDiagnostics, AgentHarness, AgentTerminal, ApprovalId, ApprovalRequest,
-    Capabilities, Decision, Entry, FailureKind, HarnessError, HarnessEvent, ProjectApprovalPolicy,
-    PromptInput, SessionApproval, SessionId, SpawnSpec, Transcript,
+    Capabilities, Decision, Entry, EntryKind, FailureKind, HarnessError, HarnessEvent,
+    ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId, SpawnSpec, Transcript,
+    TranscriptChange,
 };
 use async_trait::async_trait;
 
+use crate::session::SessionRecord;
 use crate::store::{ProjectApproval, Store, checksum};
 use crate::{Agent, AgentTier, CoreError, ProjectId};
 
@@ -121,6 +124,7 @@ pub struct HarnessSession {
     capabilities: Capabilities,
     session_id: Option<SessionId>,
     transcript: Transcript,
+    dirty_entries: BTreeSet<usize>,
     agent_terminals: Vec<AgentTerminal>,
     pending_approval: Option<ApprovalId>,
     cancelling: bool,
@@ -135,6 +139,7 @@ impl HarnessSession {
             capabilities: Capabilities::default(),
             session_id: None,
             transcript: Transcript::default(),
+            dirty_entries: BTreeSet::new(),
             agent_terminals: Vec::new(),
             pending_approval: None,
             cancelling: false,
@@ -152,10 +157,15 @@ impl HarnessSession {
         &mut self,
         resume: Option<SessionId>,
     ) -> Result<SessionId, CoreError> {
+        let fresh = resume.is_none();
         let session_id = self.harness.open_session(resume).await?;
         let replay = self.harness.take_replayed_transcript();
+        if fresh {
+            // An adapter can reuse item IDs in a fresh session.
+            self.transcript.clear_adapter_row_keys();
+        }
         if self.transcript.is_empty() && !replay.is_empty() {
-            self.transcript.restore(replay);
+            self.restore_transcript(replay);
         }
         self.session_id = Some(session_id.clone());
         Ok(session_id)
@@ -164,7 +174,10 @@ impl HarnessSession {
     /// Record the user's prompt, ask the adapter, then fold every event the
     /// adapter has already produced into the transcript.
     pub async fn prompt(&mut self, text: String) -> Result<Vec<HarnessEvent>, CoreError> {
-        self.transcript.push_user_message(text.clone());
+        // Completed messages stay separate even if the adapter reuses an item ID.
+        self.transcript.clear_streaming_row_keys();
+        let change = self.transcript.push_user_message(text.clone());
+        self.track_entry(change);
         self.harness.prompt(PromptInput { text }).await?;
         Ok(self.pump())
     }
@@ -269,15 +282,18 @@ impl HarnessSession {
                 HarnessEvent::Exited { .. } | HarnessEvent::ConnectionFailed { .. } => {
                     self.cancelling = false;
                     if let Some(approval_id) = self.pending_approval.take() {
-                        self.transcript
+                        let change = self
+                            .transcript
                             .apply(&HarnessEvent::ApprovalWithdrawn { approval_id });
+                        self.track_entry(change);
                     }
                     self.closed = true;
                     self.agent_terminals.clear();
                 }
                 _ => {}
             }
-            self.transcript.apply(&event);
+            let change = self.transcript.apply(&event);
+            self.track_entry(change);
             events.push(event);
         }
         events
@@ -287,6 +303,44 @@ impl HarnessSession {
         &self.transcript
     }
 
+    fn track_entry(&mut self, change: TranscriptChange) {
+        if let Some(index) = change.changed {
+            self.dirty_entries.insert(index);
+        }
+        if change.appended
+            && let Some(index) = self.transcript.len().checked_sub(1)
+        {
+            self.dirty_entries.insert(index);
+        }
+    }
+
+    pub(crate) async fn persist_transcript(
+        &mut self,
+        store: &dyn Store,
+        record: &SessionRecord,
+        settled: bool,
+    ) -> Result<bool, CoreError> {
+        let transcript = &self.transcript;
+        let can_save =
+            |entry: &Entry| settled || matches!(entry.kind, EntryKind::UserMessage { .. });
+        let entries: Vec<_> = self
+            .dirty_entries
+            .iter()
+            .filter_map(|index| transcript.entry(*index))
+            .filter(|entry| can_save(entry))
+            .collect();
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        store.save_transcript_entries(record, &entries).await?;
+        self.dirty_entries.retain(|index| {
+            transcript
+                .entry(*index)
+                .is_some_and(|entry| !can_save(entry))
+        });
+        Ok(true)
+    }
+
     pub fn agent_terminals(&self) -> &[AgentTerminal] {
         &self.agent_terminals
     }
@@ -294,13 +348,15 @@ impl HarnessSession {
     /// Record a core-owned observation. Used when the core has to tell the user
     /// something the adapter cannot report, such as a lost session.
     pub fn note(&mut self, text: impl Into<String>, is_error: bool) {
-        self.transcript.push_notice(text, is_error);
+        let change = self.transcript.push_notice(text, is_error);
+        self.track_entry(change);
     }
 
     /// Replace the transcript, e.g. with rows carried over from a session that
     /// never started, so its failure row stays visible.
     pub fn restore_transcript(&mut self, entries: impl IntoIterator<Item = Entry>) {
         self.transcript.restore(entries);
+        self.dirty_entries = (0..self.transcript.len()).collect();
     }
 
     /// Record a failure row and mark the session unusable: the next prompt opens
@@ -312,7 +368,8 @@ impl HarnessSession {
         detail: Option<String>,
     ) {
         self.failed = true;
-        self.transcript.push_failure(kind, text, detail);
+        let change = self.transcript.push_failure(kind, text, detail);
+        self.track_entry(change);
     }
 
     pub fn is_closed(&self) -> bool {

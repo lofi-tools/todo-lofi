@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use agent_harness::Entry;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -68,6 +69,12 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
+    async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError>;
+    async fn save_transcript_entries(
+        &self,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError>;
     async fn project_approvals(
         &self,
         project: &ProjectId,
@@ -121,6 +128,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0008_project_preview_url.sql",
         sql: include_str!("../toasty/migrations/0008_project_preview_url.sql"),
     },
+    Migration {
+        name: "0009_transcript_entries.sql",
+        sql: include_str!("../toasty/migrations/0009_transcript_entries.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -153,6 +164,67 @@ impl TursoStore {
 
 #[async_trait]
 impl Store for TursoStore {
+    async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows =
+            toasty::sql::query("SELECT payload FROM entries WHERE task_id = ?1 ORDER BY sequence")
+                .column_types([Type::String])
+                .bind(task_id.as_str())
+                .exec(&mut *db)
+                .await?;
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(fields) = row else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a transcript entry record".into(),
+                    ));
+                };
+                let json = required_string(fields.first())?;
+                serde_json::from_str(&json).map_err(|error| {
+                    StoreError::InvalidRow(format!("invalid transcript entry: {error}"))
+                })
+            })
+            .collect()
+    }
+
+    async fn save_transcript_entries(
+        &self,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        let created_at = crate::projects::now_millis() as i64;
+        for entry in entries {
+            let payload = serde_json::to_value(entry).map_err(|error| {
+                StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
+            })?;
+            let kind = payload
+                .pointer("/kind/type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
+            toasty::sql::statement(
+                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload",
+            )
+            .bind(&session.id)
+            .bind(session.task_id.as_str())
+            .bind(&entry.id)
+            .bind(entry.sequence as i64)
+            .bind(kind)
+            .bind(payload.to_string())
+            .bind(created_at)
+            .exec(&mut transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     async fn project_approvals(
         &self,
         project: &ProjectId,
@@ -639,14 +711,18 @@ async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
             continue;
         }
 
+        let mut transaction = db.transaction().await?;
         for statement in split_sql(migration.sql) {
-            toasty::sql::statement(statement).exec(&mut *db).await?;
+            toasty::sql::statement(statement)
+                .exec(&mut transaction)
+                .await?;
         }
         toasty::sql::statement("INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)")
             .bind(migration.name)
             .bind(&expected)
-            .exec(&mut *db)
+            .exec(&mut transaction)
             .await?;
+        transaction.commit().await?;
     }
 
     Ok(())
@@ -834,6 +910,7 @@ pub struct MemoryStore {
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
     terminal_layouts: RwLock<BTreeMap<ProjectId, TerminalLayout>>,
     sessions: RwLock<Vec<SessionRecord>>,
+    transcripts: RwLock<BTreeMap<TaskId, BTreeMap<u64, Entry>>>,
     project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
 }
 
@@ -845,6 +922,30 @@ impl MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
+    async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError> {
+        Ok(self
+            .transcripts
+            .read()
+            .await
+            .get(task_id)
+            .into_iter()
+            .flat_map(|entries| entries.values().cloned())
+            .collect())
+    }
+
+    async fn save_transcript_entries(
+        &self,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError> {
+        let mut transcripts = self.transcripts.write().await;
+        let transcript = transcripts.entry(session.task_id.clone()).or_default();
+        for entry in entries {
+            transcript.insert(entry.sequence, (*entry).clone());
+        }
+        Ok(())
+    }
+
     async fn project_approvals(
         &self,
         project: &ProjectId,
@@ -922,6 +1023,7 @@ impl Store for MemoryStore {
         let mut tasks = self.tasks.write().await;
         tasks.remove(task_id.as_str());
         self.workspace_layouts.write().await.remove(task_id);
+        self.transcripts.write().await.remove(task_id);
         Ok(())
     }
 
@@ -1147,6 +1249,23 @@ mod tests {
         toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, created_at, updated_at) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', 1, 1)")
             .exec(&mut db)
             .await?;
+        let mut transcript = agent_harness::Transcript::default();
+        transcript.push_user_message("Legacy prompt");
+        let entry = transcript.entry(0).ok_or("missing legacy entry")?;
+        toasty::sql::statement(
+            "INSERT INTO sessions (id, task_id, adapter, state, started_at) \
+             VALUES ('session', 'task', 'codex', 'ended', 1)",
+        )
+        .exec(&mut db)
+        .await?;
+        toasty::sql::statement(
+            "INSERT INTO entries (session_id, id, sequence, kind, payload, created_at) \
+             VALUES ('session', ?1, 0, 'userMessage', ?2, 1)",
+        )
+        .bind(&entry.id)
+        .bind(serde_json::to_string(entry)?)
+        .exec(&mut db)
+        .await?;
         toasty::sql::statement("INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)")
             .bind(first.name)
             .bind(&expected)
@@ -1178,6 +1297,10 @@ mod tests {
         );
         let tasks = store.load_tasks().await?;
         assert_eq!(tasks.first().map(|task| task.agent), Some(Agent::Codex));
+        assert_eq!(
+            store.load_transcript(&TaskId::new("task")).await?,
+            transcript.entries()
+        );
         Ok(())
     }
 

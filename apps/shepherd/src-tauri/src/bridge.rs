@@ -845,9 +845,7 @@ impl ShellState {
 
     pub async fn task_workspace(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
         let task_id = TaskId::new(task_id);
-        let mut core = self.core.lock().await;
-        core.touch_archived_worktree(&task_id).await?;
-        Ok(core.task_workspace(&task_id)?)
+        Ok(self.core.lock().await.open_task_workspace(&task_id).await?)
     }
 
     async fn files_directory(

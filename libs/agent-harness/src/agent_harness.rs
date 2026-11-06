@@ -716,10 +716,19 @@ impl Transcript {
 
     pub fn reset(&mut self) {
         self.entries.clear();
+        self.clear_adapter_row_keys();
+        self.next_sequence = 0;
+    }
+
+    pub fn clear_adapter_row_keys(&mut self) {
         self.item_rows.clear();
         self.tool_rows.clear();
         self.approval_rows.clear();
-        self.next_sequence = 0;
+    }
+
+    pub fn clear_streaming_row_keys(&mut self) {
+        self.item_rows
+            .retain(|key, _| key == "plan" || key == "usage");
     }
 
     /// Rebuild from persisted rows. Canonical IDs, sequence numbers and adapter
