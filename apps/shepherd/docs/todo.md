@@ -899,8 +899,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   and agent panes follow the reported capabilities. Reopening distinguishes
   verified resume, legacy reconnect and a fresh session. The desktop launches
   the detected Codex exec fallback when app-server is unavailable.
-- [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have
-  visible outcomes.
+- [x] Missing binary, auth failure, protocol failure and mid-turn exit all have
+  visible outcomes for the Codex, OpenCode and ACP task adapters. The task keeps
+  the agent's reason after reopening. Startup failures leave the task ready to
+  retry. Failed turns offer recovery based on the stored session capabilities.
 
 ### Proof
 

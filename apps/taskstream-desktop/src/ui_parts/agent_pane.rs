@@ -1625,6 +1625,7 @@ impl AgentPane {
                 AcpEvent::Stderr(line) => {
                     tracing::debug!("agent stderr: {line}");
                 }
+                AcpEvent::ProtocolFailed { message } => tracing::warn!(%message, "ACP transport failed"),
                 AcpEvent::Exited { code, .. } => {
                     let detail = entry
                         .live()

@@ -35,7 +35,10 @@ fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, 
         None => {
             tracing::warn!("{}", detection.summary());
             (
-                Box::new(codex_harness::MissingCodexFactory::new(detection.summary())),
+                Box::new(codex_harness::MissingCodexFactory::new(
+                    detection.summary(),
+                    detection.failure_kind(),
+                )),
                 None,
             )
         }

@@ -73,9 +73,25 @@ impl AgentInfo {
 #[derive(Clone)]
 pub struct Requester {
     connection: ConnectionTo<Agent>,
+    auth_methods: Arc<[AuthMethod]>,
 }
 
 impl Requester {
+    fn request_error(&self, error: acp::Error) -> AcpError {
+        match AcpError::from(error) {
+            AcpError::AuthRequired(message) if !self.auth_methods.is_empty() => {
+                let methods = self
+                    .auth_methods
+                    .iter()
+                    .map(AuthMethod::name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                AcpError::AuthRequired(format!("{message}. Agent sign-in methods: {methods}"))
+            }
+            error => error,
+        }
+    }
+
     /// Create a session rooted at `cwd` with extra workspace roots and any MCP
     /// servers to attach (the agent must advertise the matching transport).
     pub async fn new_session(
@@ -99,7 +115,7 @@ impl Requester {
             .send_request(request)
             .block_task()
             .await
-            .map_err(AcpError::from)?;
+            .map_err(|error| self.request_error(error))?;
         Ok((
             response.session_id,
             response.modes,
@@ -123,7 +139,7 @@ impl Requester {
             .send_request(request)
             .block_task()
             .await
-            .map_err(AcpError::from)?;
+            .map_err(|error| self.request_error(error))?;
         Ok((response.modes, response.config_options.unwrap_or_default()))
     }
 
@@ -142,7 +158,7 @@ impl Requester {
             .send_request(request)
             .block_task()
             .await
-            .map_err(AcpError::from)?;
+            .map_err(|error| self.request_error(error))?;
         Ok(response.stop_reason)
     }
 
@@ -345,7 +361,7 @@ pub(crate) async fn connect_over_with_terminals<T>(
 where
     T: ConnectTo<Client> + 'static,
 {
-    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
     let stderr_buffer = Arc::new(Mutex::new(VecDeque::new()));
     let transport = build_transport(events_tx.clone(), stderr_buffer.clone());
     let (ready_tx, ready_rx) = oneshot::channel();
@@ -564,7 +580,16 @@ where
                 )
                 .block_task();
             let initialize = tokio::select! {
-                initialize = initialize => initialize?,
+                initialize = initialize => match initialize {
+                    Ok(response) => response,
+                    Err(error) if !acp::is_incoming_transport_closed(&error) => {
+                        if ready_tx.send(Err(error.into())).is_err() {
+                            tracing::debug!("ACP caller dropped during initialization");
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                },
                 _ = &mut shutdown_rx => return Ok(()),
             };
             if initialize.protocol_version != ProtocolVersion::V1 {
@@ -617,9 +642,20 @@ where
     let (requester, info) = match ready_rx.await {
         Ok(result) => {
             let (connection, info) = result?;
-            (Requester { connection }, info)
+            (
+                Requester {
+                    connection,
+                    auth_methods: info.auth_methods.clone().into(),
+                },
+                info,
+            )
         }
         Err(_) => {
+            while let Ok(event) = events_rx.try_recv() {
+                if let AcpEvent::ProtocolFailed { message } = event {
+                    return Err(AcpError::Protocol(message));
+                }
+            }
             // The ready channel and the stderr drain task race on the process's
             // final output; give the drain a moment to flush before capturing
             // the diagnostic context.
@@ -785,7 +821,29 @@ impl ConnectTo<Client> for ProjectAgent {
             None
         };
 
-        let incoming = BufReader::new(stdout).lines();
+        let protocol_events = self.events.clone();
+        let incoming = futures::StreamExt::map(BufReader::new(stdout).lines(), move |line| {
+            let line = line?;
+            if !line.trim().is_empty()
+                && let Err(error) = serde_json::from_str::<serde::de::IgnoredAny>(&line)
+            {
+                let message = format!("The ACP agent sent malformed JSON: {error}");
+                if let Some(events) = &protocol_events
+                    && events
+                        .send(AcpEvent::ProtocolFailed {
+                            message: message.clone(),
+                        })
+                        .is_err()
+                {
+                    tracing::debug!("ACP protocol failure receiver closed");
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    message,
+                ));
+            }
+            Ok(line)
+        });
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
             writer.write_all(line.as_bytes()).await?;
             writer.write_all(b"\n").await?;

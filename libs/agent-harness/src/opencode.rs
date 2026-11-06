@@ -14,7 +14,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -22,9 +22,9 @@ use crate::acp::{AcpHarness, TerminalBackend};
 use crate::settings::AgentSettings;
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
-    Decision, DeltaKind, Entry, HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput,
-    SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
-    command_line,
+    Decision, DeltaKind, Entry, FailureKind, HarnessError, HarnessEvent, HarnessResult, ItemId,
+    PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason,
+    TurnId, command_line,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -241,7 +241,7 @@ impl AgentHarness for OpenCodeHarness {
         };
         let server = match native.await {
             Ok(server) => server,
-            Err(HarnessError::Protocol(reason)) => {
+            Err(HarnessError::Protocol(reason) | HarnessError::TransportClosed(reason)) => {
                 spec.args.push("acp".into());
                 spec.environment
                     .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
@@ -256,9 +256,10 @@ impl AgentHarness for OpenCodeHarness {
                 self.diagnostics.fallback_reason =
                     Some(format!("OpenCode native server unavailable: {reason}"));
                 let capabilities = fallback.start(spec).await.map_err(|error| {
-                    HarnessError::Protocol(format!(
-                        "OpenCode native server unavailable: {reason}. ACP fallback failed: {error}"
-                    ))
+                    HarnessError::Reported {
+                        kind: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
+                        message: format!("OpenCode native server unavailable: {reason}. ACP fallback failed: {error}"),
+                    }
                 })?;
                 self.fallback = Some(fallback);
                 return Ok(capabilities);
@@ -349,19 +350,49 @@ impl AgentHarness for OpenCodeHarness {
             let finished = finished.clone();
             let remove = server.request(Method::DELETE, &format!("{path}/inbox/{id}"));
             let interrupt = server.request(Method::POST, &format!("{path}/interrupt"));
+            let child = server.child.clone();
+            let stderr = server.stderr.clone();
             async move {
                 let terminal = match read_turn(events, session, &id, &sender).await {
                     Ok(event) => event,
                     Err(error) => {
-                        if let Err(cleanup) = send_request(remove).await {
-                            tracing::warn!(%cleanup, "could not remove the disconnected OpenCode prompt");
-                        }
-                        if let Err(cleanup) = send_request(interrupt).await {
-                            tracing::warn!(%cleanup, "could not interrupt the disconnected OpenCode turn");
-                        }
-                        HarnessEvent::Exited {
-                            code: None,
-                            stderr: error.to_string(),
+                        let exit = if matches!(error, HarnessError::TransportClosed(_)) {
+                            match timeout(Duration::from_millis(250), child.lock().await.wait())
+                                .await
+                            {
+                                Ok(status) => status.map(Some),
+                                Err(_) => Ok(None),
+                            }
+                        } else {
+                            child.lock().await.try_wait()
+                        };
+                        if let Ok(Some(status)) = exit {
+                            HarnessEvent::Exited {
+                                code: status.code(),
+                                stderr: stderr_tail(&stderr),
+                            }
+                        } else {
+                            if let Err(status) = exit {
+                                tracing::warn!(%status, "could not read the OpenCode exit status");
+                            }
+                            if timeout(Duration::from_secs(1), async {
+                                if let Err(cleanup) = send_request(remove).await {
+                                    tracing::warn!(%cleanup, "could not remove the disconnected OpenCode prompt");
+                                }
+                                if let Err(cleanup) = send_request(interrupt).await {
+                                    tracing::warn!(%cleanup, "could not interrupt the disconnected OpenCode turn");
+                                }
+                            }).await.is_err() {
+                                tracing::warn!("OpenCode turn cleanup timed out");
+                            }
+                            if let Err(stop) = child.lock().await.kill().await {
+                                tracing::debug!(%stop, "could not stop OpenCode after the connection failed");
+                            }
+                            HarnessEvent::ConnectionFailed {
+                                kind: FailureKind::classify(&error)
+                                    .unwrap_or(FailureKind::Protocol),
+                                text: error.to_string(),
+                            }
                         }
                     }
                 };
@@ -487,6 +518,23 @@ async fn read_turn(
                 "OpenCode requested a form that Shepherd cannot display".into(),
             ));
         }
+        if event.kind == "session.execution.failed" {
+            let error = &event.data["error"];
+            if let Some(message) = error["message"].as_str().or_else(|| error.as_str()) {
+                let kind = if error["statusCode"] == 401 {
+                    FailureKind::AuthRequired
+                } else {
+                    FailureKind::from_message(message, FailureKind::AgentRejected)
+                };
+                publish(
+                    sender,
+                    HarnessEvent::TurnError {
+                        kind,
+                        text: message.to_owned(),
+                    },
+                )?;
+            }
+        }
         let Some(event) = transcript.apply(event)? else {
             continue;
         };
@@ -511,7 +559,7 @@ async fn read_turn(
 
 /// A loopback server owned by one Shepherd task.
 pub struct OpenCodeServer {
-    child: Child,
+    child: Arc<AsyncMutex<Child>>,
     client: Client,
     address: Url,
     password: String,
@@ -766,10 +814,13 @@ impl OpenCodeEvents {
                 return event;
             }
             let chunk = self.response.chunk().await.map_err(|error| {
-                protocol_error("could not read OpenCode event stream", error.without_url())
+                HarnessError::TransportClosed(format!(
+                    "Could not read the OpenCode event stream: {}",
+                    error.without_url()
+                ))
             })?;
             let chunk = chunk.ok_or_else(|| {
-                HarnessError::Protocol("OpenCode event stream disconnected".into())
+                HarnessError::TransportClosed("The OpenCode event stream disconnected.".into())
             })?;
             if let Err(error) = self.decoder.push(&chunk, &mut self.pending) {
                 self.pending.push_back(Err(error));
@@ -928,7 +979,7 @@ impl OpenCodeServer {
         let api: Api = response_json(request("/openapi.json")).await?;
         let probe = api.probe(health)?;
         Ok(Self {
-            child,
+            child: Arc::new(AsyncMutex::new(child)),
             client,
             address,
             password,
@@ -943,13 +994,7 @@ impl OpenCodeServer {
     }
 
     fn stderr_tail(&self) -> String {
-        match self.stderr.lock() {
-            Ok(tail) => tail.iter().cloned().collect::<Vec<_>>().join("\n"),
-            Err(error) => {
-                tracing::error!(%error, "could not read the OpenCode stderr tail");
-                String::new()
-            }
-        }
+        stderr_tail(&self.stderr)
     }
 
     pub async fn subscribe(&self) -> HarnessResult<OpenCodeEvents> {
@@ -960,12 +1005,7 @@ impl OpenCodeServer {
                 .send()
                 .await
                 .and_then(Response::error_for_status)
-                .map_err(|error| {
-                    protocol_error(
-                        "could not subscribe to OpenCode events",
-                        error.without_url(),
-                    )
-                })?;
+                .map_err(|error| http_error("could not subscribe to OpenCode events", error))?;
             let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
             if !content_type
                 .and_then(|value| value.to_str().ok())
@@ -1055,8 +1095,10 @@ impl OpenCodeServer {
         Ok(())
     }
 
-    pub async fn shutdown(mut self) -> HarnessResult<()> {
+    pub async fn shutdown(self) -> HarnessResult<()> {
         self.child
+            .lock()
+            .await
             .kill()
             .await
             .map_err(|error| protocol_error("could not stop OpenCode server", error))
@@ -1080,6 +1122,16 @@ impl OpenCodeServer {
         let session = SessionId::new(record.id);
         session_path(&session)?;
         Ok(session)
+    }
+}
+
+fn stderr_tail(stderr: &Mutex<VecDeque<String>>) -> String {
+    match stderr.lock() {
+        Ok(tail) => tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+        Err(error) => {
+            tracing::error!(%error, "could not read the OpenCode stderr tail");
+            String::new()
+        }
     }
 }
 
@@ -1123,7 +1175,18 @@ async fn send_request(request: RequestBuilder) -> HarnessResult<Response> {
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| protocol_error("OpenCode HTTP request failed", error.without_url()))
+        .map_err(|error| http_error("OpenCode HTTP request failed", error))
+}
+
+fn http_error(context: &str, error: reqwest::Error) -> HarnessError {
+    if error.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+        HarnessError::Reported {
+            kind: FailureKind::AuthRequired,
+            message: format!("{context}: OpenCode returned HTTP 401 Unauthorized"),
+        }
+    } else {
+        protocol_error(context, error.without_url())
+    }
 }
 
 async fn response_json<T: DeserializeOwned>(request: RequestBuilder) -> HarnessResult<T> {
@@ -1391,6 +1454,19 @@ mod tests {
     #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_streams_a_turn_through_a_local_fixture()
     -> Result<(), Box<dyn std::error::Error>> {
+        installed_harness_with_fixture_provider(false).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_reports_a_provider_sign_in_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        installed_harness_with_fixture_provider(true).await
+    }
+
+    async fn installed_harness_with_fixture_provider(
+        unauthorized: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let mut spec = installed_fixture_spec(root.path())?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1420,24 +1496,60 @@ mod tests {
             "OPENCODE_CONFIG".into(),
             config.to_string_lossy().into_owned(),
         );
-        let provider = tokio::spawn(serve_fixture_model(listener));
+        let provider = tokio::spawn(serve_fixture_model(listener, unauthorized));
         let outcome = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
             assert_eq!(harness.tier(), AdapterTier::Native);
             harness.open_session(None).await?;
-            let transcript = fixture_reply(&mut harness).await?;
+            let transcript = if unauthorized {
+                harness
+                    .prompt(PromptInput {
+                        text: "test local sign-in failure".into(),
+                    })
+                    .await?;
+                timeout(REQUEST_TIMEOUT, async {
+                    let mut transcript = crate::Transcript::default();
+                    while let Some(event) = harness.events().recv().await {
+                        transcript.apply(&event);
+                        if matches!(
+                            event,
+                            HarnessEvent::TurnFinished {
+                                reason: TurnFinishReason::Failed
+                            }
+                        ) {
+                            return Ok(transcript);
+                        }
+                    }
+                    Err(HarnessError::ChannelClosed)
+                })
+                .await
+                .map_err(|error| protocol_error("fixture turn timed out", error))??
+            } else {
+                fixture_reply(&mut harness).await?
+            };
             harness.shutdown().await?;
             Ok::<_, HarnessError>(transcript)
         }
         .await;
         provider.abort();
         let transcript = outcome?;
-        assert_eq!(transcript.len(), 1);
-        assert_eq!(
-            transcript.entry(0).map(crate::Entry::summary).as_deref(),
-            Some("agent: local fixture reply")
-        );
+        if unauthorized {
+            assert!(
+                transcript
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.summary().contains("sign-in required")),
+                "{:?}",
+                transcript.entries()
+            );
+        } else {
+            assert_eq!(transcript.len(), 1);
+            assert_eq!(
+                transcript.entry(0).map(crate::Entry::summary).as_deref(),
+                Some("agent: local fixture reply")
+            );
+        }
         Ok(())
     }
 
@@ -1599,7 +1711,7 @@ done
         })
     }
 
-    async fn serve_fixture_model(listener: TcpListener) -> std::io::Result<()> {
+    async fn serve_fixture_model(listener: TcpListener, unauthorized: bool) -> std::io::Result<()> {
         loop {
             let (socket, _) = listener.accept().await?;
             let (reader, mut writer) = socket.into_split();
@@ -1613,6 +1725,16 @@ done
                 line.clear();
             }
             tokio::io::copy(&mut reader.take(length), &mut tokio::io::sink()).await?;
+            if unauthorized {
+                let body = r#"{"error":{"message":"Local fixture credential expired","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                writer.write_all(response.as_bytes()).await?;
+                writer.shutdown().await?;
+                continue;
+            }
             let mut body = String::new();
             for (delta, finish) in [
                 (

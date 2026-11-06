@@ -556,11 +556,15 @@ substitutions resolved at spawn (§11.1); resolved values are never stored.
 | probe fails / protocol unsupported | tier downgraded with the reason and the next tier offered |
 | initialize or handshake fails | error row with captured stderr and retry |
 | Pi approval bridge unavailable | RPC continues; task labelled **unreviewed tools**, diagnostics name the missing bridge, and no approval is claimed |
-| agent exits mid-turn | state `failed`, exit code and stderr tail shown, resume offered |
-| protocol error | request fails, turn ends, notice row; connection closed if fatal |
-| prompt rejected (auth/limits) | error row with auth methods or the agent's message |
+| agent exits mid-turn | state `failed`, observed exit code and stderr tail shown, recovery offered |
+| protocol error | error row with the protocol failure, connection closed if fatal |
+| prompt rejected (auth/limits) | error row with the agent's message and advertised sign-in methods when available |
 | app quits or crashes | task `interrupted`; resume offered; leftover process offered for termination |
 | wrapper manifest missing | plain pane with a notice, no state badge |
+
+The task saves the latest failure message so it can be shown after reopening.
+Launch failures allow another prompt after the problem is resolved. For failed
+turns, the recovery action reflects the capabilities of the recorded session.
 
 ## 5. Terminal service
 

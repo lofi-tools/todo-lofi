@@ -66,13 +66,13 @@ test.beforeEach(async ({ context }) => {
         id: 'task-1',
         projectId: 'project-1',
         title: 'Ship it',
-        state: options.has('interrupted-task') ? 'interrupted'
+        state: options.has('agent-failed') ? 'failed' : options.has('interrupted-task') ? 'interrupted'
           : ['approval-fixture', 'scoped-approval', 'project-approval'].some((name) => options.has(name)) ? 'waiting' : 'ready',
         agent: options.has('acp-fallback') ? 'opencode' : 'codex',
         tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
-        error: null,
+        error: options.has('agent-failed') ? 'The agent exited with code 23 before the turn finished.' : null,
         createdAt: 1_760_000_000_000,
       },
     ]
@@ -124,6 +124,12 @@ test.beforeEach(async ({ context }) => {
           },
         },
       ],
+    }
+    if (options.has('agent-failed')) {
+      transcripts['task-1'] = options.has('reopened') ? [] : [entry('failure-1', 1, {
+        type: 'failure',
+        data: { kind: 'midTurnExit', text: tasks[0].error, detail: 'Agent stderr fixture' },
+      })]
     }
 
     const terminals: TerminalSnapshot[] = [
@@ -244,7 +250,7 @@ test.beforeEach(async ({ context }) => {
         agentTerminals: agentTerminals.get(taskId) ?? [],
         adapterTier: task.state === 'draft' ? null : task.tier,
         capabilities,
-        recovery: task.state === 'interrupted' ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
+        recovery: ['failed', 'interrupted'].includes(task.state) ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
         diagnostics: options.has('acp-fallback') ? {
           command: '/existing/opencode acp', protocol: 'ACP v1 OpenCode 2.0.14',
           fallbackReason: 'OpenCode native server unavailable: no loopback server', stderrTail: 'agent stderr',
@@ -1495,6 +1501,17 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   const model = composer.getByRole('menu', { name: 'Model / effort' })
   await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
   await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
+})
+
+test('shows the agent exit and resume action, including after reopening', async ({ page }) => {
+  await page.goto('/?agent-failed')
+  await expect(page.getByText('Agent exited mid-turn', { exact: true })).toBeVisible()
+  await expect(page.getByText('Agent stderr fixture')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+
+  await page.goto('/?agent-failed&reopened')
+  await expect(page.getByRole('alert')).toContainText('The agent exited with code 23')
+  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {

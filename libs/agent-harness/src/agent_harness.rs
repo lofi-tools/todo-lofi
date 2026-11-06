@@ -69,6 +69,10 @@ pub enum HarnessError {
     },
     #[error("adapter protocol error: {0}")]
     Protocol(String),
+    #[error("{message}")]
+    Reported { kind: FailureKind, message: String },
+    #[error("{0}")]
+    TransportClosed(String),
 }
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
@@ -82,6 +86,7 @@ pub enum FailureKind {
     MissingBinary,
     UnsupportedVersion,
     AuthRequired,
+    AgentRejected,
     Protocol,
     MidTurnExit,
 }
@@ -95,33 +100,43 @@ impl FailureKind {
             HarnessError::Spawn { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
                 Some(Self::MissingBinary)
             }
-            HarnessError::Protocol(message) => {
-                let message = message.to_lowercase();
-                let says_one =
-                    |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
-                if says_one(&[
-                    "unauthorized",
-                    "401",
-                    "login",
-                    "authentication",
-                    "api key",
-                    "credential",
-                ]) {
-                    Some(Self::AuthRequired)
-                } else if says_one(&[
-                    "unsupported",
-                    "does not support",
-                    "unknown method",
-                    "method not found",
-                    "unknown command",
-                    "unexpected argument",
-                ]) {
-                    Some(Self::UnsupportedVersion)
-                } else {
-                    Some(Self::Protocol)
-                }
-            }
+            HarnessError::Reported { kind, .. } => Some(*kind),
+            HarnessError::Protocol(message) => Some(Self::from_message(message, Self::Protocol)),
+            HarnessError::Spawn { .. }
+            | HarnessError::WriteFile { .. }
+            | HarnessError::TransportClosed(_)
+            | HarnessError::ChannelClosed => Some(Self::Protocol),
             _ => None,
+        }
+    }
+
+    pub(crate) fn from_message(message: &str, fallback: Self) -> Self {
+        let message = message.to_lowercase();
+        let says_one = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
+        if says_one(&[
+            "unauthorized",
+            "unauthenticated",
+            "401 unauthorized",
+            "login",
+            "log in",
+            "sign in",
+            "sign-in",
+            "authentication",
+            "api key",
+            "credential",
+        ]) {
+            Self::AuthRequired
+        } else if says_one(&[
+            "unsupported",
+            "does not support",
+            "unknown method",
+            "method not found",
+            "unknown command",
+            "unexpected argument",
+        ]) {
+            Self::UnsupportedVersion
+        } else {
+            fallback
         }
     }
 
@@ -130,6 +145,7 @@ impl FailureKind {
             Self::MissingBinary => "agent not installed",
             Self::UnsupportedVersion => "version not supported",
             Self::AuthRequired => "sign-in required",
+            Self::AgentRejected => "agent rejected the turn",
             Self::Protocol => "protocol error",
             Self::MidTurnExit => "agent exited mid-turn",
         }
@@ -139,12 +155,13 @@ impl FailureKind {
     pub fn hint(self) -> &'static str {
         match self {
             Self::MissingBinary => {
-                "Install the agent, or point Shepherd at its path in Settings, then retry."
+                "Install the agent or correct its configured executable path, then retry."
             }
             Self::UnsupportedVersion => {
                 "Update the agent; this build does not speak the protocol Shepherd needs."
             }
             Self::AuthRequired => "Sign in to the agent, then retry.",
+            Self::AgentRejected => "Check the agent's message before retrying.",
             Self::Protocol => "The agent's response could not be used; retry the turn.",
             Self::MidTurnExit => {
                 "The turn stopped before it finished; resume the task to continue."
@@ -535,6 +552,10 @@ pub enum HarnessEvent {
         kind: FailureKind,
         text: String,
     },
+    ConnectionFailed {
+        kind: FailureKind,
+        text: String,
+    },
     TurnFinished {
         reason: TurnFinishReason,
     },
@@ -824,7 +845,11 @@ impl Transcript {
                 self.settle_approval(approval_id.as_str(), None)
             }
             HarnessEvent::ApprovalPolicyError { text } => self.push_notice(text, true),
-            HarnessEvent::TurnError { kind, text } => {
+            HarnessEvent::TurnError { kind, text }
+            | HarnessEvent::ConnectionFailed { kind, text } => {
+                if matches!(event, HarnessEvent::ConnectionFailed { .. }) {
+                    self.stop_unfinished_commands();
+                }
                 self.push_failure(*kind, text.clone(), Some(kind.hint().to_string()))
             }
             _ => TranscriptChange::default(),

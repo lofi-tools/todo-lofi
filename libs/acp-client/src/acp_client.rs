@@ -54,6 +54,10 @@ pub enum AcpError {
     Launch(String),
     #[error("the agent speaks protocol version {agent}, which this client does not support")]
     UnsupportedVersion { agent: String },
+    #[error("{0}")]
+    AuthRequired(String),
+    #[error("{0}")]
+    TransportClosed(String),
     #[error("agent protocol error: {0}")]
     Protocol(String),
     #[error("the agent process exited{code}: {stderr}")]
@@ -62,7 +66,13 @@ pub enum AcpError {
 
 impl From<acp::Error> for AcpError {
     fn from(error: acp::Error) -> Self {
-        AcpError::Protocol(error.to_string())
+        if error.code == acp::ErrorCode::AuthRequired {
+            AcpError::AuthRequired(error.message)
+        } else if acp::is_incoming_transport_closed(&error) {
+            AcpError::TransportClosed(error.message)
+        } else {
+            AcpError::Protocol(error.message)
+        }
     }
 }
 
@@ -106,6 +116,9 @@ pub enum AcpEvent {
     },
     /// A line captured from the agent's stderr.
     Stderr(String),
+    ProtocolFailed {
+        message: String,
+    },
     /// The agent process exited.
     Exited {
         code: Option<i32>,
@@ -162,6 +175,9 @@ impl std::fmt::Debug for AcpEvent {
                 .field("choice", choice)
                 .finish(),
             Self::Stderr(line) => f.debug_tuple("Stderr").field(line).finish(),
+            Self::ProtocolFailed { message } => {
+                f.debug_tuple("ProtocolFailed").field(message).finish()
+            }
             Self::Exited { code, stderr } => f
                 .debug_struct("Exited")
                 .field("code", code)

@@ -20,7 +20,7 @@ use acp_client::{
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, ApprovalSource,
@@ -308,6 +308,15 @@ fn configured_model(options: &[schema::SessionConfigOption]) -> Option<String> {
 fn acp_error(error: AcpError) -> HarnessError {
     match error {
         AcpError::AgentNotFound { program } => HarnessError::MissingProgram { program },
+        AcpError::AuthRequired(message) => HarnessError::Reported {
+            kind: FailureKind::AuthRequired,
+            message,
+        },
+        AcpError::UnsupportedVersion { .. } => HarnessError::Reported {
+            kind: FailureKind::UnsupportedVersion,
+            message: error.to_string(),
+        },
+        AcpError::TransportClosed(message) => HarnessError::TransportClosed(message),
         other => protocol(other.to_string()),
     }
 }
@@ -394,6 +403,7 @@ async fn drive_session(
     let mut terminals = HashSet::new();
     let mut released = Vec::new();
     let mut cancelling = false;
+    let mut disconnect_deadline = None;
     loop {
         tokio::select! {
             biased;
@@ -443,9 +453,15 @@ async fn drive_session(
                         withdraw_approvals(&sender, &mut approvals)?;
                         return publish(&sender, HarnessEvent::Exited { code, stderr });
                     }
+                    Some(AcpEvent::ProtocolFailed { message }) => {
+                        withdraw_approvals(&sender, &mut approvals)?;
+                        return publish(&sender, HarnessEvent::ConnectionFailed { kind: FailureKind::Protocol, text: message });
+                    }
                     None => {
                         withdraw_approvals(&sender, &mut approvals)?;
-                        return publish(&sender, HarnessEvent::Exited { code: None, stderr: "ACP connection closed".into() });
+                        return publish(&sender, HarnessEvent::ConnectionFailed {
+                            kind: FailureKind::Protocol, text: "The ACP connection closed.".into(),
+                        });
                     }
                     _ => {}
                 }
@@ -462,13 +478,30 @@ async fn drive_session(
                 for id in released.drain(..) {
                     publish(&sender, HarnessEvent::AgentTerminalRemoved { id })?;
                 }
+                if matches!(outcome, Err(AcpError::TransportClosed(_))) {
+                    // The process supervisor can report the actual status after the wire closes.
+                    disconnect_deadline = Some(Instant::now() + Duration::from_secs(1));
+                    continue;
+                }
                 let reason = finish_turn(&sender, outcome)?;
                 publish(&sender, HarnessEvent::TurnFinished { reason })?;
+            }
+            _ = async {
+                match disconnect_deadline {
+                    Some(deadline) => sleep_until(deadline).await,
+                    None => pending().await,
+                }
+            } => {
+                return publish(&sender, HarnessEvent::ConnectionFailed {
+                    kind: FailureKind::Protocol,
+                    text: "The ACP connection closed without an exit status.".into(),
+                });
             }
             command = commands.recv() => {
                 let Some((command, answer)) = command else { return Ok(()); };
                 let result = match command {
                     Control::Prompt(_) if prompt.is_some() => Err(protocol("ACP turn is already running")),
+                    Control::Prompt(_) if disconnect_deadline.is_some() => Err(protocol("the ACP connection is closing")),
                     Control::Prompt(text) => {
                         updates = Updates::default();
                         publish(&sender, HarnessEvent::TurnStarted { turn_id: TurnId::new(uuid::Uuid::new_v4().to_string()) })?;
@@ -508,25 +541,34 @@ fn finish_turn(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     outcome: Result<StopReason, AcpError>,
 ) -> HarnessResult<TurnFinishReason> {
-    let failure = match outcome {
+    let (kind, text) = match outcome {
         Ok(StopReason::EndTurn) => return Ok(TurnFinishReason::Completed),
         Ok(StopReason::Cancelled) => return Ok(TurnFinishReason::Cancelled),
-        Ok(StopReason::MaxTokens) => "The ACP agent reached its token limit".to_string(),
-        Ok(StopReason::MaxTurnRequests) => {
-            "The ACP agent reached its turn request limit".to_string()
+        Ok(StopReason::MaxTokens) => (
+            FailureKind::AgentRejected,
+            "The ACP agent reached its token limit".into(),
+        ),
+        Ok(StopReason::MaxTurnRequests) => (
+            FailureKind::AgentRejected,
+            "The ACP agent reached its turn request limit".into(),
+        ),
+        Ok(StopReason::Refusal) => (
+            FailureKind::AgentRejected,
+            "The ACP agent refused to continue".into(),
+        ),
+        Ok(reason) => (
+            FailureKind::AgentRejected,
+            format!("The ACP agent stopped the turn ({reason:?})"),
+        ),
+        Err(error) => {
+            let error = acp_error(error);
+            (
+                FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
+                error.to_string(),
+            )
         }
-        Ok(StopReason::Refusal) => "The ACP agent refused to continue".to_string(),
-        Ok(reason) => format!("The ACP agent stopped the turn ({reason:?})"),
-        Err(error) => error.to_string(),
     };
-    let kind = FailureKind::classify(&protocol(&failure)).unwrap_or(FailureKind::Protocol);
-    publish(
-        sender,
-        HarnessEvent::TurnError {
-            kind,
-            text: failure,
-        },
-    )?;
+    publish(sender, HarnessEvent::TurnError { kind, text })?;
     Ok(TurnFinishReason::Failed)
 }
 
@@ -1034,6 +1076,7 @@ fn replay_history(
                     "ACP agent exited while loading history ({code:?}): {stderr}"
                 )));
             }
+            AcpEvent::ProtocolFailed { message } => return Err(protocol(message)),
             event @ (AcpEvent::TerminalStarted { .. }
             | AcpEvent::TerminalExited { .. }
             | AcpEvent::TerminalReleased { .. }) => startup_events.push_back(event),
@@ -1076,6 +1119,92 @@ mod tests {
         let mut harness = AcpHarness::default();
         let capabilities = harness.attach(connection, cwd, "fake-acp".into());
         Ok((harness, capabilities, observed))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn separates_sign_in_protocol_and_exit_failures() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("acp-failure.sh");
+        std::fs::write(
+            &script,
+            r#"
+while IFS= read -r request; do
+    id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+    case "$request" in
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"authMethods":[{"id":"cli","name":"Local CLI sign-in"}]}}\n' "$id";;
+        *'"method":"session/new"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"fixture"}}\n' "$id";;
+        *'"method":"session/prompt"'*)
+            case "$1" in
+                auth) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Account expired"}}\n' "$id";;
+                protocol) echo 'not valid JSON';;
+                exit) echo 'ACP fixture crashed' >&2; exit 23;;
+            esac;;
+    esac
+done
+"#,
+        )?;
+        for mode in ["auth", "protocol", "exit"] {
+            let mut harness = AcpHarness::default();
+            harness
+                .start(SpawnSpec {
+                    program: "/bin/sh".into(),
+                    args: vec![script.to_string_lossy().into_owned(), mode.into()],
+                    cwd: directory.path().to_owned(),
+                    ..SpawnSpec::default()
+                })
+                .await?;
+            harness.open_session(None).await?;
+            harness.prompt(PromptInput { text: "go".into() }).await?;
+            let outcome = timeout(Duration::from_secs(5), async {
+                while let Some(event) = harness.events().recv().await {
+                    if matches!(
+                        event,
+                        HarnessEvent::TurnError { .. }
+                            | HarnessEvent::ConnectionFailed { .. }
+                            | HarnessEvent::Exited { .. }
+                    ) {
+                        return Ok(event);
+                    }
+                }
+                Err(HarnessError::ChannelClosed)
+            })
+            .await??;
+            match (mode, outcome) {
+                (
+                    "auth",
+                    HarnessEvent::TurnError {
+                        kind: FailureKind::AuthRequired,
+                        text,
+                    },
+                ) => {
+                    assert!(
+                        text.contains("Account expired") && text.contains("Local CLI sign-in"),
+                        "{text}"
+                    );
+                }
+                (
+                    "protocol",
+                    HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text,
+                    },
+                ) => assert!(text.contains("malformed JSON")),
+                (
+                    "exit",
+                    HarnessEvent::Exited {
+                        code: Some(23),
+                        stderr,
+                    },
+                ) => assert!(stderr.contains("ACP fixture crashed")),
+                (mode, event) => panic!("{mode}: {event:?}"),
+            }
+            harness.shutdown().await?;
+        }
+        Ok(())
     }
 
     struct ExitingTerminal;

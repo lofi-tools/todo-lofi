@@ -266,9 +266,12 @@ impl HarnessSession {
                     self.cancelling = false;
                     self.pending_approval = None;
                 }
-                HarnessEvent::Exited { .. } => {
+                HarnessEvent::Exited { .. } | HarnessEvent::ConnectionFailed { .. } => {
                     self.cancelling = false;
-                    self.pending_approval = None;
+                    if let Some(approval_id) = self.pending_approval.take() {
+                        self.transcript
+                            .apply(&HarnessEvent::ApprovalWithdrawn { approval_id });
+                    }
                     self.closed = true;
                     self.agent_terminals.clear();
                 }

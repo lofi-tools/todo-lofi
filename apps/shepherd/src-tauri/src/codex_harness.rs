@@ -11,7 +11,7 @@ use agent_harness::acp::{AcpHarness, TerminalBackend};
 use agent_harness::codex::{CodexHarness, CodexInstall, CodexTier, ExecHarness};
 use agent_harness::opencode::OpenCodeHarness;
 use agent_harness::settings::ConfiguredCommand;
-use agent_harness::{AgentHarness, HarnessError, SpawnSpec};
+use agent_harness::{AgentHarness, FailureKind, HarnessError, SpawnSpec};
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::{Agent, CoreError};
 
@@ -78,9 +78,7 @@ fn require_configured<'a, T>(
         Ok(None) => Err(CoreError::HarnessMissing {
             report: format!("Set {key} in Shepherd's settings.json"),
         }),
-        Err(error) => Err(CoreError::HarnessMissing {
-            report: error.to_string(),
-        }),
+        Err(error) => Err(HarnessError::Protocol(error.to_string()).into()),
     }
 }
 
@@ -147,19 +145,27 @@ impl HarnessFactory for CodexHarnessFactory {
 /// report; the app never falls back to the scripted fake silently.
 pub struct MissingCodexFactory {
     report: String,
+    failure: FailureKind,
 }
 
 impl MissingCodexFactory {
-    pub fn new(report: String) -> Self {
-        Self { report }
+    pub fn new(report: String, failure: FailureKind) -> Self {
+        Self { report, failure }
     }
 }
 
 impl HarnessFactory for MissingCodexFactory {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
-        Err(CoreError::HarnessMissing {
-            report: self.report.clone(),
-        })
+        match self.failure {
+            FailureKind::MissingBinary => Err(CoreError::HarnessMissing {
+                report: self.report.clone(),
+            }),
+            kind => Err(HarnessError::Reported {
+                kind,
+                message: self.report.clone(),
+            }
+            .into()),
+        }
     }
 }
 
@@ -224,7 +230,10 @@ mod tests {
     fn launches_the_configured_opencode_independently_of_codex() -> Result<(), CoreError> {
         let executable = PathBuf::from("/etc/profiles/per-user/me/bin/opencode");
         let factory = DesktopHarnessFactory {
-            codex: Box::new(MissingCodexFactory::new("fixture".into())),
+            codex: Box::new(MissingCodexFactory::new(
+                "fixture".into(),
+                FailureKind::MissingBinary,
+            )),
             opencode: Ok(Some(executable.clone())),
             claude: Ok(None),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
@@ -241,7 +250,10 @@ mod tests {
     fn launches_claude_through_the_configured_acp_command() -> Result<(), CoreError> {
         let executable = PathBuf::from("/tmp/claude-code-acp");
         let factory = DesktopHarnessFactory {
-            codex: Box::new(MissingCodexFactory::new("fixture".into())),
+            codex: Box::new(MissingCodexFactory::new(
+                "fixture".into(),
+                FailureKind::MissingBinary,
+            )),
             opencode: Ok(None),
             claude: Ok(Some(ConfiguredCommand {
                 executable: executable.clone(),

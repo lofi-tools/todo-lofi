@@ -1120,6 +1120,7 @@ textarea {
   margin: 0;
   color: var(--text);
   font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .entry__failure-detail {

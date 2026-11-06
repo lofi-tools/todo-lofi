@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_harness::{Decision, FailureKind, HarnessEvent, SessionId, TurnFinishReason};
+use agent_harness::{Decision, FailureKind, HarnessEvent, SessionId, Transcript, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary, ReviewAction};
@@ -145,6 +145,7 @@ pub struct Core {
     tasks: BTreeMap<TaskId, Task>,
     workspace_layouts: BTreeMap<TaskId, WorkspaceLayout>,
     sessions: BTreeMap<TaskId, HarnessSession>,
+    detached_transcripts: BTreeMap<TaskId, Transcript>,
     turn_baselines: BTreeMap<TaskId, TurnBaseline>,
     review_notes: BTreeMap<TaskId, QueuedReviewNote>,
     /// The newest durable session per task, kept across restarts so resume can
@@ -186,6 +187,7 @@ impl Core {
             tasks: BTreeMap::new(),
             workspace_layouts: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            detached_transcripts: BTreeMap::new(),
             turn_baselines: BTreeMap::new(),
             review_notes: BTreeMap::new(),
             session_records: BTreeMap::new(),
@@ -638,9 +640,11 @@ impl Core {
             if events.is_empty() {
                 continue;
             }
-            let before = self.task(&task_id)?.state;
+            let task = self.task(&task_id)?;
+            let before = (task.state, task.error.clone());
             self.apply_events(&task_id, &events)?;
-            if self.task(&task_id)?.state != before {
+            let task = self.task(&task_id)?;
+            if (task.state, &task.error) != (before.0, &before.1) {
                 self.save_task(&task_id).await?;
             }
             self.publish_task(&task_id)?;
@@ -855,7 +859,9 @@ impl Core {
             cancelling: session.is_some_and(HarnessSession::is_cancelling),
             queued_review_note: self.review_notes.get(task_id).map(|note| note.text.clone()),
             transcript: session
-                .map(|session| session.transcript().entries().to_vec())
+                .map(HarnessSession::transcript)
+                .or_else(|| self.detached_transcripts.get(task_id))
+                .map(|transcript| transcript.entries().to_vec())
                 .unwrap_or_default(),
             agent_terminals: session
                 .map(|session| session.agent_terminals().to_vec())
@@ -1157,6 +1163,9 @@ impl Core {
             self.turn_baselines.insert(task_id.clone(), baseline);
         }
         self.set_task_state(task_id, TaskState::Working)?;
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.error = None;
+        }
         let stored = self
             .sessions
             .get(task_id)
@@ -1177,6 +1186,10 @@ impl Core {
             // A session that never started leaves the task ready to retry; the
             // failure row is already in its transcript.
             self.set_task_state(task_id, TaskState::Ready)?;
+            self.turn_baselines.remove(task_id);
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                task.error = Some(error.to_string());
+            }
             self.save_task(task_id).await?;
             self.publish_task(task_id)?;
             return Err(error);
@@ -1195,10 +1208,16 @@ impl Core {
             Ok(events) => events,
             Err(error) => {
                 self.turn_baselines.remove(task_id);
-                self.record_failure(task_id, &error);
-                // A rejected prompt ends the turn but keeps the session, so the
-                // user can sign in and send another prompt.
-                self.set_task_state(task_id, TaskState::Ready)?;
+                let events = self
+                    .sessions
+                    .get_mut(task_id)
+                    .map(HarnessSession::pump)
+                    .unwrap_or_default();
+                self.apply_events(task_id, &events)?;
+                if self.task(task_id)?.state.is_live() {
+                    self.record_failure(task_id, &error);
+                    self.set_task_state(task_id, TaskState::Ready)?;
+                }
                 self.save_task(task_id).await?;
                 self.publish_task(task_id)?;
                 return Err(error);
@@ -1320,6 +1339,9 @@ impl Core {
                 // Stay resumable: the user can install or update the agent and
                 // try again.
                 self.set_task_state(task_id, state)?;
+                if let Some(task) = self.tasks.get_mut(task_id) {
+                    task.error = Some(error.to_string());
+                }
                 self.save_task(task_id).await?;
                 self.publish_task(task_id)?;
                 return Err(error);
@@ -1439,7 +1461,11 @@ impl Core {
                     .map(|session| session.transcript().entries().to_vec())
                     .unwrap_or_default()
             }
-            None => Vec::new(),
+            None => self
+                .detached_transcripts
+                .remove(task_id)
+                .map(|transcript| transcript.entries().to_vec())
+                .unwrap_or_default(),
         };
 
         let task = self.task(task_id)?.clone();
@@ -1447,7 +1473,19 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let (mut harness, spec) = self.harness_factory.launch(task.agent, cwd)?;
+        let (mut harness, spec) = match self.harness_factory.launch(task.agent, cwd) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let mut transcript = Transcript::default();
+                transcript.restore(carried);
+                if let Some(kind) = adapter_failure_kind(&error) {
+                    transcript.push_failure(kind, error.to_string(), Some(kind.hint().to_string()));
+                }
+                self.detached_transcripts
+                    .insert(task_id.clone(), transcript);
+                return Err(error);
+            }
+        };
         let policy = ProjectApprovals::new(
             self.store.clone(),
             task.project_id.clone(),
@@ -1538,6 +1576,7 @@ impl Core {
                     decision: Decision::AllowSession | Decision::AllowProject,
                     ..
                 } | HarnessEvent::Exited { .. }
+                    | HarnessEvent::ConnectionFailed { .. }
             )
         }) {
             self.emit(Event::ProjectApprovalsChanged {
@@ -1548,7 +1587,7 @@ impl Core {
         let started_live = initial_state.is_live();
         let mut next_state = None;
         let mut turn_completed = false;
-        let mut task_error = None;
+        let mut task_error = task.error.clone();
         let mut failure = None;
 
         for event in events {
@@ -1581,8 +1620,11 @@ impl Core {
                     TurnFinishReason::Cancelled => next_state = Some(TaskState::Ready),
                     TurnFinishReason::Failed => {
                         next_state = Some(TaskState::Failed);
-                        task_error
-                            .get_or_insert_with(|| "the agent reported a failed turn".to_string());
+                        if task_error.is_none() {
+                            let message = "The agent reported a failed turn.".to_string();
+                            task_error = Some(message.clone());
+                            failure = Some((FailureKind::AgentRejected, message, None));
+                        }
                     }
                     TurnFinishReason::Interrupted => {
                         next_state = Some(TaskState::Interrupted);
@@ -1591,21 +1633,35 @@ impl Core {
                 HarnessEvent::TurnError { text, .. } => {
                     task_error = Some(text.clone());
                 }
+                HarnessEvent::ConnectionFailed { text, .. } => {
+                    task_error = Some(text.clone());
+                    if next_state.unwrap_or(initial_state).is_live() {
+                        next_state = Some(TaskState::Failed);
+                    }
+                }
                 HarnessEvent::Exited { code, stderr } => {
                     let turn_in_progress = next_state.map_or(started_live, TaskState::is_live);
-                    if *code != Some(0) || turn_in_progress {
-                        // Only a turn that was still running when the process
-                        // died is a mid-turn exit; quitting is a separate path.
-                        if started_live {
-                            let tail = stderr.trim().to_string();
-                            failure = Some((
-                                FailureKind::MidTurnExit,
-                                format!("the agent exited with code {code:?}"),
-                                (!tail.is_empty()).then_some(tail),
-                            ));
-                        }
+                    if turn_in_progress {
+                        let text = code.map_or_else(
+                            || "The agent exited before the turn finished.".into(),
+                            |code| {
+                                format!(
+                                    "The agent exited with code {code} before the turn finished."
+                                )
+                            },
+                        );
+                        let tail = stderr.trim();
+                        task_error = Some(if tail.is_empty() {
+                            text.clone()
+                        } else {
+                            format!("{text}\n{tail}")
+                        });
+                        failure = Some((
+                            FailureKind::MidTurnExit,
+                            text,
+                            (!tail.is_empty()).then(|| tail.to_owned()),
+                        ));
                         next_state = Some(TaskState::Failed);
-                        task_error = Some(format!("the agent exited with code {code:?}: {stderr}"));
                     }
                 }
                 _ => {}
@@ -1635,9 +1691,9 @@ impl Core {
             if task.state != state {
                 task.set_state(state)?;
             }
-            if let Some(message) = task_error {
-                task.error = Some(message);
-            }
+        }
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.error = task_error;
         }
 
         Ok(())
@@ -1666,9 +1722,7 @@ impl Core {
         mut session: HarnessSession,
         error: CoreError,
     ) -> CoreError {
-        if let CoreError::Harness(harness_error) = &error
-            && let Some(kind) = FailureKind::classify(harness_error)
-        {
+        if let Some(kind) = adapter_failure_kind(&error) {
             session.push_failure(kind, error.to_string(), Some(kind.hint().to_string()));
         }
         self.sessions.insert(task_id.clone(), session);
@@ -1678,18 +1732,14 @@ impl Core {
     /// Turn an adapter error into a visible failure row. Errors about Shepherd's
     /// own state get no row, because the caller already reports them.
     fn record_failure(&mut self, task_id: &TaskId, error: &CoreError) {
-        let CoreError::Harness(harness_error) = error else {
+        let Some(kind) = adapter_failure_kind(error) else {
             return;
         };
-        let Some(kind) = FailureKind::classify(harness_error) else {
-            return;
-        };
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.error = Some(error.to_string());
+        }
         if let Some(session) = self.sessions.get_mut(task_id) {
-            session.push_failure(
-                kind,
-                harness_error.to_string(),
-                Some(kind.hint().to_string()),
-            );
+            session.push_failure(kind, error.to_string(), Some(kind.hint().to_string()));
         }
     }
 
@@ -1923,6 +1973,15 @@ impl Core {
     }
 }
 
+fn adapter_failure_kind(error: &CoreError) -> Option<FailureKind> {
+    match error {
+        CoreError::HarnessMissing { .. } => Some(FailureKind::MissingBinary),
+        CoreError::HarnessUnavailable => Some(FailureKind::Protocol),
+        CoreError::Harness(error) => FailureKind::classify(error),
+        _ => None,
+    }
+}
+
 fn normalize_project_path(path: &Path) -> Result<PathBuf, CoreError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -2047,7 +2106,7 @@ mod live_exit {
         let workspace = failed.ok_or("the killed process must fail the task")?;
 
         let error = workspace.task.error.clone().unwrap_or_default();
-        assert!(error.contains("exited with code"), "task error: {error}");
+        assert!(error.contains("before the turn finished"), "task error: {error}");
         let rows: Vec<String> = workspace
             .transcript
             .iter()
@@ -3957,6 +4016,45 @@ mod tests {
         assert!(
             note.contains("started a new session"),
             "unexpected note: {note}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_adapter_reports_why_it_could_not_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::new();
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                agent: Agent::Claude,
+                project_id,
+                title: "Unconfigured adapter".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let result = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                text: "go".into(),
+            })
+            .await;
+        assert!(matches!(result, Err(CoreError::HarnessMissing { .. })));
+        let workspace = core.task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert!(
+            workspace
+                .task
+                .error
+                .is_some_and(|text| text.contains("Claude Code ACP executable"))
+        );
+        assert!(
+            workspace
+                .transcript
+                .iter()
+                .any(|entry| entry.summary().contains("agent not installed"))
         );
         Ok(())
     }

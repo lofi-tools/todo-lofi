@@ -227,11 +227,7 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
                         methods: Vec::new(),
                     })
                 } else {
-                    let message = error
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("the codex server rejected initialize");
-                    Err(HarnessError::Protocol(message.to_string()))
+                    Err(codex_rpc_error(error))
                 }
             }
             None => Ok(Handshake {
@@ -334,6 +330,7 @@ pub struct CodexInstall {
 pub struct CodexAttempt {
     pub program: PathBuf,
     pub kind: CodexInstallKind,
+    pub failure: FailureKind,
     pub reason: String,
 }
 
@@ -347,6 +344,15 @@ pub struct CodexDetection {
 }
 
 impl CodexDetection {
+    pub fn failure_kind(&self) -> FailureKind {
+        self.attempts
+            .iter()
+            .find_map(|attempt| {
+                (attempt.failure != FailureKind::MissingBinary).then_some(attempt.failure)
+            })
+            .unwrap_or(FailureKind::MissingBinary)
+    }
+
     /// One line for diagnostics.
     pub fn summary(&self) -> String {
         match &self.install {
@@ -375,7 +381,11 @@ impl CodexDetection {
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("codex is not installed; tried {tried}")
+                    if self.failure_kind() == FailureKind::MissingBinary {
+                        format!("codex is not installed; tried {tried}")
+                    } else {
+                        format!("no usable Codex executable; tried {tried}")
+                    }
                 }
             }
         }
@@ -418,6 +428,7 @@ async fn detect_in(
                 attempts.push(CodexAttempt {
                     program,
                     kind,
+                    failure: FailureKind::MissingBinary,
                     reason: "not found".to_string(),
                 });
             }
@@ -427,6 +438,7 @@ async fn detect_in(
             attempts.push(CodexAttempt {
                 program,
                 kind,
+                failure: FailureKind::Protocol,
                 reason: "not executable".to_string(),
             });
             continue;
@@ -445,6 +457,7 @@ async fn detect_in(
             Err(error) => attempts.push(CodexAttempt {
                 program,
                 kind,
+                failure: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
                 reason: error.to_string(),
             }),
         }
@@ -638,10 +651,11 @@ pub async fn project_model(spec: SpawnSpec) -> HarnessResult<Option<String>> {
 
 #[derive(Default)]
 struct Pending {
-    responses: HashMap<i64, oneshot::Sender<Result<Value, String>>>,
+    responses: HashMap<i64, oneshot::Sender<HarnessResult<Value>>>,
     approvals: HashMap<String, i64>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    turn_error: Option<HarnessEvent>,
 }
 
 #[cfg(any(test, feature = "live-test-support"))]
@@ -654,7 +668,7 @@ pub struct CodexHarness {
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     outgoing: Option<mpsc::UnboundedSender<Value>>,
-    child: Option<Child>,
+    child: Option<Arc<AsyncMutex<Child>>>,
     pending: Arc<AsyncMutex<Pending>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     closed: Arc<AtomicBool>,
@@ -754,7 +768,10 @@ impl CodexHarness {
         self.next_request_id += 1;
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.responses.insert(id, sender);
-        self.send(json!({ "method": method, "id": id, "params": params }))?;
+        if let Err(error) = self.send(json!({ "method": method, "id": id, "params": params })) {
+            self.pending.lock().await.responses.remove(&id);
+            return Err(error);
+        }
 
         match timeout(REQUEST_TIMEOUT, receiver).await {
             Err(_) => {
@@ -763,11 +780,18 @@ impl CodexHarness {
                     "codex did not answer {method}"
                 )))
             }
-            Ok(Err(_)) => Err(HarnessError::Protocol(format!(
-                "codex dropped the answer to {method}"
-            ))),
-            Ok(Ok(Err(message))) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
-            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Err(_)) => {
+                let stderr = stderr_tail(&self.stderr);
+                let suffix = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{stderr}")
+                };
+                Err(HarnessError::TransportClosed(format!(
+                    "Codex disconnected while answering {method}.{suffix}"
+                )))
+            }
+            Ok(Ok(outcome)) => outcome,
         }
     }
 
@@ -819,7 +843,8 @@ impl CodexHarness {
         };
 
         self.cwd = spec.cwd;
-        self.child = Some(child);
+        let child = Arc::new(AsyncMutex::new(child));
+        self.child = Some(child.clone());
 
         let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
         self.writer_task = Some(spawn_writer(
@@ -838,6 +863,7 @@ impl CodexHarness {
             Arc::clone(&self.closed),
             Arc::clone(&self.closing),
             stderr_drained,
+            Arc::downgrade(&child),
             #[cfg(any(test, feature = "live-test-support"))]
             self.wire_capture.clone(),
         ));
@@ -1036,17 +1062,16 @@ impl AgentHarness for CodexHarness {
         self.outgoing = None;
 
         let code = match self.child.take() {
-            Some(mut child) => match child.kill().await {
-                Ok(()) => child
-                    .try_wait()
-                    .ok()
-                    .flatten()
-                    .and_then(|status| status.code()),
-                Err(error) => {
-                    tracing::debug!(%error, "could not kill the codex process");
-                    None
+            Some(child) => {
+                let mut child = child.lock().await;
+                match child.kill().await.and_then(|()| child.try_wait()) {
+                    Ok(status) => status.and_then(|status| status.code()),
+                    Err(error) => {
+                        tracing::debug!(%error, "could not stop the codex process");
+                        None
+                    }
                 }
-            },
+            }
             None => None,
         };
 
@@ -1747,18 +1772,16 @@ fn spawn_reader(
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     stderr_drained: oneshot::Receiver<()>,
+    child: std::sync::Weak<AsyncMutex<Child>>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
-        loop {
+        let protocol_failure = loop {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(error) => {
-                    tracing::debug!(%error, "reading codex stdout failed");
-                    break;
-                }
+                Ok(None) => break None,
+                Err(error) => break Some(format!("Could not read Codex stdout: {error}")),
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -1766,22 +1789,42 @@ fn spawn_reader(
             }
             let message = match serde_json::from_str::<Value>(trimmed) {
                 Ok(message) => message,
-                Err(error) => {
-                    tracing::warn!(%error, "codex sent a line that is not JSON");
-                    continue;
-                }
+                Err(error) => break Some(format!("Codex sent malformed JSON: {error}")),
             };
             #[cfg(any(test, feature = "live-test-support"))]
             if let Some(capture) = &capture {
                 capture.push(WireEntry::Response(message.clone()));
             }
             route_incoming(message, &sender, &pending, &outgoing).await;
-        }
+        };
 
         closed.store(true, Ordering::Relaxed);
         if closing.load(Ordering::Relaxed) {
             return;
         }
+        let Some(child) = child.upgrade() else {
+            return;
+        };
+        let outcome = {
+            let mut child = child.lock().await;
+            if let Some(message) = protocol_failure {
+                if let Err(error) = child.kill().await {
+                    tracing::debug!(%error, "could not stop Codex after invalid protocol output");
+                }
+                Err(message)
+            } else {
+                match timeout(Duration::from_millis(250), child.wait()).await {
+                    Ok(Ok(status)) => Ok(status.code()),
+                    Ok(Err(error)) => Err(format!("Could not read the Codex exit status: {error}")),
+                    Err(_) => {
+                        if let Err(error) = child.kill().await {
+                            tracing::debug!(%error, "could not stop Codex after stdout closed");
+                        }
+                        Err("Codex closed its protocol stream while still running.".into())
+                    }
+                }
+            }
+        };
         if timeout(Duration::from_millis(150), stderr_drained)
             .await
             .is_err()
@@ -1793,12 +1836,21 @@ fn spawn_reader(
         if let Some(capture) = &capture {
             capture.push(WireEntry::Exit(stderr.clone()));
         }
-        if sender
-            .send(HarnessEvent::Exited { code: None, stderr })
-            .is_err()
-        {
+        let event = match outcome {
+            Ok(code) => HarnessEvent::Exited { code, stderr },
+            Err(text) => HarnessEvent::ConnectionFailed {
+                kind: FailureKind::Protocol,
+                text: if stderr.is_empty() {
+                    text
+                } else {
+                    format!("{text}\n{stderr}")
+                },
+            },
+        };
+        if !closing.load(Ordering::Relaxed) && sender.send(event).is_err() {
             tracing::debug!("the core stopped listening to codex events");
         }
+        pending.lock().await.responses.clear();
     })
 }
 
@@ -1870,11 +1922,7 @@ async fn route_incoming(
                 return;
             };
             let outcome = match message.get("error") {
-                Some(error) => Err(error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("the codex server returned an error")
-                    .to_string()),
+                Some(error) => Err(codex_rpc_error(error)),
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
             if waiter.send(outcome).is_err() {
@@ -1887,6 +1935,21 @@ async fn route_incoming(
             handle_notification(&method, &params, sender, pending).await;
         }
         (None, None) => tracing::warn!("codex sent a message with neither id nor method"),
+    }
+}
+
+fn codex_rpc_error(error: &Value) -> HarnessError {
+    let message = error["message"]
+        .as_str()
+        .unwrap_or("The Codex server returned an error.");
+    let kind = match error["code"].as_i64() {
+        Some(401) => FailureKind::AuthRequired,
+        Some(METHOD_NOT_FOUND) => FailureKind::UnsupportedVersion,
+        _ => FailureKind::from_message(message, FailureKind::Protocol),
+    };
+    HarnessError::Reported {
+        kind,
+        message: message.to_owned(),
     }
 }
 
@@ -1971,7 +2034,15 @@ async fn handle_notification(
         }
         "turn/started" => {
             if let Some(turn_id) = read_turn_id(params) {
-                pending.lock().await.turn_id = Some(turn_id);
+                let mut pending = pending.lock().await;
+                pending.turn_id = Some(turn_id);
+                pending.turn_error = None;
+            }
+        }
+        "error" if params["willRetry"] == false => {
+            let mut pending = pending.lock().await;
+            if params["turnId"].as_str() == pending.turn_id.as_deref() {
+                pending.turn_error = codex_turn_error(&params["error"]);
             }
         }
         "item/agentMessage/delta" => {
@@ -2027,17 +2098,32 @@ async fn handle_notification(
         }
         "turn/completed" | "turn/failed" | "turn/cancelled" => {
             let reason = match method {
-                "turn/failed" => TurnFinishReason::Failed,
-                "turn/cancelled" => TurnFinishReason::Cancelled,
+                "turn/failed" => Some(TurnFinishReason::Failed),
+                "turn/cancelled" => Some(TurnFinishReason::Cancelled),
                 _ => turn_finish_reason(params),
             };
             let mut pending = pending.lock().await;
             pending.turn_id = None;
+            let reported_error = pending.turn_error.take();
             events.extend(pending.approvals.drain().map(|(id, _)| {
                 HarnessEvent::ApprovalWithdrawn {
                     approval_id: ApprovalId::new(id),
                 }
             }));
+            if reason == Some(TurnFinishReason::Failed) {
+                events.extend(
+                    codex_turn_error(&params["turn"]["error"])
+                        .or_else(|| codex_turn_error(&params["error"]))
+                        .or(reported_error),
+                );
+            }
+            let reason = reason.unwrap_or_else(|| {
+                events.push(HarnessEvent::TurnError {
+                    kind: FailureKind::Protocol,
+                    text: "Codex completed the turn without a recognized status.".into(),
+                });
+                TurnFinishReason::Failed
+            });
             events.push(HarnessEvent::TurnFinished { reason });
         }
         _ => {}
@@ -2133,15 +2219,38 @@ fn tool_status(status: Option<&str>) -> ToolStatus {
     }
 }
 
-fn turn_finish_reason(params: &Value) -> TurnFinishReason {
+fn codex_turn_error(error: &Value) -> Option<HarnessEvent> {
+    let message = error["message"].as_str()?;
+    let info = &error["codexErrorInfo"];
+    let unauthorized = info == "unauthorized"
+        || info
+            .as_object()
+            .is_some_and(|fields| fields.values().any(|field| field["httpStatusCode"] == 401));
+    let kind = if unauthorized {
+        FailureKind::AuthRequired
+    } else {
+        FailureKind::from_message(message, FailureKind::AgentRejected)
+    };
+    let text = match error["additionalDetails"]
+        .as_str()
+        .filter(|details| !details.is_empty())
+    {
+        Some(details) => format!("{message}\n{details}"),
+        None => message.to_string(),
+    };
+    Some(HarnessEvent::TurnError { kind, text })
+}
+
+fn turn_finish_reason(params: &Value) -> Option<TurnFinishReason> {
     match params
         .get("turn")
         .and_then(|turn| turn.get("status"))
         .and_then(Value::as_str)
     {
-        Some("interrupted") => TurnFinishReason::Cancelled,
-        Some("failed") => TurnFinishReason::Failed,
-        _ => TurnFinishReason::Completed,
+        Some("interrupted") => Some(TurnFinishReason::Cancelled),
+        Some("failed") => Some(TurnFinishReason::Failed),
+        Some("completed") => Some(TurnFinishReason::Completed),
+        _ => None,
     }
 }
 
@@ -2402,6 +2511,77 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn failed_turn_preserves_the_typed_sign_in_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let script = PROTOCOL_STUB.replace(
+            r#""id":"turn_1","status":"completed""#,
+            r#""id":"turn_1","status":"failed","error":{"message":"Session expired","codexErrorInfo":"unauthorized","additionalDetails":"Refresh the account"}"#,
+        );
+        let stub = write_stub(&directory, "codex-auth", &script);
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        harness.prompt(PromptInput { text: "go".into() }).await?;
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [.., HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text }, HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed }] if text == "Session expired\nRefresh the account"),
+            "{events:?}"
+        );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_exit_and_invalid_output_have_different_outcomes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        for (name, action) in [
+            ("codex-exit", "echo 'fixture crashed' >&2; exit 23"),
+            ("codex-invalid", "echo 'not valid JSON'"),
+        ] {
+            let script = PROTOCOL_STUB.replace(
+                r#"printf '{"method":"turn/completed","params":{"turn":{"id":"turn_1","status":"completed"}}}\n'"#,
+                action,
+            );
+            let stub = write_stub(&directory, name, &script);
+            let (mut harness, _) = start_session(&stub, directory.path()).await;
+            harness.prompt(PromptInput { text: "go".into() }).await?;
+            let events = collect_until(&mut harness, |events| {
+                events.iter().any(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::Exited { .. } | HarnessEvent::ConnectionFailed { .. }
+                    )
+                })
+            })
+            .await;
+            match (name, events.last()) {
+                (
+                    "codex-exit",
+                    Some(HarnessEvent::Exited {
+                        code: Some(23),
+                        stderr,
+                    }),
+                ) => assert_eq!(stderr, "fixture crashed"),
+                (
+                    "codex-invalid",
+                    Some(HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text,
+                    }),
+                ) => assert!(text.contains("malformed JSON")),
+                _ => panic!("{name}: {events:?}"),
+            }
+            harness.shutdown().await?;
+        }
+        Ok(())
     }
 
     #[tokio::test]

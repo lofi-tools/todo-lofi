@@ -139,6 +139,7 @@ export type FailureKind =
   | 'missingBinary'
   | 'unsupportedVersion'
   | 'authRequired'
+  | 'agentRejected'
   | 'protocol'
   | 'midTurnExit'
 

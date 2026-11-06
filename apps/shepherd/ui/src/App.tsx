@@ -1016,6 +1016,9 @@ export function App() {
           </Show>
 
           <div class="chat__transcript">
+            <Show when={!workspace()?.transcript.some((entry) => entry.kind.type === 'failure') && workspace()?.task.error}>
+              {(error) => <p class="entry__failure-text" role="alert">{error()}</p>}
+            </Show>
             <Show
               when={workspace()}
               fallback={
@@ -1619,6 +1622,7 @@ function entryBody(
     missingBinary: 'Agent not installed',
     unsupportedVersion: 'Version not supported',
     authRequired: 'Sign-in required',
+    agentRejected: 'Agent rejected the turn',
     protocol: 'Protocol error',
     midTurnExit: 'Agent exited mid-turn',
   }
