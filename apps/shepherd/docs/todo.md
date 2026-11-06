@@ -699,10 +699,15 @@ fresh Ubuntu ARM64 checkout. The burst tail painted in 57 ms and all 24 paced
 markers appeared. The native PTY probe also verified Kitty releases after a
 shortcut modifier was lifted and after the terminal lost focus.
 
-The local Ubuntu 24.04.5 amd64 guest used OrbStack's QEMU user-mode emulation.
-Creating a private user and mount namespace failed with `Invalid argument`,
-and Nix stopped before compiling Shepherd. The hosted workflow is still
-needed for the x86-64 result.
+Both terminal launches and the IBus Pinyin probe passed on an Ubuntu 24.04.5
+amd64 guest under OrbStack's QEMU user-mode emulation. QEMU rejected Nix's
+private user and mount namespace. Binding the guest's cached store at `/nix`
+temporarily and disabling Nix's nested build sandbox for this invocation let
+the locked shell build Shepherd as an x86-64 executable. The guest's Nix
+`stty` rejected a PTY that Ubuntu's `stty` could read, so the smoke now reads
+the dimensions with Python's `os.get_terminal_size`. Both Pinyin candidates
+appeared by the caret and reached the shell once each. The 554 ms burst
+result measures the emulated guest. The hosted x86-64 run remains pending.
 
 ### Gate
 

@@ -396,7 +396,8 @@ function paneWidth(title: string): number {
 }
 
 async function ptyColumns(terminalId: string, title: string, marker: string): Promise<number> {
-  await bridge.terminalWrite(terminalId, "printf 'S4_%s:%s\\n' " + marker + ' "$(stty size)"\r')
+  const program = "import os, sys; size = os.get_terminal_size(0); print(f'S4_{sys.argv[1]}:{size.lines} {size.columns}')"
+  await bridge.terminalWrite(terminalId, `python3 -c ${shellQuote(program)} ${shellQuote(marker)}\r`)
   const size = new RegExp('S4_' + marker + ':(\\d+) (\\d+)')
   const match = await waitFor(marker + ' PTY dimensions', () => {
     const pane = terminalPane(title)
