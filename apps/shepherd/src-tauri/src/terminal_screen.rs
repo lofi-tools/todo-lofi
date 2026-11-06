@@ -12,6 +12,7 @@ use std::time::Instant;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{BuildError, RegexSearch};
@@ -33,6 +34,14 @@ pub struct TerminalFrame {
     pub display_offset: usize,
     pub modes: u32,
     pub cells: Vec<FrameCell>,
+    pub search_highlight: Option<SearchHighlight>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SearchHighlight {
+    id: u32,
+    start: u32,
+    end: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -61,7 +70,10 @@ impl TerminalFrame {
         let mut bytes = Vec::new();
         bytes.extend([
             1,
-            u8::from(self.cursor_visible) | (u8::from(full) << 1) | (self.cursor_style << 2),
+            u8::from(self.cursor_visible)
+                | (u8::from(full) << 1)
+                | (self.cursor_style << 2)
+                | (u8::from(self.search_highlight.is_some()) << 4),
         ]);
         bytes.extend((self.columns as u16).to_le_bytes());
         bytes.extend((self.rows as u16).to_le_bytes());
@@ -106,22 +118,12 @@ impl TerminalFrame {
             bytes[count_offset..count_offset + 2].copy_from_slice(&run_count.to_le_bytes());
         }
         bytes[row_count_offset..row_count_offset + 2].copy_from_slice(&row_count.to_le_bytes());
-        bytes
-    }
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-pub struct SearchPoint {
-    line: i32,
-    column: usize,
-}
-
-impl From<Point> for SearchPoint {
-    fn from(point: Point) -> Self {
-        Self {
-            line: point.line.0,
-            column: point.column.0,
+        if let Some(highlight) = self.search_highlight {
+            bytes.extend(highlight.id.to_le_bytes());
+            bytes.extend(highlight.start.to_le_bytes());
+            bytes.extend(highlight.end.to_le_bytes());
         }
+        bytes
     }
 }
 
@@ -130,12 +132,6 @@ impl From<Point> for SearchPoint {
 pub enum SearchDirection {
     Previous,
     Next,
-}
-
-#[derive(Serialize)]
-pub struct SearchMatch {
-    start: SearchPoint,
-    end: SearchPoint,
 }
 
 struct ScreenSize {
@@ -253,6 +249,9 @@ pub struct Screen {
     parser: Processor,
     keyboard_parser: Parser,
     keyboards: [KeyboardModes; 2],
+    search_id: u32,
+    search_text: String,
+    search_span: i32,
     columns: usize,
     rows: usize,
 }
@@ -268,6 +267,9 @@ impl Screen {
             parser: Processor::new(),
             keyboard_parser: Parser::new(),
             keyboards: Default::default(),
+            search_id: 0,
+            search_text: String::new(),
+            search_span: 0,
             columns,
             rows,
         }
@@ -392,9 +394,9 @@ impl Screen {
     pub fn search(
         &mut self,
         query: &str,
-        anchor: Option<SearchPoint>,
+        anchor: Option<u32>,
         direction: SearchDirection,
-    ) -> Result<Option<SearchMatch>, Box<BuildError>> {
+    ) -> Result<Option<u32>, Box<BuildError>> {
         if query.is_empty() {
             return Ok(None);
         }
@@ -407,26 +409,24 @@ impl Screen {
         }
         let mut regex = RegexSearch::new(&pattern)?;
         let grid = self.term.grid();
-        let origin = anchor.map(|point| {
-            Point::new(
-                Line(point.line),
-                Column(point.column.min(grid.last_column().0)),
-            )
-            .grid_clamp(grid, Boundary::Grid)
-        });
+        let selection = if anchor == Some(self.search_id) {
+            self.search_selection()
+        } else {
+            None
+        };
         let (origin, direction, side) = match direction {
             SearchDirection::Previous => (
-                origin.map_or_else(
+                selection.map_or_else(
                     || Point::new(grid.bottommost_line(), grid.last_column()),
-                    |point| point.sub(grid, Boundary::None, 1),
+                    |selection| selection.start.sub(grid, Boundary::None, 1),
                 ),
                 Direction::Left,
                 Side::Left,
             ),
             SearchDirection::Next => (
-                origin.map_or_else(
+                selection.map_or_else(
                     || Point::new(grid.topmost_line(), Column(0)),
-                    |point| point.add(grid, Boundary::None, 1),
+                    |selection| selection.end.add(grid, Boundary::None, 1),
                 ),
                 Direction::Right,
                 Side::Right,
@@ -436,16 +436,43 @@ impl Screen {
             .term
             .search_next(&mut regex, origin, direction, side, None)
         else {
+            self.term.selection = None;
             return Ok(None);
         };
         let offset = grid.display_offset() as i32;
         let desired_offset = (-found.start().line.0).max(0);
         self.term
             .scroll_display(Scroll::Delta(desired_offset - offset));
-        Ok(Some(SearchMatch {
-            start: (*found.start()).into(),
-            end: (*found.end()).into(),
-        }))
+        let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
+        selection.update(*found.end(), Side::Right);
+        self.term.selection = Some(selection);
+        self.search_text = self.term.bounds_to_string(*found.start(), *found.end());
+        self.search_span = self.cell_index(*found.end()) - self.cell_index(*found.start());
+        self.search_id = self.search_id.wrapping_add(1);
+        Ok(Some(self.search_id))
+    }
+
+    fn search_selection(&self) -> Option<SelectionRange> {
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        (self.cell_index(range.end) - self.cell_index(range.start) == self.search_span
+            && self.term.bounds_to_string(range.start, range.end) == self.search_text)
+            .then_some(range)
+    }
+
+    fn cell_index(&self, point: Point) -> i32 {
+        point.line.0 * self.columns as i32 + point.column.0 as i32
+    }
+
+    fn search_highlight(&self, display_offset: usize) -> Option<SearchHighlight> {
+        let range = self.search_selection()?;
+        let offset = (display_offset * self.columns) as i32;
+        let start = (self.cell_index(range.start) + offset).max(0);
+        let end = (self.cell_index(range.end) + offset).min((self.columns * self.rows) as i32 - 1);
+        (start <= end).then(|| SearchHighlight {
+            id: self.search_id,
+            start: start as u32,
+            end: end as u32,
+        })
     }
 
     pub fn follow_output(&mut self) -> bool {
@@ -541,6 +568,7 @@ impl Screen {
             modes: self.term.mode().bits()
                 | (u32::from(self.keyboards[self.keyboard_index()].flags) << 18),
             cells,
+            search_highlight: self.search_highlight(display_offset),
         }
     }
 }
@@ -659,6 +687,60 @@ mod tests {
         let resized = screen.frame().encode(Some(&current));
         assert_eq!(resized.get(1), Some(&3));
         assert_eq!(resized.get(18..20), Some([3, 0].as_slice()));
+    }
+
+    #[test]
+    fn search_highlights_and_navigation_follow_scrolling_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut screen = Screen::new(16, 3);
+        screen.process(b"hit first\r\nnoise\r\nhit second\r\nmore\r\nlive\r\nbottom");
+        let second = screen
+            .search("hit", None, SearchDirection::Previous)?
+            .ok_or("missing second hit")?;
+        let matched = screen.frame();
+        assert!(row(&matched, 0).starts_with("hit second"));
+        let highlight = SearchHighlight {
+            id: second,
+            start: 0,
+            end: 2,
+        };
+        assert_eq!(matched.search_highlight, Some(highlight));
+
+        screen.process(b"\r\nnew output\r\nnewer output");
+        let scrolled = screen.frame();
+        assert!(scrolled.display_offset > matched.display_offset);
+        assert!(row(&scrolled, 0).starts_with("hit second"));
+        assert_eq!(scrolled.search_highlight, Some(highlight));
+
+        screen.scroll(-10);
+        assert!(screen.frame().search_highlight.is_none());
+        let first = screen
+            .search("hit", Some(second), SearchDirection::Previous)?
+            .ok_or("missing first hit")?;
+        assert_ne!(first, second);
+        assert!(row(&screen.frame(), 0).starts_with("hit first"));
+        screen.search("hit", Some(first), SearchDirection::Next)?;
+        assert!(row(&screen.frame(), 0).starts_with("hit second"));
+        Ok(())
+    }
+
+    #[test]
+    fn overwritten_search_text_loses_its_highlight() -> Result<(), Box<dyn std::error::Error>> {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"hit");
+        assert!(
+            screen
+                .search("hit", None, SearchDirection::Previous)?
+                .is_some()
+        );
+        let matched = screen.frame();
+        let encoded = matched.encode(None);
+        assert!(encoded.get(1).is_some_and(|flags| flags & 16 != 0));
+        assert!(encoded.ends_with(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]));
+
+        screen.process(b"\x1b[Hnew");
+        assert!(screen.frame().search_highlight.is_none());
+        Ok(())
     }
 
     #[test]

@@ -221,6 +221,7 @@ export interface TerminalFrame {
   displayOffset: number
   modes: number
   cells: FrameCell[]
+  searchHighlight: { id: number; start: number; end: number } | null
 }
 
 export type Event =
@@ -355,19 +356,9 @@ export function startFreebuffTerminal(projectId: string): Promise<string> {
   return invoke('start_freebuff_terminal', { projectId })
 }
 
-interface SearchPoint {
-  line: number
-  column: number
-}
-
-export interface TerminalMatch {
-  start: SearchPoint
-  end: SearchPoint
-}
-
 export type SearchDirection = 'previous' | 'next'
 
-export function searchTerminal(terminalId: string, query: string, anchor: SearchPoint | null, direction: SearchDirection): Promise<TerminalMatch | null> {
+export function searchTerminal(terminalId: string, query: string, anchor: number | null, direction: SearchDirection): Promise<number | null> {
   return invoke('search_terminal', { terminalId, query, anchor, direction })
 }
 
@@ -464,8 +455,12 @@ function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | unde
     }
     if (column !== columns) throw new Error('Incomplete terminal row')
   }
+  const searchHighlight = (flags & 16) ? { id: integer(), start: integer(), end: integer() } : null
+  if (searchHighlight && (searchHighlight.start > searchHighlight.end || searchHighlight.end >= cells.length)) {
+    throw new Error('Invalid terminal search highlight')
+  }
   if (offset !== payloadLength) throw new Error('Invalid terminal frame length')
-  const frame: TerminalFrame = { revision, columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells }
+  const frame: TerminalFrame = { revision, columns, rows, cursorColumn, cursorRow, cursorVisible: Boolean(flags & 1), cursorStyle: (flags >> 2) & 3, displayOffset, modes, cells, searchHighlight }
   return { frame, sequence, changedRows: full ? null : changedRows }
 }
 

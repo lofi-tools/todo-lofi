@@ -32,7 +32,7 @@ use tokio::time::Instant;
 
 use crate::codex_harness::codex_spawn_spec;
 use crate::pty_terminal::PtyTerminals;
-use crate::terminal_screen::{Screen, SearchDirection, SearchMatch, SearchPoint, TerminalFrame};
+use crate::terminal_screen::{Screen, SearchDirection, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -736,9 +736,9 @@ impl ShellState {
         &self,
         terminal_id: &str,
         query: &str,
-        anchor: Option<SearchPoint>,
+        anchor: Option<u32>,
         direction: SearchDirection,
-    ) -> Result<Option<SearchMatch>, BridgeError> {
+    ) -> Result<Option<u32>, BridgeError> {
         if query.len() > 1024 {
             return Err(BridgeError::new(
                 "terminal",
@@ -1335,9 +1335,9 @@ pub mod commands {
         state: State<'_, ShellState>,
         terminal_id: String,
         query: String,
-        anchor: Option<SearchPoint>,
+        anchor: Option<u32>,
         direction: SearchDirection,
-    ) -> Result<Option<SearchMatch>, BridgeError> {
+    ) -> Result<Option<u32>, BridgeError> {
         state
             .inner()
             .search_terminal(&terminal_id, &query, anchor, direction)

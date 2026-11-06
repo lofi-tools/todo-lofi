@@ -526,6 +526,9 @@ task-scoped, persistent and fast enough.
   checks Ctrl+Backspace and Alt+Shift+Tab in legacy mode.
   A browser regression checks that new output preserves a scrollback selection
   while its visible cells stay in place, and clears it when those cells change.
+  Terminal search follows the matched text while output scrolls. The native
+  smoke checks the canvas highlight and searches in both directions after a
+  100-line PTY burst.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other

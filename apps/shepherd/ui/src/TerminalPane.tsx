@@ -596,10 +596,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   const [visibleText, setVisibleText] = createSignal('')
   const [searching, setSearching] = createSignal(false)
   const [noMatch, setNoMatch] = createSignal(false)
-  let match: bridge.TerminalMatch | null = null
+  let searchId: number | null = null
   let searchInput: HTMLInputElement | undefined
   let copyInput: HTMLTextAreaElement | undefined
   let searchGeneration = 0
+  let pendingSearch: Promise<number | null> | undefined
   let composing = false
   let committedComposition: string | undefined
   let compositionTimer: number | undefined
@@ -687,10 +688,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     context.textBaseline = 'top'
 
     const columns = current.columns
-    const highlight = match ? [
-      (match.start.line + current.displayOffset) * columns + match.start.column,
-      (match.end.line + current.displayOffset) * columns + match.end.column,
-    ] : null
+    const match = current.searchHighlight
+    const highlight = match && match.id === searchId ? [match.start, match.end] : null
     const selected = selection ? selectionRange(current, selection) : null
     const rows = changedRows ?? Array.from({ length: current.rows }, (_, row) => row)
     for (const row of rows) {
@@ -981,7 +980,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     searchGeneration++
     setSearching(false)
     setNoMatch(false)
-    match = null
+    searchId = null
     scheduleDraw()
   }
 
@@ -997,11 +996,13 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     setSearching(true)
     setError(null)
     try {
-      const anchor = direction === 'previous' ? match?.start : match?.end
-      const found = await bridge.searchTerminal(props.terminalId, query, anchor ?? null, direction)
+      if (pendingSearch) await pendingSearch.catch(() => null)
       if (generation !== searchGeneration) return
-      match = found
-      setNoMatch(!found)
+      pendingSearch = bridge.searchTerminal(props.terminalId, query, searchId, direction)
+      const found = await pendingSearch
+      if (generation !== searchGeneration) return
+      searchId = found
+      setNoMatch(found === null)
       scheduleDraw()
     } catch (failure) {
       if (generation === searchGeneration) setError(describe(failure))
@@ -1142,6 +1143,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
           changedRows = null
           break
         }
+      }
+      const oldHighlight = previous?.searchHighlight
+      const newHighlight = next.searchHighlight
+      if (oldHighlight?.id !== newHighlight?.id || oldHighlight?.start !== newHighlight?.start || oldHighlight?.end !== newHighlight?.end) {
+        changedRows = null
       }
       const rows = changedRows && new Set(changedRows)
       if (rows && previous && (previous.cursorRow !== next.cursorRow || previous.cursorColumn !== next.cursorColumn || previous.cursorVisible !== next.cursorVisible || previous.cursorStyle !== next.cursorStyle)) {

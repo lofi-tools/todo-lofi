@@ -536,6 +536,28 @@ async function exerciseSearch(terminal: bridge.TerminalSnapshot, input: HTMLText
   const previous = await enabledButton('Find previous')
   previous.click()
   await reveal('second')
+  const canvas = terminalPane(terminal.title)?.querySelector('canvas')
+  const context = canvas?.getContext('2d')
+  if (!context) throw new Error('The terminal canvas has no 2D context')
+  await waitFor('the canvas highlights the search match', () => {
+    const [red, green, blue] = context.getImageData(devicePixelRatio, 16 * devicePixelRatio, 1, 1).data
+    return red > green && green > blue
+  })
+  let frame: bridge.TerminalFrame | undefined
+  let frameError: unknown
+  const dispose = await bridge.subscribeTerminal(terminal.id, (next) => { frame = next }, (failure) => { frameError = failure })
+  try {
+    const pinned = await waitFor('the highlighted scrollback frame', () => frame?.searchHighlight && frame)
+    await bridge.terminalWrite(terminal.id, "awk 'BEGIN {for (line=1; line<=100; line++) print line}'\r", false)
+    await waitFor('the pinned highlight to survive new PTY output', () => {
+      if (frameError) throw frameError
+      return frame && frame.displayOffset >= pinned.displayOffset + 100
+        && frame.searchHighlight?.id === pinned.searchHighlight?.id
+        && frame.searchHighlight?.start === pinned.searchHighlight?.start
+    })
+  } finally {
+    await dispose()
+  }
   await waitFor('previous search completed', () => !previous.disabled)
   previous.click()
   await reveal('first')

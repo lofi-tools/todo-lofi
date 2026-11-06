@@ -589,6 +589,10 @@ quitting the app does, by design (§2.5). A terminal's scope is either the proje
   copy/paste with bracketed paste, search with highlighting, hyperlinks,
   alternate screen and mouse reporting. v1 paints on a `<canvas>` fed by a Tauri
   channel of binary frames; v2 paints on a GPUI canvas.
+- Terminal search keeps the highlight and Next/Previous anchored to the
+  matched text as output moves into scrollback. Scrolling the viewport away
+  hides the highlight and preserves the navigation anchor. Replaced text or
+  a column-width reflow discards the anchor.
 - Keys and IME commits arrive from the shell as structured input events. The core
   first resolves app chords against its registry; only unclaimed chords are
   encoded into escape sequences with the engine's encoders, so both shells behave
