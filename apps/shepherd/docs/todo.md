@@ -663,8 +663,9 @@ inside the Nix development shell on Ubuntu. The
 [terminal smoke workflow](../../../.github/workflows/shepherd-terminal-smoke.yml)
 sets the Mesa and GTK module paths and installs the required packages. This
 mode starts its own Xvfb display, session bus, and IBus daemon with disposable
-settings. Removing the caret refresh reproduces the misplaced popup and fails
-the check.
+settings. The probe waits for the focused IBus client to report Pinyin before
+typing. Three fresh sessions passed both candidate selections. Removing the
+caret refresh reproduces the misplaced popup and fails the check.
 
 The native smoke waits for the composition prompt's cursor row to paint before
 scrolling back. It starts synthetic composition from scrollback and checks
@@ -687,6 +688,10 @@ The search fixture starts its first marker on a new line because `/bin/sh`
 can leave its prompt immediately before the marker. The guest painted the
 tail of the 1 MiB burst in 119 ms and all 24 paced markers. The optional
 interactive fish probe was skipped on this guest.
+With the tuned debug build at `f6addee`, both launches passed again in a
+fresh Ubuntu ARM64 checkout. The burst tail painted in 57 ms and all 24 paced
+markers appeared. The native PTY probe also verified Kitty releases after a
+shortcut modifier was lifted and after the terminal lost focus.
 
 The local Ubuntu 24.04.5 amd64 guest used OrbStack's QEMU user-mode emulation.
 Creating a private user and mount namespace failed with `Invalid argument`,

@@ -44,7 +44,7 @@ def candidate_position():
     return None
 
 
-def check_composition(log, app):
+def check_composition(log, app, bus, idle_context):
     def event(stage, attempt=None):
         for line in log.read_text().splitlines():
             prefix = "SHEPHERD_TERMINAL_SMOKE "
@@ -61,6 +61,16 @@ def check_composition(log, app):
             raise RuntimeError(f"The IME smoke app exited before reporting {stage or 'success'}")
         return None
 
+    def focused_pinyin_context():
+        context = bus.current_input_context()
+        if not context or context == idle_context:
+            return None
+        engine = bus.get_global_engine()
+        if engine is None or engine.get_name() != "libpinyin":
+            bus.set_global_engine("libpinyin")
+            return None
+        return context
+
     for attempt in (1, 2):
         ready = wait_for("terminal IME anchor", lambda: event("ready", attempt), timeout=45)
         window = command("xdotool", "search", "--onlyvisible", "--name", "^Shepherd$").strip()
@@ -68,6 +78,7 @@ def check_composition(log, app):
         scale = ready["devicePixelRatio"]
         caret = tuple(offset + value * scale for offset, value in zip(origin, ready["cursor"]))
         command("xdotool", "windowfocus", "--sync", window)
+        wait_for("Pinyin engine in the focused IBus input context", focused_pinyin_context)
         command("xdotool", "key", "--clearmodifiers", "n", "i")
 
         def panel_at_caret():
@@ -112,14 +123,9 @@ def main(fixture, launch):
             wait_for("IBus session socket", lambda: address if address.is_socket() else None)
             IBus.init()
             bus = IBus.Bus.new()
-
-            def select_pinyin():
-                if bus.is_connected() and any(engine.get_name() == "libpinyin" for engine in bus.list_engines()):
-                    if bus.set_global_engine("libpinyin"):
-                        return True
-                return None
-
-            wait_for("IBus Pinyin engine selection", select_pinyin)
+            wait_for("IBus bus connection", lambda: bus if bus.is_connected() else None)
+            # IBus exposes a placeholder context before the GTK client takes focus.
+            idle_context = bus.current_input_context()
             log = fixture / "linux-ime.log"
             with log.open("w") as output, subprocess.Popen(
                 ["timeout", "--signal=INT", "--kill-after=10s", "120s", *launch],
@@ -128,7 +134,7 @@ def main(fixture, launch):
                 stdout=output, stderr=subprocess.STDOUT,
             ) as app:
                 try:
-                    check_composition(log, app)
+                    check_composition(log, app, bus, idle_context)
                     if app.wait(timeout=15):
                         raise RuntimeError(f"The IME smoke app exited with status {app.returncode}")
                 finally:
