@@ -724,6 +724,13 @@ fresh Ubuntu ARM64 checkout. The burst tail painted in 57 ms and all 24 paced
 markers appeared. The native PTY probe also verified Kitty releases after a
 shortcut modifier was lifted and after the terminal lost focus.
 
+At `7fe0b13`, Ubuntu 24.04 ARM64 passed all 33 regular Rust tests, both
+desktop smoke launches and the IBus Pinyin probe. Stop and Quit each ended
+the foreground and background fixture jobs that ignored SIGHUP. The search
+smoke preserved its match through a 100-line burst. The shutdown fixture
+emits each readiness line with one write to avoid interleaving the two
+markers. The optional fish probe was skipped on this guest.
+
 Both terminal launches and the IBus Pinyin probe passed on an Ubuntu 24.04.5
 amd64 guest under OrbStack's QEMU user-mode emulation. QEMU rejected Nix's
 private user and mount namespace. Binding the guest's cached store at `/nix`
