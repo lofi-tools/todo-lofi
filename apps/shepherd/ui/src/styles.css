@@ -8,9 +8,6 @@
   --text-muted: #8b8b96;
   --text-disabled: #5f5f6b;
   --focus: #6f7dff;
-  --header-navigation: #1c1e27;
-  --header-conversation: #211d26;
-  --header-inspector: #192322;
 
   --sidebar-width: 240px;
   --inspector-width: 360px;
@@ -79,19 +76,15 @@ textarea {
 
 .shell__header-navigation {
   grid-column: rail / conversation;
-  background: var(--header-navigation);
 }
 
 .shell__header-conversation {
   grid-column: conversation;
-  background: var(--header-conversation);
 }
 
 .shell__header-inspector {
   grid-column: inspector;
-  justify-content: flex-end;
   padding-inline: 8px;
-  background: var(--header-inspector);
 }
 
 .shell__window-controls {

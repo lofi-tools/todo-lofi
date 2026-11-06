@@ -26,10 +26,11 @@ current layout and give future changes a point of comparison.
   horizontal line, centred vertically in a 42 px header. The free header space
   is draggable. Quit uses the system window or app controls.
 - Use one window grid for the header, workspace, and footer. The header and
-  workspace share columns through CSS subgrid. Give the header above navigation,
-  conversation, and inspector a distinct muted background in each section.
-- Keep the inspector on the right. Put its five icon tabs in the header above
-  it in this order: **Terminals**, **Preview**, **Review**, **Git**, and **Files**.
+  workspace share columns through CSS subgrid. The navigation, conversation,
+  and inspector sections of the header share the window background.
+- Keep the inspector on the right. Left-align its five icon tabs in the header
+  above it in this order: **Terminals**, **Preview**, **Review**, **Git**, and
+  **Files**.
   Give each icon an accessible name and tooltip. Use Left and Right to switch
   between available tabs. Show terminal and review attention as dots with
   accessible descriptions. Settings can occupy the middle pane while the
