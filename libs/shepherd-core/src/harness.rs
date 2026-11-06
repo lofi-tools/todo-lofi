@@ -5,13 +5,72 @@
 //! shutdown. It does not know which CLI is underneath.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agent_harness::{
-    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, Entry,
-    FailureKind, HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
+    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
+    Decision, Entry, FailureKind, HarnessError, HarnessEvent, ProjectApprovalPolicy, PromptInput,
+    SessionId, SpawnSpec, Transcript,
 };
+use async_trait::async_trait;
 
-use crate::{Agent, AgentTier, CoreError};
+use crate::store::{ProjectApproval, Store, checksum};
+use crate::{Agent, AgentTier, CoreError, ProjectId};
+
+pub(crate) struct ProjectApprovals {
+    store: Arc<dyn Store>,
+    project: ProjectId,
+    agent: Agent,
+    profile: String,
+}
+
+impl ProjectApprovals {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        project: ProjectId,
+        agent: Agent,
+        spec: &SpawnSpec,
+    ) -> Result<Self, HarnessError> {
+        let profile = serde_json::to_string(&(agent, &spec.program, &spec.args, &spec.environment))
+            .map_err(|error| {
+                HarnessError::Protocol(format!("could not encode the approval profile: {error}"))
+            })?;
+        Ok(Self {
+            store,
+            project,
+            agent,
+            profile: checksum(&profile),
+        })
+    }
+
+    fn id(&self, key: &str) -> String {
+        checksum(&format!("acp-v1:{}:{key}", self.profile))
+    }
+}
+
+#[async_trait]
+impl ProjectApprovalPolicy for ProjectApprovals {
+    async fn allows(&self, key: &str) -> Result<bool, String> {
+        self.store
+            .has_project_approval(&self.project, &self.id(key))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn remember(&self, key: &str, request: &ApprovalRequest) -> Result<(), String> {
+        let grant = ProjectApproval {
+            id: self.id(key),
+            agent: self.agent,
+            title: request.title.clone(),
+            arguments: request.arguments.clone(),
+            paths: request.paths.clone(),
+        };
+        self.store
+            .save_project_approval(&self.project, &grant)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// Creates one adapter instance for a task. The shell or test supplies the
 /// implementation; the core never chooses a concrete CLI here.
@@ -231,10 +290,79 @@ impl HarnessSession {
 #[cfg(test)]
 mod tests {
     use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
-    use agent_harness::{ApprovalId, Decision, FileDiff, ToolStatus};
+    use agent_harness::{ApprovalId, Decision, FileDiff, ToolCallId, ToolStatus};
 
     use super::*;
-    use crate::test_support::TestDirectory;
+    use crate::Project;
+    use crate::store::TursoStore;
+    use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[tokio::test]
+    async fn a_project_grant_survives_reopen_and_reset_is_scoped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let project = Project::new(database.path().join("first"));
+        let other = Project::new(database.path().join("other"));
+        let spec = SpawnSpec {
+            program: "/bin/fixture".into(),
+            ..SpawnSpec::default()
+        };
+        let request = ApprovalRequest {
+            approval_id: ApprovalId::new("approval-1"),
+            tool_call_id: ToolCallId::new("tool-1"),
+            title: "Check status".into(),
+            arguments: serde_json::json!({"command": "git status"}),
+            paths: Vec::new(),
+            patch: None,
+            choices: None,
+        };
+        let key = "exact ACP input";
+        {
+            let store: Arc<dyn Store> = Arc::new(TursoStore::open(&database.uri()).await?);
+            store.save_project(&project).await?;
+            store.save_project(&other).await?;
+            let policy =
+                ProjectApprovals::new(store.clone(), project.id.clone(), Agent::Claude, &spec)?;
+            let other_policy =
+                ProjectApprovals::new(store, other.id.clone(), Agent::Claude, &spec)?;
+            policy.remember(key, &request).await?;
+            policy.remember(key, &request).await?;
+            assert!(!other_policy.allows(key).await?);
+            other_policy.remember(key, &request).await?;
+        }
+
+        let store: Arc<dyn Store> = Arc::new(TursoStore::open(&database.uri()).await?);
+        let policy =
+            ProjectApprovals::new(store.clone(), project.id.clone(), Agent::Claude, &spec)?;
+        let other_policy =
+            ProjectApprovals::new(store.clone(), other.id.clone(), Agent::Claude, &spec)?;
+        let changed_spec = SpawnSpec {
+            args: vec!["--other-profile".into()],
+            ..spec.clone()
+        };
+        let changed = ProjectApprovals::new(
+            store.clone(),
+            project.id.clone(),
+            Agent::Claude,
+            &changed_spec,
+        )?;
+        let other_agent =
+            ProjectApprovals::new(store.clone(), project.id.clone(), Agent::OpenCode, &spec)?;
+        assert!(policy.allows(key).await?);
+        assert!(!changed.allows(key).await?);
+        assert!(!other_agent.allows(key).await?);
+        assert!(!policy.allows("different ACP input").await?);
+        let listed = store.project_approvals(&project.id).await?;
+        assert_eq!(listed.len(), 1);
+        let grant = listed.first().ok_or("missing persisted grant")?;
+        assert_eq!(grant.arguments, request.arguments);
+        store.reset_project_approval(&project.id, &grant.id).await?;
+        store.reset_project_approval(&project.id, &grant.id).await?;
+        assert!(store.project_approvals(&project.id).await?.is_empty());
+        assert!(!policy.allows(key).await?);
+        assert!(other_policy.allows(key).await?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn a_session_folds_streamed_events_into_one_transcript()

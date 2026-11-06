@@ -18,7 +18,7 @@ use agent_harness::Decision;
 use serde::{Deserialize, Serialize};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
-use shepherd_core::store::TursoStore;
+use shepherd_core::store::{ProjectApproval, TursoStore};
 use shepherd_core::terminal::{
     InspectorTab, TerminalEvent, TerminalId, TerminalList, TerminalRecord, TerminalService,
     TerminalSpec,
@@ -395,6 +395,31 @@ impl ShellState {
             decision,
         })
         .await
+    }
+
+    pub async fn project_approvals(
+        &self,
+        project_id: String,
+    ) -> Result<Vec<ProjectApproval>, BridgeError> {
+        Ok(self
+            .core
+            .lock()
+            .await
+            .project_approvals(&ProjectId::new(project_id))
+            .await?)
+    }
+
+    pub async fn reset_project_approval(
+        &self,
+        project_id: String,
+        approval_id: String,
+    ) -> Result<(), BridgeError> {
+        Ok(self
+            .core
+            .lock()
+            .await
+            .reset_project_approval(&ProjectId::new(project_id), &approval_id)
+            .await?)
     }
 
     pub async fn cancel_task(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
@@ -1084,6 +1109,26 @@ pub mod commands {
         state
             .inner()
             .resolve_approval(task_id, approval_id, decision)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn project_approvals(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Vec<ProjectApproval>, BridgeError> {
+        state.inner().project_approvals(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn reset_project_approval(
+        state: State<'_, ShellState>,
+        project_id: String,
+        approval_id: String,
+    ) -> Result<(), BridgeError> {
+        state
+            .inner()
+            .reset_project_approval(project_id, approval_id)
             .await
     }
 

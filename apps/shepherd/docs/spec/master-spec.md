@@ -751,6 +751,9 @@ Default policy is **agent-judged**:
    For ACP, session grants match the reported operation and input within the
    live connection. Shepherd uses the agent's one-time option for each match,
    keeping the grant lifetime under Shepherd's control.
+   Project grants use the same match and are scoped to the project and the
+   configured executable, arguments, and launch environment overrides.
+   They survive Shepherd restarts and can be reset under Settings → Projects.
 
 - Project overrides may only tighten this policy: they can remove commands from
   the safe list or require approval where the global default auto-allows. Adding

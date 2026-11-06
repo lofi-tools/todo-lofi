@@ -791,6 +791,14 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.settings__approval {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
 .chat__title {
   flex: 1;
   font-weight: 600;

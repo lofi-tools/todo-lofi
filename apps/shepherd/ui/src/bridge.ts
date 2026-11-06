@@ -20,10 +20,11 @@ export type TaskState =
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
 export type Agent = 'codex' | 'opencode' | 'claude'
+export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' }
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
-export type Decision = 'allow' | 'allowSession' | 'deny'
+export type Decision = 'allow' | 'allowSession' | 'allowProject' | 'deny'
 
 export interface ProjectSnapshot {
   id: string
@@ -130,7 +131,7 @@ export interface PermissionEntry {
   patch: FileDiff | null
   decision: Decision | null
   choices?: Decision[]
-  source?: 'user' | 'agent' | 'sessionGrant'
+  source?: 'user' | 'agent' | 'sessionGrant' | 'projectGrant'
   withdrawn: boolean
 }
 
@@ -285,6 +286,22 @@ export function resolveApproval(
   decision: Decision,
 ): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('resolve_approval', { taskId, approvalId, decision })
+}
+
+export interface ProjectApproval {
+  id: string
+  agent: Agent
+  title: string
+  arguments: unknown
+  paths: string[]
+}
+
+export function projectApprovals(projectId: string) {
+  return invoke<ProjectApproval[]>('project_approvals', { projectId })
+}
+
+export function resetProjectApproval(projectId: string, approvalId: string) {
+  return invoke<void>('reset_project_approval', { projectId, approvalId })
 }
 
 export function cancelTask(taskId: string): Promise<TaskWorkspace> {

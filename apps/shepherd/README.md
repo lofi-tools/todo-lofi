@@ -143,6 +143,9 @@ Shepherd. ACP approval cards offer **Allow once** when supported and
 **Allow for session** when the request identifies the operation and its input.
 Shepherd reuses the latter for identical requests while the ACP session is
 connected, and labels those decisions in the transcript.
+**Always allow for project** saves a matching grant for the configured ACP
+agent in that project. Open **Settings → Projects** to review or reset saved
+grants for the selected project.
 
 ## Live Codex tests
 

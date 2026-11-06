@@ -131,6 +131,7 @@ pub struct OpenCodeHarness {
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     diagnostics: AgentDiagnostics,
     fallback: Option<AcpHarness>,
+    project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
 }
 
 impl Default for OpenCodeHarness {
@@ -144,6 +145,7 @@ impl Default for OpenCodeHarness {
             receiver,
             diagnostics: AgentDiagnostics::default(),
             fallback: None,
+            project_approvals: None,
         }
     }
 }
@@ -196,6 +198,10 @@ impl AgentHarness for OpenCodeHarness {
             .map_or_else(Vec::new, AgentHarness::take_replayed_transcript)
     }
 
+    fn set_project_approval_policy(&mut self, policy: Arc<dyn crate::ProjectApprovalPolicy>) {
+        self.project_approvals = Some(policy);
+    }
+
     async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
         if self.server.is_some() || self.fallback.is_some() {
             return Err(HarnessError::Protocol(
@@ -215,6 +221,9 @@ impl AgentHarness for OpenCodeHarness {
                 spec.environment
                     .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
                 let mut fallback = AcpHarness::default();
+                if let Some(policy) = self.project_approvals.take() {
+                    fallback.set_project_approval_policy(policy);
+                }
                 self.diagnostics.command = command_line(&spec);
                 self.diagnostics.protocol = reason.clone();
                 let capabilities = fallback.start(spec).await.map_err(|error| {
@@ -368,7 +377,9 @@ impl AgentHarness for OpenCodeHarness {
         let reply = match decision {
             Decision::Allow => "once",
             Decision::Deny => "reject",
-            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
+            Decision::AllowSession | Decision::AllowProject => {
+                return Err(HarnessError::ApprovalOptionUnavailable);
+            }
         };
         send_request(
             server

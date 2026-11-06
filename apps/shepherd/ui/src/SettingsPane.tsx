@@ -1,6 +1,6 @@
-import { For, Show, createEffect, createSignal, on, type JSX } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal, on, type JSX } from 'solid-js'
 
-import type { ProjectSnapshot } from './bridge'
+import { AGENT_LABELS, projectApprovals, resetProjectApproval, type ProjectSnapshot } from './bridge'
 
 const categories = ['Workspace', 'Projects', 'Appearance'] as const
 
@@ -19,6 +19,72 @@ interface SettingsPaneProps {
   projectSettingsRequest?: { id: string }
   showProjectArchived: boolean
   onShowProjectArchived: (projectId: string, visible: boolean) => void
+}
+
+function ProjectApprovals(props: { projectId: string }) {
+  const [resetting, setResetting] = createSignal(false)
+  const [resetError, setResetError] = createSignal('')
+  const [approvals, { refetch }] = createResource(() => props.projectId, async (projectId) => {
+    try {
+      return { grants: await projectApprovals(projectId), error: '' }
+    } catch (error) {
+      return { grants: [], error: approvalError(error) }
+    }
+  })
+
+  async function reset(approvalId: string) {
+    setResetting(true)
+    setResetError('')
+    try {
+      await resetProjectApproval(props.projectId, approvalId)
+      await refetch()
+    } catch (error) {
+      setResetError(approvalError(error))
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  return (
+    <section class="settings__project" aria-label="Saved project approvals">
+      <h4>Saved project approvals</h4>
+      <Show when={resetError() || approvals()?.error}>
+        {(error) => <p class="entry__notice--error" role="alert">{error()}</p>}
+      </Show>
+      <Show when={!approvals.loading && !approvals()?.error}>
+        <For each={approvals()?.grants} fallback={<p class="empty">No saved project approvals.</p>}>
+          {(grant) => (
+            <div class="settings__approval">
+              <div>
+                <p>{grant.title}</p>
+                <p class="empty">{AGENT_LABELS[grant.agent]}</p>
+                <Show when={grant.paths.length > 0}>
+                  <p class="entry__permission-paths">{grant.paths.join(', ')}</p>
+                </Show>
+                <Show when={grant.arguments != null}>
+                  <pre class="entry__arguments">{typeof grant.arguments === 'string' ? grant.arguments : JSON.stringify(grant.arguments, null, 2)}</pre>
+                </Show>
+              </div>
+              <button
+                type="button"
+                class="project-action"
+                disabled={resetting()}
+                aria-label={`Reset approval for ${grant.title}`}
+                onClick={() => void reset(grant.id)}
+              >
+                Reset
+              </button>
+            </div>
+          )}
+        </For>
+      </Show>
+    </section>
+  )
+}
+
+function approvalError(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'message' in error) return String(error.message)
+  return String(error)
 }
 
 export function SettingsPane(props: SettingsPaneProps) {
@@ -60,20 +126,21 @@ export function SettingsPane(props: SettingsPaneProps) {
             </label>
           </Show>
           <Show when={category() === 'Projects'}>
-            <Show when={props.project}>
+            <Show when={props.project} keyed>
               {(project) => (
                 <div class="settings__project">
                   <h4>Project settings</h4>
-                  <p>{project().name}</p>
-                  <p class="empty settings__project-path">{project().path}</p>
+                  <p>{project.name}</p>
+                  <p class="empty settings__project-path">{project.path}</p>
                   <label>
                     <input
                       type="checkbox"
                       checked={props.showProjectArchived}
-                      onChange={(event) => props.onShowProjectArchived(project().id, event.currentTarget.checked)}
+                      onChange={(event) => props.onShowProjectArchived(project.id, event.currentTarget.checked)}
                     />
                     Show archived tasks
                   </label>
+                  <ProjectApprovals projectId={project.id} />
                 </div>
               )}
             </Show>

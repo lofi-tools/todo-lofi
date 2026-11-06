@@ -142,6 +142,10 @@ current layout and give future changes a point of comparison.
   until the adapter settles the turn, and pause approval actions during that
   interval. When the server withdraws an approval, retain its arguments and
   show **withdrawn** in place of the actions.
+- For eligible ACP requests, offer **Allow once**, **Allow for session** and
+  **Always allow for project** on the inline card. Identify reused grants on
+  the resolved card. In Settings → Projects, show the selected project's
+  saved approvals with a reset action for each grant.
 - Show **Resume** beside the state in the conversation header when the task is
   interrupted. Enable the composer when the core reports the task is ready.
 

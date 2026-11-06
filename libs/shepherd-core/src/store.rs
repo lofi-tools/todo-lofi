@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toasty::stmt::{Type, Value};
 use toasty_driver_turso::Turso;
@@ -34,6 +35,16 @@ pub enum StoreError {
     InvalidRow(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectApproval {
+    pub id: String,
+    pub agent: Agent,
+    pub title: String,
+    pub arguments: serde_json::Value,
+    pub paths: Vec<PathBuf>,
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError>;
@@ -57,6 +68,19 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
+    async fn project_approvals(
+        &self,
+        project: &ProjectId,
+    ) -> Result<Vec<ProjectApproval>, StoreError>;
+    async fn has_project_approval(&self, project: &ProjectId, id: &str)
+    -> Result<bool, StoreError>;
+    async fn save_project_approval(
+        &self,
+        project: &ProjectId,
+        grant: &ProjectApproval,
+    ) -> Result<(), StoreError>;
+    async fn reset_project_approval(&self, project: &ProjectId, id: &str)
+    -> Result<(), StoreError>;
 }
 
 struct Migration {
@@ -84,6 +108,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0005_task_agent.sql",
         sql: include_str!("../toasty/migrations/0005_task_agent.sql"),
+    },
+    Migration {
+        name: "0006_project_approvals.sql",
+        sql: include_str!("../toasty/migrations/0006_project_approvals.sql"),
     },
 ];
 
@@ -117,6 +145,84 @@ impl TursoStore {
 
 #[async_trait]
 impl Store for TursoStore {
+    async fn project_approvals(
+        &self,
+        project: &ProjectId,
+    ) -> Result<Vec<ProjectApproval>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT grant_json FROM project_approvals WHERE project_id = ?1 ORDER BY id",
+        )
+        .column_types([Type::String])
+        .bind(project.as_str())
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(record) = row else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a project approval record".into(),
+                    ));
+                };
+                serde_json::from_str(&required_string(record.first())?).map_err(|error| {
+                    StoreError::InvalidRow(format!("invalid project approval: {error}"))
+                })
+            })
+            .collect()
+    }
+
+    async fn has_project_approval(
+        &self,
+        project: &ProjectId,
+        id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id FROM project_approvals WHERE project_id = ?1 AND id = ?2",
+        )
+        .column_types([Type::String])
+        .bind(project.as_str())
+        .bind(id)
+        .exec(&mut *db)
+        .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn save_project_approval(
+        &self,
+        project: &ProjectId,
+        grant: &ProjectApproval,
+    ) -> Result<(), StoreError> {
+        let json = serde_json::to_string(grant).map_err(|error| {
+            StoreError::InvalidRow(format!("could not encode project approval: {error}"))
+        })?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "INSERT INTO project_approvals (project_id, id, grant_json) \
+             VALUES (?1, ?2, ?3) ON CONFLICT (project_id, id) DO NOTHING",
+        )
+        .bind(project.as_str())
+        .bind(&grant.id)
+        .bind(&json)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+
+    async fn reset_project_approval(
+        &self,
+        project: &ProjectId,
+        id: &str,
+    ) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM project_approvals WHERE project_id = ?1 AND id = ?2")
+            .bind(project.as_str())
+            .bind(id)
+            .exec(&mut *db)
+            .await?;
+        Ok(())
+    }
+
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
@@ -520,9 +626,9 @@ async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn checksum(sql: &str) -> String {
+pub(crate) fn checksum(input: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(sql.as_bytes());
+    hasher.update(input.as_bytes());
     let bytes = hasher.finalize();
     bytes
         .iter()
@@ -690,6 +796,7 @@ pub struct MemoryStore {
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
     terminal_layouts: RwLock<BTreeMap<ProjectId, TerminalLayout>>,
     sessions: RwLock<Vec<SessionRecord>>,
+    project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
 }
 
 impl MemoryStore {
@@ -700,6 +807,57 @@ impl MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
+    async fn project_approvals(
+        &self,
+        project: &ProjectId,
+    ) -> Result<Vec<ProjectApproval>, StoreError> {
+        let approvals = self.project_approvals.read().await;
+        Ok(approvals
+            .get(project)
+            .into_iter()
+            .flat_map(|grants| grants.values().cloned())
+            .collect())
+    }
+
+    async fn has_project_approval(
+        &self,
+        project: &ProjectId,
+        id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .project_approvals
+            .read()
+            .await
+            .get(project)
+            .is_some_and(|grants| grants.contains_key(id)))
+    }
+
+    async fn save_project_approval(
+        &self,
+        project: &ProjectId,
+        grant: &ProjectApproval,
+    ) -> Result<(), StoreError> {
+        self.project_approvals
+            .write()
+            .await
+            .entry(project.clone())
+            .or_default()
+            .entry(grant.id.clone())
+            .or_insert_with(|| grant.clone());
+        Ok(())
+    }
+
+    async fn reset_project_approval(
+        &self,
+        project: &ProjectId,
+        id: &str,
+    ) -> Result<(), StoreError> {
+        if let Some(grants) = self.project_approvals.write().await.get_mut(project) {
+            grants.remove(id);
+        }
+        Ok(())
+    }
+
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
         let projects = self.projects.read().await;
         Ok(projects.values().cloned().collect())

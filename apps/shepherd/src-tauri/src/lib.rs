@@ -158,6 +158,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::discard_draft,
             bridge::commands::send_prompt,
             bridge::commands::resolve_approval,
+            bridge::commands::project_approvals,
+            bridge::commands::reset_project_approval,
             bridge::commands::cancel_task,
             bridge::commands::resume_task,
             bridge::commands::quit,

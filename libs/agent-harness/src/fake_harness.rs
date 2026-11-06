@@ -375,7 +375,9 @@ impl AgentHarness for FakeHarness {
         let allow = match decision {
             Decision::Allow => true,
             Decision::Deny => false,
-            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
+            Decision::AllowSession | Decision::AllowProject => {
+                return Err(HarnessError::ApprovalOptionUnavailable);
+            }
         };
         let pending = self.pending.take().ok_or(HarnessError::NoPendingApproval)?;
         if pending.request.approval_id != approval_id {

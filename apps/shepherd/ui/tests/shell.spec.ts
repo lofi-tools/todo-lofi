@@ -19,6 +19,7 @@ test.beforeEach(async ({ context }) => {
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
+    let projectGrants = []
 
     const project = {
       id: 'project-1',
@@ -99,7 +100,8 @@ test.beforeEach(async ({ context }) => {
                 newText: 'const answer = 42;',
               },
               decision: null,
-              choices: options.has('scoped-approval') ? ['allow', 'allowSession', 'deny'] : undefined,
+              choices: options.has('project-approval') ? ['allow', 'allowSession', 'allowProject', 'deny']
+                : options.has('scoped-approval') ? ['allow', 'allowSession', 'deny'] : undefined,
             },
           },
         },
@@ -262,6 +264,13 @@ test.beforeEach(async ({ context }) => {
             return '/tmp/home/'
           case 'project_list':
             return { projects: [...projects] }
+          case 'project_approvals':
+            return args.projectId === project.id ? [...projectGrants] : []
+          case 'reset_project_approval':
+            if (args.projectId === project.id) {
+              projectGrants = projectGrants.filter((grant) => grant.id !== args.approvalId)
+            }
+            return null
           case 'codex_project_model':
             return 'gpt-6.1-terra'
           case 'opencode_configured':
@@ -387,8 +396,18 @@ test.beforeEach(async ({ context }) => {
           case 'resolve_approval': {
             const rows = transcripts[args.taskId]
             const request = rows.find((row) => row.kind.type === 'permission' && row.kind.data.approvalId === args.approvalId)
-            if (!request || request.kind.type !== 'permission' || args.decision !== 'allowSession') {
-              throw new Error('Expected a session approval')
+            const projectGrant = options.has('project-approval')
+            if (!request || request.kind.type !== 'permission' || args.decision !== (projectGrant ? 'allowProject' : 'allowSession')) {
+              throw new Error('Expected a scoped approval')
+            }
+            if (projectGrant) {
+              projectGrants.push({
+                id: 'grant-1',
+                agent: 'claude',
+                title: request.kind.data.title,
+                arguments: request.kind.data.arguments,
+                paths: request.kind.data.paths,
+              })
             }
             const settled = entry(request.id, request.sequence, {
               type: 'permission',
@@ -401,7 +420,7 @@ test.beforeEach(async ({ context }) => {
                 approvalId: 'auto-approval',
                 title: 'Run tests again',
                 decision: 'allow',
-                source: 'sessionGrant',
+                source: projectGrant ? 'projectGrant' : 'sessionGrant',
                 withdrawn: false,
               },
             })
@@ -660,6 +679,19 @@ test('sends a scoped approval and identifies an automatic session grant', async 
   const repeated = page.locator('.entry__permission').filter({ hasText: 'Run tests again' })
   await expect(repeated.locator('.entry__permission-decision')).toHaveText('allowed by session grant')
   await expect(repeated.getByRole('button')).toHaveCount(0)
+})
+
+test('lists and resets a saved ACP project grant from Settings', async ({ page }) => {
+  await page.goto('/?project-approval')
+  await page.getByRole('button', { name: 'Always allow for project' }).click()
+  await expect(page.getByText('allowed by project grant')).toBeVisible()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
+  const approvals = page.getByRole('region', { name: 'Saved project approvals' })
+  await expect(approvals).toContainText('Claude Code')
+  await expect(approvals).toContainText('cargo test')
+  await approvals.getByRole('button', { name: 'Reset approval for Run tests' }).click()
+  await expect(approvals).toContainText('No saved project approvals.')
 })
 
 test('composes the first chat in an empty project and hides its sole task row', async ({ page }) => {

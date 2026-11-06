@@ -17,6 +17,7 @@ pub mod settings;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -350,6 +351,7 @@ pub struct PromptInput {
 pub enum Decision {
     Allow,
     AllowSession,
+    AllowProject,
     Deny,
 }
 
@@ -359,6 +361,7 @@ pub enum ApprovalSource {
     User,
     Agent,
     SessionGrant,
+    ProjectGrant,
 }
 
 /// The result of one turn, as reported by the adapter.
@@ -429,6 +432,12 @@ pub struct ApprovalRequest {
     pub choices: Option<Vec<Decision>>,
 }
 
+#[async_trait]
+pub trait ProjectApprovalPolicy: Send + Sync {
+    async fn allows(&self, key: &str) -> Result<bool, String>;
+    async fn remember(&self, key: &str, request: &ApprovalRequest) -> Result<(), String>;
+}
+
 /// Everything an adapter reports to the core, in one ordered stream.
 #[derive(Clone, Debug)]
 pub enum HarnessEvent {
@@ -479,6 +488,9 @@ pub enum HarnessEvent {
     },
     ApprovalWithdrawn {
         approval_id: ApprovalId,
+    },
+    ApprovalPolicyError {
+        text: String,
     },
     ModeChanged {
         mode: String,
@@ -775,6 +787,7 @@ impl Transcript {
             HarnessEvent::ApprovalWithdrawn { approval_id } => {
                 self.settle_approval(approval_id.as_str(), None)
             }
+            HarnessEvent::ApprovalPolicyError { text } => self.push_notice(text, true),
             HarnessEvent::TurnError { kind, text } => {
                 self.push_failure(*kind, text.clone(), Some(kind.hint().to_string()))
             }
@@ -1063,6 +1076,8 @@ pub trait AgentHarness: Send {
     fn tier(&self) -> AdapterTier {
         AdapterTier::Native
     }
+
+    fn set_project_approval_policy(&mut self, _policy: Arc<dyn ProjectApprovalPolicy>) {}
 
     /// History returned while opening a persisted agent session.
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {

@@ -981,7 +981,9 @@ impl AgentHarness for CodexHarness {
         let answer = match decision {
             Decision::Allow => "accept",
             Decision::Deny => "decline",
-            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
+            Decision::AllowSession | Decision::AllowProject => {
+                return Err(HarnessError::ApprovalOptionUnavailable);
+            }
         };
         let request_id = self
             .pending

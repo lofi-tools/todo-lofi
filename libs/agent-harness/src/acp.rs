@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::{Future, pending};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use acp_client::schema::{
@@ -22,8 +23,9 @@ use tokio::time::timeout;
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, ApprovalSource,
     Capabilities, Decision, DeltaKind, Entry, FailureKind, FileDiff, HarnessError, HarnessEvent,
-    HarnessResult, ItemId, PlanRow, PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId,
-    ToolStatus, Transcript, TurnFinishReason, TurnId, command_line, limit_command_output,
+    HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy, PromptInput, SessionId, SessionState,
+    SpawnSpec, ToolCallId, ToolStatus, Transcript, TurnFinishReason, TurnId, command_line,
+    limit_command_output,
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,6 +35,7 @@ pub struct AcpHarness {
     cwd: PathBuf,
     diagnostics: AgentDiagnostics,
     runtime: Option<Runtime>,
+    project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
     replay: Vec<Entry>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -46,6 +49,7 @@ impl Default for AcpHarness {
             cwd: PathBuf::new(),
             diagnostics: AgentDiagnostics::default(),
             runtime: None,
+            project_approvals: None,
             replay: Vec::new(),
             sender,
             events,
@@ -103,6 +107,10 @@ impl AgentHarness for AcpHarness {
 
     fn tier(&self) -> AdapterTier {
         AdapterTier::Acp
+    }
+
+    fn set_project_approval_policy(&mut self, policy: Arc<dyn ProjectApprovalPolicy>) {
+        self.project_approvals = Some(policy);
     }
 
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {
@@ -194,6 +202,7 @@ impl AgentHarness for AcpHarness {
             session,
             events,
             self.sender.clone(),
+            self.project_approvals.clone(),
         ));
         publish(
             &self.sender,
@@ -289,10 +298,20 @@ impl Runtime {
         session: schema::SessionId,
         events: mpsc::UnboundedReceiver<AcpEvent>,
         sender: mpsc::UnboundedSender<HarnessEvent>,
+        project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
     ) -> Self {
         let (commands, incoming) = mpsc::channel(8);
         let worker = tokio::spawn(async move {
-            if let Err(error) = drive_session(requester, session, events, incoming, sender).await {
+            if let Err(error) = drive_session(
+                requester,
+                session,
+                events,
+                incoming,
+                sender,
+                project_approvals.as_deref(),
+            )
+            .await
+            {
                 tracing::debug!(%error, "ACP harness event loop ended");
             }
         });
@@ -312,6 +331,7 @@ async fn drive_session(
     mut events: mpsc::UnboundedReceiver<AcpEvent>,
     mut commands: mpsc::Receiver<Command>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
+    project_approvals: Option<&dyn ProjectApprovalPolicy>,
 ) -> HarnessResult<()> {
     let mut prompt: Option<Prompt> = None;
     let mut updates = Updates::default();
@@ -331,11 +351,11 @@ async fn drive_session(
                     }
                     Some(AcpEvent::PermissionRequested { session_id, tool_call, options, decision })
                         if session_id == session && prompt.is_some() && !cancelling => {
-                        let approval = PendingApproval::new(tool_call, options, decision);
+                        let approval = PendingApproval::new(tool_call, options, decision, project_approvals.is_some());
                         let idle = approvals.is_empty();
                         approvals.push_back(approval);
                         if idle {
-                            show_next_approval(&sender, &mut approvals, &session_grants)?;
+                            show_next_approval(&sender, &mut approvals, &session_grants, project_approvals).await?;
                         }
                     }
                     Some(AcpEvent::TerminalOutput { terminal_id, chunk, .. }) if prompt.is_some() => {
@@ -388,7 +408,7 @@ async fn drive_session(
                     }
                     Control::Cancel => Ok(()),
                     Control::Respond(id, decision) => {
-                        respond(&sender, &mut approvals, &mut session_grants, id, decision)
+                        respond(&sender, &mut approvals, &mut session_grants, project_approvals, id, decision).await
                     }
                 };
                 if answer.send(result).is_err() {
@@ -430,6 +450,7 @@ struct PendingApproval {
     allow: Option<schema::PermissionOptionId>,
     deny: Option<schema::PermissionOptionId>,
     grant: Option<SessionGrant>,
+    project_key: Option<String>,
     reply: PermissionReply,
 }
 
@@ -444,6 +465,7 @@ impl PendingApproval {
         call: schema::ToolCallUpdate,
         options: Vec<schema::PermissionOption>,
         reply: PermissionReply,
+        project_approvals: bool,
     ) -> Self {
         let once = |kind| {
             options
@@ -468,6 +490,21 @@ impl PendingApproval {
                     meta: call.meta,
                 });
             }
+        }
+        let project_key = grant
+            .as_ref()
+            .filter(|_| project_approvals)
+            .and_then(
+                |grant| match serde_json::to_string(&(&grant.fields, &grant.meta)) {
+                    Ok(key) => Some(key),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not encode an ACP project approval");
+                        None
+                    }
+                },
+            );
+        if project_key.is_some() {
+            choices.push(Decision::AllowProject);
         }
         choices.push(Decision::Deny);
         let patch = fields
@@ -505,6 +542,7 @@ impl PendingApproval {
             allow,
             deny: once(PermissionOptionKind::RejectOnce),
             grant,
+            project_key,
             reply,
         }
     }
@@ -520,18 +558,37 @@ fn has_approval_input(input: &serde_json::Value) -> bool {
     }
 }
 
-fn show_next_approval(
+async fn show_next_approval(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     approvals: &mut VecDeque<PendingApproval>,
     session_grants: &[SessionGrant],
+    project_approvals: Option<&dyn ProjectApprovalPolicy>,
 ) -> HarnessResult<()> {
     while let Some(approval) = approvals.front() {
-        let Some(option) = approval.allow.clone().filter(|_| {
-            approval
-                .grant
-                .as_ref()
-                .is_some_and(|grant| session_grants.contains(grant))
-        }) else {
+        let source = if approval
+            .grant
+            .as_ref()
+            .is_some_and(|grant| session_grants.contains(grant))
+        {
+            Some(ApprovalSource::SessionGrant)
+        } else if let (Some(policy), Some(key)) = (project_approvals, &approval.project_key) {
+            match policy.allows(key).await {
+                Ok(true) => Some(ApprovalSource::ProjectGrant),
+                Ok(false) => None,
+                Err(error) => {
+                    publish(
+                        sender,
+                        HarnessEvent::ApprovalPolicyError {
+                            text: format!("Could not check saved project approvals: {error}"),
+                        },
+                    )?;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let (Some(source), Some(option)) = (source, approval.allow.clone()) else {
             return publish(
                 sender,
                 HarnessEvent::ApprovalRequested {
@@ -552,20 +609,21 @@ fn show_next_approval(
                 HarnessEvent::ApprovalAutomaticallyResolved {
                     request: approval.request,
                     decision: Decision::Allow,
-                    source: ApprovalSource::SessionGrant,
+                    source,
                 },
             )?;
         } else {
-            tracing::debug!("ACP permission ended before its session grant could be applied");
+            tracing::debug!("ACP permission ended before its grant could be applied");
         }
     }
     Ok(())
 }
 
-fn respond(
+async fn respond(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     approvals: &mut VecDeque<PendingApproval>,
     session_grants: &mut Vec<SessionGrant>,
+    project_approvals: Option<&dyn ProjectApprovalPolicy>,
     id: ApprovalId,
     decision: Decision,
 ) -> HarnessResult<()> {
@@ -573,11 +631,16 @@ fn respond(
         .front()
         .filter(|approval| approval.request.approval_id == id)
         .ok_or(HarnessError::NoPendingApproval)?;
+    if !pending
+        .request
+        .choices
+        .as_ref()
+        .is_some_and(|choices| choices.contains(&decision))
+    {
+        return Err(HarnessError::ApprovalOptionUnavailable);
+    }
     let option = match decision {
-        Decision::AllowSession if pending.grant.is_none() => {
-            return Err(HarnessError::ApprovalOptionUnavailable);
-        }
-        Decision::Allow | Decision::AllowSession => Some(
+        Decision::Allow | Decision::AllowSession | Decision::AllowProject => Some(
             pending
                 .allow
                 .clone()
@@ -592,6 +655,20 @@ fn respond(
     if approval.reply.answer(reply).is_err() {
         publish(sender, HarnessEvent::ApprovalWithdrawn { approval_id: id })?;
     } else {
+        let decision = if decision == Decision::AllowProject
+            && let (Some(policy), Some(key)) = (project_approvals, approval.project_key)
+            && let Err(error) = policy.remember(&key, &approval.request).await
+        {
+            publish(
+                sender,
+                HarnessEvent::ApprovalPolicyError {
+                    text: format!("Allowed once. Could not save the project approval: {error}"),
+                },
+            )?;
+            Decision::Allow
+        } else {
+            decision
+        };
         if decision == Decision::AllowSession
             && let Some(grant) = approval.grant
         {
@@ -606,7 +683,7 @@ fn respond(
             },
         )?;
     }
-    show_next_approval(sender, approvals, session_grants)
+    show_next_approval(sender, approvals, session_grants, project_approvals).await
 }
 
 fn withdraw_approvals(
@@ -875,6 +952,122 @@ mod tests {
         ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
     }
 
+    #[derive(Default)]
+    struct TestProjectPolicy {
+        key: tokio::sync::RwLock<Option<String>>,
+        read_only: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ProjectApprovalPolicy for TestProjectPolicy {
+        async fn allows(&self, key: &str) -> Result<bool, String> {
+            Ok(self.key.read().await.as_deref() == Some(key))
+        }
+
+        async fn remember(&self, key: &str, _: &ApprovalRequest) -> Result<(), String> {
+            if self.read_only.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("read-only test store".into());
+            }
+            *self.key.write().await = Some(key.into());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_project_grant_is_reused_until_reset_in_the_live_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = FakeScript {
+            permission: Some(ToolCallUpdate::new(
+                "tool-1",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .title("Run a command")
+                    .raw_input(serde_json::json!({"command": "git status"})),
+            )),
+            permission_options: vec![PermissionOption::new(
+                "once",
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            )],
+            ..FakeScript::default()
+        };
+        let (mut harness, _, observed) = fake(script).await?;
+        let policy = Arc::new(TestProjectPolicy::default());
+        harness.set_project_approval_policy(policy.clone());
+        harness.open_session(None).await?;
+        for (prompt, decision) in [
+            ("grant", Some(Decision::AllowProject)),
+            ("reuse", None),
+            ("after reset", Some(Decision::AllowProject)),
+            ("after failed save", Some(Decision::Allow)),
+        ] {
+            let save_fails = prompt == "after reset";
+            if save_fails {
+                *policy.key.write().await = None;
+                policy
+                    .read_only
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            harness
+                .prompt(PromptInput {
+                    text: prompt.into(),
+                })
+                .await?;
+            let mut automatic = false;
+            let mut saved_decision = None;
+            let mut save_error = false;
+            loop {
+                match next(&mut harness).await? {
+                    HarnessEvent::ApprovalRequested { request } => {
+                        let decision = decision.ok_or("unexpected manual approval")?;
+                        assert!(
+                            request
+                                .choices
+                                .as_ref()
+                                .is_some_and(|choices| choices.contains(&Decision::AllowProject))
+                        );
+                        harness.respond(request.approval_id, decision).await?;
+                    }
+                    HarnessEvent::ApprovalResolved { decision, .. } => {
+                        saved_decision = Some(decision)
+                    }
+                    HarnessEvent::ApprovalPolicyError { text } => {
+                        assert!(text.contains("Allowed once."));
+                        save_error = true;
+                    }
+                    HarnessEvent::ApprovalAutomaticallyResolved { source, .. } => {
+                        assert_eq!(source, ApprovalSource::ProjectGrant);
+                        automatic = true;
+                    }
+                    HarnessEvent::TurnFinished { reason } => {
+                        assert_eq!(reason, TurnFinishReason::Completed);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(automatic, decision.is_none());
+            assert_eq!(save_error, save_fails);
+            assert_eq!(
+                saved_decision,
+                if save_fails {
+                    Some(Decision::Allow)
+                } else {
+                    decision
+                }
+            );
+        }
+        let observed = observed.lock().map_err(|_| "fake observations poisoned")?;
+        assert_eq!(observed.permission_responses.len(), 4);
+        assert!(
+            observed
+                .permission_responses
+                .iter()
+                .all(|choice| choice.contains("once"))
+        );
+        Ok(())
+    }
+
     fn tool_request() -> ToolCallUpdate {
         ToolCallUpdate::new(
             "tool-1",
@@ -1058,8 +1251,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn queued_session_grant_never_covers_a_changed_command()
+    #[tokio::test]
+    async fn queued_session_grant_never_covers_a_changed_command()
     -> Result<(), Box<dyn std::error::Error>> {
         let pending = |command: &str| {
             let (reply, response) = futures_channel::oneshot::channel();
@@ -1076,7 +1269,7 @@ mod tests {
                 PermissionOptionKind::AllowOnce,
             )];
             (
-                PendingApproval::new(request, options, PermissionReply::new(reply)),
+                PendingApproval::new(request, options, PermissionReply::new(reply), false),
                 response,
             )
         };
@@ -1092,9 +1285,11 @@ mod tests {
             &sender,
             &mut queue,
             &mut grants,
+            None,
             first_id,
             Decision::AllowSession,
-        )?;
+        )
+        .await?;
         assert!(matches!(
             first_response.try_recv()?,
             Some(PermissionDecision::Selected(_))

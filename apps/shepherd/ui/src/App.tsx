@@ -25,15 +25,15 @@ const SEND_ACCENT_KEY = 'shepherd.sendAccent'
 const APPROVAL_LABELS: Record<bridge.Decision, string> = {
   allow: 'Allow once',
   allowSession: 'Allow for session',
+  allowProject: 'Always allow for project',
   deny: 'Deny',
 }
 const DEFAULT_APPROVAL_CHOICES: bridge.Decision[] = ['allow', 'deny']
-const STRUCTURED_AGENTS: Record<bridge.Agent, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' }
 const AGENT_OPTIONS: PickerOption[] = [
-  { id: 'codex', name: STRUCTURED_AGENTS.codex },
-  { id: 'opencode', name: STRUCTURED_AGENTS.opencode },
+  { id: 'codex', name: bridge.AGENT_LABELS.codex },
+  { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
   { id: 'pi', name: 'Pi (coming soon)', disabled: true },
-  { id: 'claude', name: STRUCTURED_AGENTS.claude },
+  { id: 'claude', name: bridge.AGENT_LABELS.claude },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
 
@@ -117,7 +117,7 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
-  const currentAgentName = () => STRUCTURED_AGENTS[currentAgent()]
+  const currentAgentName = () => bridge.AGENT_LABELS[currentAgent()]
   const composerModel = () => {
     const activeModel = workspace()?.diagnostics?.model
     if (activeModel) return activeModel
@@ -132,7 +132,7 @@ export function App() {
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
   const showsArchived = (projectId: string | null) =>
     (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
-  const settingsProject = () => projects().find((project) => project.id === projectSettingsRequest()?.id)
+  const settingsProject = () => projects().find((project) => project.id === (projectSettingsRequest()?.id ?? selectedProjectId()))
   const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
 
   function setProjectArchived(projectId: string, visible: boolean) {
@@ -880,7 +880,7 @@ export function App() {
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
             project={settingsProject()}
             projectSettingsRequest={projectSettingsRequest()}
-            showProjectArchived={showsArchived(projectSettingsRequest()?.id ?? null)}
+            showProjectArchived={showsArchived(settingsProject()?.id ?? null)}
             onShowProjectArchived={setProjectArchived}
           />
         </Show>
@@ -1597,7 +1597,9 @@ function entryBody(
       const argumentsText = formatArguments(permission.arguments)
       const decisionText = permission.withdrawn ? 'withdrawn'
         : permission.source === 'sessionGrant' ? 'allowed by session grant'
+        : permission.source === 'projectGrant' ? 'allowed by project grant'
         : permission.decision === 'allowSession' ? 'allowed for session'
+        : permission.decision === 'allowProject' ? 'allowed for project'
         : permission.decision
       return (
         <div class="entry__permission">

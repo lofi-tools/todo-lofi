@@ -22,6 +22,7 @@ pub mod test_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_harness::{FailureKind, HarnessEvent, SessionId, TurnFinishReason};
 use tokio::sync::mpsc;
@@ -35,9 +36,9 @@ pub use snapshots::{ProjectList, TaskList, TaskWorkspace, WorkspaceLayout};
 pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
 use crate::git::{GitError, GitService, TurnBaseline};
-use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
+use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
-use crate::store::{MemoryStore, Store, StoreError};
+use crate::store::{MemoryStore, ProjectApproval, Store, StoreError};
 use crate::terminal::{
     InspectorTab, TerminalId, TerminalLayout, TerminalList, TerminalRecord, TerminalSnapshot,
 };
@@ -149,7 +150,7 @@ pub struct Core {
     terminal_layouts: BTreeMap<ProjectId, TerminalLayout>,
     terminals: BTreeMap<TerminalId, TerminalRecord>,
     terminal_list_revision: u64,
-    store: Box<dyn Store>,
+    store: Arc<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
     events: mpsc::UnboundedSender<Event>,
@@ -188,7 +189,7 @@ impl Core {
             terminal_layouts: BTreeMap::new(),
             terminals: BTreeMap::new(),
             terminal_list_revision: 0,
-            store,
+            store: Arc::from(store),
             harness_factory,
             shutdown: ShutdownState::Running,
             events,
@@ -518,6 +519,23 @@ impl Core {
 
     pub fn shutdown_state(&self) -> ShutdownState {
         self.shutdown
+    }
+
+    pub async fn project_approvals(
+        &mut self,
+        project: &ProjectId,
+    ) -> Result<Vec<ProjectApproval>, CoreError> {
+        self.project_path(project)?;
+        Ok(self.store.project_approvals(project).await?)
+    }
+
+    pub async fn reset_project_approval(
+        &mut self,
+        project: &ProjectId,
+        id: &str,
+    ) -> Result<(), CoreError> {
+        self.project_path(project)?;
+        Ok(self.store.reset_project_approval(project, id).await?)
     }
 
     /// Execute one command. A shell should send exactly this enum over its
@@ -1348,7 +1366,14 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let (harness, spec) = self.harness_factory.launch(task.agent, cwd)?;
+        let (mut harness, spec) = self.harness_factory.launch(task.agent, cwd)?;
+        let policy = ProjectApprovals::new(
+            self.store.clone(),
+            task.project_id.clone(),
+            task.agent,
+            &spec,
+        )?;
+        harness.set_project_approval_policy(Arc::new(policy));
         let mut session = HarnessSession::new(harness);
         session.restore_transcript(carried);
         let capabilities = match session.start(spec).await {
