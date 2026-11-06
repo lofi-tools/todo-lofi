@@ -1054,12 +1054,15 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if (previous && ((previous.modes ^ next.modes) & (ALT_SCREEN | KITTY_REPORT_EVENTS))) {
         reportedKeys.clear()
       }
-      if (previous && (previous.displayOffset !== next.displayOffset || previous.columns !== next.columns || previous.rows !== next.rows)) {
+      const selectedRange = selection ?? (selectionAnchor === undefined ? undefined : { start: selectionAnchor, end: selectionAnchor })
+      if (previous && selectedRange && (previous.columns !== next.columns || previous.rows !== next.rows || ((previous.modes ^ next.modes) & ALT_SCREEN))) {
         selection = undefined
         selecting = undefined
         selectionAnchor = undefined
-      } else if (previous && selection) {
-        const [first, last] = selectionRange(previous, selection)
+        changedRows = null
+      } else if (previous && selectedRange) {
+        // New output can increase the scrollback offset while leaving the selected cells in place.
+        const [first, last] = selectionRange(previous, selectedRange)
         for (let index = first; index <= last; index++) {
           const before = previous.cells[index]
           const after = next.cells[index]

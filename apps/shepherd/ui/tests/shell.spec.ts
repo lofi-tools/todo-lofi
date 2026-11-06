@@ -411,6 +411,21 @@ test.beforeEach(async ({ context }) => {
               new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
             }
             callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
+            if (options.has('scrollback-selection')) {
+              let index = 2
+              Object.assign(window, {
+                __emitTerminalHistory: (offset: number, glyph: string) => {
+                  const history = frame.slice()
+                  history[1] = 2
+                  history[history.length - 9] = glyph.charCodeAt(0)
+                  const header = new DataView(history.buffer)
+                  header.setUint32(10, offset, true)
+                  header.setUint32(history.length - 8, index + 1, true)
+                  header.setUint32(history.length - 4, index + 1, true)
+                  callbacks.get(args.channel.id)?.({ index: index++, message: history.buffer })
+                },
+              })
+            }
             return `subscription-${args.terminalId}`
           }
           case 'terminal_write':
@@ -704,6 +719,37 @@ test('releases a held terminal mouse button when focus leaves', async ({ page })
   await page.mouse.up()
   await input.press('b')
   await expect.poll(writes).toEqual([...reports, 'b'])
+})
+
+test('keeps a selection while new output leaves the selected scrollback unchanged', async ({ page }) => {
+  await page.goto('/?scrollback-selection')
+  const output = page.getByLabel('Terminal output')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const emit = (offset: number, glyph: string) => page.evaluate(({ offset, glyph }) => {
+    const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
+    fixture.__emitTerminalHistory(offset, glyph)
+  }, { offset, glyph })
+  const copy = () => input.evaluate((element) => {
+    const clipboard = new DataTransfer()
+    element.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: clipboard }))
+    return clipboard.getData('text/plain')
+  })
+
+  await expect(output).toHaveText('BB')
+  await emit(4, 'A')
+  await expect(output).toHaveText('AA')
+  const canvas = page.locator('.terminal-view__canvas')
+  const bounds = await canvas.boundingBox()
+  if (!bounds) throw new Error('The terminal canvas has no bounds')
+  await canvas.dispatchEvent('dblclick', { clientX: bounds.x + 2, clientY: bounds.y + 2 })
+  expect(await copy()).toBe('AA')
+
+  await emit(5, 'A')
+  expect(await copy()).toBe('AA')
+
+  await emit(6, 'C')
+  await expect(output).toHaveText('CC')
+  expect(await copy()).toBe('')
 })
 
 test('ends a partial bracketed paste before sending the next key', async ({ page }) => {
