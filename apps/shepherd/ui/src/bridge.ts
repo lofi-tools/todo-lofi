@@ -671,6 +671,20 @@ export interface DirectoryListing {
   incomplete: boolean
 }
 
+export interface FileChange {
+  path: string
+  kind: 'added' | 'modified' | 'deleted' | 'renamed'
+  originalPath: string | null
+}
+
+export type FileWatchUpdate = { type: 'changes'; files: FileChange[] } | { type: 'error'; message: string }
+
+export async function watchWorkspaceFiles(projectId: string, taskId: string | null, onUpdate: (update: FileWatchUpdate) => void): Promise<() => Promise<void>> {
+  const channel = new Channel<FileWatchUpdate>(onUpdate)
+  const watchId = await invoke<string>('watch_workspace_files', { projectId, taskId, channel })
+  return () => invoke('unwatch_workspace_files', { watchId })
+}
+
 export interface TextFile {
   firstLine: number
   lines: Array<Array<{ text: string; color: string | null }>>

@@ -89,6 +89,11 @@ impl GitService {
         })
     }
 
+    pub fn common_directory(path: &Path) -> Result<PathBuf, GitError> {
+        let directory = run_git(path, &["rev-parse", "--git-common-dir"])?;
+        canonicalize(&path.join(directory))
+    }
+
     /// Create a task worktree from the repository's default branch. The caller
     /// resolves the slug and path; this function only performs the Git mutation.
     pub fn create_worktree(
@@ -661,10 +666,11 @@ impl GitService {
         commit_with_message(root, message, false)
     }
 
-    fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
+    pub(crate) fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
         let bytes = git_bytes(
             path,
             &[
+                "--no-optional-locks",
                 "status",
                 "--porcelain=v2",
                 "-z",

@@ -57,6 +57,8 @@ current layout and give future changes a point of comparison.
   in a read-only, line-numbered viewer inside the inspector. **Find files**
   filters filenames as the user types. **Search contents** and Enter start a
   cancellable literal search. Selecting a content match opens its line.
+  Show Git change badges beside visible paths and list deleted paths below the
+  tree. Refresh Git status and open folders after a debounced workspace change.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

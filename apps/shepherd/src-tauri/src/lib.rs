@@ -8,6 +8,7 @@ mod bridge;
 mod codex_harness;
 #[cfg(any(test, debug_assertions))]
 mod dev_harness;
+mod file_watch;
 mod pty_terminal;
 mod terminal_screen;
 
@@ -185,6 +186,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::git_snapshot,
             bridge::commands::list_files,
             bridge::commands::read_workspace_file,
+            bridge::commands::watch_workspace_files,
+            bridge::commands::unwatch_workspace_files,
             bridge::commands::reserve_file_search,
             bridge::commands::search_workspace_files,
             bridge::commands::cancel_file_search,

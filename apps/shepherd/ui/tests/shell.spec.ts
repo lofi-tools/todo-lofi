@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { AgentTerminal, Entry, Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { AgentTerminal, Entry, Event as ShepherdEvent, FileChange, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -21,6 +21,9 @@ test.beforeEach(async ({ context }) => {
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
     const cancelledFileSearches: string[] = []
     const pendingFileSearches = new Map<string, () => void>()
+    const fileWatchers = new Map<string, { taskId: string | null; channel: number; index: number }>()
+    const unwatchedFiles: string[] = []
+    const watchedSourceFiles = new Map<string | null, Set<string>>()
     let nextFileSearch = 1
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
@@ -354,7 +357,8 @@ test.beforeEach(async ({ context }) => {
           case 'list_files': {
             fileListings.push(args.path)
             if (args.path === 'src') {
-              return { entries: [{ name: 'main.rs', path: 'src/main.rs', directory: false }], incomplete: false }
+              const paths = watchedSourceFiles.get(args.taskId) ?? new Set(['src/main.rs'])
+              return { entries: [...paths].map((path) => ({ name: path.split('/').at(-1), path, directory: false })), incomplete: false }
             }
             const name = args.taskId ? 'worktree.txt' : 'README.md'
             return { entries: [
@@ -368,6 +372,14 @@ test.beforeEach(async ({ context }) => {
               [{ text: args.path === 'src/main.rs' ? 'fn main() {}' : '<file>', color: '#a3be8c' }],
               [{ text: '// second line', color: null }],
             ], truncated: false }
+          case 'watch_workspace_files': {
+            const id = `file-watch-${fileWatchers.size + 1}`
+            fileWatchers.set(id, { taskId: args.taskId, channel: args.channel.id, index: 0 })
+            return id
+          }
+          case 'unwatch_workspace_files':
+            unwatchedFiles.push(args.watchId)
+            return null
           case 'reserve_file_search':
             return `search-${nextFileSearch++}`
           case 'search_workspace_files': {
@@ -636,6 +648,22 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__fileListings = fileListings
+    window.__unwatchedFiles = unwatchedFiles
+    window.__fileWatchIds = () => [...fileWatchers.keys()]
+    window.__publishFileChanges = (id: string, files: FileChange[]) => {
+      const watcher = fileWatchers.get(id)
+      if (!watcher) throw new Error(`Unknown fixture watcher ${id}`)
+      const paths = watchedSourceFiles.get(watcher.taskId) ?? new Set(['src/main.rs'])
+      for (const file of files) {
+        if (file.originalPath) paths.delete(file.originalPath)
+        if (file.path.startsWith('src/')) {
+          if (file.kind === 'deleted') paths.delete(file.path)
+          else paths.add(file.path)
+        }
+      }
+      watchedSourceFiles.set(watcher.taskId, paths)
+      callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files } })
+    }
     window.__fileSearches = fileSearches
     window.__cancelledFileSearches = cancelledFileSearches
     window.__finishFileSearch = (id: string) => pendingFileSearches.get(id)?.()
@@ -786,6 +814,47 @@ test('filters by name, cancels content searches, and opens matches at their line
   await query.fill('main')
   await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
   expect((await searches()).at(-1)).toMatchObject({ taskId: null, mode: 'name' })
+})
+
+test('refreshes Git badges and open folders and stops watching the old root', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const root = files.getByLabel('File root')
+  const folder = files.getByRole('button', { name: 'src', exact: true })
+  const watchIds = () => page.evaluate(() => window.__fileWatchIds())
+  const unwatched = () => page.evaluate(() => window.__unwatchedFiles)
+  const publish = (id: string, changes: FileChange[]) => page.evaluate(({ id, changes }) => window.__publishFileChanges(id, changes), { id, changes })
+  await expect.poll(watchIds).toEqual(['file-watch-1'])
+  await folder.click()
+  await expect(files.getByRole('button', { name: 'main.rs' })).toBeVisible()
+  await folder.focus()
+
+  await publish('file-watch-1', [
+    { path: 'src/main.rs', kind: 'modified', originalPath: null },
+    { path: 'src/added.rs', kind: 'added', originalPath: null },
+    { path: 'src/renamed.rs', kind: 'renamed', originalPath: 'src/old.rs' },
+    { path: 'retired.md', kind: 'deleted', originalPath: null },
+  ])
+  await expect(files.getByRole('button', { name: /main\.rs/ }).getByRole('img', { name: 'Modified' })).toBeVisible()
+  await expect(files.getByRole('button', { name: /added\.rs/ }).getByRole('img', { name: 'Added' })).toBeVisible()
+  await expect(files.getByRole('button', { name: /renamed\.rs/ }).getByRole('img', { name: 'Renamed from src/old.rs' })).toBeVisible()
+  await expect(files.getByText('retired.md')).toBeVisible()
+  await expect(files.getByRole('img', { name: 'Deleted', exact: true })).toBeVisible()
+  await expect(folder).toBeFocused()
+  await expect(folder).toHaveAttribute('aria-expanded', 'true')
+
+  await publish('file-watch-1', [])
+  await expect(files.getByRole('img')).toHaveCount(0)
+  await expect(files.getByRole('button', { name: 'added.rs' })).toBeVisible()
+  await root.selectOption('project')
+  await expect.poll(unwatched).toContain('file-watch-1')
+  await expect.poll(watchIds).toContain('file-watch-2')
+  await publish('file-watch-1', [{ path: 'retired.md', kind: 'deleted', originalPath: null }])
+  await expect(files.getByText('retired.md')).toHaveCount(0)
+  await page.getByRole('tab', { name: 'Terminals' }).click()
+  await expect.poll(unwatched).toContain('file-watch-2')
 })
 
 test('resumes an interrupted task from its conversation header', async ({ page }) => {

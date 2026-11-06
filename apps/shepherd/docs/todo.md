@@ -956,8 +956,10 @@ and the task header never overstates the tier.
   preview limits. Filename filtering searches the selected root as the user
   types. Submitted content searches run in the background and support cancel,
   and opening a result jumps to its line. Scans cap entries, content bytes and
-  results, and label incomplete results. Live Git badges and external editor
-  and file manager actions remain open.
+  results, and label incomplete results. A debounced watcher refreshes Git
+  badges for the selected root, including changes to the index and HEAD. A
+  separate list shows deleted paths. External editor and file manager actions
+  remain open.
 - [ ] Preview tab: project URL, element annotation, structured prompt context,
   screenshot fallback when framing or injection is blocked.
 - [ ] Cross-task search over Turso FTS.

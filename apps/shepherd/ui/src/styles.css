@@ -1697,6 +1697,33 @@ textarea {
   background: var(--surface-raised);
 }
 
+.files-tree__label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.files-tree__change {
+  flex: none;
+  min-width: 1ch;
+  color: var(--text-muted);
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.files-tree__change[data-kind='added'] { color: #8ac48a; }
+.files-tree__change[data-kind='modified'] { color: #e5b66e; }
+.files-tree__change[data-kind='deleted'] { color: #d98a8a; }
+.files-tree__change[data-kind='renamed'] { color: #a5b0ff; }
+
+.files-tree__deleted {
+  padding: 4px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .files-viewer {
   display: grid;
   gap: 6px;

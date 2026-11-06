@@ -1,6 +1,6 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
-import { cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
+import { cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 
 interface FileLocation {
   projectId: string
@@ -46,7 +46,34 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean }) {
   const [results, setResults] = createSignal<FileSearchResult>()
   const [error, setError] = createSignal<string>()
   const [status, setStatus] = createSignal<'idle' | 'searching' | 'cancelled'>('idle')
+  const [changes, setChanges] = createSignal<FileChange[]>([])
+  const [watchError, setWatchError] = createSignal<string>()
+  const [treeRevision, setTreeRevision] = createSignal(0)
+  const changesByPath = createMemo(() => new Map(changes().map((change) => [change.path, change])))
+  const changeFor = (path: string) => changesByPath().get(path)
+  const deleted = () => changes().filter((change) => change.kind === 'deleted'
+    && (props.showDotfiles || !change.path.split('/').some((part) => part.startsWith('.'))))
   let active: PendingSearch | undefined
+
+  onMount(() => {
+    let closed = false
+    const watcher = watchWorkspaceFiles(props.projectId, props.taskId, (update) => {
+      if (closed) return
+      if (update.type === 'error') {
+        setWatchError(update.message)
+      } else {
+        setWatchError(undefined)
+        setChanges(update.files)
+        setTreeRevision((revision) => revision + 1)
+      }
+    })
+    void watcher.catch((failure) => { if (!closed) setWatchError(failureMessage(failure)) })
+    onCleanup(() => {
+      closed = true
+      void watcher.then((dispose) => dispose(), () => undefined)
+        .catch((failure) => console.warn('Could not stop the file watcher', failure))
+    })
+  })
 
   function stopSearch() {
     const previous = active
@@ -105,9 +132,21 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean }) {
           <button type="button" onClick={() => { stopSearch(); setStatus('cancelled') }}>Cancel search</button>
         </Show>
       </form>
+      <Show when={watchError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
-          selected={selected()?.path ?? null} onSelect={(path) => setSelected({ path, line: null })} />
+          revision={treeRevision()} changeFor={changeFor} selected={selected()?.path ?? null}
+          onSelect={(path) => setSelected({ path, line: null })} />
+        <Show when={deleted().length}>
+          <details class="files-tree__deleted" open>
+            <summary>Deleted files</summary>
+            <ul class="files-tree">
+              <For each={deleted()}>{(file) => (
+                <li class="files-tree__label"><span>{file.path}</span><FileChangeBadge change={file} /></li>
+              )}</For>
+            </ul>
+          </details>
+        </Show>
       </div>
       <Show when={query().trim()}>
         <section class="files-pane__tree" aria-label="File search results">
@@ -121,7 +160,10 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean }) {
                   <li>
                     <button type="button" class="files-tree__entry" onClick={() => setSelected(match)}
                       aria-pressed={selected()?.path === match.path && selected()?.line === match.line}>
-                      {match.path}{match.line === null ? '' : `:${match.line}`}
+                      <span class="files-tree__label">
+                        <span>{match.path}{match.line === null ? '' : `:${match.line}`}</span>
+                        <FileChangeBadge change={changeFor(match.path)} />
+                      </span>
                       <Show when={match.excerpt}>{(excerpt) => <span class="files-search__excerpt">{excerpt()}</span>}</Show>
                     </button>
                   </li>
@@ -143,16 +185,25 @@ interface FolderProps extends FileLocation {
   showDotfiles: boolean
   selected: string | null
   onSelect: (path: string) => void
+  revision: number
+  changeFor: (path: string) => FileChange | undefined
 }
 
 function FolderContents(props: FolderProps & { path: string }) {
   const [listing] = createResource(
-    () => [props.projectId, props.taskId, props.path, props.showDotfiles] as const,
-    ([projectId, taskId, path, showDotfiles]) => listFiles(projectId, taskId, path, showDotfiles),
+    () => [props.projectId, props.taskId, props.path, props.showDotfiles, props.revision] as const,
+    async ([projectId, taskId, path, showDotfiles], { value }): Promise<DirectoryListing> => {
+      const next = await listFiles(projectId, taskId, path, showDotfiles)
+      const previous = new Map(value?.entries.map((entry) => [entry.path, entry]))
+      return { ...next, entries: next.entries.map((entry) => {
+        const prior = previous.get(entry.path)
+        return prior && prior.directory === entry.directory ? prior : entry
+      }) }
+    },
   )
   return (
     <>
-      <Show when={listing.loading}><p class="empty empty--tight" role="status">Loading files…</p></Show>
+      <Show when={listing.loading && !listing.latest}><p class="empty empty--tight" role="status">Loading files…</p></Show>
       <Show when={listing.error}>{(error) => <p class="error" role="alert">{failureMessage(error())}</p>}</Show>
       <Show when={!listing.error && listing()}>
         {(current) => <>
@@ -174,7 +225,9 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
     <li>
       <Show when={props.entry.directory} fallback={
         <button type="button" class="files-tree__entry" aria-pressed={props.selected === props.entry.path}
-          onClick={() => props.onSelect(props.entry.path)}>{props.entry.name}</button>
+          onClick={() => props.onSelect(props.entry.path)}>
+          <span class="files-tree__label"><span>{props.entry.name}</span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
+        </button>
       }>
         <button type="button" class="files-tree__entry" aria-expanded={expanded()} onClick={() => setExpanded((open) => !open)}>
           <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span> {props.entry.name}
@@ -184,6 +237,21 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
         </Show>
       </Show>
     </li>
+  )
+}
+
+const FILE_CHANGE_LABELS: Record<FileChange['kind'], string> = {
+  added: 'Added', modified: 'Modified', deleted: 'Deleted', renamed: 'Renamed',
+}
+
+function FileChangeBadge(props: { change: FileChange | undefined }) {
+  return (
+    <Show when={props.change}>{(change) => {
+      const label = () => FILE_CHANGE_LABELS[change().kind]
+      const description = () => change().kind === 'renamed' && change().originalPath
+        ? `Renamed from ${change().originalPath}` : label()
+      return <span class="files-tree__change" data-kind={change().kind} role="img" aria-label={description()} title={description()}>{label()[0]}</span>
+    }}</Show>
   )
 }
 

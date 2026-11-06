@@ -37,6 +37,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::codex_harness::codex_spawn_spec;
+use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
 use crate::terminal_screen::{Screen, SearchDirection, TerminalFrame};
 
@@ -430,6 +431,7 @@ pub struct ShellState {
     terminals: TerminalHost,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
+    file_watches: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
 }
 
 #[derive(Default)]
@@ -457,6 +459,7 @@ impl ShellState {
             terminals,
             scan: Arc::new(Mutex::new(None)),
             file_searches: Mutex::new(BTreeMap::new()),
+            file_watches: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -782,6 +785,61 @@ impl ShellState {
             &ProjectId::new(project_id),
             task_id.map(TaskId::new).as_ref(),
         )?)
+    }
+
+    async fn watch_workspace_files(
+        &self,
+        project_id: String,
+        task_id: Option<String>,
+        channel: tauri::ipc::Channel<FileWatchUpdate>,
+    ) -> Result<String, BridgeError> {
+        let root = self.files_directory(project_id, task_id).await?;
+        let mut watcher = tokio::task::spawn_blocking(move || WorkspaceWatch::start(root))
+            .await
+            .map_err(|error| {
+                BridgeError::new(
+                    "files",
+                    format!("Could not start the file watcher: {error}"),
+                )
+            })?
+            .map_err(|error| {
+                BridgeError::new("files", format!("Could not watch workspace files: {error}"))
+            })?;
+        let (cancel, mut cancelled) = oneshot::channel();
+        let watch_id = uuid::Uuid::new_v4().to_string();
+        self.file_watches
+            .lock()
+            .await
+            .insert(watch_id.clone(), cancel);
+        let watches = self.file_watches.clone();
+        let id = watch_id.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let update = tokio::select! {
+                    _ = &mut cancelled => break,
+                    snapshot = watcher.snapshot() => match snapshot {
+                        Ok(files) => FileWatchUpdate::Changes { files },
+                        Err(error) => FileWatchUpdate::Error { message: format!("Could not refresh Git changes: {error}") },
+                    }
+                };
+                if let Err(error) = channel.send(update) {
+                    tracing::debug!(%error, "the Files tab detached");
+                    break;
+                }
+                tokio::select! {
+                    _ = &mut cancelled => break,
+                    refresh = watcher.next_refresh() => if let Err(error) = refresh {
+                        let update = FileWatchUpdate::Error { message: format!("Could not watch workspace files: {error}") };
+                        if let Err(error) = channel.send(update) {
+                            tracing::debug!(%error, "the Files tab detached");
+                        }
+                        break;
+                    },
+                }
+            }
+            watches.lock().await.remove(&id);
+        });
+        Ok(watch_id)
     }
 
     async fn reserve_file_search(&self) -> Result<String, BridgeError> {
@@ -1540,6 +1598,27 @@ pub mod commands {
                     )
                 })??,
         )
+    }
+
+    #[tauri::command]
+    pub async fn watch_workspace_files(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+        channel: tauri::ipc::Channel<FileWatchUpdate>,
+    ) -> Result<String, BridgeError> {
+        state
+            .watch_workspace_files(project_id, task_id, channel)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn unwatch_workspace_files(
+        state: State<'_, ShellState>,
+        watch_id: String,
+    ) -> Result<(), BridgeError> {
+        state.file_watches.lock().await.remove(&watch_id);
+        Ok(())
     }
 
     #[tauri::command]

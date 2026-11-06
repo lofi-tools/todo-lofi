@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, DirEntry, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -9,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+
+use crate::git::{GitError, GitService};
 
 const MAX_DIRECTORY_ENTRIES: usize = 5_000;
 const MAX_IGNORE_BYTES: u64 = 1024 * 1024;
@@ -41,6 +44,8 @@ pub enum FileError {
     Io(#[from] io::Error),
     #[error("Could not read a workspace ignore file: {0}")]
     Ignore(String),
+    #[error("{0}")]
+    Git(#[from] GitError),
     #[error("The search query must contain 1 to {MAX_QUERY_BYTES} bytes.")]
     InvalidQuery,
     #[error("File search cancelled.")]
@@ -59,6 +64,72 @@ pub struct FileEntry {
     name: String,
     path: String,
     directory: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    path: String,
+    kind: FileChangeKind,
+    original_path: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum FileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+pub fn git_changes(root: &Path) -> Result<Vec<FileChange>, FileError> {
+    let mut changes = BTreeMap::new();
+    for file in GitService
+        .status(root)?
+        .into_iter()
+        .filter(|file| file.actionable)
+    {
+        let has = |code: &str| file.index == code || file.worktree == code;
+        let kind = if has("D") {
+            FileChangeKind::Deleted
+        } else if has("R") {
+            FileChangeKind::Renamed
+        } else if has("A") || has("?") || has("C") {
+            FileChangeKind::Added
+        } else {
+            FileChangeKind::Modified
+        };
+        if kind == FileChangeKind::Deleted && removed_path_is_ignored(root, Path::new(&file.path))?
+        {
+            continue;
+        }
+        changes.insert(
+            file.path.clone(),
+            FileChange {
+                path: file.path,
+                kind,
+                original_path: file.original_path,
+            },
+        );
+    }
+    Ok(changes.into_values().collect())
+}
+
+fn removed_path_is_ignored(root: &Path, relative: &Path) -> Result<bool, FileError> {
+    let relative = checked_path(relative)?;
+    let parent = relative.parent().ok_or(FileError::InvalidPath)?;
+    let mut directory = root.to_path_buf();
+    let mut rules = IgnoreRules::default();
+    for component in parent {
+        load_rules(root, &directory, &mut rules)?;
+        directory.push(component);
+        if is_ignored(&rules, &directory, true) {
+            return Ok(true);
+        }
+    }
+    load_rules(root, &directory, &mut rules)?;
+    Ok(is_ignored(&rules, &root.join(relative), false))
 }
 
 #[derive(Debug, Serialize)]
@@ -577,6 +648,36 @@ fn highlight(path: &Path, content: &str, focus_line: Option<usize>) -> TextFile 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::run_git;
+    use crate::test_support::TestRepository;
+
+    #[test]
+    fn classifies_git_status_and_excludes_ignored_deletions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let root = fixture.path();
+        for name in ["changed.txt", "removed.txt", "ignored.txt"] {
+            fs::write(root.join(name), name)?;
+        }
+        fs::write(root.join(".shepherdignore"), "ignored.txt\n")?;
+        run_git(root, &["add", "--all"])?;
+        run_git(root, &["commit", "-m", "fixture paths"])?;
+        run_git(root, &["mv", "README.md", "renamed.md"])?;
+        fs::write(root.join("changed.txt"), "modified")?;
+        fs::write(root.join("added.txt"), "untracked")?;
+        fs::remove_file(root.join("removed.txt"))?;
+        fs::remove_file(root.join("ignored.txt"))?;
+        assert_eq!(
+            serde_json::to_value(git_changes(root)?)?,
+            serde_json::json!([
+                {"path": "added.txt", "kind": "added", "originalPath": null},
+                {"path": "changed.txt", "kind": "modified", "originalPath": null},
+                {"path": "removed.txt", "kind": "deleted", "originalPath": null},
+                {"path": "renamed.md", "kind": "renamed", "originalPath": "README.md"},
+            ])
+        );
+        Ok(())
+    }
 
     #[test]
     fn lists_one_level_and_honors_ancestor_and_local_ignore_rules()
