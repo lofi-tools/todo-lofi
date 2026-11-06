@@ -602,7 +602,9 @@ task-scoped, persistent and fast enough.
   The native 1 MiB burst painted in 36 ms with the inline storage, compared
   with 37–40 ms across three baseline runs. All 24 paced markers appeared.
 - [x] Bound PTY queues and allow one frame in flight per webview subscription.
-  Coalesce paints and defer canvas work while the tab is hidden. Rate-limit
+  Coalesce paints and defer canvas work while the inspector tab or window is
+  hidden. The browser regression verifies that the terminal skips a queued
+  paint when the window hides and draws the latest frame on return. Rate-limit
   frame delivery from the previous send so an idle pane can update immediately.
   Each terminal view limits queued input to 128 operations and 1 MiB of
   payload. Kitty key presses and reported mouse buttons reserve room for their

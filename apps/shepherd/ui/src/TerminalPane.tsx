@@ -639,7 +639,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   function scheduleDraw(rows: Iterable<number> | null = null) {
     if (rows === null) dirtyRows = null
     else if (dirtyRows) for (const row of rows) dirtyRows.add(row)
-    if (paintRequest !== undefined || !props.shown) return
+    if (paintRequest !== undefined || !props.shown || document.hidden) return
     paintRequest = window.requestAnimationFrame(() => {
       paintRequest = undefined
       const rows = dirtyRows
@@ -648,16 +648,20 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     })
   }
 
-  createEffect(() => {
-    if (props.shown) {
+  function syncViewVisibility() {
+    if (props.shown && !document.hidden) {
       scheduleDraw()
       if (frame && !copying()) setVisibleText(viewportText(frame))
     } else {
-      leaveTerminal()
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       paintRequest = undefined
       dirtyRows = null
     }
+  }
+
+  createEffect(() => {
+    if (!props.shown) leaveTerminal()
+    syncViewVisibility()
   })
 
   function draw(changedRows: Iterable<number> | null) {
@@ -1177,10 +1181,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
     window.addEventListener('focus', onWindowFocus)
     window.addEventListener('blur', leaveTerminal)
+    document.addEventListener('visibilitychange', syncViewVisibility)
     onCleanup(() => {
       leaveTerminal()
       window.removeEventListener('focus', onWindowFocus)
       window.removeEventListener('blur', leaveTerminal)
+      document.removeEventListener('visibilitychange', syncViewVisibility)
       detached = true
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       window.clearTimeout(mirrorTimer)

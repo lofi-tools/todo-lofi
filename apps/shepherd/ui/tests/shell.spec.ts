@@ -774,6 +774,47 @@ test('releases a held terminal mouse button when focus leaves', async ({ page })
   await expect.poll(writes).toEqual([...reports, 'b'])
 })
 
+test('paints the latest terminal output when a hidden window returns', async ({ page }) => {
+  await page.goto('/?scrollback-selection')
+  const output = page.getByLabel('Terminal output')
+  await expect(output).toHaveText('BB')
+
+  const paints = await page.evaluate(async () => {
+    const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
+    let hidden = false
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+    const glyphs: string[] = []
+    const originalFillText = CanvasRenderingContext2D.prototype.fillText
+    CanvasRenderingContext2D.prototype.fillText = function (...args) {
+      if (this.canvas.classList.contains('terminal-view__canvas')) glyphs.push(args[0])
+      originalFillText.apply(this, args)
+    }
+    const waitForPaint = () => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+
+    try {
+      fixture.__emitTerminalHistory(2, 'C')
+      hidden = true
+      document.dispatchEvent(new Event('visibilitychange'))
+      fixture.__emitTerminalHistory(3, 'D')
+      await waitForPaint()
+      const whileHidden = glyphs.splice(0)
+
+      hidden = false
+      document.dispatchEvent(new Event('visibilitychange'))
+      await waitForPaint()
+      return { whileHidden, restored: glyphs }
+    } finally {
+      CanvasRenderingContext2D.prototype.fillText = originalFillText
+      Reflect.deleteProperty(document, 'hidden')
+    }
+  })
+
+  expect(paints).toEqual({ whileHidden: [], restored: ['D', 'D'] })
+  await expect(output).toHaveText('DD')
+})
+
 test('keeps a selection while new output leaves the selected scrollback unchanged', async ({ page }) => {
   await page.goto('/?scrollback-selection')
   const output = page.getByLabel('Terminal output')
