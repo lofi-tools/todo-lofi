@@ -23,10 +23,18 @@ current layout and give future changes a point of comparison.
   Freebuff terminal is visible, Previous is available as **Back to chat**.
 - On macOS, show the native window controls on the app's surface, with the
   title hidden. Put Previous and Next directly to their right on the same
-  horizontal line in a single 42 px header. The free header space is draggable.
-  Quit uses the system window or app controls.
-- Keep the inspector on the right with its vertical tab strip. Settings can
-  occupy the middle pane while the sidebar and inspector remain in place.
+  horizontal line, centred vertically in a 42 px header. The free header space
+  is draggable. Quit uses the system window or app controls.
+- Use one window grid for the header, workspace, and footer. The header and
+  workspace share columns through CSS subgrid. The navigation, conversation,
+  and inspector sections of the header share the window background.
+- Keep the inspector on the right. Left-align its five icon tabs in the header
+  above it in this order: **Terminals**, **Preview**, **Review**, **Git**, and
+  **Files**.
+  Give each icon an accessible name and tooltip. Use Left and Right to switch
+  between available tabs. Show terminal and review attention as dots with
+  accessible descriptions. Settings can occupy the middle pane while the
+  sidebar and inspector remain in place.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - Place the status bar below the wrapper on the window background. Its
@@ -74,8 +82,9 @@ current layout and give future changes a point of comparison.
   icons with light strokes. The text and icons share a colour. Use muted text
   for unselected projects and slightly brighter text for the selected project.
   Unselected rows rest on the sidebar's background with a transparent fill.
-  The selected row has a raised fill and no visible border. Compose opens a
-  draft in that project.
+  The selected row has a raised fill and no visible border. On devices with
+  hover, reveal Compose when the pointer is over the row or a row button has
+  keyboard focus. Compose opens a draft in that project.
 - Show task rows beneath the selected project only when more than one task is
   visible after applying the archive filter. A sole visible task opens directly
   in the conversation pane. Reserve the expanded area for task rows. Compose

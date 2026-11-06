@@ -462,9 +462,13 @@ test('puts the macOS window controls and history buttons in one header row', asy
 test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 
-  await expect(page.getByRole('button', { name: 'demo', exact: true })).toBeVisible()
-
-  await page.getByRole('button', { name: 'New chat in demo' }).click()
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  await expect(project).toBeVisible()
+  await project.press('Tab')
+  const compose = page.getByRole('button', { name: 'New chat in demo' })
+  await expect(compose).toBeFocused()
+  await expect(compose).toHaveCSS('opacity', '1')
+  await compose.press('Enter')
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
   await expect(page.getByText('Proposed branch')).toBeVisible()
   await expect(page.getByText('shepherd/new-task')).toBeVisible()
@@ -741,7 +745,10 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(directory.locator('.project-icon')).toBeVisible()
   await expect(directory.locator('.project-icon__git')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
+  const compose = page.getByRole('button', { name: 'New chat in demo' })
+  await expect(compose).toHaveCSS('opacity', '0')
   await repository.hover()
+  await expect(compose).toHaveCSS('opacity', '1')
   const card = page.getByRole('menu', { name: 'demo' })
   await expect(card).toBeVisible()
   await expect(card.getByText('/tmp/demo', { exact: true })).toBeVisible()
@@ -760,6 +767,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   expect(cardBounds.y).toBeCloseTo(rowBounds.y, 0)
   await page.mouse.move(cardBounds.x + 12, rowBounds.y + rowBounds.height / 2, { steps: 20 })
   await expect(card).toBeVisible()
+  await expect(compose).toHaveCSS('opacity', '0')
   const archive = page.getByRole('menuitemcheckbox', { name: 'Show archived' })
   await expect(archive).toHaveAttribute('aria-checked', 'false')
   await archive.locator('.project-menu__switch').click()
@@ -788,6 +796,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await projectSettings.click()
   await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
 
+  await directory.hover()
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
   await expect(page.locator('.chat__title')).toHaveText('New task')
@@ -1043,7 +1052,7 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   await expect(sharedInput).toBeFocused()
   expect(await page.evaluate(() => (window as unknown as { __writes: string[] }).__writes)).toEqual([])
 
-  await terminalsTab.press('ArrowDown')
+  await terminalsTab.press('ArrowRight')
   await expect(reviewTab).toBeFocused()
   await expect(reviewTab).toHaveAttribute('aria-selected', 'true')
   await expect(terminalsTab).toHaveAttribute('tabindex', '-1')
@@ -1061,7 +1070,16 @@ test('resizes the inspector and restores the saved width for the selected task',
   await page.goto('/?scoped-terminals')
   const divider = page.getByRole('separator', { name: 'Resize inspector' })
   const width = async () => Number(await divider.getAttribute('aria-valuenow'))
+  const inspectorHeader = page.locator('.shell__header-inspector')
+  const inspector = page.getByRole('complementary', { name: 'Inspector', exact: true })
+  const columnBounds = async () => {
+    const header = await inspectorHeader.boundingBox()
+    const pane = await inspector.boundingBox()
+    return header && pane ? [header.x - pane.x, header.width - pane.width] : null
+  }
+  await expect(inspectorHeader.getByRole('tab')).toHaveCount(5)
   await expect.poll(width).toBe(360)
+  await expect.poll(columnBounds).toEqual([0, 0])
   await divider.press('ArrowLeft')
   await expect.poll(width).toBe(392)
   const handle = await divider.boundingBox()
@@ -1073,6 +1091,7 @@ test('resizes the inspector and restores the saved width for the selected task',
   await page.mouse.move(x - 64, y, { steps: 4 })
   await page.mouse.up()
   await expect.poll(width).toBe(456)
+  await expect.poll(columnBounds).toEqual([0, 0])
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect.poll(width).toBe(360)
   await page.getByRole('button', { name: /Ship it/ }).click()

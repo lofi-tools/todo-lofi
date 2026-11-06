@@ -95,6 +95,7 @@ export function App() {
   const inspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
   let pendingInspectorTabSave = Promise.resolve()
   let inspector: HTMLElement | undefined
+  let inspectorTabList: HTMLDivElement | undefined
   const [emptyInspectorWidth, setEmptyInspectorWidth] = createSignal<number | null>(null)
   const inspectorWidth = () => selectedTaskId()
     ? workspace()?.layout.inspectorWidth ?? null
@@ -330,8 +331,7 @@ export function App() {
     let disposed = false
     let detach: (() => void) | undefined
     window.addEventListener('keydown', onCancelShortcut, true)
-    const inspectorElement = inspector
-    inspectorElement?.addEventListener('keydown', onInspectorFocusShortcut, true)
+    window.addEventListener('keydown', onInspectorFocusShortcut, true)
     void getCurrentWindow().onCloseRequested((event) => {
       if (allowClose) return
       event.preventDefault()
@@ -344,7 +344,7 @@ export function App() {
       disposed = true
       detach?.()
       window.removeEventListener('keydown', onCancelShortcut, true)
-      inspectorElement?.removeEventListener('keydown', onInspectorFocusShortcut, true)
+      window.removeEventListener('keydown', onInspectorFocusShortcut, true)
     })
   })
 
@@ -497,9 +497,11 @@ export function App() {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.altKey ||
         !modifier || event.code !== 'Backquote' || !workspaceShortcutsEnabled() ||
         inspectorTab() !== 'terminals' || !inspector) return
-    const tab = inspector.querySelector<HTMLButtonElement>('#inspector-tab-terminals')
+    const tab = inspectorTabList?.querySelector<HTMLButtonElement>('#inspector-tab-terminals')
+    const target = event.target
+    if (!tab || !(target instanceof HTMLElement) || (target !== tab && !inspector.contains(target))) return
     const terminals = Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input'))
-    if (!tab || !terminals.length) return
+    if (!terminals.length) return
     const stops = [tab, ...terminals]
     const index = stops.findIndex((stop) => stop === event.target)
     if (index < 0) return
@@ -510,12 +512,12 @@ export function App() {
 
   function onInspectorTabKeyDown(event: KeyboardEvent, tabList: HTMLDivElement) {
     if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
-        !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+        !['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) return
     const tabs = Array.from(tabList.querySelectorAll<HTMLButtonElement>('button:enabled'))
     const current = tabs.findIndex((tab) => tab === event.target)
     if (current < 0) return
     event.preventDefault()
-    const step = event.key === 'ArrowUp' ? -1 : 1
+    const step = event.key === 'ArrowLeft' ? -1 : 1
     let next = (current + step + tabs.length) % tabs.length
     if (event.key === 'Home') next = 0
     if (event.key === 'End') next = tabs.length - 1
@@ -563,9 +565,112 @@ export function App() {
     })
   }
 
+  const needsReview = () => workspace()?.task.state === 'review'
+  const terminalAttentionId = createUniqueId()
+  const reviewAttentionId = createUniqueId()
+  const inspectorTabsHeader = (
+    <div
+      class="inspector__tabs"
+      role="tablist"
+      ref={inspectorTabList}
+      aria-label="Inspector tabs"
+      onKeyDown={(event) => onInspectorTabKeyDown(event, event.currentTarget)}
+    >
+      <For each={INSPECTOR_TABS}>
+        {(tab) => (
+          <button
+            type="button"
+            role="tab"
+            class="shell__icon-button inspector__tab"
+            id={`inspector-tab-${tab.id}`}
+            aria-label={tab.label}
+            aria-describedby={
+              tab.id === 'terminals' && tabAttention() ? terminalAttentionId
+                : tab.id === 'review' && needsReview() ? reviewAttentionId : undefined
+            }
+            aria-selected={tab.id === inspectorTab()}
+            tabIndex={tab.id === inspectorTab() ? 0 : -1}
+            onClick={() => setInspectorTab(tab.id)}
+            aria-disabled={!tab.enabled}
+            aria-controls="inspector-pane"
+            disabled={!tab.enabled}
+            title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d={tab.icon} />
+            </svg>
+            <Show when={tab.id === 'terminals' && tabAttention()}>
+              <span id={terminalAttentionId} class="terminal-attention" role="img" aria-label="Terminal needs attention" />
+            </Show>
+            <Show when={tab.id === 'review' && needsReview()}>
+              <span id={reviewAttentionId} class="terminal-attention" role="img" aria-label="Needs review" />
+            </Show>
+          </button>
+        )}
+      </For>
+    </div>
+  )
+
+  const workspaceFooter = (
+    <>
+      <div class="shell__notices">
+        <Show when={quitRequired()}>
+          {(confirmation) => (
+            <div class="banner" role="alert">
+              <span>
+                Quit will stop {confirmation().liveTasks} live task{confirmation().liveTasks === 1 ? '' : 's'}
+                <Show when={confirmation().liveTerminals}>
+                  {(count) => ` and ${count()} terminal${count() === 1 ? '' : 's'}`}
+                </Show>
+                . Quit anyway?
+              </span>
+              <button type="button" onClick={forceQuit} disabled={pending()}>
+                Quit anyway
+              </button>
+              <button type="button" class="banner__quiet" onClick={() => setQuitRequired(null)}>
+                Keep working
+              </button>
+            </div>
+          )}
+        </Show>
+
+        <Show when={error()}>
+          {(message) => (
+            <div class="banner banner--error" role="alert">
+              <span>{message()}</span>
+              <button type="button" class="banner__quiet" onClick={() => setError(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+        </Show>
+      </div>
+      <footer class="status-bar" aria-label="Status">
+        <span>{agentActivity(workspace())}</span>
+        <Dot />
+        <span>{runningCount()} tasks running</span>
+        <Dot />
+        <span>{reviewCount()} in review</span>
+        <Dot />
+        <span>branch {workspace()?.task.branch ?? '—'}</span>
+        <Dot />
+        <span>changes —</span>
+        <Show when={shutdownNote()}>
+          {(note) => (
+            <>
+              <Dot />
+              <span>{note()}</span>
+            </>
+          )}
+        </Show>
+      </footer>
+    </>
+  )
+
   return (
-    <div class="shell">
+    <>
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
+        inspectorTabs={inspectorTabsHeader} footer={workspaceFooter}
         onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
         <aside class="sidebar" aria-label="Workspace navigation">
           <header class="sidebar__header">
@@ -770,7 +875,7 @@ export function App() {
             <Show
               when={workspace()}
               fallback={
-                <Show when={canStartTask() && selectedProject()} fallback={<p class="empty">Select a task to read its transcript.</p>}>
+                <Show when={canStartTask() && selectedProject()}>
                   {(project) => (
                     <div class="chat__welcome">
                       <h1 aria-label={`What should ${DEFAULT_AGENT.name} build in ${project().name}?`}>
@@ -855,39 +960,6 @@ export function App() {
 
         <aside ref={inspector} class="inspector" id="workspace-inspector" aria-label="Inspector">
           <div
-            class="inspector__tabs"
-            role="tablist"
-            aria-orientation="vertical"
-            aria-label="Inspector tabs"
-            onKeyDown={(event) => onInspectorTabKeyDown(event, event.currentTarget)}
-          >
-            <For each={INSPECTOR_TABS}>
-              {(tab) => (
-                <button
-                  type="button"
-                  role="tab"
-                  class="inspector__tab"
-                  id={`inspector-tab-${tab.id}`}
-                  aria-selected={tab.id === inspectorTab()}
-                  tabIndex={tab.id === inspectorTab() ? 0 : -1}
-                  onClick={() => setInspectorTab(tab.id)}
-                  aria-disabled={!tab.enabled}
-                  aria-controls="inspector-pane"
-                  disabled={!tab.enabled}
-                  title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
-                >
-                  {tab.label}
-                  <Show when={tab.id === 'terminals' && tabAttention()}>
-                    <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
-                  </Show>
-                  <Show when={tab.id === 'review' && workspace()?.task.state === 'review'}>
-                    <ReviewBadge />
-                  </Show>
-                </button>
-              )}
-            </For>
-          </div>
-          <div
             class="inspector__pane"
             id="inspector-pane"
             role="tabpanel"
@@ -937,58 +1009,7 @@ export function App() {
           onSelect={addProject}
         />
       </Show>
-
-      <Show when={quitRequired()}>
-        {(confirmation) => (
-          <div class="banner" role="alert">
-            <span>
-              Quit will stop {confirmation().liveTasks} live task{confirmation().liveTasks === 1 ? '' : 's'}
-              <Show when={confirmation().liveTerminals}>
-                {(count) => ` and ${count()} terminal${count() === 1 ? '' : 's'}`}
-              </Show>
-              . Quit anyway?
-            </span>
-            <button type="button" onClick={forceQuit} disabled={pending()}>
-              Quit anyway
-            </button>
-            <button type="button" class="banner__quiet" onClick={() => setQuitRequired(null)}>
-              Keep working
-            </button>
-          </div>
-        )}
-      </Show>
-
-      <Show when={error()}>
-        {(message) => (
-          <div class="banner banner--error" role="alert">
-            <span>{message()}</span>
-            <button type="button" class="banner__quiet" onClick={() => setError(null)}>
-              Dismiss
-            </button>
-          </div>
-        )}
-      </Show>
-
-      <footer class="status-bar" aria-label="Status">
-        <span>{agentActivity(workspace())}</span>
-        <Dot />
-        <span>{runningCount()} tasks running</span>
-        <Dot />
-        <span>{reviewCount()} in review</span>
-        <Dot />
-        <span>branch {workspace()?.task.branch ?? '—'}</span>
-        <Dot />
-        <span>changes —</span>
-        <Show when={shutdownNote()}>
-          {(note) => (
-            <>
-              <Dot />
-              <span>{note()}</span>
-            </>
-          )}
-        </Show>
-      </footer>
-    </div>
+    </>
   )
 }
 
@@ -998,6 +1019,8 @@ const CHAT_MIN_WIDTH = 220
 
 function WorkspaceFrame(props: {
   children: JSX.Element
+  inspectorTabs: JSX.Element
+  footer: JSX.Element
   taskId: string | null
   inspectorWidth: number | null
   onInspectorWidthChange: (width: number) => Promise<void>
@@ -1043,97 +1066,101 @@ function WorkspaceFrame(props: {
     }
   }
 
+  const dragRegion = macWindow ? '' : undefined
+
   return (
-    <>
-      <header class="shell__header" classList={{ 'shell__header--mac': macWindow }} aria-label="Workspace header">
-        <Show when={macWindow}>
-          <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
-        </Show>
-        <div class="shell__history" role="group" aria-label="Navigation history">
-          <button class="shell__icon-button" type="button"
-            aria-label={props.onBackToChat ? 'Back to chat' : 'Previous'}
-            title={props.onBackToChat ? 'Back to chat' : 'Previous'}
-            disabled={!props.onBackToChat} onClick={() => props.onBackToChat?.()}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m14 6-6 6 6 6" />
-            </svg>
-          </button>
-          <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="m10 6 6 6-6 6" />
-            </svg>
-          </button>
+    <div class="shell" style={{
+      '--workspace-inspector-width': requestedWidth() === null ? undefined : `${requestedWidth()}px`,
+      '--inspector-min-width': `${INSPECTOR_MIN_WIDTH}px`,
+      '--inspector-max-width': `${INSPECTOR_MAX_WIDTH}px`,
+      '--chat-min-width': `${CHAT_MIN_WIDTH}px`,
+    }}>
+      <header class="shell__header" aria-label="Workspace header">
+        <div class="shell__header-navigation" data-tauri-drag-region={dragRegion}>
+          <Show when={macWindow}>
+            <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
+          </Show>
+          <div class="shell__history" role="group" aria-label="Navigation history" data-tauri-drag-region={dragRegion}>
+            <button class="shell__icon-button" type="button"
+              aria-label={props.onBackToChat ? 'Back to chat' : 'Previous'}
+              title={props.onBackToChat ? 'Back to chat' : 'Previous'}
+              disabled={!props.onBackToChat} onClick={() => props.onBackToChat?.()}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m14 6-6 6 6 6" />
+              </svg>
+            </button>
+            <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m10 6 6 6-6 6" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <Show when={macWindow}>
-          <div class="shell__header-drag" data-tauri-drag-region="" aria-hidden="true" />
-        </Show>
+        <div class="shell__header-conversation" data-tauri-drag-region={dragRegion} />
+        <div class="shell__header-inspector" data-tauri-drag-region={dragRegion}>
+          {props.inspectorTabs}
+        </div>
       </header>
-      <div class="shell__workspace">
-        <nav class="shell__rail" aria-label="Quick navigation">
-          <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <path d="M9 4v16" />
-            </svg>
-          </button>
-          <button class="shell__icon-button" type="button" aria-label="Conversations" title="Conversations" disabled>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
-              <path d="M6 4h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3a3 3 0 0 1-2-3V7a3 3 0 0 1 3-3Z" />
-            </svg>
-          </button>
-          <button class="shell__icon-button" type="button" aria-label="Tools" title="Tools" disabled>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <path d="m7 9 3 3-3 3m6 0h4" />
-            </svg>
-          </button>
-        </nav>
-        <div class="shell__body" ref={body} style={{
-          '--workspace-inspector-width': requestedWidth() === null ? undefined : `${requestedWidth()}px`,
-          '--inspector-min-width': `${INSPECTOR_MIN_WIDTH}px`,
-          '--inspector-max-width': `${INSPECTOR_MAX_WIDTH}px`,
-          '--chat-min-width': `${CHAT_MIN_WIDTH}px`,
-        }}>
-          {props.children}
-          <div class="workspace-divider" role="separator" aria-label="Resize inspector"
-            aria-controls="workspace-inspector" aria-orientation="vertical" tabIndex={0}
-            aria-valuemin={INSPECTOR_MIN_WIDTH} aria-valuemax={metrics().limit}
-            aria-valuenow={Math.max(INSPECTOR_MIN_WIDTH, metrics().width)}
-            onPointerDown={(event) => {
-              if (event.button !== 0 || saving() || drag) return
-              event.preventDefault()
-              event.currentTarget.focus({ preventScroll: true })
-              event.currentTarget.setPointerCapture(event.pointerId)
-              drag = { pointerId: event.pointerId, taskId: props.taskId, x: event.clientX, width: metrics().width }
-            }}
-            onPointerMove={(event) => {
-              if (drag?.pointerId !== event.pointerId || drag.taskId !== props.taskId) return
-              setPreview({ taskId: drag.taskId, width: clampWidth(drag.width + drag.x - event.clientX) })
-            }}
-            onPointerUp={(event) => {
-              if (drag?.pointerId !== event.pointerId) return
-              const start = drag
-              drag = undefined
-              const width = clampWidth(start.width + start.x - event.clientX)
-              if (start.taskId === props.taskId && width !== start.width) void saveWidth(width)
-              else setPreview(undefined)
-            }}
-            onLostPointerCapture={() => {
-              if (!drag) return
-              drag = undefined
-              setPreview(undefined)
-            }}
-            onKeyDown={(event) => {
-              if (saving() || drag) return
-              const step = event.key === 'ArrowLeft' ? 32 : event.key === 'ArrowRight' ? -32 : 0
-              if (!step) return
-              event.preventDefault()
-              const width = clampWidth(metrics().width + step)
-              if (width !== metrics().width) void saveWidth(width)
-            }} />
-        </div>
+      <nav class="shell__rail" aria-label="Quick navigation">
+        <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="M9 4v16" />
+          </svg>
+        </button>
+        <button class="shell__icon-button" type="button" aria-label="Conversations" title="Conversations" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 4h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3a3 3 0 0 1-2-3V7a3 3 0 0 1 3-3Z" />
+          </svg>
+        </button>
+        <button class="shell__icon-button" type="button" aria-label="Tools" title="Tools" disabled>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path d="m7 9 3 3-3 3m6 0h4" />
+          </svg>
+        </button>
+      </nav>
+      <div class="shell__body" ref={body}>
+        {props.children}
+        <div class="workspace-divider" role="separator" aria-label="Resize inspector"
+          aria-controls="workspace-inspector" aria-orientation="vertical" tabIndex={0}
+          aria-valuemin={INSPECTOR_MIN_WIDTH} aria-valuemax={metrics().limit}
+          aria-valuenow={Math.max(INSPECTOR_MIN_WIDTH, metrics().width)}
+          onPointerDown={(event) => {
+            if (event.button !== 0 || saving() || drag) return
+            event.preventDefault()
+            event.currentTarget.focus({ preventScroll: true })
+            event.currentTarget.setPointerCapture(event.pointerId)
+            drag = { pointerId: event.pointerId, taskId: props.taskId, x: event.clientX, width: metrics().width }
+          }}
+          onPointerMove={(event) => {
+            if (drag?.pointerId !== event.pointerId || drag.taskId !== props.taskId) return
+            setPreview({ taskId: drag.taskId, width: clampWidth(drag.width + drag.x - event.clientX) })
+          }}
+          onPointerUp={(event) => {
+            if (drag?.pointerId !== event.pointerId) return
+            const start = drag
+            drag = undefined
+            const width = clampWidth(start.width + start.x - event.clientX)
+            if (start.taskId === props.taskId && width !== start.width) void saveWidth(width)
+            else setPreview(undefined)
+          }}
+          onLostPointerCapture={() => {
+            if (!drag) return
+            drag = undefined
+            setPreview(undefined)
+          }}
+          onKeyDown={(event) => {
+            if (saving() || drag) return
+            const step = event.key === 'ArrowLeft' ? 32 : event.key === 'ArrowRight' ? -32 : 0
+            if (!step) return
+            event.preventDefault()
+            const width = clampWidth(metrics().width + step)
+            if (width !== metrics().width) void saveWidth(width)
+          }} />
       </div>
-    </>
+      {props.footer}
+    </div>
   )
 }
 
@@ -1345,6 +1372,7 @@ interface InspectorTabOption {
   id: bridge.InspectorTab
   label: string
   enabled: boolean
+  icon: string
 }
 
 function FolderPlusIcon() {
@@ -1366,11 +1394,11 @@ function PlusIcon() {
 }
 
 const INSPECTOR_TABS: InspectorTabOption[] = [
-  { id: 'terminals', label: 'Terminals', enabled: true },
-  { id: 'preview', label: 'Preview', enabled: false },
-  { id: 'review', label: 'Review', enabled: true },
-  { id: 'git', label: 'Git', enabled: true },
-  { id: 'files', label: 'Files', enabled: false },
+  { id: 'terminals', label: 'Terminals', enabled: true, icon: 'M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Zm4 3 3 3-3 3m6 0h4' },
+  { id: 'preview', label: 'Preview', enabled: false, icon: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z' },
+  { id: 'review', label: 'Review', enabled: true, icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 14l3 3 5-5' },
+  { id: 'git', label: 'Git', enabled: true, icon: 'M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 6v12M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0c0 4-4 6-12 6' },
+  { id: 'files', label: 'Files', enabled: false, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },
 ]
 
 function ReviewBadge() {
