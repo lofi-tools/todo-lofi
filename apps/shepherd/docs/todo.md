@@ -539,6 +539,8 @@ task-scoped, persistent and fast enough.
   Terminal search follows the matched text while output scrolls. The native
   smoke checks the canvas highlight and searches in both directions after a
   100-line PTY burst.
+  Overwriting the match discards its anchor, including when synchronized
+  output flushes. Redrawing the same text later leaves the old highlight cleared.
   The [pinned Alacritty fix](https://github.com/alacritty/alacritty/commit/ede2ac144da4dec4c075bfa803aacf3b3739bce6)
   caps combining marks at nine per grid cell. The regression feeds 16,384
   marks in separate chunks and checks the grid, the frame and the following

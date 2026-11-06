@@ -306,6 +306,7 @@ impl Screen {
             }
             bytes = remaining;
         }
+        self.discard_replaced_search();
     }
 
     pub fn sync_deadline(&self) -> Option<Instant> {
@@ -314,6 +315,7 @@ impl Screen {
 
     pub fn finish_sync(&mut self) {
         self.parser.stop_sync(&mut self.term);
+        self.discard_replaced_search();
     }
 
     fn apply_keyboard_command(&mut self, command: KeyboardCommand) {
@@ -476,6 +478,12 @@ impl Screen {
         (self.cell_index(range.end) - self.cell_index(range.start) == self.search_span
             && self.term.bounds_to_string(range.start, range.end) == self.search_text)
             .then_some(range)
+    }
+
+    fn discard_replaced_search(&mut self) {
+        if self.term.selection.is_some() && self.search_selection().is_none() {
+            self.term.selection = None;
+        }
     }
 
     fn cell_index(&self, point: Point) -> i32 {
@@ -759,6 +767,21 @@ mod tests {
         assert!(encoded.ends_with(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]));
 
         screen.process(b"\x1b[Hnew");
+        assert!(screen.frame().search_highlight.is_none());
+
+        screen.process(b"\x1b[Hhit");
+        let redrawn = screen.frame();
+        assert!(row(&redrawn, 0).starts_with("hit"));
+        assert!(redrawn.search_highlight.is_none());
+
+        assert!(
+            screen
+                .search("hit", None, SearchDirection::Previous)?
+                .is_some()
+        );
+        screen.process(b"\x1b[?2026h\x1b[Hnew");
+        screen.finish_sync();
+        screen.process(b"\x1b[Hhit");
         assert!(screen.frame().search_highlight.is_none());
         Ok(())
     }
