@@ -549,6 +549,12 @@ test.beforeEach(async ({ context }) => {
             }))
           case 'archive_reviewed': {
             archiveRequests.push(args.taskIds)
+            if (options.has('archive-fails-once') && archiveRequests.length === 1) {
+              throw { message: 'Could not save the archive.' }
+            }
+            if (args.taskIds.some((id: string) => !tasks.some((task) => task.id === id && task.state === 'review'))) {
+              throw { message: 'A selected task is no longer awaiting review.' }
+            }
             const affected = new Set<string>()
             for (const id of args.taskIds) {
               const index = tasks.findIndex((task) => task.id === id)
@@ -1189,6 +1195,39 @@ test('filters review tasks across projects and archives the confirmed selection'
   await emptyCount.click()
   await expect(navigation.getByRole('button', { name: 'demo', exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('Ready chat')).toBeVisible()
+})
+
+test('reconfirms a changed review selection and preserves it after a failed archive', async ({ page }) => {
+  await page.goto('/?review-fixture&archive-fails-once')
+  await page.getByRole('button', { name: '3 in review' }).click()
+  const sidebar = page.getByRole('complementary', { name: 'Workspace navigation' })
+  const batch = sidebar.getByRole('button', { name: 'Archive selected' })
+  const confirmation = page.getByRole('dialog', { name: 'Archive selected tasks' })
+  const archive = confirmation.getByRole('button', { name: 'Archive', exact: true })
+  await sidebar.getByRole('checkbox', { name: 'Select Update notes' }).check()
+  await sidebar.getByRole('checkbox', { name: 'Select Ship it' }).check()
+  await batch.click()
+  await expect(confirmation.getByRole('heading')).toHaveText('Archive 2 selected tasks?')
+
+  await page.evaluate(() => window.__setTaskState('task-1', 'working'))
+  await expect(confirmation).toHaveCount(0)
+  await expect(page.getByRole('alert')).toHaveText(/The review selection changed/)
+  await expect(batch).toBeFocused()
+  await expect(sidebar.getByRole('status')).toHaveText('1 selected')
+  expect(await page.evaluate(() => window.__archiveRequests)).toEqual([])
+  await page.evaluate(() => window.__setTaskState('task-1', 'review'))
+  await expect(sidebar.getByRole('checkbox', { name: 'Select Ship it' })).not.toBeChecked()
+
+  await batch.click()
+  await expect(confirmation.getByRole('heading')).toHaveText('Archive 1 selected task?')
+  await archive.click()
+  await expect(page.getByRole('alert')).toHaveText(/Could not save the archive/)
+  await expect(sidebar.getByRole('checkbox', { name: 'Select Update notes' })).toBeChecked()
+  await batch.click()
+  await archive.click()
+  await expect(page.getByRole('button', { name: '2 in review' })).toBeVisible()
+  await expect(sidebar.getByRole('checkbox', { name: 'Select Update notes' })).toHaveCount(0)
+  expect(await page.evaluate(() => window.__archiveRequests)).toEqual([['task-review-notes'], ['task-review-notes']])
 })
 
 test('opts in to notifications for unfocused waits and shows waiting attention', async ({ page }) => {

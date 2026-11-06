@@ -815,12 +815,16 @@ uses the desktop notification service.
 - Review has no separate view or inbox: the task row and its Review tab badge,
   the status-bar count and the dock badge are the surface.
 - **Mark reviewed and archive** is one action and moves the task to `done`;
-  **Reopen** returns it to `review` and recreates a collected worktree.
+  **Reopen** applies to archived tasks and returns them to `review` after
+  restoring a collected worktree.
 - **Squash-merge into base** is available from the Git tab; it is the only merge
   action and records the branch tip for recreation.
 - **Archive selected** asks for confirmation with the number of selected tasks.
   The core validates every selected task is still in review before closing
   their sessions and writes the archive state changes in one transaction.
+  The transaction rolls back if any task has left review in the database.
+  A retry can finish saving the exit information for an already closed
+  session before archiving the batch.
   Review notes stay per task.
 - Archiving keeps the branch; an archived worktree unused for 30 days is removed
   automatically (§7.2), and reopening recreates it from the branch or recorded

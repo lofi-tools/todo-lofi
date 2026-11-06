@@ -35,6 +35,8 @@ pub enum StoreError {
     },
     #[error("invalid database row: {0}")]
     InvalidRow(String),
+    #[error("task {task_id} is no longer awaiting review in the database")]
+    ReviewStateChanged { task_id: TaskId },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -605,13 +607,19 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         for task in tasks {
-            toasty::sql::statement(
-                "UPDATE tasks SET state = 'done', updated_at = ?2 WHERE id = ?1",
+            let updated = toasty::sql::statement(
+                "UPDATE tasks SET state = 'done', updated_at = ?2 WHERE id = ?1 AND state = 'review'",
             )
             .bind(task.id.as_str())
             .bind(task.updated_at as i64)
             .exec(&mut transaction)
             .await?;
+            if updated != 1 {
+                transaction.rollback().await?;
+                return Err(StoreError::ReviewStateChanged {
+                    task_id: task.id.clone(),
+                });
+            }
         }
         transaction.commit().await?;
         Ok(())
@@ -1208,6 +1216,15 @@ impl Store for MemoryStore {
 
     async fn archive_tasks(&self, archived: &[Task]) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
+        if let Some(task) = archived.iter().find(|task| {
+            tasks
+                .get(task.id.as_str())
+                .is_none_or(|stored| stored.state != TaskState::Review)
+        }) {
+            return Err(StoreError::ReviewStateChanged {
+                task_id: task.id.clone(),
+            });
+        }
         for task in archived {
             tasks.insert(task.id.as_str().to_string(), task.clone());
         }

@@ -172,6 +172,9 @@ current layout and give future changes a point of comparison.
   under each matching project, including a sole review task. Checkboxes and
   modifier-clicks select rows across projects. **Archive selected** shows the
   number of selected tasks in a confirmation dialog.
+  If a selected task leaves review while the dialog is open, close the dialog
+  and ask for a fresh confirmation of the remaining selection. A failed
+  archive keeps the eligible tasks selected for retry.
 - Highlight a row on hover and open a compact context card directly to its
   right. The pointer can move onto the card. Right-click and Shift+F10 open the
   same card. The row uses hover and these context actions as its menu entry

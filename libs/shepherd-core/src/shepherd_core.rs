@@ -94,6 +94,8 @@ pub enum CoreError {
     TaskNotReady { id: String, state: &'static str },
     #[error("task {id} is {state}; it has nothing to resume")]
     TaskNotResumable { id: String, state: &'static str },
+    #[error("task {id} is {state}; only archived tasks can be reopened")]
+    TaskNotArchived { id: String, state: &'static str },
     #[error("task {id} is {state}; it cannot be cancelled")]
     TaskNotCancellable { id: String, state: &'static str },
     #[error("task {id} has no pending approval")]
@@ -1143,6 +1145,12 @@ impl Core {
                 return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
             }
             ReviewAction::Reopen => {
+                if task.state != TaskState::Done {
+                    return Err(CoreError::TaskNotArchived {
+                        id: task_id.to_string(),
+                        state: task.state.as_str(),
+                    });
+                }
                 task.set_state(TaskState::Review)?;
                 if task.worktree_path.is_none() && task.branch.is_some() {
                     task.worktree_path = Some(task.proposed_worktree_path.clone());
@@ -1200,12 +1208,16 @@ impl Core {
             return Ok(CommandResult::Ack);
         }
         for task in &archived {
-            if let Some(session) = self.sessions.get_mut(&task.id)
-                && !session.is_closed()
-            {
-                let events = session.shutdown().await?;
-                self.end_session_record(&task.id, &events).await?;
-            }
+            let Some(session) = self.sessions.get_mut(&task.id) else {
+                continue;
+            };
+            let events = if session.is_closed() {
+                Vec::new()
+            } else {
+                session.shutdown().await?
+            };
+            self.end_session_record(&task.id, &events).await?;
+            self.persist_task_transcript(&task.id).await?;
         }
         self.store.archive_tasks(&archived).await?;
         let mut projects = BTreeSet::new();
@@ -1961,20 +1973,21 @@ impl Core {
         self.emit(Event::ProjectApprovalsChanged {
             project_id: self.task(task_id)?.project_id.clone(),
         });
-        let Some(mut record) = self.session_records.remove(task_id) else {
+        let Some(record) = self.session_records.get_mut(task_id) else {
             return Ok(());
         };
-        let mut exit_code = None;
-        let mut stderr = None;
-        for event in events {
-            if let HarnessEvent::Exited { code, stderr: tail } = event {
-                exit_code = *code;
-                stderr = Some(tail.clone());
-            }
+        if !record.is_ended() {
+            let (exit_code, stderr) = events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    HarnessEvent::Exited { code, stderr } => Some((*code, Some(stderr.clone()))),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            record.end(exit_code, stderr);
         }
-        record.end(exit_code, stderr);
-        self.store.save_session(&record).await?;
-        self.session_records.insert(task_id.clone(), record);
+        self.store.save_session(record).await?;
         Ok(())
     }
 
@@ -3669,6 +3682,19 @@ mod tests {
         );
         assert_eq!(waiting.task.state, TaskState::Waiting);
 
+        assert!(matches!(
+            core.execute(Command::ReviewTask {
+                task_id: task_id.clone(),
+                action: ReviewAction::Reopen,
+            })
+            .await,
+            Err(CoreError::TaskNotArchived {
+                state: "waiting",
+                ..
+            })
+        ));
+        assert_eq!(core.task(&task_id)?.state, TaskState::Waiting);
+
         let queued = workspace_of(
             core.execute(Command::ReviewTask {
                 task_id: task_id.clone(),
@@ -3827,6 +3853,73 @@ mod tests {
                 .count(),
             2
         );
+
+        let mut database_probe = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement(
+            "CREATE TRIGGER block_session_close BEFORE UPDATE ON sessions \
+             WHEN NEW.state = 'ended' BEGIN SELECT RAISE(ABORT, 'session write blocked'); END",
+        )
+        .exec(&mut database_probe)
+        .await?;
+        let error = core
+            .execute(Command::ArchiveReviewed {
+                task_ids: review_ids.clone(),
+            })
+            .await
+            .err()
+            .ok_or("the session write should fail")?;
+        assert!(error.to_string().contains("session write blocked"));
+        let first_task = review_ids.iter().min().ok_or("missing first review task")?;
+        assert!(
+            core.sessions
+                .get(first_task)
+                .is_some_and(HarnessSession::is_closed)
+        );
+        let closed_record = core
+            .session_records
+            .get(first_task)
+            .ok_or("missing session record")?
+            .clone();
+        assert_eq!(closed_record.exit_code, Some(0));
+        assert!(closed_record.is_ended());
+        toasty::sql::statement("DROP TRIGGER block_session_close")
+            .exec(&mut database_probe)
+            .await?;
+
+        let stale_task = review_ids
+            .iter()
+            .max()
+            .ok_or("missing second review task")?;
+        toasty::sql::statement("UPDATE tasks SET state = 'ready' WHERE id = ?1")
+            .bind(stale_task.as_str())
+            .exec(&mut database_probe)
+            .await?;
+        assert!(matches!(
+            core.execute(Command::ArchiveReviewed { task_ids: review_ids.clone() }).await,
+            Err(CoreError::Store(StoreError::ReviewStateChanged { task_id })) if task_id == *stale_task
+        ));
+        for task in core.store.load_tasks().await? {
+            if task.id == *first_task {
+                assert_eq!(task.state, TaskState::Review);
+            } else if task.id == *stale_task {
+                assert_eq!(task.state, TaskState::Ready);
+            }
+        }
+        let saved_record = core
+            .store
+            .load_sessions()
+            .await?
+            .into_iter()
+            .find(|record| record.id == closed_record.id)
+            .ok_or("missing durable session record")?;
+        assert_eq!(saved_record.ended_at, closed_record.ended_at);
+        assert_eq!(saved_record.exit_code, closed_record.exit_code);
+        toasty::sql::statement("UPDATE tasks SET state = 'review' WHERE id = ?1")
+            .bind(stale_task.as_str())
+            .exec(&mut database_probe)
+            .await?;
 
         core.drain_events();
         assert!(matches!(

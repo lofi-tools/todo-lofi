@@ -818,6 +818,7 @@ export function App() {
       if (reviewLoad === updates) {
         reviewLoad = undefined
         setLoadingReview(false)
+        reconcileReviewSelection()
       }
     }
   }
@@ -839,7 +840,22 @@ export function App() {
 
   function dismissArchiveConfirmation() {
     setArchiveConfirmation(undefined)
-    archiveSelectedButton?.focus({ preventScroll: true })
+    if (archiveSelectedButton?.disabled === false) archiveSelectedButton.focus({ preventScroll: true })
+    else reviewCountButton?.focus({ preventScroll: true })
+  }
+
+  function reconcileReviewSelection() {
+    if (!reviewOnly() || loadingReview()) return
+    const eligible = new Set(reviewRows().map((task) => task.id))
+    setReviewSelection((current) => {
+      const selection = new Set([...current].filter((id) => eligible.has(id)))
+      return selection.size === current.size ? current : selection
+    })
+    if (reviewAnchor && !eligible.has(reviewAnchor)) reviewAnchor = undefined
+    if (archiveConfirmation()?.some((id) => !eligible.has(id))) {
+      dismissArchiveConfirmation()
+      setError('The review selection changed. Check the remaining tasks and confirm again.')
+    }
   }
 
   function archiveSelectedTasks() {
@@ -960,6 +976,7 @@ export function App() {
     switch (event.type) {
       case 'projectListChanged':
         setProjects(event.data.projects)
+        reconcileReviewSelection()
         break
       case 'projectApprovalsChanged':
         setApprovalChange(event.data)
@@ -971,13 +988,7 @@ export function App() {
           const reviewed = tasks.filter((task) => task.state === 'review')
           reviewLoad?.set(projectId, reviewed)
           setReviewLists((lists) => new Map(lists).set(projectId, reviewed))
-          const ids = new Set(reviewed.map((task) => task.id))
-          const dropped = tasks.filter((task) => !ids.has(task.id) && reviewSelection().has(task.id))
-          if (dropped.length) {
-            const selection = new Set(reviewSelection())
-            for (const task of dropped) selection.delete(task.id)
-            setReviewSelection(selection)
-          }
+          reconcileReviewSelection()
         }
         break
       }
@@ -1883,8 +1894,9 @@ export function App() {
                   queuedNote={workspace()?.queuedReviewNote}
                   openFile={openTaskFile}
                   onAction={async (action) => {
+                    const before = workspace()
                     const updated = await bridge.reviewTask(taskId, action)
-                    if (selectedTaskId() === taskId) setWorkspace(updated)
+                    if (selectedTaskId() === taskId) setWorkspace((current) => current === before ? updated : current)
                   }}
                 />}
               </Show>

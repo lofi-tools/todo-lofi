@@ -1034,7 +1034,11 @@ and the task header never overstates the tier.
   tab and its named panel. Git and Review expose file change status in words
   and let keyboard users focus the diff. Terminal copy mode keeps a selected
   snapshot and provides a way to leave the shell by keyboard.
-- [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
+- [x] Review and archive edge cases.
+  A changed selection needs fresh confirmation and a failed archive keeps
+  eligible rows selected. Turso tests reject stale batches, roll back partial
+  writes and verify that retry preserves session exit information. Reopen
+  only accepts archived tasks. The 30-day worktree collection is tracked in S7.
 - [ ] Status bar, window title and empty states.
 
 ### Proof
