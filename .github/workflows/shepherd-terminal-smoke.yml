@@ -23,12 +23,16 @@ jobs:
       - name: Install display and terminal fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus-daemon fzf less python3 ripgrep vim xauth xvfb
+          sudo apt-get install -y --no-install-recommends dbus-daemon fontconfig fonts-dejavu-core fzf less python3 ripgrep vim xauth xvfb
       - name: Build the debug app
         run: |
           nix develop --impure -c pnpm --filter shepherd-app --filter shepherd-ui install --frozen-lockfile
           nix develop --impure -c cargo build --locked -p shepherd --no-default-features
       - name: Exercise both native launches
         run: |
+          # Xvfb needs an explicit EGL provider for the Nix WebKit build.
+          mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+          export __EGL_VENDOR_LIBRARY_FILENAMES="$mesa/share/glvnd/egl_vendor.d/50_mesa.json"
+          export LIBGL_DRIVERS_PATH="$mesa/lib/dri"
           /usr/bin/dbus-run-session --dbus-daemon=/usr/bin/dbus-daemon -- \
             nix develop --impure -c xvfb-run -a -s '-screen 0 1600x1000x24' ./scripts/smoke-shepherd-terminal.sh

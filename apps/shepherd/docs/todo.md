@@ -649,7 +649,9 @@ starts the run. The Ubuntu result remains pending.
 The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
 override. On a minimal Ubuntu 24.04 guest, the debug build succeeded. Start
 the session bus with Ubuntu's D-Bus binaries so the daemon reads the distro's
-session configuration before entering the Nix shell.
+session configuration before entering the Nix shell. Use the locked Nix Mesa
+EGL provider under Xvfb. With that provider, WebKit launched and the ARM64
+smoke reached the scrollback search check.
 
 ### Gate
 
