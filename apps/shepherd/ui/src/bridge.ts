@@ -758,7 +758,7 @@ export function actOnWorkspaceFile(projectId: string, taskId: string | null, pat
 }
 
 export interface FileSearchQuery {
-  mode: 'name' | 'contents'
+  mode: 'name' | 'contents' | 'path'
   query: string
   showDotfiles: boolean
 }

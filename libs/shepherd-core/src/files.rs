@@ -151,6 +151,7 @@ pub struct TextSpan {
 pub enum FileSearchMode {
     Name,
     Contents,
+    Path,
 }
 
 #[derive(Deserialize)]
@@ -289,7 +290,9 @@ pub fn search_files(
     cancelled: &AtomicBool,
 ) -> Result<FileSearchResult, FileError> {
     let text = query.query.trim();
-    if text.is_empty() || text.len() > MAX_QUERY_BYTES {
+    if (text.is_empty() && !matches!(query.mode, FileSearchMode::Path))
+        || text.len() > MAX_QUERY_BYTES
+    {
         return Err(FileError::InvalidQuery);
     }
     if cancelled.load(Ordering::Relaxed) {
@@ -399,8 +402,15 @@ impl Search<'_> {
                     self.result.incomplete = true;
                     return Ok(());
                 };
+                let candidate = if matches!(self.mode, FileSearchMode::Path) {
+                    relative
+                } else {
+                    name
+                };
                 match self.mode {
-                    FileSearchMode::Name if name.to_lowercase().contains(&self.text) => {
+                    FileSearchMode::Name | FileSearchMode::Path
+                        if candidate.to_lowercase().contains(&self.text) =>
+                    {
                         self.result.matches.push(FileMatch {
                             path: relative.into(),
                             line: None,
@@ -408,7 +418,7 @@ impl Search<'_> {
                         });
                     }
                     FileSearchMode::Contents => self.file(relative)?,
-                    FileSearchMode::Name => {}
+                    FileSearchMode::Name | FileSearchMode::Path => {}
                 }
                 Ok(())
             }
@@ -460,6 +470,34 @@ impl Search<'_> {
         }
         Ok(())
     }
+}
+
+pub(crate) fn prompt_mentions(text: &str) -> Vec<PathBuf> {
+    let mut mentions = Vec::new();
+    let mut remaining = text;
+    while let Some((prefix, tail)) = remaining.split_once("@file(") {
+        remaining = tail;
+        if prefix
+            .chars()
+            .next_back()
+            .is_some_and(|character| !character.is_whitespace() && !"([{".contains(character))
+            || !tail.starts_with('"')
+        {
+            continue;
+        }
+        let mut path = serde_json::Deserializer::from_str(tail).into_iter::<PathBuf>();
+        if let Some(Ok(path_value)) = path.next()
+            && let Some(suffix) = tail
+                .get(path.byte_offset()..)
+                .and_then(|suffix| suffix.strip_prefix(')'))
+        {
+            remaining = suffix;
+            if !mentions.contains(&path_value) {
+                mentions.push(path_value);
+            }
+        }
+    }
+    mentions
 }
 
 fn checked_path(path: &Path) -> Result<PathBuf, FileError> {
@@ -848,6 +886,13 @@ mod tests {
             search(FileSearchMode::Name, "needle", true)?.matches.len(),
             2
         );
+        let paths = search(FileSearchMode::Path, "src/deep/", false)?;
+        assert_eq!(paths.matches.len(), 1);
+        assert_eq!(
+            paths.matches.first().ok_or("missing path match")?.path,
+            "src/deep/Needle.rs"
+        );
+        assert_eq!(search(FileSearchMode::Path, "", false)?.matches.len(), 3);
         let contents = search(FileSearchMode::Contents, "NÉEDLE", false)?;
         let hit = contents.matches.first().ok_or("expected a content match")?;
         assert_eq!(contents.matches.len(), 1);
@@ -861,6 +906,20 @@ mod tests {
             Err(FileError::Cancelled)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn parses_only_complete_quoted_file_mentions() {
+        let mentions = prompt_mentions(
+            r#"Review @file("src/notes with \"quotes\".md") and @file("README.md"), then @file("README.md"). Ignore test@host, @"string", and @file("unfinished"."#,
+        );
+        assert_eq!(
+            mentions,
+            [
+                PathBuf::from("src/notes with \"quotes\".md"),
+                PathBuf::from("README.md")
+            ]
+        );
     }
 
     #[test]

@@ -974,6 +974,11 @@ transaction. Paths are relative to the task's attachment cache. A cached
 file can belong to multiple entries, and each entry restores its own
 attachment order.
 
+Selecting a composer file mention inserts `@file("relative/path")` in the
+prompt. Shepherd resolves it as a regular file in the task worktree on Send.
+ACP and native OpenCode with file support receive a structured link. Codex
+receives the relative path in the prompt text.
+
 ### 11.1 Settings files
 
 `settings.json` and `keybindings.json` live in the app config directory and are

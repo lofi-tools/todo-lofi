@@ -10,6 +10,7 @@ import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
@@ -1269,26 +1270,18 @@ export function App() {
                 </li>}</For>
               </ul>
             </Show>
-            <textarea
-              ref={promptInput}
-              class="composer__input"
-              aria-label="Prompt"
+            <ComposerInput
+              inputRef={(element) => { promptInput = element }}
+              projectId={selectedProjectId()}
+              taskId={workspace()?.task.worktreePath ? selectedTaskId() : null}
               placeholder={canCompose() ? 'Send a prompt' : 'Select a draft or ready task'}
-              rows={2}
               value={prompt()}
               disabled={!canCompose() || pending()}
-              onInput={(event) => {
-                const text = event.currentTarget.value
-                if (event.isComposing) setPrompt(text)
+              onInput={(text, composing) => {
+                if (composing) setPrompt(text)
                 else updatePrompt(text)
               }}
-              onCompositionEnd={(event) => updatePrompt(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-                  event.preventDefault()
-                  sendPrompt()
-                }
-              }}
+              onSend={sendPrompt}
             />
             <div class="composer__actions">
               <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}

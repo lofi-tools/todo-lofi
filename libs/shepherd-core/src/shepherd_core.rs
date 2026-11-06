@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_harness::{
-    Decision, FailureKind, HarnessEvent, PromptInput, SessionId, Transcript, TurnFinishReason,
+    Decision, FailureKind, HarnessEvent, PromptAttachment, PromptInput, SessionId, Transcript,
+    TurnFinishReason,
 };
 use tokio::sync::mpsc;
 
@@ -80,6 +81,11 @@ pub enum CoreError {
     EmptyTitle,
     #[error("the prompt is empty")]
     EmptyPrompt,
+    #[error("Could not resolve mentioned file {path}. {source}")]
+    FileMention {
+        path: String,
+        source: files::FileError,
+    },
     #[error("task {id} is not a draft")]
     NotADraft { id: String },
     #[error("task {id} is {state}; it cannot accept a prompt")]
@@ -1227,6 +1233,23 @@ impl Core {
         }
 
         if let Some(path) = self.task(task_id)?.worktree_path.as_ref() {
+            for mention in files::prompt_mentions(&input.text) {
+                let resolved = match files::external_file_path(path, &mention) {
+                    Ok(resolved) => resolved,
+                    Err(source) => {
+                        self.publish_task(task_id)?;
+                        return Err(CoreError::FileMention {
+                            path: mention.display().to_string(),
+                            source,
+                        });
+                    }
+                };
+                input.attachments.push(PromptAttachment {
+                    path: resolved,
+                    image_mime_type: None,
+                    metadata: None,
+                });
+            }
             let baseline = GitService.turn_baseline(path)?;
             self.turn_baselines.insert(task_id.clone(), baseline);
         }
@@ -2431,6 +2454,7 @@ mod streaming {
 
     struct LateHarnessFactory {
         receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
+        prompts: mpsc::UnboundedSender<PromptInput>,
     }
 
     impl HarnessFactory for LateHarnessFactory {
@@ -2444,6 +2468,7 @@ mod streaming {
             Ok(Box::new(LateHarness {
                 events: receiver,
                 approvals: Vec::new(),
+                prompts: Some(self.prompts.clone()),
             }))
         }
     }
@@ -2453,6 +2478,7 @@ mod streaming {
     struct LateHarness {
         events: mpsc::UnboundedReceiver<HarnessEvent>,
         approvals: Vec<SessionApproval>,
+        prompts: Option<mpsc::UnboundedSender<PromptInput>>,
     }
 
     #[async_trait]
@@ -2481,7 +2507,12 @@ mod streaming {
             Ok(resume.unwrap_or_else(|| SessionId::new("late-thread")))
         }
 
-        async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+        async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+            if let Some(prompts) = &self.prompts {
+                prompts
+                    .send(input)
+                    .map_err(|_| agent_harness::HarnessError::ChannelClosed)?;
+            }
             Ok(())
         }
 
@@ -2529,6 +2560,7 @@ mod streaming {
                 HarnessSession::new(Box::new(LateHarness {
                     events,
                     approvals: vec![approval.clone()],
+                    prompts: None,
                 })),
             );
             (task_id, sender)
@@ -2590,10 +2622,12 @@ mod streaming {
         let repository = TestRepository::new()?;
         let database = TestDatabase::new()?;
         let (sender, receiver) = mpsc::unbounded_channel();
+        let (prompts, mut sent) = mpsc::unbounded_channel();
         let mut core = Core::with_services(
             Box::new(TursoStore::open(&database.uri()).await?),
             Box::new(LateHarnessFactory {
                 receiver: Mutex::new(Some(receiver)),
+                prompts,
             }),
         );
 
@@ -2617,10 +2651,11 @@ mod streaming {
             return Err("expected a draft".into());
         };
         let task_id = TaskId::new(draft.task.id.clone());
+        let prompt = r#"Open @file("README.md")"#;
         let CommandResult::TaskWorkspace(workspace) = core
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                input: PromptInput::text("go"),
+                input: PromptInput::text(prompt),
             })
             .await?
         else {
@@ -2628,6 +2663,23 @@ mod streaming {
         };
         assert_eq!(workspace.task.state, TaskState::Working);
         assert_eq!(workspace.transcript.len(), 1);
+        let input = sent.try_recv()?;
+        assert_eq!(input.text, prompt);
+        let [file] = input.attachments.as_slice() else {
+            return Err("expected one referenced file".into());
+        };
+        let worktree = workspace
+            .task
+            .worktree_path
+            .as_deref()
+            .ok_or("missing worktree")?;
+        assert_eq!(
+            file.path,
+            std::path::Path::new(worktree)
+                .canonicalize()?
+                .join("README.md")
+        );
+        assert!(file.metadata.is_none());
         core.drain_events();
 
         sender.send(HarnessEvent::Delta {
@@ -2640,7 +2692,7 @@ mod streaming {
         let persisted = store.load_transcript(&task_id).await?;
         assert_eq!(
             persisted.iter().map(Entry::summary).collect::<Vec<_>>(),
-            ["you: go"]
+            [format!("you: {prompt}")]
         );
         sender.send(HarnessEvent::TurnFinished {
             reason: TurnFinishReason::Completed,
@@ -2653,6 +2705,14 @@ mod streaming {
         assert_eq!(workspace.transcript.len(), 2);
         assert_eq!(workspace.transcript[1].summary(), "agent: streamed");
         assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
+        let invalid = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text(r#"Read @file("../README.md")"#),
+            })
+            .await;
+        assert!(matches!(invalid, Err(CoreError::FileMention { .. })));
+        assert!(sent.try_recv().is_err());
         assert!(
             core.drain_events()
                 .iter()

@@ -211,6 +211,11 @@ current layout and give future changes a point of comparison.
   by default, with app and project overrides in `settings.json`. The prompt can
   be sent with files alone. It includes the paths in the transcript and
   passes supported images to the agent as image input.
+- Typing `@` at a word boundary opens a file picker above the composer and
+  keeps focus in the text area. Type part of a workspace path to narrow the
+  results. Use the arrow keys and Enter to insert a reference, or Escape to
+  dismiss the picker. Drafts search the project directory until they have a
+  worktree. A sent mention resolves against the task's worktree.
 - The safety picker shows a small shield containing `>_`, the current value
   **Ask me**, and a down caret immediately after the text. Reserve a 128 px
   slot wide enough for **Approve for me** so changes to the value leave sibling

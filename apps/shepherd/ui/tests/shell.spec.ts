@@ -473,6 +473,12 @@ test.beforeEach(async ({ context }) => {
                 ? [{ path: 'src/main.rs', line: null, excerpt: null }] : []
               return { matches, incomplete: false }
             }
+            if (args.query.mode === 'path' && args.query.query !== 'slow') {
+              const matches = ['src/main.rs', 'src/notes with spaces.md']
+                .filter((path) => path.includes(args.query.query))
+                .map((path) => ({ path, line: null, excerpt: null }))
+              return { matches, incomplete: false }
+            }
             return new Promise((resolve) => pendingFileSearches.set(args.searchId, () => {
               pendingFileSearches.delete(args.searchId)
               resolve({ matches: [{ path: 'src/main.rs', line: 120, excerpt: '// second line' }], incomplete: true })
@@ -2063,6 +2069,39 @@ test('uses the selected project attachment limit', async ({ page }) => {
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await chooseFile()
   await expect(composer.getByRole('list', { name: 'Queued attachments' })).toContainText('notes.txt')
+})
+
+test('mentions a workspace file with the keyboard and cancels an outdated search', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const prompt = page.getByLabel('Prompt', { exact: true })
+  await expect(prompt).toBeEnabled()
+  await prompt.fill('Review @slow')
+  await expect.poll(() => page.evaluate(() => window.__fileSearches.at(-1)?.mode)).toBe('path')
+  const stale = await page.evaluate(() => window.__fileSearches.at(-1))
+  expect(stale?.taskId).toBe('task-1')
+  await prompt.fill('Review @src/')
+  await expect.poll(() => page.evaluate(() => window.__cancelledFileSearches)).toContain(stale?.id)
+  const choices = page.getByRole('listbox', { name: 'Mention a workspace file' })
+  await expect(choices.getByRole('option', { name: 'src/main.rs' })).toBeVisible()
+  await page.evaluate((id) => window.__finishFileSearch(id), stale?.id)
+  await prompt.press('ArrowDown')
+  await expect(choices.getByRole('option', { name: 'src/notes with spaces.md' })).toHaveAttribute('aria-selected', 'true')
+  await prompt.press('Enter')
+  const text = 'Review @file("src/notes with spaces.md")'
+  await expect(prompt).toHaveValue(text + ' ')
+  await expect(prompt).toBeFocused()
+  await expect(choices).toBeHidden()
+  await prompt.press('Enter')
+  await expect(page.locator('.transcript')).toContainText(text)
+
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(prompt).toBeEnabled()
+  await prompt.fill('@')
+  await expect(choices.getByRole('option', { name: 'src/main.rs' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__fileSearches.at(-1)?.taskId)).toBeNull()
+  await prompt.press('Escape')
+  await expect(choices).toBeHidden()
+  await expect(prompt).toHaveValue('@')
 })
 
 test('shows the agent exit and resume action, including after reopening', async ({ page }) => {

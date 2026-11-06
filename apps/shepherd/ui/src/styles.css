@@ -519,7 +519,8 @@ textarea {
 }
 
 .project-menu,
-.picker-menu {
+.picker-menu,
+.composer__mentions {
   position: fixed;
   padding: 3px;
   border: 1px solid var(--border);
@@ -1231,6 +1232,7 @@ textarea {
 .composer {
   --composer-control-inset: 4px;
 
+  position: relative;
   display: flex;
   flex-direction: column;
   margin: 12px;
@@ -1243,6 +1245,21 @@ textarea {
 
 .composer:focus-within {
   border-color: var(--focus);
+}
+
+.composer__mentions {
+  position: absolute;
+  inset-inline-start: 0;
+  bottom: calc(100% + 4px);
+  z-index: 2;
+  width: min(360px, 100%);
+  max-height: 220px;
+  overflow: auto;
+  padding-top: 6px;
+}
+
+.composer__mentions .picker__row {
+  overflow-wrap: anywhere;
 }
 
 .composer__files {
