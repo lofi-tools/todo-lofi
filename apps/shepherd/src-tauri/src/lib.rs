@@ -157,15 +157,15 @@ pub fn run() -> Result<(), tauri::Error> {
                 harness_factory,
                 codex_program,
                 codex_detected,
-                opencode_configured,
+                opencode_launch,
                 claude_configured,
             ): (Box<dyn HarnessFactory>, _, _, _, _) = match dev_factory {
-                Some(factory) => (factory, None, false, false, false),
+                Some(factory) => (factory, None, false, None, false),
                 None => {
                     let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
                     let (opencode, claude) = match &agents {
                         Ok(settings) => (
-                            settings.executable("agents.opencode.executable"),
+                            agent_harness::opencode::configured_launch(settings),
                             settings.command("agents.claude"),
                         ),
                         Err(error) => {
@@ -182,7 +182,7 @@ pub fn run() -> Result<(), tauri::Error> {
                     if let Err(error) = &claude {
                         tracing::warn!(%error, "could not load Claude Code configuration");
                     }
-                    let opencode_configured = matches!(&opencode, Ok(Some(_)));
+                    let opencode_launch = opencode.as_ref().ok().cloned().flatten();
                     let claude_configured = matches!(&claude, Ok(Some(_)));
                     (
                         Box::new(codex_harness::DesktopHarnessFactory {
@@ -193,7 +193,7 @@ pub fn run() -> Result<(), tauri::Error> {
                         }),
                         codex_program,
                         codex_detected,
-                        opencode_configured,
+                        opencode_launch,
                         claude_configured,
                     )
                 }
@@ -203,11 +203,10 @@ pub fn run() -> Result<(), tauri::Error> {
                 harness_factory,
                 terminals,
             ))?;
-            state.agent_settings = agents.unwrap_or_default();
             state.preferences = preferences;
             state.codex_program = codex_program;
             state.codex_detected = codex_detected;
-            state.opencode_configured = opencode_configured;
+            state.opencode_launch = opencode_launch;
             state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);

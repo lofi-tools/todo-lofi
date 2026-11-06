@@ -1022,12 +1022,15 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - `app["agents.opencode.executable"]` points to an existing OpenCode executable
   by absolute path. A stable profile symlink such as
   `/etc/profiles/per-user/me/bin/opencode` can follow Nix profile updates.
+- The optional `app["agents.opencode.config_file"]` points to an existing
+  OpenCode configuration by absolute path. Native sessions, ACP fallback, and
+  draft mode discovery pass the same path via `OPENCODE_CONFIG`.
 - `app["agents.claude.executable"]` points to an existing Claude Code ACP
   executable by absolute path. `app["agents.claude.args"]` is an optional
   array of arguments passed in order.
 - `app["notifications.enabled"]` is a boolean and defaults to false. Debug
   launches with an isolated data directory save user preferences in a settings
-  file there. They read the configured agent executables from the app config
+  file there. They read the configured agent launch settings from the app config
   directory.
 - **Settings → Workspace** edits the default archive visibility, attachment
   limit, terminal scrollback, and notification preference. **Settings →

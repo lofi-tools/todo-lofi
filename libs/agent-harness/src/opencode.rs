@@ -39,6 +39,27 @@ pub fn configured_executable(settings_path: &Path) -> HarnessResult<Option<PathB
     AgentSettings::read(settings_path)?.executable("agents.opencode.executable")
 }
 
+pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<SpawnSpec>> {
+    let Some(executable) = settings.executable("agents.opencode.executable")? else {
+        return Ok(None);
+    };
+    let program = executable
+        .into_os_string()
+        .into_string()
+        .map_err(|_| HarnessError::Protocol("agents.opencode.executable must be UTF-8".into()))?;
+    let mut spec = SpawnSpec {
+        program,
+        ..SpawnSpec::default()
+    };
+    if let Some(path) = settings.absolute_path("agents.opencode.config_file")? {
+        let path = path.into_os_string().into_string().map_err(|_| {
+            HarnessError::Protocol("agents.opencode.config_file must be UTF-8".into())
+        })?;
+        spec.environment.insert("OPENCODE_CONFIG".into(), path);
+    }
+    Ok(Some(spec))
+}
+
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
     let server = OpenCodeServer::start(spec).await?;
     let modes = if server.probe.modes {
@@ -1382,6 +1403,14 @@ mod tests {
             }))?,
         )?;
         assert_eq!(configured_executable(&settings)?, Some(executable));
+        let launch = configured_launch(&AgentSettings::read(&settings)?)?
+            .ok_or("expected a configured launch")?;
+        assert!(!launch.environment.contains_key("OPENCODE_CONFIG"));
+        let invalid: AgentSettings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": launch.program,
+            "agents.opencode.config_file": "relative.json"
+        }}))?;
+        assert!(configured_launch(&invalid).is_err());
         std::fs::write(
             &settings,
             r#"{"app":{"agents.opencode.executable":"opencode"}}"#,
@@ -1849,7 +1878,7 @@ exec sleep 60
     ) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
         let mut spec = installed_fixture_spec(root)?;
         let endpoint = format!("http://{}/v1", listener.local_addr()?);
-        let config = spec.cwd.join("opencode.json");
+        let config = root.join("fixture config.json");
         std::fs::write(
             &config,
             serde_json::to_vec(&json!({
@@ -1870,10 +1899,12 @@ exec sleep 60
                 }
             }))?,
         )?;
-        spec.environment.insert(
-            "OPENCODE_CONFIG".into(),
-            config.to_string_lossy().into_owned(),
-        );
+        let settings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": spec.program,
+            "agents.opencode.config_file": config
+        }}))?;
+        let launch = configured_launch(&settings)?.ok_or("expected a configured launch")?;
+        spec.environment.extend(launch.environment);
         Ok(spec)
     }
 
@@ -2071,6 +2102,7 @@ exec sleep 60
             root.path(),
             r#"#!/bin/sh
 if [ "$1" != acp ]; then exit 78; fi
+[ "$OPENCODE_CONFIG" = "$PWD/fixture config.json" ] || exit 79
 while IFS= read -r record; do
     request_id=$(printf '%s\n' "$record" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
     case "$record" in
@@ -2085,10 +2117,14 @@ while IFS= read -r record; do
 done
 "#,
         )?;
+        let cwd = root.path().canonicalize()?;
+        let settings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": program,
+            "agents.opencode.config_file": cwd.join("fixture config.json")
+        }}))?;
         let spec = SpawnSpec {
-            program,
-            cwd: root.path().to_owned(),
-            ..SpawnSpec::default()
+            cwd,
+            ..configured_launch(&settings)?.ok_or("expected a configured launch")?
         };
         let mut harness = OpenCodeHarness::default();
         harness.start(spec).await?;

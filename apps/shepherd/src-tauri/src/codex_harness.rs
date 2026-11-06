@@ -19,7 +19,7 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
 
 pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
-    pub opencode: Result<Option<PathBuf>, HarnessError>,
+    pub opencode: Result<Option<SpawnSpec>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
     pub terminals: Arc<dyn TerminalBackend>,
 }
@@ -40,11 +40,16 @@ impl HarnessFactory for DesktopHarnessFactory {
     ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
         let (harness, executable, args): (Box<dyn AgentHarness>, &Path, Vec<String>) = match agent {
             Agent::Codex => return self.codex.launch(agent, cwd),
-            Agent::OpenCode => (
-                Box::new(OpenCodeHarness::default().with_terminals(self.terminals.clone())),
-                require_configured(&self.opencode, "agents.opencode.executable")?,
-                Vec::new(),
-            ),
+            Agent::OpenCode => {
+                let launch = require_configured(&self.opencode, "agents.opencode.executable")?;
+                return Ok((
+                    Box::new(OpenCodeHarness::default().with_terminals(self.terminals.clone())),
+                    SpawnSpec {
+                        cwd,
+                        ..launch.clone()
+                    },
+                ));
+            }
             Agent::Claude => {
                 let command = require_configured(&self.claude, "agents.claude.executable")?;
                 (
@@ -225,20 +230,30 @@ mod tests {
     }
 
     #[test]
-    fn launches_the_configured_opencode_independently_of_codex() -> Result<(), CoreError> {
+    fn launches_the_configured_opencode_independently_of_codex()
+    -> Result<(), Box<dyn std::error::Error>> {
         let executable = PathBuf::from("/etc/profiles/per-user/me/bin/opencode");
+        let config_file = "/tmp/OpenCode config.json";
+        let settings = serde_json::from_value(serde_json::json!({"app": {
+            "agents.opencode.executable": executable,
+            "agents.opencode.config_file": config_file
+        }}))?;
         let factory = DesktopHarnessFactory {
             codex: Box::new(MissingCodexFactory::new(
                 "fixture".into(),
                 FailureKind::MissingBinary,
             )),
-            opencode: Ok(Some(executable.clone())),
+            opencode: agent_harness::opencode::configured_launch(&settings),
             claude: Ok(None),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (_harness, spec) = factory.launch(Agent::OpenCode, cwd.clone())?;
         assert_eq!(Path::new(&spec.program), executable);
+        assert_eq!(
+            spec.environment.get("OPENCODE_CONFIG").map(String::as_str),
+            Some(config_file)
+        );
         assert_eq!(spec.cwd, cwd);
         assert!(factory.launch(Agent::Codex, cwd).is_err());
         Ok(())

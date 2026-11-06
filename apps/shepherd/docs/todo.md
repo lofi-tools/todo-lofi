@@ -861,8 +861,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 ### Build
 
 - [x] OpenCode probe, session control and transcript mapping.
-  Shepherd reads `app["agents.opencode.executable"]` from `settings.json` and
-  persists the agent on each task. The opt-in OpenCode 2.0.14 smokes verify
+  Shepherd reads `app["agents.opencode.executable"]` and the optional
+  `app["agents.opencode.config_file"]` from `settings.json` and persists the
+  agent on each task. The opt-in OpenCode 2.0.14 smokes verify
   session creation and resume after restart, queued prompt cancellation, and
   a complete streamed turn through a loopback model fixture. Contract fixtures
   cover text, reasoning, tool rows and permission replies.

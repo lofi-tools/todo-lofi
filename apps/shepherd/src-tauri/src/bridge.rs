@@ -19,7 +19,6 @@ use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
 use agent_harness::codex::CodexProjectModels;
-use agent_harness::settings::AgentSettings;
 use agent_harness::{AgentMode, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -450,11 +449,10 @@ struct TerminalSubscription {
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     attachment_root: Option<PathBuf>,
-    pub(crate) agent_settings: AgentSettings,
     pub(crate) preferences: Settings,
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) codex_detected: bool,
-    pub(crate) opencode_configured: bool,
+    pub(crate) opencode_launch: Option<SpawnSpec>,
     pub(crate) claude_configured: bool,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
@@ -488,11 +486,10 @@ impl ShellState {
         Self {
             core: Arc::new(Mutex::new(core)),
             attachment_root: None,
-            agent_settings: AgentSettings::default(),
             preferences: Settings::default(),
             codex_program: None,
             codex_detected: false,
-            opencode_configured: false,
+            opencode_launch: None,
             claude_configured: false,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -966,31 +963,17 @@ impl ShellState {
         &self,
         project_id: String,
     ) -> Result<Vec<AgentMode>, BridgeError> {
-        if !self.opencode_configured {
-            return Ok(Vec::new());
-        }
-        let Some(executable) = self
-            .agent_settings
-            .executable("agents.opencode.executable")
-            .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))?
-        else {
+        let Some(launch) = &self.opencode_launch else {
             return Ok(Vec::new());
         };
-        let program = executable.into_os_string().into_string().map_err(|_| {
-            BridgeError::new(
-                "opencode_modes",
-                "OpenCode requires a UTF-8 executable path.",
-            )
-        })?;
         let cwd = self
             .core
             .lock()
             .await
             .project_path(&ProjectId::new(project_id))?;
         agent_harness::opencode::project_modes(&SpawnSpec {
-            program,
             cwd,
-            ..SpawnSpec::default()
+            ..launch.clone()
         })
         .await
         .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))
@@ -1680,7 +1663,7 @@ pub mod commands {
     pub fn agent_availability(state: State<'_, ShellState>) -> BTreeMap<&'static str, bool> {
         BTreeMap::from([
             ("codex", state.codex_detected),
-            ("opencode", state.opencode_configured),
+            ("opencode", state.opencode_launch.is_some()),
             ("claude", state.claude_configured),
         ])
     }
@@ -1797,7 +1780,7 @@ pub mod commands {
 
     #[tauri::command]
     pub fn opencode_configured(state: State<'_, ShellState>) -> bool {
-        state.opencode_configured
+        state.opencode_launch.is_some()
     }
 
     #[tauri::command]

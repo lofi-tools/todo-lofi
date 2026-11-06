@@ -42,13 +42,17 @@ impl AgentSettings {
     }
 
     pub fn executable(&self, key: &str) -> HarnessResult<Option<PathBuf>> {
-        let executable = self.value::<PathBuf>(key)?;
-        if executable.as_ref().is_some_and(|path| !path.is_absolute()) {
+        self.absolute_path(key)
+    }
+
+    pub(crate) fn absolute_path(&self, key: &str) -> HarnessResult<Option<PathBuf>> {
+        let path = self.value::<PathBuf>(key)?;
+        if path.as_ref().is_some_and(|path| !path.is_absolute()) {
             return Err(HarnessError::Protocol(format!(
                 "{key} must be an absolute path"
             )));
         }
-        Ok(executable)
+        Ok(path)
     }
 
     pub fn command(&self, prefix: &str) -> HarnessResult<Option<ConfiguredCommand>> {

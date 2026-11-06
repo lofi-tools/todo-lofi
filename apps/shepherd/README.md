@@ -145,12 +145,15 @@ to the absolute path of your existing OpenCode executable. On macOS the file
 is `~/Library/Application Support/dev.shepherd.shell/settings.json`. On Linux
 it is `dev.shepherd.shell/settings.json` under `$XDG_CONFIG_HOME` (by default
 `~/.config`). If the file already exists, add the key to its `app` object.
+Set `agents.opencode.config_file` to the absolute path of an existing OpenCode
+configuration file when you want Shepherd to select it explicitly.
 
 ```json
 {
   "version": 1,
   "app": {
-    "agents.opencode.executable": "/etc/profiles/per-user/me/bin/opencode"
+    "agents.opencode.executable": "/etc/profiles/per-user/me/bin/opencode",
+    "agents.opencode.config_file": "/Users/me/.config/opencode/opencode.json"
   }
 }
 ```
@@ -158,6 +161,9 @@ it is `dev.shepherd.shell/settings.json` under `$XDG_CONFIG_HOME` (by default
 Restart Shepherd, then select **OpenCode** from the agent picker in an empty
 conversation or a draft. Shepherd probes OpenCode's native 2.x HTTP API and
 falls back to ACP with the same executable when the native probe fails.
+Shepherd passes the optional file as `OPENCODE_CONFIG` for both protocols and
+for project mode discovery. With the setting omitted, OpenCode uses its usual
+configuration lookup.
 The task keeps its agent after the first prompt. The diagnostics show which
 protocol ran and why Shepherd selected the fallback.
 The conversation header shows the tier after a session opens. Diagnostics list
@@ -165,7 +171,7 @@ the command, protocol, supported features and recent stderr. Turn actions
 follow the capabilities the adapter reported.
 
 To run the opt-in smoke tests, set `SHEPHERD_OPENCODE_TEST_SETTINGS` to the
-absolute path of a settings file with that key. The tests use a disposable
+absolute path of a settings file with the executable key. The tests use a disposable
 OpenCode profile. The native turn smoke uses a loopback model fixture, and
 the installed ACP fallback smoke checks session creation and reload.
 
