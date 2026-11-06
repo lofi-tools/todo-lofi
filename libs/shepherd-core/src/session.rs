@@ -4,6 +4,7 @@
 //! makes resume after a restart possible. The core keeps the newest record per
 //! task; the rest is history for diagnostics.
 
+use agent_harness::Capabilities;
 use uuid::Uuid;
 
 use crate::projects::now_millis;
@@ -21,6 +22,7 @@ pub struct SessionRecord {
     pub ended_at: Option<u64>,
     pub exit_code: Option<i32>,
     pub stderr: Option<String>,
+    pub capabilities: Option<Capabilities>,
 }
 
 impl SessionRecord {
@@ -38,6 +40,7 @@ impl SessionRecord {
             ended_at: None,
             exit_code: None,
             stderr: None,
+            capabilities: None,
         }
     }
 
@@ -51,5 +54,16 @@ impl SessionRecord {
 
     pub fn is_ended(&self) -> bool {
         self.ended_at.is_some()
+    }
+
+    pub fn resume_handle(&self) -> Option<&str> {
+        if self
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| !capabilities.resume)
+        {
+            return None;
+        }
+        self.adapter_session_id.as_deref()
     }
 }

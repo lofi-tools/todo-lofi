@@ -66,9 +66,10 @@ test.beforeEach(async ({ context }) => {
         id: 'task-1',
         projectId: 'project-1',
         title: 'Ship it',
-        state: options.has('interrupted-task') ? 'interrupted' : 'ready',
-        agent: 'codex',
-        tier: 'native',
+        state: options.has('interrupted-task') ? 'interrupted'
+          : ['approval-fixture', 'scoped-approval', 'project-approval'].some((name) => options.has(name)) ? 'waiting' : 'ready',
+        agent: options.has('acp-fallback') ? 'opencode' : 'codex',
+        tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
         error: null,
@@ -228,6 +229,12 @@ test.beforeEach(async ({ context }) => {
 
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
+      const limited = options.has('limited-adapter')
+      const capabilities = task.state === 'draft' || options.has('legacy-session') ? null : {
+        streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
+        cancel: !limited, modelPicker: false, modePicker: false, images: false, resourceLinks: false,
+        usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
+      }
       return {
         project: projects.find((candidate) => candidate.id === task.projectId),
         task: detail(task),
@@ -235,7 +242,13 @@ test.beforeEach(async ({ context }) => {
         cancelling: false,
         transcript: transcripts[taskId] ?? [],
         agentTerminals: agentTerminals.get(taskId) ?? [],
-        diagnostics: task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
+        adapterTier: task.state === 'draft' ? null : task.tier,
+        capabilities,
+        recovery: task.state === 'interrupted' ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
+        diagnostics: options.has('acp-fallback') ? {
+          command: '/existing/opencode acp', protocol: 'ACP v1 OpenCode 2.0.14',
+          fallbackReason: 'OpenCode native server unavailable: no loopback server', stderrTail: 'agent stderr',
+        } : task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
       }
     }
 
@@ -348,7 +361,13 @@ test.beforeEach(async ({ context }) => {
             if (!task || task.state !== 'interrupted') throw new Error('Task cannot be resumed')
             task.state = 'ready'
             transcripts[task.id] = [
-              entry('resumed', 1, { type: 'notice', data: { text: 'resumed the previous agent session', isError: false } }),
+              entry('resumed', 1, {
+                type: 'notice',
+                data: {
+                  text: options.has('limited-adapter') ? 'started a new agent session' : 'resumed the previous agent session',
+                  isError: false,
+                },
+              }),
             ]
             return workspace(task.id)
           }
@@ -619,6 +638,7 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
   await compose.press('Enter')
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
   await expect(page.getByText('Proposed branch')).toBeVisible()
+  await expect(page.locator('.chat__adapter')).toHaveCount(0)
   await expect(page.getByText('shepherd/new-task')).toBeVisible()
   await expect(
     page.getByText('/tmp/demo/.git/shepherd/worktrees/new-task', { exact: false }),
@@ -672,7 +692,7 @@ test('cancels an active turn and waits for the settled workspace', async ({ page
 })
 
 test('shows an approval with its tool, arguments and diff', async ({ page }) => {
-  await page.goto('/')
+  await page.goto('/?approval-fixture')
 
   const withDiff = page.locator('.entry__permission').filter({ hasText: 'Run tests' })
   await expect(withDiff).toContainText('cargo test')
@@ -685,6 +705,36 @@ test('shows an approval with its tool, arguments and diff', async ({ page }) => 
     .locator('.entry__permission')
     .filter({ hasText: 'Delete scratch file' })
   await expect(withoutDiff).toContainText('diff not available')
+})
+
+test('reports the ACP tier and the reason the native adapter was skipped', async ({ page }) => {
+  await page.goto('/?acp-fallback')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByText('ACP · fallback')).toBeVisible()
+  await expect(chat.getByText('OpenCode native server unavailable: no loopback server')).toBeVisible()
+  await chat.getByText('Diagnostics', { exact: true }).click()
+  await expect(chat.getByText('ACP v1 OpenCode 2.0.14')).toBeVisible()
+  await expect(chat.getByText('/existing/opencode acp')).toBeVisible()
+  await expect(chat.getByText(/Tool approvals, Resume, Cancel turn/)).toBeVisible()
+  await expect(chat.getByText('agent stderr')).toBeVisible()
+})
+
+test('hides actions the connected adapter cannot perform', async ({ page }) => {
+  await page.goto('/?approval-fixture&limited-adapter')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.locator('.chat__state')).toHaveText('waiting')
+  await expect(chat.getByRole('button', { name: 'Cancel turn' })).toHaveCount(0)
+  await expect(chat.getByRole('button', { name: 'Allow', exact: true })).toHaveCount(0)
+  await expect(chat.getByRole('button', { name: 'Shell approvals: Ask me' })).toHaveCount(0)
+})
+
+test('opens a fresh session when the last adapter could not resume', async ({ page }) => {
+  await page.goto('/?interrupted-task&limited-adapter')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
+  await chat.getByRole('button', { name: 'Start new session' }).click()
+  await expect(chat.getByText('started a new agent session')).toBeVisible()
+  await expect(chat.getByLabel('Prompt')).toBeEnabled()
 })
 
 test('sends a scoped approval and identifies an automatic session grant', async ({ page }) => {

@@ -82,6 +82,8 @@ with a Codex installation that supports `project/list`.
 Shepherd launches its Codex app server with GPT-6.1 Terra (`gpt-6.1-terra`) as
 the default model. The composer displays the resolved model for the project or
 the model reported by the active session.
+When the installed CLI only exposes `exec --json`, Shepherd uses that
+protocol and starts a separate Codex process for each prompt.
 
 ## Bridge
 
@@ -111,6 +113,9 @@ conversation or a draft. Shepherd probes OpenCode's native 2.x HTTP API and
 falls back to ACP with the same executable when the native probe fails.
 The task keeps its agent after the first prompt. The diagnostics show which
 protocol ran and why Shepherd selected the fallback.
+The conversation header shows the tier after a session opens. Diagnostics list
+the command, protocol, supported features and recent stderr. Turn actions
+follow the capabilities the adapter reported.
 
 To run the opt-in smoke tests, set `SHEPHERD_OPENCODE_TEST_SETTINGS` to the
 absolute path of a settings file with that key. The tests use a disposable

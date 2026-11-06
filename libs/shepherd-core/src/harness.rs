@@ -170,6 +170,9 @@ impl HarnessSession {
     }
 
     pub async fn cancel(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {
+        if !self.capabilities.cancel {
+            return Err(HarnessError::CancelUnavailable.into());
+        }
         if !self.failed && !self.closed && !self.cancelling {
             self.harness.cancel().await?;
             self.cancelling = true;
@@ -215,6 +218,7 @@ impl HarnessSession {
         while let Ok(event) = self.harness.events().try_recv() {
             match &event {
                 HarnessEvent::AgentTerminalStarted { id, title } => {
+                    self.capabilities.agent_terminals = true;
                     self.agent_terminals.push(AgentTerminal {
                         id: id.clone(),
                         title: title.clone(),
@@ -249,6 +253,7 @@ impl HarnessSession {
                     }
                 }
                 HarnessEvent::ApprovalRequested { request } => {
+                    self.capabilities.approvals = true;
                     self.pending_approval = Some(request.approval_id.clone());
                 }
                 HarnessEvent::ApprovalResolved { approval_id, .. }

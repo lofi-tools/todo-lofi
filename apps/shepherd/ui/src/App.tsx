@@ -21,6 +21,32 @@ type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
+const TIER_LABELS: Record<bridge.AgentTier, string> = {
+  native: 'Native',
+  acp: 'ACP',
+  'terminal-wrapper': 'Terminal wrapper',
+  'plain-pane': 'Plain terminal',
+}
+const RECOVERY_LABELS: Record<bridge.SessionRecovery, string> = {
+  resume: 'Resume',
+  reconnect: 'Reconnect',
+  startNew: 'Start new session',
+}
+const CAPABILITY_LABELS: Record<keyof bridge.AgentCapabilities, string> = {
+  streaming: 'Streaming deltas',
+  thoughts: 'Thoughts',
+  toolCalls: 'Tool activity',
+  approvals: 'Tool approvals',
+  resume: 'Resume',
+  cancel: 'Cancel turn',
+  modelPicker: 'Model selection',
+  modePicker: 'Mode selection',
+  images: 'Images',
+  resourceLinks: 'Resource links',
+  usage: 'Usage',
+  agentTerminals: 'Agent terminals',
+  patchesInApprovals: 'Approval patches',
+}
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
 const APPROVAL_LABELS: Record<bridge.Decision, string> = {
   allow: 'Allow once',
@@ -268,8 +294,12 @@ export function App() {
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
   const canCancel = () => {
-    const task = workspace()?.task
-    return !!task && LIVE_STATES.includes(task.state)
+    const current = workspace()
+    return !!current?.capabilities?.cancel && LIVE_STATES.includes(current.task.state)
+  }
+  const canApprove = () => {
+    const current = workspace()
+    return !!current?.capabilities?.approvals && current.task.state === 'waiting'
   }
   const cancellingTurn = () => {
     const current = workspace()
@@ -543,7 +573,7 @@ export function App() {
 
   function decide(approvalId: string, decision: bridge.Decision) {
     const current = workspace()
-    if (!current || cancellingTurn()) return
+    if (!current || !canApprove() || cancellingTurn()) return
     void run(async () => {
       setWorkspace(await bridge.resolveApproval(current.task.id, approvalId, decision))
       const projectId = selectedProjectId()
@@ -620,8 +650,9 @@ export function App() {
   }
 
   function resumeTask() {
-    const task = workspace()?.task
-    if (!task || task.state !== 'interrupted' || pending()) return
+    const current = workspace()
+    if (!current?.recovery || pending()) return
+    const task = current.task
     void run(async () => {
       const resumed = await bridge.resumeTask(task.id)
       if (selectedTaskId() === task.id) setWorkspace(resumed)
@@ -901,6 +932,9 @@ export function App() {
             {(current) => (
               <header class="pane-header">
                 <span class="chat__title">{current().task.title}</span>
+                <Show when={current().adapterTier}>
+                  {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
+                </Show>
                 <span class="chat__state">{current().task.state}</span>
                 <Show when={canCancel()}>
                   <button type="button" class="project-action" onClick={cancelTurn}
@@ -909,10 +943,10 @@ export function App() {
                     {cancellingTurn() ? 'Cancelling…' : 'Cancel turn'}
                   </button>
                 </Show>
-                <Show when={current().task.state === 'interrupted'}>
-                  <button type="button" class="project-action" onClick={resumeTask} disabled={pending()}>
-                    Resume
-                  </button>
+                <Show when={current().recovery}>
+                  {(recovery) => <button type="button" class="project-action" onClick={resumeTask} disabled={pending()}>
+                    {RECOVERY_LABELS[recovery()]}
+                  </button>}
                 </Show>
               </header>
             )}
@@ -944,6 +978,10 @@ export function App() {
             )}
           </Show>
 
+          <Show when={workspace()?.diagnostics?.fallbackReason}>
+            {(reason) => <p class="chat__adapter-note">{reason()}</p>}
+          </Show>
+
           <Show when={workspace()?.diagnostics}>
             {(diagnostics) => (
               <details class="diagnostics">
@@ -955,6 +993,17 @@ export function App() {
                   </dd>
                   <dt>Protocol</dt>
                   <dd>{diagnostics().protocol || '—'}</dd>
+                  <Show when={workspace()?.adapterTier}>
+                    {(tier) => <><dt>Tier</dt><dd>{TIER_LABELS[tier()]}</dd></>}
+                  </Show>
+                  <Show when={workspace()?.capabilities}>
+                    {(capabilities) => <>
+                      <dt>Supported features</dt>
+                      <dd>{Object.entries(CAPABILITY_LABELS)
+                        .filter(([key]) => capabilities()[key as keyof bridge.AgentCapabilities])
+                        .map(([, label]) => label).join(', ') || 'None reported'}</dd>
+                    </>}
+                  </Show>
                   <Show when={diagnostics().stderrTail}>
                     <dt>stderr</dt>
                     <dd>
@@ -1001,7 +1050,7 @@ export function App() {
                 >
                   <ol class="transcript">
                     <For each={current().transcript}>
-                      {(entry) => <li class="entry">{entryBody(entry, decide, cancellingTurn)}</li>}
+                      {(entry) => <li class="entry">{entryBody(entry, decide, cancellingTurn, canApprove)}</li>}
                     </For>
                   </ol>
                 </Show>
@@ -1032,7 +1081,8 @@ export function App() {
               }}
             />
             <div class="composer__actions">
-              <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent} />
+              <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
+                showShellApprovals={workspace()?.capabilities?.approvals !== false} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} />
@@ -1067,7 +1117,7 @@ export function App() {
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}
-                  agentTerminals={workspace()?.task.id === selectedTaskId() ? workspace()?.agentTerminals : undefined}
+                  agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
                   shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
                   onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}
@@ -1294,22 +1344,24 @@ const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void }) {
+function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; showShellApprovals: boolean }) {
   return (
     <>
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
         <PlusIcon />
       </PickerMenu>
-      <div class="composer__approval-slot">
-        <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
-            <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
-          </svg>
-          <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
-          <PickerCaret />
-        </PickerMenu>
-      </div>
+      <Show when={props.showShellApprovals}>
+        <div class="composer__approval-slot">
+          <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
+              <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
+            </svg>
+            <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
+            <PickerCaret />
+          </PickerMenu>
+        </div>
+      </Show>
       <PickerMenu label="Agent" text={props.agentName} value={props.agent} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
         <span class="composer__picker-label">{props.agentName}</span>
         <PickerCaret />
@@ -1560,6 +1612,7 @@ function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
   cancelling: () => boolean,
+  canApprove: () => boolean,
 ) {
   const kind = entry.kind
   const failureLabels: Record<string, string> = {
@@ -1627,8 +1680,8 @@ function entryBody(
             {(patch) => <DiffBlock patch={patch()} />}
           </Show>
           <Show
-            when={!permission.withdrawn && permission.decision === null}
-            fallback={<span class="entry__permission-decision">{decisionText}</span>}
+            when={canApprove() && !permission.withdrawn && permission.decision === null}
+            fallback={<span class="entry__permission-decision">{decisionText ?? 'approval unavailable'}</span>}
           >
             <div class="entry__actions">
               <For each={permission.choices ?? DEFAULT_APPROVAL_CHOICES}>

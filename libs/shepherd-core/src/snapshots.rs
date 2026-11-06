@@ -1,11 +1,11 @@
 //! Snapshots returned by commands and included in change events.
 
-use agent_harness::{AgentDiagnostics, AgentTerminal, Entry, SessionApproval};
+use agent_harness::{AgentDiagnostics, AgentTerminal, Capabilities, Entry, SessionApproval};
 use serde::{Deserialize, Serialize};
 
 use crate::projects::{ProjectId, ProjectSnapshot};
 use crate::store::ProjectApproval;
-use crate::tasks::{Agent, TaskDetail, TaskSummary};
+use crate::tasks::{Agent, AgentTier, TaskDetail, TaskSummary};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,4 +63,15 @@ pub struct TaskWorkspace {
     pub queued_review_note: Option<String>,
     /// What the adapter launched and speaks, once a session exists.
     pub diagnostics: Option<AgentDiagnostics>,
+    pub adapter_tier: Option<AgentTier>,
+    pub capabilities: Option<Capabilities>,
+    pub recovery: Option<SessionRecovery>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionRecovery {
+    Resume,
+    Reconnect,
+    StartNew,
 }

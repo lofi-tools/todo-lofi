@@ -40,7 +40,7 @@ pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSumma
 use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
-use crate::snapshots::TaskApproval;
+use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{MemoryStore, Store, StoreError};
 use crate::terminal::{
     InspectorTab, TerminalId, TerminalLayout, TerminalList, TerminalRecord, TerminalSnapshot,
@@ -830,6 +830,20 @@ impl Core {
                     id: task.project_id.as_str().to_string(),
                 })?;
         let session = self.sessions.get(task_id);
+        let record = self.session_records.get(task_id);
+        let recovery = if matches!(task.state, TaskState::Interrupted | TaskState::Failed)
+            && task.worktree_path.is_some()
+        {
+            Some(
+                match record.filter(|record| record.resume_handle().is_some()) {
+                    Some(record) if record.capabilities.is_some() => SessionRecovery::Resume,
+                    Some(_) => SessionRecovery::Reconnect,
+                    None => SessionRecovery::StartNew,
+                },
+            )
+        } else {
+            None
+        };
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
@@ -847,6 +861,12 @@ impl Core {
                 .map(|session| session.agent_terminals().to_vec())
                 .unwrap_or_default(),
             diagnostics: session.map(HarnessSession::diagnostics),
+            adapter_tier: record.map(|_| task.tier),
+            capabilities: session
+                .filter(|session| session.session_id().is_some())
+                .map(|session| session.capabilities().clone())
+                .or_else(|| record.and_then(|record| record.capabilities.clone())),
+            recovery,
         })
     }
 
@@ -1142,7 +1162,7 @@ impl Core {
             .get(task_id)
             .filter(|session| session.is_closed())
             .and_then(|_| self.session_records.get(task_id))
-            .and_then(|record| record.adapter_session_id.clone())
+            .and_then(SessionRecord::resume_handle)
             .map(SessionId::new);
         let opened = self.ensure_session(task_id, stored).await;
         if let Ok(SessionOpened::ResumeFailed(reason)) = &opened
@@ -1271,8 +1291,11 @@ impl Core {
     /// Resume an interrupted task with the agent session the previous process
     /// left behind, and say plainly when that session is gone.
     async fn resume_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
-        let state = self.task(task_id)?.state;
-        if state != TaskState::Interrupted {
+        let task = self.task(task_id)?;
+        let state = task.state;
+        if !matches!(state, TaskState::Interrupted | TaskState::Failed)
+            || task.worktree_path.is_none()
+        {
             return Err(CoreError::TaskNotResumable {
                 id: task_id.as_str().to_string(),
                 state: state.as_str(),
@@ -1281,18 +1304,22 @@ impl Core {
 
         self.repair_worktree(task_id).await?;
         self.set_task_state(task_id, TaskState::Starting)?;
-        self.sessions.remove(task_id);
+        if self.sessions.remove(task_id).is_some() {
+            self.emit(Event::ProjectApprovalsChanged {
+                project_id: self.task(task_id)?.project_id.clone(),
+            });
+        }
         let stored_session_id = self
             .session_records
             .get(task_id)
-            .and_then(|record| record.adapter_session_id.clone())
+            .and_then(SessionRecord::resume_handle)
             .map(SessionId::new);
         let opened = match self.ensure_session(task_id, stored_session_id).await {
             Ok(opened) => opened,
             Err(error) => {
                 // Stay resumable: the user can install or update the agent and
                 // try again.
-                self.set_task_state(task_id, TaskState::Interrupted)?;
+                self.set_task_state(task_id, state)?;
                 self.save_task(task_id).await?;
                 self.publish_task(task_id)?;
                 return Err(error);
@@ -1306,7 +1333,7 @@ impl Core {
                 ),
                 SessionOpened::ResumeFailed(error) => session.note(
                     format!(
-                        "the previous agent session is gone (the adapter cannot resume it: {error}); started a new session"
+                        "the adapter cannot resume the previous session ({error}). Shepherd started a new session"
                     ),
                     true,
                 ),
@@ -1314,6 +1341,9 @@ impl Core {
             }
         }
         self.set_task_state(task_id, TaskState::Ready)?;
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.error = None;
+        }
         self.save_task(task_id).await?;
         let workspace = self.publish_task(task_id)?;
         Ok(CommandResult::TaskWorkspace(workspace))
@@ -1432,6 +1462,19 @@ impl Core {
             Err(error) => return Err(self.fail_session_start(task_id, session, error)),
         };
         let opened_session = match resume {
+            Some(_)
+                if task.tier != session.tier() && self.session_records.contains_key(task_id) =>
+            {
+                let reason = format!(
+                    "the adapter changed from {} to {}",
+                    task.tier.as_str(),
+                    session.tier().as_str()
+                );
+                session
+                    .open_session(None)
+                    .await
+                    .map(|session_id| (SessionOpened::ResumeFailed(reason), session_id))
+            }
             Some(requested) if capabilities.resume => {
                 match session.open_session(Some(requested)).await {
                     Ok(session_id) => {
@@ -1469,11 +1512,12 @@ impl Core {
             Err(error) => return Err(self.fail_session_start(task_id, session, error)),
         };
 
-        let record = SessionRecord::started(
+        let mut record = SessionRecord::started(
             task_id.clone(),
             task.agent.as_str(),
             Some(session_id.as_str().to_string()),
         );
+        record.capabilities = Some(session.capabilities().clone());
         self.store.save_session(&record).await?;
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.tier = session.tier();
@@ -2244,7 +2288,10 @@ mod streaming {
         }
 
         async fn start(&mut self, _spec: SpawnSpec) -> HarnessResult<Capabilities> {
-            Ok(Capabilities::default())
+            Ok(Capabilities {
+                cancel: true,
+                ..Capabilities::default()
+            })
         }
 
         async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
@@ -2929,6 +2976,16 @@ mod tests {
 
         let workspace = scenario.core().task_workspace(&task_id)?;
         assert_eq!(workspace.task.state, TaskState::Interrupted);
+        assert_eq!(
+            workspace.recovery,
+            Some(crate::snapshots::SessionRecovery::Resume)
+        );
+        assert!(
+            workspace
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.resume)
+        );
         assert!(workspace.transcript.is_empty());
         assert!(worktree_path.join("README.md").is_file());
         assert_eq!(workspace.project.unfinished_task_count, 1);
@@ -4070,6 +4127,7 @@ mod tests {
             draft.diagnostics.is_none(),
             "a draft has no session to report"
         );
+        assert!(draft.adapter_tier.is_none() && draft.capabilities.is_none());
 
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
@@ -4084,6 +4142,57 @@ mod tests {
         assert_eq!(diagnostics.command, "fake");
         assert_eq!(diagnostics.protocol, "fake-harness");
         assert!(diagnostics.stderr_tail.is_empty());
+        assert_eq!(workspace.adapter_tier, Some(crate::AgentTier::Native));
+        assert!(
+            workspace
+                .capabilities
+                .is_some_and(|capabilities| capabilities.cancel)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_distinguishes_known_non_resumable_and_legacy_sessions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::Task;
+        use crate::session::SessionRecord;
+        use crate::snapshots::SessionRecovery;
+        use agent_harness::Capabilities;
+
+        let repository = TestRepository::new()?;
+        let mut core = Core::new();
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut task = Task::draft(project_id, "Interrupted", repository.path());
+        task.worktree_path = Some(repository.path().to_path_buf());
+        task.state = TaskState::Interrupted;
+        let task_id = task.id.clone();
+        core.tasks.insert(task_id.clone(), task);
+        assert_eq!(
+            core.task_workspace(&task_id)?.recovery,
+            Some(SessionRecovery::StartNew)
+        );
+
+        let mut record =
+            SessionRecord::started(task_id.clone(), "codex", Some("previous-handle".into()));
+        core.session_records.insert(task_id.clone(), record.clone());
+        assert_eq!(
+            core.task_workspace(&task_id)?.recovery,
+            Some(SessionRecovery::Reconnect)
+        );
+
+        record.capabilities = Some(Capabilities {
+            cancel: true,
+            ..Capabilities::default()
+        });
+        assert!(record.resume_handle().is_none());
+        core.session_records.insert(task_id.clone(), record);
+        let workspace = core.task_workspace(&task_id)?;
+        assert_eq!(workspace.recovery, Some(SessionRecovery::StartNew));
+        assert!(
+            workspace
+                .capabilities
+                .is_some_and(|capabilities| capabilities.cancel && !capabilities.resume)
+        );
         Ok(())
     }
 }

@@ -43,6 +43,8 @@ pub enum HarnessError {
     SessionMissing,
     #[error("the agent is waiting for an approval")]
     ApprovalPending,
+    #[error("the current adapter cannot cancel a turn")]
+    CancelUnavailable,
     #[error("there is no pending approval")]
     NoPendingApproval,
     #[error("the agent did not offer this approval option")]
@@ -266,6 +268,8 @@ pub struct AgentDiagnostics {
     /// The protocol surface and version the adapter verified.
     pub protocol: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The child's stderr, newest last.
     pub stderr_tail: String,
@@ -301,13 +305,15 @@ impl SessionRoots {
 
 /// What an adapter can do. False means the capability is absent, not merely
 /// untested; the core must hide the corresponding control.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Capabilities {
     pub streaming: bool,
     pub thoughts: bool,
     pub tool_calls: bool,
     pub approvals: bool,
     pub resume: bool,
+    pub cancel: bool,
     pub model_picker: bool,
     pub mode_picker: bool,
     pub images: bool,
@@ -333,6 +339,7 @@ impl Capabilities {
             tool_calls: true,
             approvals: true,
             resume: true,
+            cancel: true,
             usage: true,
             ..Self::default()
         }

@@ -396,6 +396,9 @@ approval kinds and whether approvals carry patches, usage reporting and
 agent-created terminals. Capabilities are probed at connect, refined per session,
 and default to false when unknown; a false capability hides the corresponding UI
 rather than showing a dead control.
+Shepherd saves the negotiated capabilities with the session. Legacy handles can
+be reconnected and probed again. The task shows a tier after a session opens
+and displays the reason when a fallback is selected.
 
 Contract tests per adapter: recorded protocol fixtures for parsing, one live
 smoke test against an installed CLI, and explicit tests for "binary missing",

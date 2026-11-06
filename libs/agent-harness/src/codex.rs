@@ -25,8 +25,8 @@ use tokio::time::timeout;
 
 use crate::{
     AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
-    FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
-    SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
+    FailureKind, FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput,
+    SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
 };
 
 /// Protocol methods Shepherd knows how to drive. A build that advertises fewer
@@ -77,6 +77,28 @@ impl CodexProbe {
 pub async fn probe(program: &str, cwd: &Path) -> HarnessResult<CodexProbe> {
     let version = read_version(program).await;
     let handshake = run_handshake(program, cwd).await?;
+    if !handshake.supported {
+        let output = timeout(
+            PROBE_TIMEOUT,
+            Command::new(program)
+                .args(["exec", "--help"])
+                .current_dir(cwd)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| HarnessError::Protocol("Codex exec help probe timed out".into()))?
+        .map_err(|error| spawn_error(program, error))?;
+        if !output.status.success()
+            || !String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|flag| flag == "--json")
+        {
+            return Err(HarnessError::Protocol(
+                "Codex did not expose app-server or support exec --json".into(),
+            ));
+        }
+    }
     Ok(CodexProbe {
         tier: if handshake.supported {
             CodexTier::AppServer
@@ -707,7 +729,9 @@ impl CodexHarness {
             tool_calls: true,
             approvals: self.supports("item/commandExecution/requestApproval")
                 || self.supports("item/fileChange/requestApproval"),
+            patches_in_approvals: self.supports("item/fileChange/requestApproval"),
             resume: self.supports("thread/resume"),
+            cancel: self.supports("turn/interrupt"),
             ..Capabilities::default()
         }
     }
@@ -866,6 +890,7 @@ impl AgentHarness for CodexHarness {
         AgentDiagnostics {
             command: self.command.clone(),
             protocol: self.protocol.clone(),
+            fallback_reason: None,
             model: self.model.clone(),
             stderr_tail: stderr_tail(&self.stderr),
         }
@@ -1059,6 +1084,7 @@ pub struct ExecHarness {
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     program: String,
     command: String,
+    version: Option<String>,
     args: Vec<String>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -1074,7 +1100,7 @@ pub struct ExecHarness {
 /// a natural exit cannot both reap the same process.
 struct ExecRun {
     waiter: JoinHandle<()>,
-    reader: JoinHandle<()>,
+    reader: tokio::task::AbortHandle,
     kill: Option<oneshot::Sender<()>>,
     finished: Arc<AtomicBool>,
 }
@@ -1089,6 +1115,7 @@ impl ExecHarness {
             receiver,
             program: String::new(),
             command: String::new(),
+            version: None,
             args: Vec::new(),
             cwd: PathBuf::new(),
             environment: BTreeMap::new(),
@@ -1101,11 +1128,18 @@ impl ExecHarness {
         }
     }
 
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: false,
             thoughts: true,
             tool_calls: true,
+            cancel: true,
+            usage: true,
             ..Capabilities::default()
         }
     }
@@ -1133,7 +1167,8 @@ impl AgentHarness for ExecHarness {
     fn diagnostics(&self) -> AgentDiagnostics {
         AgentDiagnostics {
             command: self.command.clone(),
-            protocol: "codex exec --json".to_string(),
+            protocol: self.version.as_ref().map_or_else(|| "codex exec --json".into(), |version| format!("codex exec --json ({version})")),
+            fallback_reason: Some("Codex app-server did not complete the initialize handshake. Each prompt starts a separate Codex process.".into()),
             model: None,
             stderr_tail: stderr_tail(&self.stderr),
         }
@@ -1145,7 +1180,11 @@ impl AgentHarness for ExecHarness {
                 "the codex exec session is already started".to_string(),
             ));
         }
-        self.command = crate::command_line(&spec);
+        self.command = std::iter::once(spec.program.as_str())
+            .chain(["exec", "--json"])
+            .chain(spec.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
         self.program = spec.program;
         self.args = spec.args;
         self.cwd = spec.cwd;
@@ -1204,6 +1243,8 @@ impl AgentHarness for ExecHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
 
         let mut child = command
             .spawn()
@@ -1226,17 +1267,19 @@ impl AgentHarness for ExecHarness {
         self.next_turn += 1;
         let (kill, kill_receiver) = oneshot::channel();
         let finished = Arc::new(AtomicBool::new(false));
+        let reader = spawn_exec_reader(stdout, self.sender.clone());
+        let reader_abort = reader.abort_handle();
         let waiter = spawn_exec_waiter(
             child,
             kill_receiver,
             self.sender.clone(),
             Arc::clone(&self.stderr),
             Arc::clone(&finished),
+            reader,
         );
-        let reader = spawn_exec_reader(stdout, self.sender.clone());
         self.run = Some(ExecRun {
             waiter,
-            reader,
+            reader: reader_abort,
             kill: Some(kill),
             finished,
         });
@@ -1289,26 +1332,22 @@ impl AgentHarness for ExecHarness {
             return Ok(());
         }
 
-        let reported = match self.run.take() {
-            Some(mut run) => {
-                if !run.finished.load(Ordering::Relaxed)
-                    && let Some(kill) = run.kill.take()
-                    && kill.send(()).is_err()
-                {
-                    tracing::debug!("the codex exec process was already gone");
-                }
-                let joined = timeout(Duration::from_secs(5), &mut run.waiter)
-                    .await
-                    .is_ok();
-                if !joined {
-                    tracing::warn!("the codex exec process did not stop within 5s");
-                    run.waiter.abort();
-                }
-                run.reader.abort();
-                joined
+        if let Some(mut run) = self.run.take() {
+            if !run.finished.load(Ordering::Relaxed)
+                && let Some(kill) = run.kill.take()
+                && kill.send(()).is_err()
+            {
+                tracing::debug!("the codex exec process was already gone");
             }
-            None => false,
-        };
+            let joined = timeout(Duration::from_secs(5), &mut run.waiter)
+                .await
+                .is_ok();
+            if !joined {
+                tracing::warn!("the codex exec process did not stop within 5s");
+                run.waiter.abort();
+            }
+            run.reader.abort();
+        }
 
         if let Some(task) = self.stderr_task.take() {
             task.abort();
@@ -1316,15 +1355,12 @@ impl AgentHarness for ExecHarness {
         self.started = false;
         self.session_id = None;
 
-        if !reported {
-            self.sender
-                .send(HarnessEvent::Exited {
-                    code: None,
-                    stderr: stderr_tail(&self.stderr),
-                })
-                .map_err(|_| HarnessError::ChannelClosed)?;
-        }
-        Ok(())
+        self.sender
+            .send(HarnessEvent::Exited {
+                code: Some(0),
+                stderr: stderr_tail(&self.stderr),
+            })
+            .map_err(|_| HarnessError::ChannelClosed)
     }
 }
 
@@ -1334,6 +1370,7 @@ fn spawn_exec_waiter(
     sender: mpsc::UnboundedSender<HarnessEvent>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    mut reader: JoinHandle<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let outcome = tokio::select! {
@@ -1344,6 +1381,15 @@ fn spawn_exec_waiter(
         let status = match outcome {
             Some(status) => status,
             None => {
+                #[cfg(unix)]
+                if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
+                    && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(%error, "could not stop the Codex exec process group");
+                    }
+                }
                 if let Err(error) = child.kill().await {
                     tracing::debug!(%error, "could not kill the codex exec process");
                 }
@@ -1351,6 +1397,11 @@ fn spawn_exec_waiter(
             }
         };
 
+        match timeout(Duration::from_secs(1), &mut reader).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::debug!(%error, "the Codex exec reader stopped"),
+            Err(_) => reader.abort(),
+        }
         finished.store(true, Ordering::Relaxed);
         let code = match &status {
             Ok(status) => status.code(),
@@ -1366,16 +1417,23 @@ fn spawn_exec_waiter(
         } else {
             TurnFinishReason::Failed
         };
-        if sender.send(HarnessEvent::TurnFinished { reason }).is_err() {
-            tracing::debug!("the core stopped listening to codex events");
+        if reason == TurnFinishReason::Failed {
+            let stderr = stderr_tail(&stderr);
+            let text = format!(
+                "Codex exec failed (exit code {code:?}){suffix}",
+                suffix = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+            let kind = FailureKind::classify(&HarnessError::Protocol(text.clone()))
+                .unwrap_or(FailureKind::Protocol);
+            if sender.send(HarnessEvent::TurnError { kind, text }).is_err() {
+                tracing::debug!("the core stopped listening to codex errors");
+            }
         }
-        if sender
-            .send(HarnessEvent::Exited {
-                code,
-                stderr: stderr_tail(&stderr),
-            })
-            .is_err()
-        {
+        if sender.send(HarnessEvent::TurnFinished { reason }).is_err() {
             tracing::debug!("the core stopped listening to codex events");
         }
     })
@@ -2304,6 +2362,7 @@ done
     /// Answers initialize with "method not found".
     const UNSUPPORTED_STUB: &str = r#"#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "codex-cli 0.9.0"; exit 0; fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then echo "  --json"; exit 0; fi
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
@@ -2964,6 +3023,7 @@ sleep 30
         assert!(!capabilities.streaming);
         assert!(!capabilities.approvals);
         assert!(!capabilities.resume);
+        assert!(capabilities.cancel);
 
         let error = harness
             .open_session(Some(SessionId::new("sess_1")))
@@ -2989,7 +3049,7 @@ sleep 30
         let events = collect_until(&mut harness, |events| {
             events
                 .iter()
-                .any(|event| matches!(event, HarnessEvent::Exited { .. }))
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
         })
         .await;
 
@@ -3021,15 +3081,33 @@ sleep 30
             }
         )));
         assert!(
-            events
+            !events
                 .iter()
-                .any(|event| matches!(event, HarnessEvent::Exited { code: Some(0), .. }))
+                .any(|event| matches!(event, HarnessEvent::Exited { .. }))
         );
 
         let arguments = std::fs::read_to_string(directory.path().join("args.txt"))
             .expect("the stub recorded its arguments");
         assert!(arguments.contains("--json"));
         assert!(arguments.contains("run the tests"));
+        harness
+            .prompt(PromptInput {
+                text: "second prompt".into(),
+            })
+            .await
+            .expect("another command starts in the same adapter");
+        let next = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(next.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed
+            }
+        )));
         harness.shutdown().await.expect("the session stops");
     }
 

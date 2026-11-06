@@ -162,9 +162,28 @@ export interface Entry {
 export interface AgentDiagnostics {
   command: string
   protocol: string
+  fallbackReason?: string
   model?: string
   stderrTail: string
 }
+
+export interface AgentCapabilities {
+  streaming: boolean
+  thoughts: boolean
+  toolCalls: boolean
+  approvals: boolean
+  resume: boolean
+  cancel: boolean
+  modelPicker: boolean
+  modePicker: boolean
+  images: boolean
+  resourceLinks: boolean
+  usage: boolean
+  agentTerminals: boolean
+  patchesInApprovals: boolean
+}
+
+export type SessionRecovery = 'resume' | 'reconnect' | 'startNew'
 
 export interface WorkspaceLayout {
   inspectorWidth: number | null
@@ -179,6 +198,9 @@ export interface TaskWorkspace {
   transcript: Entry[]
   agentTerminals: AgentTerminal[]
   diagnostics: AgentDiagnostics | null
+  adapterTier: AgentTier | null
+  capabilities: AgentCapabilities | null
+  recovery: SessionRecovery | null
 }
 
 export interface AgentTerminal {

@@ -893,7 +893,12 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   inspector. Fixtures cover input, resize, exit status, release, and cleanup
   on disconnect. A live Claude Code smoke remains open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
-- [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
+- [x] Tier downgrade UI, capability gates and diagnostics per adapter.
+  The task shows its negotiated tier and fallback reason. Diagnostics list the
+  command, protocol, capabilities and stderr. Cancellation, approval actions
+  and agent panes follow the reported capabilities. Reopening distinguishes
+  verified resume, legacy reconnect and a fresh session. The desktop launches
+  the detected Codex exec fallback when app-server is unavailable.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have
   visible outcomes.
 

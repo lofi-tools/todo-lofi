@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_harness::acp::{AcpHarness, TerminalBackend};
-use agent_harness::codex::{CodexHarness, CodexInstall};
+use agent_harness::codex::{CodexHarness, CodexInstall, CodexTier, ExecHarness};
 use agent_harness::opencode::OpenCodeHarness;
 use agent_harness::settings::ConfiguredCommand;
 use agent_harness::{AgentHarness, HarnessError, SpawnSpec};
@@ -85,13 +85,15 @@ fn require_configured<'a, T>(
 }
 
 pub(crate) fn codex_spawn_spec(program: &Path, cwd: PathBuf) -> SpawnSpec {
+    let mut spec = codex_command_spec(program, cwd);
+    spec.args.push("app-server".into());
+    spec
+}
+
+fn codex_command_spec(program: &Path, cwd: PathBuf) -> SpawnSpec {
     SpawnSpec {
         program: program.to_string_lossy().into_owned(),
-        args: vec![
-            "-c".into(),
-            format!("model=\"{DEFAULT_CODEX_MODEL}\""),
-            "app-server".into(),
-        ],
+        args: vec!["-c".into(), format!("model=\"{DEFAULT_CODEX_MODEL}\"")],
         cwd,
         ..SpawnSpec::default()
     }
@@ -100,6 +102,7 @@ pub(crate) fn codex_spawn_spec(program: &Path, cwd: PathBuf) -> SpawnSpec {
 pub struct CodexHarnessFactory {
     program: PathBuf,
     version: Option<String>,
+    tier: CodexTier,
 }
 
 impl CodexHarnessFactory {
@@ -107,22 +110,36 @@ impl CodexHarnessFactory {
         Self {
             program: install.program.clone(),
             version: install.probe.version.clone(),
+            tier: install.probe.tier,
         }
     }
 }
 
 impl HarnessFactory for CodexHarnessFactory {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
-        let harness = CodexHarness::new();
-        let harness = match &self.version {
-            Some(version) => harness.with_version(version.clone()),
-            None => harness,
-        };
-        Ok(Box::new(harness))
+        match self.tier {
+            CodexTier::AppServer => {
+                let mut harness = CodexHarness::new();
+                if let Some(version) = &self.version {
+                    harness = harness.with_version(version.clone());
+                }
+                Ok(Box::new(harness))
+            }
+            CodexTier::Exec => {
+                let mut harness = ExecHarness::new();
+                if let Some(version) = &self.version {
+                    harness = harness.with_version(version.clone());
+                }
+                Ok(Box::new(harness))
+            }
+        }
     }
 
     fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
-        codex_spawn_spec(&self.program, cwd)
+        match self.tier {
+            CodexTier::AppServer => codex_spawn_spec(&self.program, cwd),
+            CodexTier::Exec => codex_command_spec(&self.program, cwd),
+        }
     }
 }
 
@@ -149,6 +166,59 @@ impl HarnessFactory for MissingCodexFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launches_the_detected_codex_exec_fallback() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::codex::{CodexInstallKind, probe};
+        use agent_harness::{HarnessEvent, PromptInput, TurnFinishReason};
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = shepherd_core::test_support::TestDirectory::new()?;
+        let program = directory.join("codex-fixture");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ncase \"$*\" in\n  --version) echo 'codex-cli 0.9.0';;\n  app-server) IFS= read -r line; exit 0;;\n  'exec --help') echo '  --json';;\n  'exec --json '*) exit 0;;\n  *) exit 12;;\nesac\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+        let probe = probe(
+            program.to_str().ok_or("fixture path is not UTF-8")?,
+            directory.path(),
+        )
+        .await?;
+        assert_eq!(probe.tier, CodexTier::Exec);
+        let factory = CodexHarnessFactory::new(&CodexInstall {
+            program,
+            kind: CodexInstallKind::ProfilePath,
+            probe,
+        });
+        let (mut harness, spec) = factory.launch(Agent::Codex, directory.path().to_path_buf())?;
+        assert_eq!(spec.args, ["-c", "model=\"gpt-6.1-terra\""]);
+        let capabilities = harness.start(spec).await?;
+        assert!(!capabilities.resume && !capabilities.approvals && capabilities.cancel);
+        let diagnostics = harness.diagnostics();
+        assert!(diagnostics.command.contains("exec --json -c"));
+        assert!(diagnostics.protocol.contains("codex-cli 0.9.0"));
+        assert!(diagnostics.fallback_reason.is_some());
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput {
+                text: "fixture".into(),
+            })
+            .await?;
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while let Some(event) = harness.events().recv().await {
+                if let HarnessEvent::TurnFinished { reason } = event {
+                    return Some(reason);
+                }
+            }
+            None
+        })
+        .await?;
+        assert_eq!(reason, Some(TurnFinishReason::Completed));
+        harness.shutdown().await?;
+        Ok(())
+    }
 
     #[test]
     fn launches_the_configured_opencode_independently_of_codex() -> Result<(), CoreError> {

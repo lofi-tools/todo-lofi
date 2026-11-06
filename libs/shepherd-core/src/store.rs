@@ -113,6 +113,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0006_project_approvals.sql",
         sql: include_str!("../toasty/migrations/0006_project_approvals.sql"),
     },
+    Migration {
+        name: "0007_session_capabilities.sql",
+        sql: include_str!("../toasty/migrations/0007_session_capabilities.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -522,13 +526,19 @@ impl Store for TursoStore {
         let ended_at = session.ended_at.map(|value| value as i64).unwrap_or(-1);
         let exit_code = session.exit_code.map(i64::from).unwrap_or(-1);
         let stderr = session.stderr.as_deref().unwrap_or_default();
+        let capabilities = session
+            .capabilities
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
         toasty::sql::statement(
             "INSERT INTO sessions (\
                 id, task_id, adapter, state, adapter_session_id, started_at, \
-                ended_at, exit_code, stderr\
+                ended_at, exit_code, stderr, capabilities_json\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, \
-                NULLIF(?7, -1), NULLIF(?8, -1), NULLIF(?9, '')\
+                NULLIF(?7, -1), NULLIF(?8, -1), NULLIF(?9, ''), NULLIF(?10, '')\
              ) ON CONFLICT (id) DO UPDATE SET \
                 task_id = excluded.task_id, \
                 adapter = excluded.adapter, \
@@ -537,7 +547,8 @@ impl Store for TursoStore {
                 started_at = excluded.started_at, \
                 ended_at = excluded.ended_at, \
                 exit_code = excluded.exit_code, \
-                stderr = excluded.stderr",
+                stderr = excluded.stderr, \
+                capabilities_json = excluded.capabilities_json",
         )
         .bind(session.id.as_str())
         .bind(session.task_id.as_str())
@@ -548,6 +559,7 @@ impl Store for TursoStore {
         .bind(ended_at)
         .bind(exit_code)
         .bind(stderr)
+        .bind(capabilities.as_deref().unwrap_or_default())
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -559,7 +571,7 @@ impl TursoStore {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
             "SELECT id, task_id, adapter, adapter_session_id, started_at, ended_at, \
-                    exit_code, stderr \
+                    exit_code, stderr, capabilities_json \
              FROM sessions ORDER BY started_at, rowid",
         )
         .column_types([
@@ -570,6 +582,7 @@ impl TursoStore {
             Type::I64,
             Type::I64,
             Type::I64,
+            Type::String,
             Type::String,
         ])
         .exec(&mut *db)
@@ -696,6 +709,14 @@ fn parse_session(value: Value) -> Result<SessionRecord, StoreError> {
             "expected a session record".to_string(),
         ));
     };
+    let capabilities =
+        optional_string(record.get(8))?.and_then(|json| match serde_json::from_str(&json) {
+            Ok(capabilities) => Some(capabilities),
+            Err(error) => {
+                tracing::warn!(%error, "ignored unreadable session capabilities");
+                None
+            }
+        });
     Ok(SessionRecord {
         id: required_string(record.first())?,
         task_id: TaskId::new(required_string(record.get(1))?),
@@ -705,6 +726,7 @@ fn parse_session(value: Value) -> Result<SessionRecord, StoreError> {
         ended_at: optional_i64(record.get(5))?.map(|value| value as u64),
         exit_code: optional_i64(record.get(6))?.map(|value| value as i32),
         stderr: optional_string(record.get(7))?,
+        capabilities,
     })
 }
 

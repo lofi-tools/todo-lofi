@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -183,13 +183,16 @@ impl AgentHarness for OpenCodeHarness {
     fn diagnostics(&self) -> AgentDiagnostics {
         if let Some(fallback) = &self.fallback {
             let mut diagnostics = fallback.diagnostics();
-            diagnostics.protocol = format!(
-                "{} (native unavailable: {})",
-                diagnostics.protocol, self.diagnostics.protocol
-            );
+            diagnostics
+                .fallback_reason
+                .clone_from(&self.diagnostics.fallback_reason);
             diagnostics
         } else {
-            self.diagnostics.clone()
+            let mut diagnostics = self.diagnostics.clone();
+            if let Some(server) = &self.server {
+                diagnostics.stderr_tail = server.stderr_tail();
+            }
+            diagnostics
         }
     }
 
@@ -250,7 +253,8 @@ impl AgentHarness for OpenCodeHarness {
                     fallback.set_project_approval_policy(policy);
                 }
                 self.diagnostics.command = command_line(&spec);
-                self.diagnostics.protocol = reason.clone();
+                self.diagnostics.fallback_reason =
+                    Some(format!("OpenCode native server unavailable: {reason}"));
                 let capabilities = fallback.start(spec).await.map_err(|error| {
                     HarnessError::Protocol(format!(
                         "OpenCode native server unavailable: {reason}. ACP fallback failed: {error}"
@@ -268,6 +272,7 @@ impl AgentHarness for OpenCodeHarness {
             tool_calls: true,
             approvals: true,
             resume: probe.resume,
+            cancel: true,
             ..Capabilities::default()
         };
         spec.args.extend(SERVER_ARGS.map(str::to_owned));
@@ -422,12 +427,13 @@ impl AgentHarness for OpenCodeHarness {
         self.turn = None;
         self.session = None;
         if let Some(server) = self.server.take() {
+            self.diagnostics.stderr_tail = server.stderr_tail();
             server.shutdown().await?;
             publish(
                 &self.sender,
                 HarnessEvent::Exited {
                     code: Some(0),
-                    stderr: String::new(),
+                    stderr: self.diagnostics.stderr_tail.clone(),
                 },
             )?;
         }
@@ -511,6 +517,7 @@ pub struct OpenCodeServer {
     password: String,
     directory: String,
     probe: OpenCodeProbe,
+    stderr: Arc<Mutex<VecDeque<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -848,7 +855,7 @@ impl OpenCodeServer {
             .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| HarnessError::Spawn {
@@ -858,6 +865,36 @@ impl OpenCodeServer {
         let stdout = child.stdout.take().ok_or_else(|| {
             HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
         })?;
+        let stderr = Arc::new(Mutex::new(VecDeque::new()));
+        if let Some(output) = child.stderr.take() {
+            let stderr = stderr.clone();
+            let password = password.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(output).lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            let mut tail = match stderr.lock() {
+                                Ok(tail) => tail,
+                                Err(error) => {
+                                    tracing::error!(%error, "could not retain OpenCode stderr");
+                                    break;
+                                }
+                            };
+                            if tail.len() == 20 {
+                                tail.pop_front();
+                            }
+                            tail.push_back(line.replace(&password, "[redacted]"));
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::debug!(%error, "could not read OpenCode stderr");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
         let mut startup = BufReader::new(stdout).take(64 * 1024).lines();
         let address = timeout(STARTUP_TIMEOUT, async {
             while let Some(line) = startup
@@ -897,11 +934,22 @@ impl OpenCodeServer {
             password,
             directory,
             probe,
+            stderr,
         })
     }
 
     pub fn probe(&self) -> &OpenCodeProbe {
         &self.probe
+    }
+
+    fn stderr_tail(&self) -> String {
+        match self.stderr.lock() {
+            Ok(tail) => tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+            Err(error) => {
+                tracing::error!(%error, "could not read the OpenCode stderr tail");
+                String::new()
+            }
+        }
     }
 
     pub async fn subscribe(&self) -> HarnessResult<OpenCodeEvents> {
@@ -1425,7 +1473,12 @@ done
         assert_eq!(harness.tier(), AdapterTier::Acp);
         let diagnostics = harness.diagnostics();
         assert!(diagnostics.command.ends_with(" acp"));
-        assert!(diagnostics.protocol.contains("native unavailable"));
+        assert!(
+            diagnostics
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("native server unavailable"))
+        );
         assert_eq!(harness.open_session(None).await?.as_str(), "fixture");
         let transcript = fixture_reply(&mut harness).await?;
         assert_eq!(

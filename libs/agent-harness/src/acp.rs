@@ -79,6 +79,8 @@ impl AcpHarness {
             tool_calls: true,
             approvals: true,
             resume: info.load_session,
+            cancel: true,
+            agent_terminals: self.terminals.is_some(),
             usage: true,
             patches_in_approvals: true,
             ..Capabilities::default()

@@ -804,6 +804,16 @@ textarea {
   font-weight: 600;
 }
 
+.chat__adapter,
+.chat__adapter-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.chat__adapter-note {
+  margin: 0;
+}
+
 .chat__state {
   padding: 2px 8px;
   border: 1px solid var(--border);

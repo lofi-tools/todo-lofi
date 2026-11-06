@@ -140,8 +140,12 @@ current layout and give future changes a point of comparison.
 
 ## Conversation lifecycle
 
-- Show **Cancel turn** in the conversation header during an active turn. The
-  shortcut is Command+. on macOS and Ctrl+. on Linux. Show **Cancelling…**
+- Show the negotiated adapter tier in the conversation header after a session
+  opens. When a fallback is used, show its reason and keep the command,
+  protocol, capabilities and stderr in **Diagnostics**.
+- Show **Cancel turn** in the conversation header during an active turn when
+  the adapter supports cancellation. The shortcut is Command+. on macOS and
+  Ctrl+. on Linux. Show **Cancelling…**
   until the adapter settles the turn, and pause approval actions during that
   interval. When the server withdraws an approval, retain its arguments and
   show **withdrawn** in place of the actions.
@@ -151,8 +155,10 @@ current layout and give future changes a point of comparison.
   saved approvals and live session approvals in separate lists. Label each
   session grant with its task, remove it when its session ends, and show a
   reset action for each grant.
-- Show **Resume** beside the state in the conversation header when the task is
-  interrupted. Enable the composer when the core reports the task is ready.
+- For interrupted or failed tasks with a worktree, show **Resume** when the
+  saved session can resume, **Reconnect** for legacy records with a session
+  handle, or **Start new session** when a fresh session is needed. Enable the
+  composer when the core reports the task is ready.
 
 ## Conversation composer
 

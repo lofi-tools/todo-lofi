@@ -301,6 +301,7 @@ impl AgentHarness for FakeHarness {
         AgentDiagnostics {
             command: "fake".to_string(),
             protocol: "fake-harness".to_string(),
+            fallback_reason: None,
             model: None,
             stderr_tail: String::new(),
         }
