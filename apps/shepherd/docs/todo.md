@@ -1000,6 +1000,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-06 | S4 | Partial | Native IBus Pinyin passed after correcting the WebKitGTK caret position. The hosted x86-64 smoke, candidate-based input on macOS, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Both native desktop launches and the IBus candidate check passed on hosted Ubuntu x86-64 at `4e75638`. Candidate-based input on macOS and the workday trial remain open. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757) |
 | 2026-11-06 | S4 | Partial | The hosted Ubuntu x86-64 rerun at `505ffe6` passed both launches and IBus. The 1 MiB burst painted in 79 ms. [Hosted rerun](https://github.com/lofi-tools/todo-lofi/actions/runs/42215694509) |
+| 2026-11-06 | S4 | Partial | The exact tree at `a1c7964` passed both native launches and IBus Pinyin on Ubuntu 24.04 ARM64 under Xvfb in a disposable guest. The 1 MiB burst painted in 51 ms and all 24 paced markers appeared. The candidate panel followed the caret at both positions, and `你` and `尼` each reached the shell once. Fish was skipped. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |
